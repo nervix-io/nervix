@@ -285,6 +285,9 @@ class InventoryTests(unittest.TestCase):
             "sqs-batch-requests",
             "mqtt-publish-packets",
             "postgres-insert-measures",
+            "console-pending-backups",
+            "console-pending-backups-malformed",
+            "console-restore-drafts",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -317,11 +320,12 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-sqs",
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
+            "nervix-web-console",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
-            self.assertIn(target.test_target, {"lib", "test:representations"})
+            self.assertIn(target.test_target, {"lib", "test:representations", "bin:nervix-web-console"})
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
@@ -369,6 +373,8 @@ class InventoryTests(unittest.TestCase):
             ('sanitizer = "address"', 'sanitizer = "none"', "real sanitizer"),
             ('id = "nspl-expression"', 'id = "Invalid ID"', "invalid target id"),
             ('test_target = "lib"', 'test_target = "bin"', "invalid cargo test target"),
+            ('test_target = "lib"', 'test_target = "bin:"', "invalid cargo test target"),
+            ('test_target = "lib"', 'test_target = "example:owner"', "invalid cargo test target"),
             ('invariant = "', 'invariant = "" # ', "invariant is required"),
         ):
             with self.subTest(message=message):
@@ -663,6 +669,11 @@ class ExecutionTests(unittest.TestCase):
                     "name": package.replace("-", "_"), "kind": ["bin"],
                     "src_path": str(manifest.parent / "src/main.rs"),
                 })
+            if package == "nervix-web-console":
+                targets.append({
+                    "name": package, "kind": ["bin"],
+                    "src_path": str(manifest.parent / "src/main.rs"),
+                })
             if package == "nervix-models":
                 targets.append({
                     "name": "representations", "kind": ["test"],
@@ -953,6 +964,46 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("fuzz-support", bolero.bolero_args(self.inventory, target))
         self.assertIn("--engine-args=-print_funcs=0", bolero.bolero_args(self.inventory, target))
 
+    def test_each_test_target_kind_has_its_own_cargo_selector(self) -> None:
+        for test_target, selector in [("lib", ["--lib"]),
+                                       ("test:property_suite", ["--test", "property_suite"]),
+                                       ("bin:nervix-web-console", ["--bin", "nervix-web-console"])]:
+            with self.subTest(test_target=test_target):
+                args = bolero.cargo_test_args(dataclasses.replace(self.target, test_target=test_target))
+                self.assertEqual(args[-len(selector):], selector)
+
+    def test_binary_unit_tests_are_selected_beside_the_library_of_the_same_name(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "console-pending-backups")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_web_console-1111"
+            binary = run / "nervix_web_console-2222"
+            library.touch()
+            binary.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable unittests src/lib.rs ({library})\n"
+                f"Executable unittests src/main.rs ({binary})\n", "")
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), binary)
+                second = run / "library"
+                second.mkdir()
+                self.assertEqual(
+                    bolero.build_instrumented(self.inventory, dataclasses.replace(target, test_target="lib"), second),
+                    library,
+                )
+
+    def test_a_binary_target_names_one_binary_of_its_package(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "console-pending-backups")
+        for test_target in ("bin:nervix-web-console-renamed", "test:nervix-web-console"):
+            with self.subTest(test_target=test_target), tempfile.TemporaryDirectory() as directory:
+                build = subprocess.CompletedProcess([], 0, "", "")
+                with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
+                    with self.assertRaisesRegex(bolero.BoleroError, "expected one Cargo"):
+                        bolero.build_instrumented(
+                            self.inventory, dataclasses.replace(target, test_target=test_target),
+                            pathlib.Path(directory),
+                        )
+
     def test_instrumented_cargo_scope_keeps_the_pinned_tool_and_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -964,7 +1015,8 @@ class ExecutionTests(unittest.TestCase):
                 "'build_wrapper':os.environ.get('CARGO_BUILD_RUSTC_WRAPPER')}))\n")
             tool.chmod(0o700)
             for test_target, selector in [("lib", ["--lib"]),
-                                           ("test:representations", ["--test", "representations"])]:
+                                           ("test:representations", ["--test", "representations"]),
+                                           ("bin:nervix-web-console", ["--bin", "nervix-web-console"])]:
                 target = dataclasses.replace(self.target, test_target=test_target)
                 run = root / test_target.replace(":", "_")
                 run.mkdir()

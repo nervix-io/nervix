@@ -54,6 +54,16 @@ class FuzzWorkspace(native.Workspace):
         return self.root / "target/fuzz"
 
 
+def fingerprint_prefix(test_target: str) -> str:
+    """How Cargo begins the name of a test executable's build fingerprint: by a library's or a
+    binary's unit tests, or by an integration test."""
+    if test_target == "lib":
+        return "test-lib-"
+    if test_target.startswith("bin:"):
+        return "test-bin-"
+    return "test-integration-test-"
+
+
 def target_identity(target: Target, root: pathlib.Path) -> dict[str, object]:
     result = dataclasses.asdict(target)
     for key, value in result.items():
@@ -233,7 +243,7 @@ class TargetCoverage:
         binary = binary.resolve()
         # Read the exact test executable's Cargo fingerprint, rather than guessing a debug binary.
         fingerprint = binary.parent.parent / "fingerprint"
-        kind = "test-lib-" if self.target.test_target == "lib" else "test-integration-test-"
+        kind = fingerprint_prefix(self.target.test_target)
         files = list(fingerprint.glob(f"{kind}*.json"))
         if len(files) != 1:
             raise native.RunnerError(f"{self.target.id}: exact fuzz build fingerprint is missing or ambiguous")

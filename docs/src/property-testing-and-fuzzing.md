@@ -80,6 +80,9 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, deduplicator key groups and window row and argument groups, synthetic raw payloads at tar block boundaries and long paths, v3 | 256 | 4096 bytes |
 | `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all eleven kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v3 | 256 | 4096 bytes |
 | `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records, materialized, deduplicator and window group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v3 | 256 | 4096 bytes |
+| `console-pending-backups` | `nervix-web-console` pending backup entry and tab storage round-trip equality, with forgetting only by its own reference | any execution reference and query text, no domain or one in any spelling the name rule admits, recorded over an earlier record, v1 | 256 | 1024 bytes |
+| `console-pending-backups-malformed` | `nervix-web-console` exact read-back or refusal of a tab's stored record, which a refusal forgets while other entries stay | missing, canonical, edited, upper-cased and drawn reference, query and domain entries beside an unrelated entry, v1 | 256 | 1024 bytes |
+| `console-restore-drafts` | `nervix-web-console` restore draft lowering equality and existing-user option text | every `RESTORE` scope, source, mode, runtime state and lifecycle, domains in any spelling the name rule admits, every policy, v1 | 256 | 512 bytes |
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v1 | 128 | 65536 bytes |
@@ -161,10 +164,16 @@ properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers decla
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
+A target names the test executable that holds its property: its package's library unit tests,
+`lib`, the unit tests of one of its binaries, `bin:<name>`, or one integration test,
+`test:<name>`. The web console's backup dialog belongs to the console's browser binary, whose unit
+tests compile natively, so its properties are `bin:nervix-web-console` targets; Bolero and the
+generators stay development dependencies outside the browser's graph.
 Before instrumenting a target, the runner reads Cargo metadata to resolve its package, target kind,
 name and source root. It selects the emitted executable by that identity, including integration
-tests in folders and explicitly configured library or test paths. A missing or ambiguous Cargo
-target or executable fails the run before the campaign starts.
+tests in folders, a binary's unit tests beside a library of the same name, and explicitly
+configured library or test paths. A missing or ambiguous Cargo target or executable fails the run
+before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
 bounded campaign. Its overall limit is three hours; per-build, per-case and per-campaign deadlines
@@ -480,9 +489,9 @@ The server package uses the current profile's lighter optimization and omits deb
 single codegen unit; sanitizer instrumentation, coverage, debug assertions and overflow checks remain
 enabled.
 The pinned cargo-bolero CLI does not expose a Cargo test-harness selector. Each instrumented build
-therefore records a run-local Rustup adapter that forwards the declared `--lib` or `--test` selector
-to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the toolchain,
-features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
+therefore records a run-local Rustup adapter that forwards the declared `--lib`, `--bin` or `--test`
+selector to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the
+toolchain, features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
 registered harness; they do not compile or invoke the server's Cucumber executable.
 The adapter selects the pinned compiler through `scripts/bolero_rustc.py`, still beneath the
 configured kache wrapper. For `proc-macro2` with `span-locations`, that compiler adapter removes
