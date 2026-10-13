@@ -2662,8 +2662,8 @@ chaos *args:
     exec bash scripts/chaos/chaos.sh {{ args }}
 
 # Prove the network preflight and its retained failure outcomes through the external controller.
-test-chaos-network-preflight:
-    exec bash scripts/chaos/tests/network-preflight-self-test.sh
+test-chaos-network-preflight *cases:
+    exec bash scripts/chaos/tests/network-preflight-self-test.sh {{ cases }}
 
 # Retain source coverage of network-preflight failure recording and live fault controls.
 coverage-chaos-network-preflight image="":

@@ -1899,6 +1899,8 @@ absent and recorded as an ordinary outcome; a failed inspection of a still-prese
 cleanup. The public setup error reports the actual refusal rather than inferring that the worker
 lacks netem or iptables capabilities from a Docker client failure. A successful helper exit alone
 does not establish successful Docker-client completion within the inspection bound.
+Only the ping helper's missing-replies outcome qualifies blocked traffic. A Docker execution
+refusal or a probe timeout supplies no effect observation and fails preflight with its own status.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product

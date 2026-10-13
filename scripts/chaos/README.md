@@ -1378,7 +1378,8 @@ gateway traffic, SIGTERM healing and exact helper cleanup within the existing bo
 controls cover an abrupt rules-inspection refusal, a real 30-second Docker-client timeout after the
 inspection helper exited, a failed injector-state inspection, failed log retrieval, failed cleanup,
 a Docker launch that created a canary before refusing, an injector that cannot start its nettools
-image, and sidecar disappearance versus inspection failure while still present. The same controls run in `just chaos self-test`; `just coverage-chaos-network-preflight`
+image, sidecar disappearance versus inspection failure while still present, and a refused
+Docker execution of the blocked-traffic probe. The same controls run in `just chaos self-test`; `just coverage-chaos-network-preflight`
 retains their shell coverage under `target/chaos-network-preflight-coverage/`.
 Pass an already-built Nervix image as `just coverage-chaos-network-preflight IMAGE` to include
 the public runner's setup-error projection; the controlled refusal ends before any node starts.
@@ -1402,7 +1403,10 @@ inspection or timeout failure does not establish that the worker lacks fault cap
 30-second rules-inspection bound includes Docker client and helper-launch time; a helper that exited
 successfully does not establish that the client finished within that bound. The overall preflight
 bound remains 120 seconds, and this diagnostic work changes neither fault strength nor product
-deadlines.
+deadlines. Only BusyBox ping's missing-replies status qualifies blocked traffic; a Docker
+execution refusal or command timeout provides no effect observation and fails with its own status.
+Pass a control name to `just test-chaos-network-preflight`, such as `probe-refusal`, for a focused
+control plus the live installation/effect/healing check; omission runs every control.
 
 `just test-chaos-rate-probe` exercises the production probe with a six-second Docker launch delay
 that stays outside transfer time, a real healthy/256kbit twofold effect, a two-second connect delay,

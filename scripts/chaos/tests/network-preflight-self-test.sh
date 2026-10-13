@@ -75,6 +75,15 @@ if [[ "${CHAOS_NETWORK_TEST_CASE}" == sidecar-vanishes || "${CHAOS_NETWORK_TEST_
     fi
     exec "${CHAOS_NETWORK_TEST_DOCKER}" "$@"
 fi
+if [[ "${CHAOS_NETWORK_TEST_CASE}" == probe-refusal ]]; then
+    if [[ -f "${CHAOS_NETWORK_TEST_STATE}" && "$(cat "${CHAOS_NETWORK_TEST_STATE}")" == netem \
+        && "$1" == exec && ! -e "${CHAOS_NETWORK_TEST_STATE}.probe-refusal" ]]; then
+        : >"${CHAOS_NETWORK_TEST_STATE}.probe-refusal"
+        printf 'deliberate Docker exec refusal for the blocked-traffic probe\n' >&2
+        exit 125
+    fi
+    exec "${CHAOS_NETWORK_TEST_DOCKER}" "$@"
+fi
 if [[ -f "${CHAOS_NETWORK_TEST_STATE}" && "$(cat "${CHAOS_NETWORK_TEST_STATE}")" == iptables ]]; then
     if [[ "${inspector}" == true ]]; then
         if [[ "${CHAOS_NETWORK_TEST_CASE}" == injector-state || "${CHAOS_NETWORK_TEST_CASE}" == injector-exit ]]; then
@@ -109,10 +118,19 @@ chmod +x "${artifact_dir}/bin/docker"
 export CHAOS_NETWORK_TEST_NETTOOLS="${chaos_nettools_image}"
 export CHAOS_NETWORK_TEST_CANARY_ID
 
-for test_case in inspect-failure inspector-timeout injector-state log-failure cleanup-failure canary-launch injector-exit sidecar-vanishes sidecar-inspect-failure; do
+cases=(inspect-failure inspector-timeout injector-state log-failure cleanup-failure canary-launch
+    injector-exit sidecar-vanishes sidecar-inspect-failure probe-refusal)
+if [[ "$#" -gt 0 ]]; then
+    cases=("$@")
+fi
+for test_case in "${cases[@]}"; do
+    case "${test_case}" in
+        inspect-failure|inspector-timeout|injector-state|log-failure|cleanup-failure|canary-launch|injector-exit|sidecar-vanishes|sidecar-inspect-failure|probe-refusal) ;;
+        *) fail "unknown preflight control ${test_case}" ;;
+    esac
     CHAOS_NETWORK_TEST_CASE="${test_case}"
     CHAOS_NETWORK_TEST_CANARY_ID="${artifact_dir}/${test_case}/canary-id.txt"
-    rm -f "${CHAOS_NETWORK_TEST_STATE}" "${CHAOS_NETWORK_TEST_SIDECAR}"
+    rm -f "${CHAOS_NETWORK_TEST_STATE}" "${CHAOS_NETWORK_TEST_SIDECAR}" "${CHAOS_NETWORK_TEST_STATE}.probe-refusal"
     status=0
     PATH="${artifact_dir}/bin:${PATH}" timeout --foreground --kill-after=10s 120s \
         "${chaos_dir}/network-faults.sh" preflight --run-id "${run_id}" \
@@ -128,6 +146,7 @@ for test_case in inspect-failure inspector-timeout injector-state log-failure cl
         injector-exit) expected=1; stage=iptables.installation ;;
         sidecar-vanishes) expected=0; stage=iptables.gateway-probe ;;
         sidecar-inspect-failure) expected=1; stage=cleanup ;;
+        probe-refusal) expected=125; stage=netem.gateway-probe ;;
     esac
     [[ "${status}" -eq "${expected}" ]] || fail "${test_case} returned ${status}, expected ${expected}"
     result="${artifact_dir}/${test_case}/result.json"
@@ -150,7 +169,7 @@ for test_case in inspect-failure inspector-timeout injector-state log-failure cl
             "${artifact_dir}/${test_case}/operations.ndjson" >/dev/null \
             || fail 'the real inspector deadline did not retain its elapsed time and outcome'
     fi
-    if [[ "${test_case}" != canary-launch && "${test_case}" != sidecar-* ]]; then
+    if [[ "${test_case}" != canary-launch && "${test_case}" != sidecar-* && "${test_case}" != probe-refusal ]]; then
         jq -e '.injector_id | length > 0' "${result}" >/dev/null || fail 'failure lost its injector identity'
         [[ -f "${artifact_dir}/${test_case}/iptables-pumba.txt" ]] || fail 'cleanup lost the raw injector log'
         [[ -s "${artifact_dir}/${test_case}/iptables-injector.json" ]] || fail 'cleanup lost the injector inspection'
@@ -183,14 +202,15 @@ for test_case in inspect-failure inspector-timeout injector-state log-failure cl
 done
 
 # A reused output must not overwrite evidence or make a prior cidfile a cleanup authority.
-retained_digest="$(sha256sum "${artifact_dir}/inspect-failure/result.json")"
+retained_output="${artifact_dir}/${cases[0]}"
+retained_digest="$(sha256sum "${retained_output}/result.json")"
 status=0
 "${chaos_dir}/network-faults.sh" preflight --run-id "${run_id}" \
     --pumba "${chaos_pumba_image}" --nettools "${chaos_nettools_image}" \
-    --probe "${chaos_probe_image}" --output "${artifact_dir}/inspect-failure" \
+    --probe "${chaos_probe_image}" --output "${retained_output}" \
     >"${artifact_dir}/reused-output.log" 2>&1 || status=$?
 [[ "${status}" -eq 2 ]] || fail 'a reused evidence directory was accepted'
-[[ "$(sha256sum "${artifact_dir}/inspect-failure/result.json")" == "${retained_digest}" ]] \
+[[ "$(sha256sum "${retained_output}/result.json")" == "${retained_digest}" ]] \
     || fail 'output reuse changed the retained failure'
 
 # Actual pinned Pumba/nettools, with the same loss strength, observation count and timeouts.

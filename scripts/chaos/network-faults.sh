@@ -420,6 +420,13 @@ preflight() {
         fi
         if preflight_canary_reaches "${gateway}"; then
             preflight_fail "${kind}.effect" "Pumba ${kind} was installed but the canary still reached its gateway"
+        else
+            local probe_status=$?
+            # BusyBox ping returns 1 for missing replies. A Docker refusal or a command timeout
+            # judges no traffic effect and must retain its own failure instead of qualifying it.
+            if [[ "${probe_status}" -ne 1 ]]; then
+                exit "${probe_status}"
+            fi
         fi
         preflight_run "${kind}.stop-injector" 60 docker stop -t 40 "${preflight_injector}"
         local exit_code
