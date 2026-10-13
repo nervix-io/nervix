@@ -144,6 +144,29 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(build["profile_settings"], {"opt-level": 1, "debug": 2})
         self.assertEqual(build["profile_manifest"], "tools/nervix-lint/Cargo.toml")
 
+    def test_each_test_target_kind_reads_the_fingerprint_cargo_names_it_by(self) -> None:
+        self.assertEqual(coverage.fingerprint_prefix("lib"), "test-lib-")
+        self.assertEqual(coverage.fingerprint_prefix("bin:nervix-web-console"), "test-bin-")
+        self.assertEqual(coverage.fingerprint_prefix("test:representations"), "test-integration-test-")
+
+    def test_binary_unit_tests_read_their_own_build_fingerprint(self) -> None:
+        target = dataclasses.replace(self.inventory.targets[0], test_target="bin:nervix-web-console")
+        self.inventory = dataclasses.replace(self.inventory, targets=(target,))
+        # The library's fingerprint beside the binary's executable is not the binary's own.
+        with self.assertRaisesRegex(native.RunnerError, "fingerprint"), self.campaign() as campaign:
+            with campaign.target(target, self.root) as measured:
+                measured.execute(self.binary, [])
+        own = self.fingerprint.with_name("test-bin-nervix-web-console.json")
+        self.fingerprint.rename(own)
+        with self.campaign() as campaign:
+            with campaign.target(target, self.root) as measured:
+                self.execute(measured)
+                measured.complete("#10 DONE", 1)
+            campaign.complete()
+        build = self.record(measured.path)["build"]
+        self.assertEqual(build["fingerprint"], str(own.relative_to(self.root)))
+        self.assertEqual(self.record(campaign.path)["verdict"], "complete")
+
     def test_absent_or_repeated_targets_cannot_complete(self) -> None:
         with self.assertRaisesRegex(native.RunnerError, "missing"), self.campaign() as campaign:
             campaign.complete()

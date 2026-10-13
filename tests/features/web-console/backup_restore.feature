@@ -68,6 +68,30 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
+  @console_backup_foreign_record
+  Scenario Outline: A page reload forgets a pending backup record the console did not write and resumes nothing
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given backup archive downloads on node "{{leader}}" pause before the archive streams
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When a pending backup of "BACKUP DOMAIN {{domain}} TO 'foreign.nvxb';" whose domain entry spells "{{domain}}" in upper case is written into the web console tab's session storage
+    And the web console page is reloaded
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And the web console tab's session storage holds no pending backup
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @console_restore
   Scenario Outline: A console restore uploads its archive with progress, shows the dry run, and restores the domain
     Given a <cluster_size> node nervix cluster is started

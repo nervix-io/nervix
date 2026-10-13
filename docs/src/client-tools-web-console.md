@@ -540,7 +540,9 @@ its execution reference: the leader answers with the backup's recorded outcome i
 it twice, and the console downloads the archive again from its first byte. The node collects an
 archive once it has queued the archive's last bytes for a download, so a reload that comes after
 that moment finds the archive collected, and the backup must run again. Closing the tab or signing
-in as another user forgets the record. An archive stays downloadable only while it is
+in as another user forgets the record. So does a reload that finds a record the console cannot read
+back as exactly what it wrote, such as one edited outside the console; the reload then resumes
+nothing. An archive stays downloadable only while it is
 retained, by default for 15 minutes from the moment the console sent the backup.
 
 The browser saves the archive with the permissions of its downloads directory. An archive holds
