@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use super::*;
+use super::{
+    audit::{AuditCandidate, AuditPattern, Construct, ErrorInformation, KeyedOperation},
+    *,
+};
 
 fn report(seed: &[u8; 32]) -> CompilerReport {
     let text = format!("symbol_{}", seed[0]);
@@ -28,6 +31,13 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
             definition: Some(text.clone()),
         });
     }
+    let candidate = AuditCandidate {
+        owner: format!("example::owner::{{closure#{}}}", seed[14]),
+        context: seed[15].is_multiple_of(2).then(|| context(seed)),
+        span: source.clone(),
+        expansion: expansions.clone(),
+        pattern: pattern(seed, &source),
+    };
     CompilerReport {
         compiler: text.clone(),
         identity: text.clone(),
@@ -35,6 +45,7 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
         crate_name: text.clone(),
         crate_source: "src/lib.rs".into(),
         arguments: vec![text.clone()],
+        audit: vec![candidate],
         findings: vec![Finding {
             rule: "data_plane_lock_acquisitions".into(),
             receiver: text.clone(),
@@ -56,6 +67,71 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
         excluded_generated: u32::from(seed[6]),
         excluded_external: u32::from(seed[7]),
         complete: true,
+    }
+}
+
+/// Every current audit pattern, with seed-selected values in each of its fields.
+fn pattern(seed: &[u8; 32], source: &SourceSpan) -> AuditPattern {
+    let name = format!("value_{}", seed[16]);
+    let mut later = source.clone();
+    later.site.start = source.site.start + u32::from(seed[17]) + 1;
+    let information = match seed[18] % 3 {
+        0 => ErrorInformation::Report,
+        1 => ErrorInformation::Value,
+        _ => ErrorInformation::Generic,
+    };
+    match seed[19] % 7 {
+        0 => AuditPattern::RepeatedLookup {
+            collection: "std::collections::hash::map::HashMap".into(),
+            receiver: format!("self.{name}"),
+            key: name.clone(),
+            guarded: seed[20].is_multiple_of(2),
+            operations: vec![
+                KeyedOperation {
+                    operation: "get_mut".into(),
+                    span: source.clone(),
+                },
+                KeyedOperation {
+                    operation: "insert".into(),
+                    span: later,
+                },
+            ],
+        },
+        1 => AuditPattern::KeyAllocation {
+            collection: "alloc::collections::btree::map::BTreeMap".into(),
+            operation: "get".into(),
+            allocation: "to_string".into(),
+            key_type: name,
+        },
+        2 => AuditPattern::BorrowedCopy {
+            operation: "clone".into(),
+            value_type: name,
+        },
+        3 => AuditPattern::DuplicatedBranch {
+            construct: if seed[20].is_multiple_of(2) {
+                Construct::If
+            } else {
+                Construct::Match
+            },
+            statement: name,
+            occurrences: vec![source.clone(), later],
+        },
+        4 => AuditPattern::ForwardingWrapper {
+            callee: format!("example::{name}"),
+            callers: u32::from(seed[21]),
+            contract: seed[20].is_multiple_of(2),
+            implementation: seed[21].is_multiple_of(2),
+            relocated: seed[22].is_multiple_of(2),
+        },
+        5 => AuditPattern::DiscardedError {
+            operation: "Result::ok".into(),
+            error_type: name,
+            information,
+        },
+        _ => AuditPattern::DisguisedClamp {
+            operation: "checked_sub".into(),
+            fallback: name,
+        },
     }
 }
 
@@ -103,6 +179,32 @@ fn bolero_compiler_reports_round_trip() {
             assert!(
                 result.is_err(),
                 "every current finding field is required: {field}"
+            );
+        }
+        let encoded = serde_json::to_value(&original.audit[0])
+            .assured("a current audit candidate has its complete field set");
+        let candidate = encoded.as_object().assured("candidates encode as objects");
+        for field in candidate.keys() {
+            let mut incomplete = candidate.clone();
+            incomplete.remove(field);
+            let result =
+                serde_json::from_value::<AuditCandidate>(serde_json::Value::Object(incomplete));
+            assert!(
+                result.is_err(),
+                "every current candidate field is required: {field}"
+            );
+        }
+        let pattern = candidate["pattern"]
+            .as_object()
+            .assured("patterns encode as tagged objects");
+        for field in pattern.keys() {
+            let mut incomplete = pattern.clone();
+            incomplete.remove(field);
+            let result =
+                serde_json::from_value::<AuditPattern>(serde_json::Value::Object(incomplete));
+            assert!(
+                result.is_err(),
+                "every current pattern field is required: {field}"
             );
         }
     });
@@ -331,6 +433,70 @@ fn recognition_requires_actual_definition_and_receiver_identity() {
         assert_eq!(acquisition(receiver, defining_crate, "borrow_mut"), None);
     }
     assert!(!may_acquire("borrow_mut"));
+}
+
+#[test]
+fn audit_catalogs_resolve_owners_and_conversions() {
+    use crate::audit::{
+        KeyedAccess, checked_operation, copies_text, copies_value, fallback, keyed_access,
+        preserves_value,
+    };
+    for (collection, operation, expected) in [
+        (
+            "std::collections::hash::map::HashMap",
+            "get_mut",
+            KeyedAccess::Lookup,
+        ),
+        (
+            "alloc::collections::btree::map::BTreeMap",
+            "contains_key",
+            KeyedAccess::Lookup,
+        ),
+        (
+            "indexmap::map::IndexMap",
+            "swap_remove",
+            KeyedAccess::Removal,
+        ),
+        ("dashmap::DashMap", "entry", KeyedAccess::Entry),
+        (
+            "std::collections::hash::set::HashSet",
+            "insert",
+            KeyedAccess::Insertion,
+        ),
+        ("serde_json::map::Map", "index", KeyedAccess::Lookup),
+    ] {
+        assert_eq!(keyed_access(collection, operation), Some(expected));
+        // An unrelated owner with the same method names is not a keyed collection.
+        assert_eq!(keyed_access("example::Registry", operation), None);
+    }
+    assert_eq!(
+        keyed_access("std::collections::hash::map::HashMap", "len"),
+        None
+    );
+    assert!(KeyedAccess::Lookup.borrows_key());
+    assert!(KeyedAccess::Removal.borrows_key());
+    assert!(!KeyedAccess::Insertion.borrows_key());
+    assert!(!KeyedAccess::Entry.borrows_key());
+    for operation in ["clone", "to_owned", "to_vec"] {
+        assert!(copies_value(operation));
+        assert!(!copies_text(operation));
+        assert!(preserves_value(operation));
+    }
+    // Formatting a number or converting a value is not a copy of existing text.
+    for operation in ["to_string", "into"] {
+        assert!(copies_text(operation));
+        assert!(!copies_value(operation));
+    }
+    for operation in ["as_str", "borrow", "copied"] {
+        assert!(preserves_value(operation));
+        assert!(!copies_value(operation));
+        assert!(!copies_text(operation));
+    }
+    assert!(!preserves_value("next"));
+    assert!(checked_operation("checked_sub"));
+    assert!(!checked_operation("saturating_sub"));
+    assert!(fallback("unwrap_or_default"));
+    assert!(!fallback("unwrap"));
 }
 
 #[test]

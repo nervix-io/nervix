@@ -718,6 +718,9 @@ mod wasm_state;
 mod wasm_state_recovery;
 mod wasm_state_reset;
 mod window_accumulator;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub use window_accumulator::benchmark as window_sketch_benchmark;
 mod window_archive;
 #[cfg(test)]
 mod window_checkpoint_cases;
