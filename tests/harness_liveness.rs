@@ -2,14 +2,15 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
+//! - **Owns.** Registration of the focused node-liveness, node-startup, node-stop, phase-deadline,
 //!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
 //!   HTTP-receiver, materialized-state diagnostic and gRPC-receiver regressions with Rust's test
 //!   runner, and the stand-in nodes and clients those regressions talk to.
-//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver, gRPC-receiver
-//!   and materialized-state diagnostic harness modules, and the client wire session
-//!   protocol the stand-in nodes answer status requests with.
+//! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
+//!   port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
+//!   gRPC-receiver and materialized-state diagnostic harness modules, the product's shutdown
+//!   coordinator a stopping node is read through, and the client wire session protocol the
+//!   stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -26,6 +27,8 @@ mod materialized_state_diagnostics_tests;
 mod node_liveness;
 #[path = "common/node_startup.rs"]
 mod node_startup;
+#[path = "common/node_stop.rs"]
+mod node_stop;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
 #[path = "common/port_pool.rs"]
@@ -81,7 +84,9 @@ mod tests {
         time::{Instant, timeout},
     };
     use nervix_recovery::NoReceiver as _;
-    use nervix_server::application::AppError;
+    use nervix_server::application::{
+        AppError, ShutdownCoordinator, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
+    };
     use nervix_test_environment::{ContainerTeardownError, TeardownFailures};
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tempfile::TempDir;
@@ -104,6 +109,10 @@ mod tests {
             ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, NODE_START_ATTEMPTS,
             NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted, StartableNode, StartupEnd,
             StartupPorts, StartupRetry, cluster_startup_budget,
+        },
+        node_stop::{
+            NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord,
+            ProductShutdownDeadline,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
         port_pool::{
@@ -1759,6 +1768,8 @@ mod tests {
         task: OwnedNodeTask,
         log: Arc<CleanupLog>,
         scenario: Option<Arc<ActiveScenarioRegistration>>,
+        /// What the node's shutdown reads as while it stops, when the regression gives it one.
+        progress: Option<NodeStopProgress>,
     }
 
     impl StandInTeardownNode {
@@ -1800,7 +1811,14 @@ mod tests {
                 task,
                 log: log.clone(),
                 scenario: None,
+                progress: None,
             }
+        }
+
+        /// Gives the node a shutdown that reads as `progress` for as long as it stops.
+        fn stopping_in(mut self, progress: NodeStopProgress) -> Self {
+            self.progress = Some(progress);
+            self
         }
 
         /// Reads the phase `scenario` publishes while this node releases, so a regression can tell
@@ -1825,6 +1843,10 @@ mod tests {
 
         fn owned_task(&mut self) -> &mut OwnedNodeTask {
             &mut self.task
+        }
+
+        fn stop_progress(&self) -> Option<NodeStopProgress> {
+            self.progress
         }
 
         fn release(&mut self) {
@@ -2166,6 +2188,215 @@ mod tests {
             assert!(!teardown.left_nodes_stopping(), "{teardown}");
             assert_eq!(log.released().len(), cluster.len());
         }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes =
+            [
+                StandInTeardownNode::new("node-1", StandInEnding::StopsWhenAsked, &log)
+                    .stopping_in(NodeStopProgress {
+                        phase: ShutdownPhase::DrainSupport,
+                        deadline: ProductShutdownDeadline::Ahead(Duration::from_secs(200)),
+                    }),
+                StandInTeardownNode::new("node-2", StandInEnding::OutlastsCleanup, &log)
+                    .stopping_in(NodeStopProgress {
+                        phase: ShutdownPhase::TerminalTeardown,
+                        deadline: ProductShutdownDeadline::Passed,
+                    }),
+                StandInTeardownNode::new("node-3", StandInEnding::OutlastsCleanup, &log),
+            ];
+
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        let [ended, read, unread] = teardown.nodes.as_slice() else {
+            panic!("a cluster of three reports three nodes: {teardown}");
+        };
+        // A node that ended inside the budget has no shutdown left to describe.
+        assert_eq!(ended.progress, None, "{ended}");
+        assert_eq!(
+            read.to_string(),
+            "node \"node-2\" was still stopping at the cleanup deadline, in shutdown phase \
+             TerminalTeardown, past its own shutdown deadline, and keeps its storage and ports \
+             until it ends"
+        );
+        // A node whose shutdown cannot be read is still named as stopping.
+        assert_eq!(
+            unread.to_string(),
+            "node \"node-3\" was still stopping at the cleanup deadline and keeps its storage and \
+             ports until it ends"
+        );
+        assert_eq!(
+            log.left_stopping(),
+            vec!["node-2".to_string(), "node-3".to_string()]
+        );
+    }
+
+    /// The test nodes' shutdown timeout, which a stopping node's deadline is read against.
+    const STAND_IN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(240);
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline() {
+        let shutdown = ShutdownCoordinator::new(STAND_IN_SHUTDOWN_TIMEOUT);
+
+        let serving = NodeStopProgress::observe(&shutdown);
+        assert_eq!(
+            serving,
+            NodeStopProgress {
+                phase: ShutdownPhase::Serving,
+                deadline: ProductShutdownDeadline::NotRequested,
+            }
+        );
+        assert_eq!(
+            serving.to_string(),
+            "in shutdown phase Serving, with no stop request accepted"
+        );
+
+        shutdown.request_stop();
+        nervix_primitives::time::advance(Duration::from_secs(90)).await;
+        let stopping = NodeStopProgress::observe(&shutdown);
+        assert_eq!(
+            stopping,
+            NodeStopProgress {
+                phase: ShutdownPhase::StopRequested,
+                deadline: ProductShutdownDeadline::Ahead(Duration::from_secs(150)),
+            }
+        );
+        assert_eq!(
+            stopping.to_string(),
+            "in shutdown phase StopRequested, 150s before its own shutdown deadline"
+        );
+
+        // An in-process node has no deadline supervision, so it is read past its deadline for as
+        // long as it goes on stopping.
+        nervix_primitives::time::advance(Duration::from_secs(150)).await;
+        let overdue = NodeStopProgress::observe(&shutdown);
+        assert_eq!(overdue.phase, ShutdownPhase::StopRequested);
+        assert_eq!(overdue.deadline, ProductShutdownDeadline::Passed);
+        nervix_primitives::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(NodeStopProgress::observe(&shutdown), overdue);
+        assert_eq!(
+            overdue.to_string(),
+            "in shutdown phase StopRequested, past its own shutdown deadline"
+        );
+    }
+
+    #[test]
+    fn a_stop_record_reads_as_the_transition_the_harness_prints() {
+        let ended = NodeStopRecord {
+            node: "node-2".to_string(),
+            stopping_for: Some(Duration::from_millis(480)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::Ended {
+                task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
+                shutdown: Some(ShutdownOutcome {
+                    stop_admission: ShutdownPhaseOutcome::Completed,
+                    drain_support: ShutdownPhaseOutcome::Abandoned,
+                    terminal_teardown: ShutdownPhaseOutcome::Completed,
+                }),
+            },
+        };
+        assert_eq!(
+            ended.to_string(),
+            "node 'node-2' stop: ended 480ms after its stop request, inside its 300s watchdog: \
+             clean application exit; shutdown phases: stop admission Completed, drain support \
+             Abandoned, terminal teardown Completed"
+        );
+
+        let unreported = NodeStopRecord {
+            node: "node-3".to_string(),
+            stopping_for: Some(Duration::from_secs(2)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::Ended {
+                task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
+                shutdown: None,
+            },
+        };
+        assert_eq!(
+            unreported.to_string(),
+            "node 'node-3' stop: ended 2s after its stop request, inside its 300s watchdog: clean \
+             application exit; no shutdown outcome was reported"
+        );
+
+        let still_stopping = NodeStopRecord {
+            node: "restored-1".to_string(),
+            stopping_for: Some(Duration::from_secs(300)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::StillStopping(NodeStopProgress {
+                phase: ShutdownPhase::TerminalTeardown,
+                deadline: ProductShutdownDeadline::Passed,
+            }),
+        };
+        assert_eq!(
+            still_stopping.to_string(),
+            "node 'restored-1' stop: still stopping 300s after its stop request, at the end of \
+             its 300s watchdog, in shutdown phase TerminalTeardown, past its own shutdown deadline"
+        );
+
+        let kept = NodeStopRecord {
+            node: "restored-2".to_string(),
+            stopping_for: Some(Duration::from_secs(75)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::LeftToKeeper,
+        };
+        assert_eq!(
+            kept.to_string(),
+            "node 'restored-2' stop: still stopping 75s after its stop request; it had already \
+             been left to a keeper, which waits for it to end"
+        );
+
+        let unasked = NodeStopRecord {
+            node: "node-1".to_string(),
+            stopping_for: None,
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::Ended {
+                task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
+                shutdown: None,
+            },
+        };
+        assert_eq!(
+            unasked.to_string(),
+            "node 'node-1' stop: ended without a stop request from the harness, inside its 300s \
+             watchdog: clean application exit; no shutdown outcome was reported"
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task() {
+        let (mut clock, ended) = NodeStopClock::start();
+        assert_eq!(
+            clock.stopping_for(),
+            None,
+            "a node the harness never asked to stop has no stop to time"
+        );
+
+        nervix_primitives::time::advance(Duration::from_secs(7)).await;
+        clock.stop_requested();
+        nervix_primitives::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(clock.stopping_for(), Some(Duration::from_secs(3)));
+
+        // A later request changes nothing, as it changes nothing in the node.
+        clock.stop_requested();
+        nervix_primitives::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(clock.stopping_for(), Some(Duration::from_secs(5)));
+
+        // The task records its own ending, so a harness that gets round to the node later still
+        // reads how long the node itself took.
+        drop(ended);
+        nervix_primitives::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(clock.stopping_for(), Some(Duration::from_secs(5)));
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop() {
+        let (mut clock, ended) = NodeStopClock::start();
+        drop(ended);
+        nervix_primitives::time::advance(Duration::from_secs(4)).await;
+
+        clock.stop_requested();
+
+        assert_eq!(clock.stopping_for(), Some(Duration::ZERO));
     }
 
     #[nervix_primitives::test(start_paused = true)]
