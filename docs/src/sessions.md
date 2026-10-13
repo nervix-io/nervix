@@ -188,7 +188,10 @@ An attachment moves through one lifecycle:
   is slow, and a changed clock withdraws a queued tick the transport has not taken yet. Tick ids may
   skip after coalesced periods. An unpaced, stopped or uninstalled clock emits no ticks.
 - **Detached.** `DETACH DOMAIN CLOCK` stops delivery before its reply, so nothing about the domain
-  follows the reply. A detach without an attachment is refused as not attached.
+  follows the reply. A detach without an attachment is refused as not attached. The Rust client,
+  the CLI and every host of the shared C binding never attach a clock again on their own behind a
+  detach of it: a restoration attach they already decided to send reaches the session first, and
+  the detach releases what it attached.
 - **Ended by the server.** When the domain no longer exists on the serving node, the session
   receives `DomainClockAttachmentEnded` with reason `DomainRemoved`, the last frame about that
   attachment. A request sent after that frame finds the attachment gone: an attach is served as a
@@ -201,7 +204,10 @@ An attachment moves through one lifecycle:
   server refuses that clock attach, and the console shows the refusal until its selection or
   connection changes. The new attachment delivers the clock as it is then and the newest tick its
   serving node holds. That tick can repeat one the client already received, or precede it when
-  another node serves the new session.
+  another node serves the new session. When the new session's attach is answered while the old
+  session still holds the attachment, as after a redirect to the leader, the Rust client and the
+  shared C binding keep the newest tick of an unchanged clock and report a tick of the new session
+  only when it is newer.
 
 Both statements run in order with the session's commands. While the session holds a transaction,
 the server refuses them as it refuses a subscription change, and the Rust client, the CLI, every
