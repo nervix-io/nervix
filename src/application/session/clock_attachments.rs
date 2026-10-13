@@ -397,7 +397,7 @@ impl ClockDelivery {
                         Err(error) => {
                             warn!(
                                 domain = self.domain.as_str(),
-                                error = %error,
+                                error = format!("{error:#}"),
                                 "a domain clock observation does not fit a session frame"
                             );
                             if !self.wait_change().await {
@@ -444,7 +444,7 @@ impl ClockDelivery {
             Err(error) => {
                 warn!(
                     domain = self.domain.as_str(),
-                    error = %error,
+                    error = format!("{error:#}"),
                     "a domain clock tick does not fit a session frame"
                 );
                 None
@@ -530,7 +530,7 @@ impl ClockDelivery {
             }
             Err(error) => warn!(
                 domain = self.domain.as_str(),
-                error = %error,
+                error = format!("{error:#}"),
                 "the end of a domain clock attachment does not fit a session frame"
             ),
         }

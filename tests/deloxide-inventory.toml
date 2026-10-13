@@ -1614,6 +1614,7 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed workloads reach the clock state lock through attaches, frames, events, reads of followed clocks, and the restoration decisions and attempts of a reopened session. They do not detach a clock while a restoration of it is being decided, move an attachment by redirect while its old session holds it, or leave a restoration unanswered past the request timeout, so detach releases, a restoration waiting for one, and the wake of an abandoned restoration are exercised only by the client-core unit tests and the Shuttle check shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock, outside the lane."
 path = "crates/client-core/src/domain_clock.rs"
 workloads = [
   "scenario.paced-resume",
