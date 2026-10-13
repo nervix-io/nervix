@@ -28,6 +28,7 @@ use nervix_primitives::{
         atomic::{AtomicUsize, Ordering},
         blocking::Mutex,
     },
+    time::{Interval, MissedTickBehavior},
 };
 
 use super::{
@@ -656,16 +657,19 @@ impl RemoteDispatchRegistry {
         failed
     }
 
-    pub(super) async fn sweep_silent_acks(&self) {
-        let mut sweeps = nervix_primitives::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
-        sweeps.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            sweeps.tick().await;
-            for (receiver, acknowledgements) in self.fail_silent_acks() {
-                warn!(target_node = %receiver, acknowledgements, "remote record acknowledgement owner expired");
-            }
+    /// Fails every forwarded acknowledgement whose receiver stayed silent past its bound, and logs
+    /// how many each receiver lost.
+    fn expire_silent_acks(&self) {
+        for (receiver, acknowledgements) in self.fail_silent_acks() {
+            warn!(target_node = %receiver, acknowledgements, "remote record acknowledgement owner expired");
         }
+    }
+
+    /// Sweeps once per silence interval for as long as the task polling it runs.
+    pub(super) async fn sweep_silent_acks(&self) {
+        SilenceSweeps::every_interval()
+            .run(|| self.expire_silent_acks())
+            .await;
     }
 
     pub(super) fn shutdown(&self) {
@@ -712,6 +716,31 @@ impl RemoteDispatchRegistry {
 impl Drop for RemoteDispatchRegistry {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// The cadence of the silence sweep, apart from the sweep it runs.
+pub(super) struct SilenceSweeps {
+    ticks: Interval,
+}
+
+impl SilenceSweeps {
+    /// One sweep per silence interval. A sweep that runs late counts once rather than for every
+    /// interval it missed, so a node whose execution stalled fails nothing for the time in which no
+    /// report could have reached it.
+    pub(super) fn every_interval() -> Self {
+        let mut ticks = nervix_primitives::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        Self { ticks }
+    }
+
+    /// Runs `sweep` at every tick, for as long as the task polling this runs.
+    pub(super) async fn run(mut self, mut sweep: impl FnMut()) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            self.ticks.tick().await;
+            sweep();
+        }
     }
 }
 
