@@ -551,9 +551,7 @@ mod tests {
     use arrow_array::{ArrayRef, BooleanArray, Int64Array, StringArray};
     use meticulous::ResultExt as _;
     use nervix_arbitrary::Entropy;
-    use nervix_execution::ExecutionConfig;
     use nervix_models::ParseAsType;
-    use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
     use super::*;
@@ -562,6 +560,7 @@ mod tests {
             OptionalTestField, TestWindow, WindowArgumentColumns, WindowProcessorState,
             batch_value,
             snapshot_staging::{SnapshotStagingError, SnapshotStagingLimits},
+            window_checkpoint_cases::WindowCheckpointCase,
             window_state::WindowPublishedSnapshot,
         },
         runtime_schema::RuntimeValue,
@@ -687,10 +686,16 @@ mod tests {
     }
 
     /// Admits generated batches and steps over some of their rows, as a branch task would.
-    async fn fill(window: &mut TestWindow, entropy: &mut Entropy<'_>) {
+    async fn fill(window: &mut TestWindow, entropy: &mut Entropy<'_>, mut remaining: usize) {
         let mut clock = 0_i64;
-        for _ in 0..entropy.count(4) {
-            let rows = entropy.positive_count(nonzero!(4_usize));
+        while remaining > 0 {
+            nervix_primitives::task::consume_budget().await;
+            let maximum = std::num::NonZeroUsize::new(remaining.min(32))
+                .verified("the loop retains at least one row to admit");
+            let rows = entropy.positive_count(maximum);
+            remaining = remaining
+                .checked_sub(rows)
+                .verified("the generated batch fits the remaining row count");
             let mut latencies = Vec::with_capacity(rows);
             let mut labels = Vec::with_capacity(rows);
             let mut healthy = Vec::with_capacity(rows);
@@ -738,6 +743,7 @@ mod tests {
         published: WindowProcessorStateSnapshot,
         revision: u64,
         limit: u64,
+        branch: &Option<BranchKey>,
     ) -> WindowProcessorStateSnapshot {
         let input = window.input_schema.arrow_schema();
         let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
@@ -777,7 +783,7 @@ mod tests {
             ArchivedWindow {
                 revision: opened.revision(),
                 incarnation: opened.incarnation(),
-                branch: None,
+                branch: branch.clone(),
                 first_sequence: opened.first_sequence(),
                 next_sequence: opened.next_sequence(),
                 rows: opened.row_watermarks(),
@@ -854,19 +860,6 @@ mod tests {
         ArchivedRows { bytes, batch }
     }
 
-    /// An executor whose identity records hold a few rows, so archived groups split into groups
-    /// of their own and their columns are projected again.
-    fn narrow_identity_executor() -> Executor {
-        Executor::new(ExecutionConfig {
-            limits: nervix_execution::OperationLimits {
-                snapshot_record_bytes: ubyte::ByteUnit::Byte(512),
-                ..nervix_execution::OperationLimits::default()
-            },
-            ..ExecutionConfig::default()
-        })
-        .assured("a narrow identity record is a valid limit")
-    }
-
     /// Asserts `restored` holds exactly the rows, sequences, watermarks, argument values and
     /// delayed removals of `published`.
     fn assert_same_window(
@@ -879,7 +872,12 @@ mod tests {
         for (restored, published) in restored.entries.iter().zip(&published.entries) {
             assert_eq!(restored.sequence, published.sequence);
             assert_eq!(restored.timestamp, published.timestamp);
-            assert_eq!(restored.key, published.key);
+            let key_bits = |key| {
+                rkyv::to_bytes::<rkyv::rancor::Error>(&BranchKey::to_remote_key(key))
+                    .assured("typed branch fields archive without normalizing float bits")
+                    .to_vec()
+            };
+            assert_eq!(key_bits(&restored.key), key_bits(&published.key));
             assert_eq!(
                 restored.record.one_row_batch().batch(),
                 published.record.one_row_batch().batch(),
@@ -914,6 +912,49 @@ mod tests {
         }
     }
 
+    #[nervix_primitives::test]
+    async fn window_archive_oracle_detects_changed_float_bits_and_datetime_offsets() {
+        let mut window = window();
+        fill(&mut window, &mut Entropy::new(&[]), 1).await;
+        let mut published = window
+            .state
+            .to_snapshot()
+            .assured("one admitted row publishes");
+        let key = |float, at| {
+            let fields = [
+                (
+                    nervix_models::FieldName::parse("float").assured("fixed field name is valid"),
+                    RuntimeValue::F64(OrderedFloat(float)),
+                ),
+                (
+                    nervix_models::FieldName::parse("at").assured("fixed field name is valid"),
+                    RuntimeValue::Datetime(at),
+                ),
+            ];
+            Some(BranchKey::from_fields(fields).assured("two finite typed fields form a key"))
+        };
+        let instant = chrono::DateTime::from_timestamp_nanos(1);
+        let utc = chrono::FixedOffset::east_opt(0).assured("UTC is a fixed offset");
+        let offset = chrono::FixedOffset::east_opt(20_700)
+            .assured("a whole-minute offset within a day is valid");
+        published.entries[0].key = key(-0.0, instant.with_timezone(&utc));
+        assert_same_window(&published, &published);
+        for changed in [
+            key(0.0, instant.with_timezone(&utc)),
+            key(-0.0, instant.with_timezone(&offset)),
+        ] {
+            let mut restored = published.clone();
+            restored.entries[0].key = changed;
+            let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_same_window(&restored, &published);
+            }));
+            assert!(
+                mismatch.is_err(),
+                "the complete branch oracle detects the changed key"
+            );
+        }
+    }
+
     #[test]
     fn bolero_window_archive_groups_rebuild_the_published_window() {
         bolero::check!()
@@ -925,29 +966,28 @@ mod tests {
                     .build()
                     .assured("property runtime opens");
                 let mut entropy = Entropy::new(input);
-                // Archived groups keep their sections when their identities fit one identity
-                // record, and split into groups of their own otherwise.
-                let executor = if entropy.flag() {
-                    narrow_identity_executor()
-                } else {
-                    Executor::new(ExecutionConfig::default()).assured("default bounds are valid")
-                };
+                let case = WindowCheckpointCase::generated(&mut entropy);
+                let executor = case.archive_executor();
                 runtime.block_on(async {
                     let mut window = window();
-                    fill(&mut window, &mut entropy).await;
+                    fill(&mut window, &mut entropy, case.rows).await;
                     let before = window.emitted().await;
-                    let published = window
+                    let mut published = window
                         .state
                         .to_snapshot()
                         .assured("a bounded window publishes");
+                    for entry in &mut published.entries {
+                        entry.key = case.branch.clone();
+                    }
                     let revision = entropy.any_u64();
-                    let limit = entropy.between(1..=512);
+                    let limit = entropy.pick([64, 512, 65_536]);
                     let restored = archived_and_restored(
                         &executor,
                         &window,
                         published.clone(),
                         revision,
                         limit,
+                        &case.branch,
                     )
                     .await;
                     assert_same_window(&restored, &published);
@@ -988,6 +1028,7 @@ mod tests {
                     assert_mean_close(&from_archive, &from_native);
                     assert_mean_close(&from_archive, &before);
                 });
+                assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
             });
     }
 
@@ -1046,7 +1087,8 @@ mod tests {
             .state
             .to_snapshot()
             .assured("the sketch window publishes");
-        let restored = archived_and_restored(&executor, &window, published.clone(), 3, 64).await;
+        let restored =
+            archived_and_restored(&executor, &window, published.clone(), 3, 64, &None).await;
         assert_same_window(&restored, &published);
         window.state = WindowProcessorState::from_snapshot(
             &window.plan,
