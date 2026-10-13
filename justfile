@@ -347,6 +347,11 @@ test-admission-kernels *args:
 bench-window-admission *args:
     cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
+# Measure admitting a window's retained rows into its distinct, quantile and top-k pane sketches,
+# from a new pane for every row to a thousand rows per pane.
+bench-window-sketches *args: build-web-console
+    cargo bench --package nervix-server --bench window_sketches --features benchmarks -- {{ args }}
+
 # Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
 # run each. Extra arguments are forwarded to Criterion.
 bench-checked-lanes *args:
@@ -366,6 +371,11 @@ bench-byte-classes-x86-64-v3 *args:
 # Measure RFC 6587 stream framing over a mebibyte of frames read in a connection's 8 KiB reads.
 bench-syslog-framing *args:
     cargo bench --package nervix-connector-syslog --bench stream_framing --features benchmarks -- {{ args }}
+
+# Measure folding one acknowledgement batch's Kafka positions to each partition's latest offset and
+# a rejection's to each partition's earliest message, over repeated and distinct partitions.
+bench-kafka-offsets *args:
+    cargo bench --package nervix-connector-kafka --bench partition_offsets --features benchmarks -- {{ args }}
 
 bench-constant-division-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
@@ -1742,10 +1752,12 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench window_sketches --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-connector-kafka --bench partition_offsets --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
     just bench-remote-owners-bodies

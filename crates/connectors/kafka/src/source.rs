@@ -727,7 +727,9 @@ impl AssignedPartitions {
     }
 }
 
-fn latest_positions(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPosition> {
+/// The latest acknowledged offset of every partition, ordered by topic and partition, which the
+/// source commits.
+pub fn latest_positions(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPosition> {
     let mut topics = BTreeMap::<String, BTreeMap<i32, i64>>::new();
     for position in positions {
         if let Some(partitions) = topics.get_mut(&position.topic) {
@@ -756,7 +758,9 @@ fn latest_positions(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPositio
     latest
 }
 
-fn earliest_message_offsets(
+/// The earliest rejected message of every partition, ordered by topic and partition, from which the
+/// source reads again.
+pub fn earliest_message_offsets(
     positions: &[KafkaOffsetPosition],
 ) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaSourceError>> {
     let mut topics = BTreeMap::<String, BTreeMap<i32, i64>>::new();
@@ -1072,6 +1076,106 @@ mod tests {
         assert!(!current.is_current(&empty));
         assert!(KafkaConsumerAssignment::Cleared.is_current(&empty));
         assert!(!KafkaConsumerAssignment::Unknown.is_current(&assignment));
+    }
+
+    /// A generated acknowledged or rejected position over a few topics and partitions.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct GeneratedPosition {
+        topic: u8,
+        partition: u8,
+        offset: i64,
+    }
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct GeneratedPositions {
+        #[generator(bolero::generator::produce_with::<Vec<GeneratedPosition>>().len(0_usize..=64))]
+        positions: Vec<GeneratedPosition>,
+    }
+
+    /// The topic partition the reference folds offsets under.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct PartitionKey {
+        topic: String,
+        partition: i32,
+    }
+
+    impl GeneratedPositions {
+        fn positions(&self) -> Vec<KafkaOffsetPosition> {
+            self.positions
+                .iter()
+                .map(|position| KafkaOffsetPosition {
+                    topic: format!("topic-{}", position.topic % 3),
+                    partition: i32::from(position.partition % 4),
+                    offset: position.offset,
+                })
+                .collect()
+        }
+    }
+
+    fn key(position: &KafkaOffsetPosition) -> PartitionKey {
+        PartitionKey {
+            topic: position.topic.clone(),
+            partition: position.partition,
+        }
+    }
+
+    fn ordered(folded: BTreeMap<PartitionKey, i64>) -> Vec<KafkaOffsetPosition> {
+        folded
+            .into_iter()
+            .map(|(key, offset)| KafkaOffsetPosition {
+                topic: key.topic,
+                partition: key.partition,
+                offset,
+            })
+            .collect()
+    }
+
+    /// The greatest acknowledged offset of every topic partition, ordered by topic and partition.
+    fn latest_reference(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPosition> {
+        let mut folded = BTreeMap::new();
+        for position in positions {
+            let current = folded.entry(key(position)).or_insert(position.offset);
+            *current = (*current).max(position.offset);
+        }
+        ordered(folded)
+    }
+
+    /// The offset of the earliest rejected message of every topic partition, or absent when a
+    /// position has no message before it.
+    fn earliest_reference(positions: &[KafkaOffsetPosition]) -> Option<Vec<KafkaOffsetPosition>> {
+        let mut folded = BTreeMap::new();
+        for position in positions {
+            let offset = position.offset.checked_sub(1)?;
+            let current = folded.entry(key(position)).or_insert(offset);
+            *current = (*current).min(offset);
+        }
+        Some(ordered(folded))
+    }
+
+    /// Acknowledged positions fold to each partition's latest offset and rejected positions to
+    /// each partition's earliest message, in topic and partition order, whatever the order and
+    /// repetition of the positions; a position with no message before it is refused.
+    #[test]
+    fn bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .with_type::<GeneratedPositions>()
+            .for_each(|generated| {
+                let positions = generated.positions();
+                assert_eq!(latest_positions(&positions), latest_reference(&positions));
+                let expected = earliest_reference(&positions);
+                match earliest_message_offsets(&positions) {
+                    Ok(earliest) => assert_eq!(Some(earliest), expected),
+                    Err(report) => {
+                        assert_eq!(expected, None);
+                        assert!(matches!(
+                            report.current_context(),
+                            KafkaSourceError::UnsupportedDomainOffset { .. }
+                        ));
+                    }
+                }
+            });
     }
 
     #[test]

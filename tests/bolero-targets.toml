@@ -2662,3 +2662,33 @@ random_iterations = 256
 source = "crates/web-console/src/backup_dialog/tests/properties.rs"
 test = "backup_dialog::tests::properties::bolero_restore_drafts_lower_to_the_restore_they_were_filled_from"
 test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/window_accumulator/__fuzz__/runtime__window_accumulator__sketches__tests__bolero_pane_sketches_equal_per_pane_admission/corpus"
+domain_version = 1
+features = []
+id = "runtime-window-sketch-panes"
+invariant = "Admitting generated rows in runs and stepping past the oldest leaves every distinct, quantile and top-k pane equal to an empty sketch that admitted exactly that pane's retained rows in order, with no pane lacking a contributing row."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/window_accumulator/sketches.rs"
+test = "runtime::window_accumulator::sketches::tests::bolero_pane_sketches_equal_per_pane_admission"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/kafka/src/__fuzz__/source__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
+domain_version = 1
+features = []
+id = "kafka-partition-offsets"
+invariant = "Generated acknowledged and rejected positions fold to each topic partition's latest offset and earliest rejected message, in topic and partition order, whatever their order and repetition, and a position with no message before it is refused."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-kafka"
+random_iterations = 256
+source = "crates/connectors/kafka/src/source.rs"
+test = "source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
+test_target = "lib"

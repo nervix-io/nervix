@@ -6873,6 +6873,8 @@ name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
+ "criterion 0.5.1",
  "error-stack",
  "futures-util",
  "humantime",
