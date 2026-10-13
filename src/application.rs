@@ -51,6 +51,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 pub use cli::{Args, Command};
 pub use cli_values::InternalTransportMode;
+use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
