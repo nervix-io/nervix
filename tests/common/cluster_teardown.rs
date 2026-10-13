@@ -5,7 +5,8 @@
 //! - **Owns.** The one deadline a whole cluster stops within, asking every node to stop before
 //!   awaiting any of them, leaving whatever is still stopping when that deadline passes to end
 //!   itself, the release of what the ended nodes held, and the record of what each node did.
-//! - **Depends on.** The owned node task and the phase deadline.
+//! - **Depends on.** The owned node task, the reading of a stopping node's own shutdown, and the
+//!   phase deadline.
 //! - **Must not know.** What a node is, how it was configured, or what it holds.
 
 use std::{fmt, time::Duration};
@@ -15,6 +16,7 @@ use meticulous::OptionExt as _;
 
 use super::{
     node_liveness::{NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask},
+    node_stop::NodeStopProgress,
     phase_deadline::PhaseDeadline,
 };
 
@@ -63,6 +65,10 @@ pub(crate) trait TeardownNode {
     /// the task whether the wait ends, is cancelled, or runs out of time.
     fn owned_task(&mut self) -> &mut OwnedNodeTask;
 
+    /// Where this node's own shutdown stands, for the record of a node the teardown leaves
+    /// stopping. `None` when the node has no shutdown that can still be read.
+    fn stop_progress(&self) -> Option<NodeStopProgress>;
+
     /// Give back the harness state this node holds: its port leases, the fault injection it
     /// registered, and anything else the next scenario must not find taken. The teardown calls it
     /// once per node whose task has ended, whatever ended it.
@@ -80,6 +86,9 @@ pub(crate) trait TeardownNode {
 pub(crate) struct NodeTeardown {
     pub(crate) node: String,
     pub(crate) stop: NodeTaskWaitOutcome,
+    /// Where the node's own shutdown stood at the cleanup deadline, when the node was still
+    /// stopping there and its shutdown could be read.
+    pub(crate) progress: Option<NodeStopProgress>,
 }
 
 impl NodeTeardown {
@@ -123,10 +132,13 @@ impl fmt::Display for NodeTeardown {
                 write!(formatter, "had already ended with {outcome}")
             }
             NodeTaskWaitOutcome::Joined(outcome) => write!(formatter, "ended with {outcome}"),
-            NodeTaskWaitOutcome::StillRunning => formatter.write_str(
-                "was still stopping at the cleanup deadline and keeps its storage and ports until \
-                 it ends",
-            ),
+            NodeTaskWaitOutcome::StillRunning => {
+                formatter.write_str("was still stopping at the cleanup deadline")?;
+                if let Some(progress) = &self.progress {
+                    write!(formatter, ", {progress},")?;
+                }
+                formatter.write_str(" and keeps its storage and ports until it ends")
+            }
             NodeTaskWaitOutcome::LeftStopping => formatter.write_str(
                 "had already been left stopping and keeps its storage and ports until it ends",
             ),
@@ -167,19 +179,26 @@ impl ClusterTeardown {
         }
 
         let deadline = PhaseDeadline::after(budget);
-        let stops = nodes.iter_mut().map(|node| async {
-            let name = node.node_name();
-            let stop = node.owned_task().wait(deadline).await;
-            NodeTeardown { node: name, stop }
-        });
-        let stopped = join_all(stops).await;
+        let waits = nodes
+            .iter_mut()
+            .map(|node| async { node.owned_task().wait(deadline).await });
+        let waited = join_all(waits).await;
 
-        for (node, teardown) in nodes.iter_mut().zip(&stopped) {
+        let mut stopped = Vec::with_capacity(nodes.len());
+        for (node, stop) in nodes.iter_mut().zip(waited) {
+            let mut teardown = NodeTeardown {
+                node: node.node_name(),
+                stop,
+                progress: None,
+            };
             if teardown.is_still_stopping() {
+                // The keeper takes the node's shutdown along with its task, so it is read first.
+                teardown.progress = node.stop_progress();
                 node.leave_stopping();
             } else {
                 node.release();
             }
+            stopped.push(teardown);
         }
 
         Self {

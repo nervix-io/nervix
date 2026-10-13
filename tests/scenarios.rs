@@ -12076,6 +12076,27 @@ async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
     }
 }
 
+#[then("every node reports that its last shutdown finished before its deadline")]
+async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+    world: &mut ScenarioWorld,
+) {
+    for node_id in world.cluster().node_ids() {
+        let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
+            panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
+        };
+        if let Some(failure) = world.cluster().node_run_failure(&node_id) {
+            panic!(
+                "node '{node_id}' did not finish its shutdown cleanly, with phases {shutdown:?}: \
+                 {failure}"
+            );
+        }
+        assert!(
+            !shutdown.deadline_expired(),
+            "node '{node_id}' finished its last shutdown past its deadline: {shutdown:?}"
+        );
+    }
+}
+
 #[then(expr = "the last authentication attempts take at least {string}")]
 async fn then_last_authentication_attempts_take_at_least(
     world: &mut ScenarioWorld,

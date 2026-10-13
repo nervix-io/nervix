@@ -612,16 +612,61 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "restore-installation-wire"
-invariant = "Every current restore installation action retains its complete authority, coordination, placement, payload and inventory through the production wire encoder and decoder."
+invariant = "Every current restore installation action and success or refusal retains its complete value through its declared class's production wire codec, with every runtime state kind branched and unbranched, full-width lengths and arbitrary digests."
 manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-interconnect"
 random_iterations = 256
 source = "crates/interconnect/src/backup.rs"
 test = "backup::wire_properties::bolero_restore_installation_requests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/backup/__fuzz__/backup__capture_properties__bolero_backup_capture_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-capture-wire"
+invariant = "Capture, every drain action and counter, ordered inventories of every section kind and section fetch requests, including every success and refusal, retain complete values through their declared class's production wire codec, with zero/full-width counters and lengths, arbitrary digests and bounded Unicode paths."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup/capture_properties.rs"
+test = "backup::capture_properties::bolero_backup_capture_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/backup/capture_properties/__fuzz__/backup__capture_properties__malformed__bolero_backup_capture_messages_refuse_damage_or_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-capture-wire-malformed"
+invariant = "Truncated, bit-flipped, overwritten and arbitrary capture/drain/inventory request and response bytes and section fetch request bytes either fail with a typed decode report or re-encode and decode with complete equality; management and bulk reservations are released."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup/capture_properties/malformed.rs"
+test = "backup::capture_properties::malformed::bolero_backup_capture_messages_refuse_damage_or_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/backup/interconnect/__fuzz__/application__backup__interconnect__section_properties__bolero_captured_section_mapping_is_total_and_injective/corpus"
+domain_version = 1
+features = ["testing"]
+id = "backup-section-mapping"
+invariant = "Every current captured section kind maps back from its production archive content, and distinct kinds have distinct content and validated production paths over generated identities, fingerprints and group ordinals, branched and unbranched."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/backup/interconnect/section_properties.rs"
+test = "application::backup::interconnect::section_properties::bolero_captured_section_mapping_is_total_and_injective"
 test_target = "lib"
 
 [[target]]
@@ -652,6 +697,66 @@ package = "nervix-interconnect"
 random_iterations = 256
 source = "crates/interconnect/src/runtime_state.rs"
 test = "runtime_state::wire_properties::bolero_checkpoint_descriptions_round_trip_through_the_replication_wire"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_runtime_state_replication_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-replication-wire"
+invariant = "Every current runtime-state request and reply retains its complete placement, state/schema/generation, model kind, ordered branch fields and nested float bits, counters, checkpoint length/digest, listing and refusal variant through its production pool-class codec, releasing all charges."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/runtime_state_properties.rs"
+test = "runtime_state::replication_properties::bolero_runtime_state_replication_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/runtime_state__replication_properties__bolero_damaged_runtime_state_replication_messages_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-replication-malformed"
+invariant = "Bounded damaged current runtime-state requests and responses either decode or fail with a typed decode outcome; empty frames and zero-byte encoding limits refuse every message kind, and no command or bulk charge survives."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/runtime_state_properties.rs"
+test = "runtime_state::replication_properties::bolero_damaged_runtime_state_replication_messages_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__checkpoint_listing__properties__bolero_owner_checkpoint_listings_round_trip/corpus"
+domain_version = 1
+features = []
+id = "runtime-checkpoint-listing-owner"
+invariant = "Absent, restarted and continued owner listings retain their complete ordered branch keys, state/schema/generation, cursor, revisions, continuation flag and float bits across the semantic conversion and production replication response codec."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_replication/checkpoint_listing_properties.rs"
+test = "runtime::state_replication::checkpoint_listing::properties::bolero_owner_checkpoint_listings_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__checkpoint_listing__properties__bolero_malformed_checkpoint_listing_keys_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-checkpoint-listing-malformed"
+invariant = "Structurally valid production-wire listings with empty keys, invalid field names, invalid datetime text or non-finite scalar/nested floats in either removed or revised entries fail the owner's typed BranchKey boundary, releasing their codec charges."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_replication/checkpoint_listing_properties.rs"
+test = "runtime::state_replication::checkpoint_listing::properties::bolero_malformed_checkpoint_listing_keys_fail_typed"
 test_target = "lib"
 
 [[target]]
