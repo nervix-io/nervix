@@ -15,7 +15,7 @@ outbound request, from Arrow preparation to response and recovery.
 
 | Layer | Responsibility |
 | --- | --- |
-| Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The registry names no connector crate. |
+| Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The vocabulary nests every source and sink Model by connector and entity, and each pair declares its capabilities once there. The registry names no connector crate. |
 | Decision and composition | Convert a validated Model into a typed source or sink start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define source and sink operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the source contract, the sink contract, or both. |
@@ -330,7 +330,11 @@ producer policy of window, ACK timeout, and retry backoff, and the endpoint cont
 attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
 The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
-partition, offset, and headers; Syslog carries the peer address. Transport headers are visited
+partition, offset, and headers; Syslog carries the peer address. The scopes, and the fields of
+each with their exact types, are declared once in the vocabulary, and each source entity names the
+scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
+programs may name, the host builds its metadata columns from the same fields, and a connector's
+metadata row names the scope it carries, so the three cannot disagree. Transport headers are visited
 from the borrowed message in arrival order. The host copies them only when the quiesce control
 decides on a payload, which may retain it, or a WebSocket session must retain them after the source
 message ends. Header support and each

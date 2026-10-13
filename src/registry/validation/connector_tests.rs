@@ -17,11 +17,14 @@ use std::fs;
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
     CodecName, CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientSqs,
-    CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-    IngestorName, JsonType, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
-    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelMetric, OutputBranch,
-    ProcessorInputs, ProcessorOutputs, RetryPolicy, SignalingProtobufConfig, TopicName,
-    WireSchemaField, WireSchemaName,
+    CreateWireSchema, EmitterPublishingMode, EndpointEndpointSource, EndpointSource, ErrorPolicies,
+    FlushPolicy, GeneralErrorPolicy, IngestorName, JsonType, KafkaIngestMode, KafkaOffsetMode,
+    KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState,
+    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelLogsSink, OtelMetric,
+    OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs,
+    ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink, SignalingProtobufConfig,
+    SyslogCollectorSink, SyslogSink, TopicName, WireSchemaField, WireSchemaName, ZeroMqPushSink,
+    ZeroMqSink,
 };
 use nonzero_ext::nonzero;
 
@@ -201,13 +204,13 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("foreign publishing modes must be rejected");
     assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
 
-    *emitter.sink = EmitSink::Sqs {
+    *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
         client: named("sqs_main"),
         queue: "events".to_string(),
         fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
             nervix_models::Literal::String("group".to_string()),
         ))),
-    };
+    }));
     emitter.publishing_mode = EmitterPublishingMode::SqsSingle {
         retry_policy: RetryPolicy {
             backoff: "1s".to_string(),
@@ -261,12 +264,12 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
             max_backoff: "1s".to_string(),
         },
     };
-    *emitter.sink = EmitSink::Postgres {
+    *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
         client: named("postgres_main"),
         table: named("events"),
         values: Vec::new(),
         conflict_action: nervix_models::PostgresConflictAction::None,
-    };
+    }));
 
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("a Postgres emitter without BATCH must be rejected");
@@ -279,11 +282,11 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
     validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect("a Postgres emitter with BATCH is valid");
 
-    *emitter.sink = EmitSink::Sqs {
+    *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
         client: named("sqs_main"),
         queue: "events".to_string(),
         fifo_group: None,
-    };
+    }));
     emitter.body = nervix_models::EmitterBody::Codec {
         codec: named("event_codec"),
     };
@@ -329,9 +332,9 @@ fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
     validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
         .expect("a protobuf codec with BATCH MESSAGE has a batch container");
 
-    *emitter.sink = EmitSink::Sentry {
+    *emitter.sink = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
         client: named("sentry_main"),
-    };
+    }));
     let Model::Codec(mut json) = jaq_native_codec("event_codec", "event_schema", None, Some("."))
     else {
         unreachable!("jaq_native_codec builds a codec model")
@@ -382,12 +385,12 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
         expression: nervix_nspl::parse_expression("input.secret")
             .assured("input.secret is a valid expression"),
     };
-    *emitter.sink = EmitSink::Postgres {
+    *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
         client: named("database"),
         table: named("events"),
         values: vec![mapping],
         conflict_action: nervix_models::PostgresConflictAction::None,
-    };
+    }));
     let models = ModelIndex::new();
     let error =
         validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
@@ -404,7 +407,9 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
             && target == "external_secret"
     ));
 
-    let EmitSink::Postgres { values, .. } = emitter.sink.as_mut() else {
+    let EmitSink::Postgres(PostgresSink::Table(PostgresTableSink { values, .. })) =
+        emitter.sink.as_mut()
+    else {
         panic!("the test emitter uses Postgres VALUES");
     };
     values[0].expression = nervix_nspl::parse_expression("leak_sensitive(input.secret)")
@@ -434,12 +439,12 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
         expression: nervix_nspl::parse_expression("input.missing")
             .expect("a missing field is still a valid expression"),
     };
-    *emitter.sink = EmitSink::Postgres {
+    *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
         client: named("database"),
         table: named("events"),
         values: vec![mapping],
         conflict_action: nervix_models::PostgresConflictAction::None,
-    };
+    }));
     let error = validate_direct_values_sensitivity(
         &domain,
         &identifier,
@@ -466,13 +471,13 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
     };
     let identifier = ModelName::from(&emitter.name);
     emitter.body = nervix_models::EmitterBody::WithoutBody;
-    *emitter.sink = EmitSink::Http {
+    *emitter.sink = EmitSink::Http(HttpSink::Request(HttpRequestSink {
         client: named("api"),
         method: nervix_nspl::parse_expression("input.value")
             .expect("a field reference is a valid expression"),
         path: nervix_nspl::parse_expression("'/events'")
             .expect("a string literal is a valid expression"),
-    };
+    }));
     let schema = CreateSchema {
         name: named("event"),
         fields: vec![SchemaField {
@@ -517,21 +522,23 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
     };
     let models = ModelIndex::new();
 
-    *emitter.sink = EmitSink::Otel {
+    *emitter.sink = EmitSink::from(OtelLogsSink {
         client: named("otel_main"),
-        signal: OtelSignal::Logs,
-        values: vec![otel_mapping("time"), otel_mapping("body")],
-        attributes: Vec::new(),
-        resource: Vec::new(),
-        scope: None,
-    };
+        mappings: OtelMappings {
+            values: vec![otel_mapping("time"), otel_mapping("body")],
+            attributes: Vec::new(),
+            resource: Vec::new(),
+            scope: None,
+        },
+    });
     validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect("complete OTEL LOGS mappings must be accepted");
 
-    let EmitSink::Otel { values, .. } = emitter.sink.as_mut() else {
-        unreachable!("test emitter must remain OTEL")
+    let EmitSink::Otel(OtelSink::Logs(OtelLogsSink { mappings, .. })) = emitter.sink.as_mut()
+    else {
+        unreachable!("test emitter must remain OTEL logs")
     };
-    values.push(otel_mapping("body"));
+    mappings.values.push(otel_mapping("body"));
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("duplicate OTEL VALUES keys must be rejected");
     assert_eq!(
@@ -551,9 +558,9 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
          'body'"
     );
 
-    *emitter.sink = EmitSink::Otel {
+    *emitter.sink = EmitSink::from(OtelMetricsSink {
         client: named("otel_main"),
-        signal: OtelSignal::Metric(OtelMetric {
+        metric: OtelMetric {
             name: "requests".to_string(),
             unit: "1".to_string(),
             description: None,
@@ -561,12 +568,14 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
                 monotonic: true,
                 temporality: OtelAggregationTemporality::Delta,
             },
-        }),
-        values: vec![otel_mapping("time"), otel_mapping("value")],
-        attributes: Vec::new(),
-        resource: Vec::new(),
-        scope: None,
-    };
+        },
+        mappings: OtelMappings {
+            values: vec![otel_mapping("time"), otel_mapping("value")],
+            attributes: Vec::new(),
+            resource: Vec::new(),
+            scope: None,
+        },
+    });
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("DELTA metric streams without start_time must be rejected");
     assert_eq!(
@@ -622,13 +631,13 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     else {
         unreachable!("emitter helper must build an emitter model")
     };
-    valid.sink = Box::new(EmitSink::Sqs {
+    valid.sink = Box::new(EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
         client: named("sqs_main"),
         queue: "events.fifo".to_string(),
         fifo_group: Some(SqsFifoGroup::Expression(
             nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
         )),
-    });
+    })));
     valid.publishing_mode = EmitterPublishingMode::SqsSingle {
         retry_policy: RetryPolicy {
             backoff: "10ms".to_string(),
@@ -641,7 +650,8 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
 
     let mut wrong_type = valid.clone();
     wrong_type.name = named("wrong_fifo_type");
-    if let EmitSink::Sqs { fifo_group, .. } = wrong_type.sink.as_mut() {
+    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) = wrong_type.sink.as_mut()
+    {
         *fifo_group = Some(SqsFifoGroup::Expression(Expression::Literal(
             nervix_models::Literal::I64(42),
         )));
@@ -654,7 +664,9 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     let mut branch_fifo = valid.clone();
     branch_fifo.name = named("branch_fifo");
     branch_fifo.from = ProcessorInputs::single(named("tenant_events"));
-    if let EmitSink::Sqs { fifo_group, .. } = branch_fifo.sink.as_mut() {
+    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) =
+        branch_fifo.sink.as_mut()
+    {
         *fifo_group = Some(SqsFifoGroup::FromBranch);
     }
     registry
@@ -664,7 +676,9 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     let mut mixed_inputs = valid.clone();
     mixed_inputs.name = named("mixed_fifo_inputs");
     mixed_inputs.from.from = vec![named("tenant_events"), named("events")];
-    if let EmitSink::Sqs { fifo_group, .. } = mixed_inputs.sink.as_mut() {
+    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) =
+        mixed_inputs.sink.as_mut()
+    {
         *fifo_group = Some(SqsFifoGroup::FromBranch);
     }
     let error = registry
@@ -688,7 +702,9 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
 
     let mut from_branch = valid;
     from_branch.name = named("unbranched_fifo");
-    if let EmitSink::Sqs { fifo_group, .. } = from_branch.sink.as_mut() {
+    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) =
+        from_branch.sink.as_mut()
+    {
         *fifo_group = Some(SqsFifoGroup::FromBranch);
     }
     let error = registry
@@ -717,9 +733,9 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         body: nervix_models::EmitterBody::Codec {
             codec: named("events_codec"),
         },
-        sink: Box::new(EmitSink::ZeroMq {
+        sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
             client: named("zeromq_main"),
-        }),
+        }))),
         publishing_mode: EmitterPublishingMode::NoAck {
             retry_policy: RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -751,9 +767,9 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
     .expect_err("ZeroMQ emitters must reject write_header");
     assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
 
-    *emitter.sink = EmitSink::Syslog {
+    *emitter.sink = EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
         client: named("syslog_main"),
-    };
+    }));
     let error = super::effective_emitter_filter_map_schema(
         &domain,
         &ModelName::from(&emitter.name),
@@ -765,10 +781,10 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
     .expect_err("Syslog emitters must reject write_header");
     assert!(format!("{error:#}").contains("SYSLOG emitters do not support write_header"));
 
-    *emitter.sink = EmitSink::Kafka {
+    *emitter.sink = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
         client: named("kafka_main"),
         topic: named("events_out"),
-    };
+    }));
     super::effective_emitter_filter_map_schema(
         &domain,
         &ModelName::from(&emitter.name),
@@ -799,7 +815,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                 output_routes: unbranched_transforming_outputs("notifications"),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Mqtt {
+                        source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                             client: ClientName::parse("mqtt_main").expect("valid identifier"),
                             topic: "notifications".to_string(),
                             instances: nonzero!(2u64),
@@ -808,7 +824,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                                 qos: MqttQos::AtMostOnce,
                             },
                             quiesce: nervix_models::IngestQuiesceMode::Drop,
-                        },
+                        })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
                     },
                 ),
@@ -874,7 +890,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                 output_routes: unbranched_transforming_outputs("notifications"),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Kafka {
+                        source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: TopicName::parse("notifications").expect("valid identifier"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
@@ -883,7 +899,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAckParallel,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
+                        })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
                     },
                 ),
@@ -911,7 +927,7 @@ fn client_ingestor(mode: nervix_models::ClientIngestMode) -> Model {
     Model::Ingestor(CreateIngestor {
         name: IngestorName::parse("app_in").expect("valid identifier"),
         output_routes: unbranched_transforming_outputs("notifications"),
-        input: nervix_models::IngestorInput::Client(nervix_models::ClientIngestSource {
+        input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerSource {
             schema: SchemaName::parse("event_schema").expect("valid identifier"),
             mode,
         }),
@@ -1083,13 +1099,13 @@ fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
         let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
             unreachable!("the fixture builds a transport ingestor")
         };
-        input.source = IngestSource::Endpoint {
+        input.source = IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
             endpoint: named("ingress"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
             quiesce: nervix_models::IngestQuiesceMode::Reject {
                 retry_after: retry_after.to_string(),
             },
-        };
+        }));
         let error = validate_ingestor_source(&domain, &identifier, &ingestor)
             .expect_err("the retry delay names no duration");
         assert_invalid_model_reason(
@@ -1241,7 +1257,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                     }),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Kafka {
+                            source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                                 client: ClientName::parse("broker").expect("valid identifier"),
                                 topic: TopicName::parse("notifications").expect("valid identifier"),
                                 offset_mode: KafkaOffsetMode::ConsumerGroup(
@@ -1250,7 +1266,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                 instances: nonzero!(1u64),
                                 mode: KafkaIngestMode::NoAckParallel,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            },
+                            })),
                             codec: CodecName::parse("event_codec").expect("valid identifier"),
                         },
                     ),
@@ -1322,7 +1338,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                 }),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Kafka {
+                        source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: TopicName::parse("notifications").expect("valid identifier"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
@@ -1331,7 +1347,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAckParallel,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
+                        })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
                     },
                 ),
@@ -1413,7 +1429,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                 }),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Kafka {
+                        source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: TopicName::parse("notifications").expect("valid identifier"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
@@ -1422,7 +1438,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAckParallel,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
+                        })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
                     },
                 ),
@@ -1613,9 +1629,9 @@ fn sentry_emitter_rejects_http_client() {
     else {
         unreachable!("emitter helper must build an emitter model")
     };
-    sentry_emitter.sink = Box::new(EmitSink::Sentry {
+    sentry_emitter.sink = Box::new(EmitSink::Sentry(SentrySink::Event(SentryEventSink {
         client: named("sentry_main"),
-    });
+    })));
     sentry_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
         retry_policy: RetryPolicy {
             backoff: "250ms".to_string(),

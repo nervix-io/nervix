@@ -421,7 +421,7 @@ pub(super) struct IngestGroupRows {
 /// accepts the payloads that did decode, giving every message of each payload the payload's
 /// metadata row and a share of its ACK set.
 pub(super) struct PendingIngestGroup {
-    pub(super) kind: IngestMetadataKind,
+    pub(super) kind: SourceMetadataScope,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
@@ -437,7 +437,7 @@ pub(super) struct PendingIngestGroup {
 }
 
 impl PendingIngestGroup {
-    pub(super) fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
+    pub(super) fn new(kind: SourceMetadataScope, row_bound: usize) -> Self {
         Self {
             kind,
             row_bound,
@@ -730,7 +730,7 @@ pub(super) struct IngestorMessageError<'a> {
 /// metadata schema is fixed by the source kind when the ingestor starts, so every group the
 /// collector opens builds the same columns.
 pub(super) struct IngestRouteCollector {
-    pub(super) kind: IngestMetadataKind,
+    pub(super) kind: SourceMetadataScope,
     /// The number of rows a group is expected to reach, used to size its metadata builders.
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
@@ -747,7 +747,7 @@ impl IngestRouteCollector {
     /// Sources that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
     pub(super) fn new(
-        kind: IngestMetadataKind,
+        kind: SourceMetadataScope,
         row_bound: usize,
         metrics: MessageMetricsHandle,
     ) -> Self {
@@ -2028,7 +2028,7 @@ impl Runtime {
             filter_where: filter_where.cloned(),
         };
         let mut collector =
-            IngestRouteCollector::new(IngestMetadataKind::Headers, row_count, metrics.clone());
+            IngestRouteCollector::new(SourceMetadataScope::Headers, row_count, metrics.clone());
         let routing =
             collector
                 .routing_snapshot(self, domain)

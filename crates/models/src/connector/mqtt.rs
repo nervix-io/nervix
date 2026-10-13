@@ -1,0 +1,265 @@
+//! The MQTT connector's vocabulary.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** The MQTT client Model, the topic source and sink Models with their session,
+//!   quality-of-service and delivery modes, and what each entity declares.
+//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Must not know.** The MQTT driver, its configuration keys, or how a topic filter is
+//!   subscribed or published to.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
+use std::num::NonZeroU64;
+
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
+
+use super::{
+    configured_client::configured_client,
+    entity_union::{connector_sinks, connector_sources},
+};
+use crate::{
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
+    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    RetryPolicy, SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+};
+
+configured_client!(Mqtt: unpooled CreateClientMqtt => MqttConfigEntry);
+
+/// One topic filter an MQTT client subscribes to. The filter is kept exactly as written, because
+/// MQTT topics are case-sensitive and routinely hold `/`, `.`, `+` or `#`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct MqttTopicSource {
+    pub client: ClientName,
+    pub topic: String,
+    pub instances: NonZeroU64,
+    pub mode: MqttIngestMode,
+    pub quiesce: IngestQuiesceMode,
+}
+
+impl SourceEntity for MqttTopicSource {
+    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+        reads_headers: false,
+        metadata: SourceMetadataScope::Headers,
+        executes_on_every_cluster_node: false,
+        reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
+    };
+}
+
+impl SourceBody for MqttTopicSource {
+    fn reference(&self) -> SourceReference<'_> {
+        SourceReference::Client(&self.client)
+    }
+
+    fn quiesce(&self) -> &IngestQuiesceMode {
+        &self.quiesce
+    }
+
+    fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
+        &mut self.quiesce
+    }
+
+    /// The broker holds messages for a suspended subscriber only when its session is persistent
+    /// and its messages are delivered at least once.
+    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
+        match quiesce {
+            IngestQuiesceMode::Suspend => {
+                self.mode.session() == MqttSession::Persistent
+                    && self.mode.qos() == MqttQos::AtLeastOnce
+            }
+            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop => true,
+            IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. } => false,
+        }
+    }
+
+    fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        self.mode.acknowledgement()
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum MqttSession {
+    Clean,
+    Persistent,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum MqttQos {
+    AtMostOnce,
+    AtLeastOnce,
+}
+
+impl MqttQos {
+    pub const fn level(self) -> u8 {
+        match self {
+            Self::AtMostOnce => 0,
+            Self::AtLeastOnce => 1,
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MqttIngestMode {
+    NoAckSequential {
+        session: MqttSession,
+        qos: MqttQos,
+    },
+    NoAckParallel {
+        session: MqttSession,
+        qos: MqttQos,
+    },
+    AckSequential {
+        timeout: String,
+        retry_policy: RetryPolicy,
+    },
+    AckParallel {
+        max: NonZeroU64,
+        batch_timeout: String,
+        timeout: String,
+        retry_policy: RetryPolicy,
+    },
+}
+
+impl MqttIngestMode {
+    pub const fn session(&self) -> MqttSession {
+        match self {
+            Self::NoAckSequential { session, .. } | Self::NoAckParallel { session, .. } => *session,
+            Self::AckSequential { .. } | Self::AckParallel { .. } => MqttSession::Persistent,
+        }
+    }
+
+    pub const fn qos(&self) -> MqttQos {
+        match self {
+            Self::NoAckSequential { qos, .. } | Self::NoAckParallel { qos, .. } => *qos,
+            Self::AckSequential { .. } | Self::AckParallel { .. } => MqttQos::AtLeastOnce,
+        }
+    }
+
+    pub const fn is_ack(&self) -> bool {
+        match self {
+            Self::AckSequential { .. } | Self::AckParallel { .. } => true,
+            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => false,
+        }
+    }
+
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Parallel {
+                max: *max,
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
+            Self::AckSequential {
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => {
+                IngestAcknowledgement::Unacknowledged
+            }
+        }
+    }
+}
+
+connector_sources! {
+    connector Mqtt = "MQTT";
+    /// What an MQTT source reads.
+    pub enum MqttSource;
+    /// The entities an MQTT source reads.
+    pub enum MqttSourceEntity {
+        Topic(MqttTopicSource) = "TOPIC", "MQTT";
+    }
+}
+
+/// One topic an MQTT client publishes to.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct MqttTopicSink {
+    pub client: ClientName,
+    pub topic: TopicName,
+}
+
+impl SinkEntity for MqttTopicSink {
+    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+        writes_headers: false,
+        requires_codec: true,
+        batch_requirement: EmitterBatchRequirement::Optional,
+        requires_batch_transformation: false,
+        batch_size_maximum: None,
+    };
+
+    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
+        matches!(
+            mode,
+            EmitterPublishingMode::MqttQos0 { .. }
+                | EmitterPublishingMode::MqttQos1 { .. }
+                | EmitterPublishingMode::MqttQos2 { .. }
+        )
+    }
+}
+
+impl SinkBody for MqttTopicSink {
+    fn reference(&self) -> SinkReference<'_> {
+        SinkReference::Client {
+            client: &self.client,
+            connector: ConnectorKind::Mqtt,
+        }
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+}
+
+connector_sinks! {
+    connector Mqtt = "MQTT";
+    /// What an MQTT sink writes.
+    pub enum MqttSink;
+    /// The entities an MQTT sink writes.
+    pub enum MqttSinkEntity {
+        Topic(MqttTopicSink) = "TOPIC";
+    }
+}

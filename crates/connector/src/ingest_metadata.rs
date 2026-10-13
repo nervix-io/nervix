@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The header trait a source message implements over its own borrowed headers, the
 //!   retained copy of headers that must outlive their message, and the typed metadata row a source
-//!   reads per message, with its Kafka, syslog and header scopes.
-//! - **Depends on.** The standard library alone.
+//!   reads per message, one shape for each metadata scope the vocabulary declares.
+//! - **Depends on.** The vocabulary's metadata scopes and the standard library.
 //! - **Must not know.** The Arrow columns the host projects these rows into, or the VM namespaces
 //!   programs read them through.
 
@@ -16,6 +16,8 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+
+use nervix_models::SourceMetadataScope;
 
 /// Transport headers of one source message, visited in arrival order.
 ///
@@ -77,7 +79,7 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
 
 /// One message's ingest metadata, read from its source message.
 ///
-/// The variant must match the metadata kind the ingestor started with; the fields borrow the
+/// The variant must match the metadata scope the ingestor started with; the fields borrow the
 /// source message so appending a row copies bytes into Arrow buffers and nothing else.
 pub enum IngestMetadataRow<'a> {
     Kafka {
@@ -92,4 +94,16 @@ pub enum IngestMetadataRow<'a> {
     Headers {
         headers: &'a dyn IngestMessageHeaders,
     },
+}
+
+impl IngestMetadataRow<'_> {
+    /// The metadata scope this row carries the fields of, which is the one builder set it can be
+    /// appended into.
+    pub fn scope(&self) -> SourceMetadataScope {
+        match self {
+            Self::Kafka { .. } => SourceMetadataScope::Kafka,
+            Self::Syslog { .. } => SourceMetadataScope::Syslog,
+            Self::Headers { .. } => SourceMetadataScope::Headers,
+        }
+    }
 }

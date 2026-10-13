@@ -28,19 +28,25 @@ use thiserror::Error;
 
 use crate::{
     AlterSchema, AlterWireSchema, AvroType, Backup, BranchKeyFingerprint, BranchName, CborType,
-    ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, CommandExecutionReference,
-    ConsumerGroupName, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
-    CreateJsonWireSchema, CreateSchema, CreateUdf, DeduplicatorName, DomainClockPeriod,
-    DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
-    FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
-    ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
-    QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CommandExecutionReference,
+    ConnectorKind, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateJsonWireSchema, CreateSchema, CreateUdf,
+    DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
+    DomainTimeRate, EmitSink, EmitterName, EndpointName, FieldName, GeneratorName, IcebergSink,
+    InferencerName, IngestQuiesceMode, IngestSource, IngestorName, JsonType, JunctionName,
+    KafkaOffsetMode, KafkaSource, LookupName, ModelName, NodeRef, ParseAsType, PlacementName,
+    RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
     ResetWasmState, ResourceName, Restore, SchemaFingerprint, SchemaName, SignalingProtocolName,
-    SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
-    UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
-    WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
-    WasmStateResetScope, WindowProcessorName, WireSchemaName,
+    SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName, UserName, VhostName,
+    WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
+    WasmStateRecoveries, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset,
+    WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope, WindowProcessorName,
+    WireSchemaName,
 };
 
 #[derive(
@@ -1184,7 +1190,7 @@ pub trait UniquelyKindedModel: Sized {
 /// [`UniquelyKindedModel`] projection. `shared` says the pairing is broken in one direction or the
 /// other, so naming the kind leaves the union as the only honest answer.
 macro_rules! declare_models {
-    ($($Variant:ident($Model:ident $(<$Version:ident>)?) => $Kind:ident, $client_label:expr, $family:ident;)+) => {
+    ($($Variant:ident($Model:ident $(<$Version:ident>)?) => $Kind:ident, $connector:expr, $family:ident;)+) => {
         /// One domain entity's configuration.
         ///
         /// `Version` is the type a resource binding's version takes. A stored Model binds concrete
@@ -1219,9 +1225,11 @@ macro_rules! declare_models {
                 }
             }
 
-            pub fn client_type_label(&self) -> Option<&'static str> {
+            /// The connector this model configures a client of. Only a client Model is a
+            /// client of one.
+            pub fn connector_kind(&self) -> Option<ConnectorKind> {
                 match self {
-                    $(Self::$Variant(_) => $client_label,)+
+                    $(Self::$Variant(_) => $connector,)+
                 }
             }
 
@@ -1287,28 +1295,28 @@ declare_models! {
     WireCborSchema(CreateCborWireSchema) => WireCborSchema, None, shared;
     WireAvroSchema(CreateAvroWireSchema) => WireAvroSchema, None, paired;
     Codec(CreateCodec<Version>) => Codec, None, paired;
-    ClientKafka(CreateClientKafka<Version>) => Client, Some("KAFKA"), shared;
-    ClientPulsar(CreateClientPulsar<Version>) => Client, Some("PULSAR"), shared;
-    ClientHttp(CreateClientHttp<Version>) => Client, Some("HTTP"), shared;
-    ClientSentry(CreateClientSentry<Version>) => Client, Some("SENTRY"), shared;
-    ClientOtel(CreateClientOtel<Version>) => Client, Some("OTEL"), shared;
-    ClientPrometheus(CreateClientPrometheus<Version>) => Client, Some("PROMETHEUS"), shared;
-    ClientMqtt(CreateClientMqtt<Version>) => Client, Some("MQTT"), shared;
-    ClientNats(CreateClientNats<Version>) => Client, Some("NATS"), shared;
-    ClientRabbitMq(CreateClientRabbitMq<Version>) => Client, Some("RABBITMQ"), shared;
-    ClientRedis(CreateClientRedis<Version>) => Client, Some("REDIS"), shared;
-    ClientZeroMq(CreateClientZeroMq<Version>) => Client, Some("ZEROMQ"), shared;
-    ClientSqs(CreateClientSqs<Version>) => Client, Some("SQS"), shared;
-    ClientWebsockets(CreateClientWebsockets<Version>) => Client, Some("WEBSOCKETS"), shared;
-    ClientSyslog(CreateClientSyslog<Version>) => Client, Some("SYSLOG"), shared;
-    ClientClickHouse(CreateClientClickHouse<Version>) => Client, Some("CLICKHOUSE"), shared;
-    ClientPostgres(CreateClientPostgres<Version>) => Client, Some("POSTGRES"), shared;
-    ClientMySql(CreateClientMySql<Version>) => Client, Some("MYSQL"), shared;
-    ClientMongoDb(CreateClientMongoDb<Version>) => Client, Some("MONGODB"), shared;
-    ClientS3(CreateClientS3<Version>) => Client, Some("S3"), shared;
-    ClientGcs(CreateClientGcs<Version>) => Client, Some("GCS"), shared;
-    ClientAzureBlob(CreateClientAzureBlob<Version>) => Client, Some("AZURE_BLOB"), shared;
-    ClientIcebergRest(CreateClientIcebergRest<Version>) => Client, Some("ICEBERG_REST"), shared;
+    ClientKafka(CreateClientKafka<Version>) => Client, Some(CreateClientKafka::<Version>::CONNECTOR), shared;
+    ClientPulsar(CreateClientPulsar<Version>) => Client, Some(CreateClientPulsar::<Version>::CONNECTOR), shared;
+    ClientHttp(CreateClientHttp<Version>) => Client, Some(CreateClientHttp::<Version>::CONNECTOR), shared;
+    ClientSentry(CreateClientSentry<Version>) => Client, Some(CreateClientSentry::<Version>::CONNECTOR), shared;
+    ClientOtel(CreateClientOtel<Version>) => Client, Some(CreateClientOtel::<Version>::CONNECTOR), shared;
+    ClientPrometheus(CreateClientPrometheus<Version>) => Client, Some(CreateClientPrometheus::<Version>::CONNECTOR), shared;
+    ClientMqtt(CreateClientMqtt<Version>) => Client, Some(CreateClientMqtt::<Version>::CONNECTOR), shared;
+    ClientNats(CreateClientNats<Version>) => Client, Some(CreateClientNats::<Version>::CONNECTOR), shared;
+    ClientRabbitMq(CreateClientRabbitMq<Version>) => Client, Some(CreateClientRabbitMq::<Version>::CONNECTOR), shared;
+    ClientRedis(CreateClientRedis<Version>) => Client, Some(CreateClientRedis::<Version>::CONNECTOR), shared;
+    ClientZeroMq(CreateClientZeroMq<Version>) => Client, Some(CreateClientZeroMq::<Version>::CONNECTOR), shared;
+    ClientSqs(CreateClientSqs<Version>) => Client, Some(CreateClientSqs::<Version>::CONNECTOR), shared;
+    ClientWebsockets(CreateClientWebsockets<Version>) => Client, Some(CreateClientWebsockets::<Version>::CONNECTOR), shared;
+    ClientSyslog(CreateClientSyslog<Version>) => Client, Some(CreateClientSyslog::<Version>::CONNECTOR), shared;
+    ClientClickHouse(CreateClientClickHouse<Version>) => Client, Some(CreateClientClickHouse::<Version>::CONNECTOR), shared;
+    ClientPostgres(CreateClientPostgres<Version>) => Client, Some(CreateClientPostgres::<Version>::CONNECTOR), shared;
+    ClientMySql(CreateClientMySql<Version>) => Client, Some(CreateClientMySql::<Version>::CONNECTOR), shared;
+    ClientMongoDb(CreateClientMongoDb<Version>) => Client, Some(CreateClientMongoDb::<Version>::CONNECTOR), shared;
+    ClientS3(CreateClientS3<Version>) => Client, Some(CreateClientS3::<Version>::CONNECTOR), shared;
+    ClientGcs(CreateClientGcs<Version>) => Client, Some(CreateClientGcs::<Version>::CONNECTOR), shared;
+    ClientAzureBlob(CreateClientAzureBlob<Version>) => Client, Some(CreateClientAzureBlob::<Version>::CONNECTOR), shared;
+    ClientIcebergRest(CreateClientIcebergRest<Version>) => Client, Some(CreateClientIcebergRest::<Version>::CONNECTOR), shared;
     Vhost(CreateVhost<Version>) => Vhost, None, paired;
     Branch(CreateBranch) => Branch, None, paired;
     Endpoint(CreateEndpoint) => Endpoint, None, paired;
@@ -1758,7 +1766,7 @@ impl CreateEmitter {
     /// error, so neither has to rebuild the other's report.
     fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
         let sink = self.sink.transport_label();
-        if let EmitSink::Http { .. } = self.sink.as_ref()
+        if let EmitSink::Http(_) = self.sink.as_ref()
             && self.batch.is_some()
         {
             return Some(EmitterBatchContractError::HttpUnsupported);
@@ -1873,7 +1881,7 @@ impl CreateEmitter {
                 };
             }
             AlterEmitterOperation::DropEncode => {
-                if let EmitSink::Http { .. } = self.sink.as_ref() {
+                if let EmitSink::Http(_) = self.sink.as_ref() {
                     return Err(Report::new(AlterEmitterError::HttpDropEncode));
                 }
                 if self.body.codec().is_none() {
@@ -1893,7 +1901,7 @@ impl CreateEmitter {
             AlterEmitterOperation::SetPublishingMode { mode } => {
                 let selected = match (self.sink.as_ref(), mode) {
                     (
-                        EmitSink::Client { .. },
+                        EmitSink::Client(_),
                         EmitterPublishingMode::BrokerAck {
                             window,
                             ack_timeout,
@@ -1929,16 +1937,11 @@ impl CreateEmitter {
                 commit_each,
                 max_commit_size,
             } => {
-                let EmitSink::Iceberg {
-                    commit_each: current_commit_each,
-                    max_commit_size: current_max_commit_size,
-                    ..
-                } = self.sink.as_mut()
-                else {
+                let EmitSink::Iceberg(IcebergSink::Table(table)) = self.sink.as_mut() else {
                     return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
                 };
-                *current_commit_each = commit_each.clone();
-                *current_max_commit_size = max_commit_size.clone();
+                table.commit_each = commit_each.clone();
+                table.max_commit_size = max_commit_size.clone();
             }
         }
         Ok(())
@@ -2234,871 +2237,6 @@ pub enum GeneralErrorPolicy {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum SqsFifoGroup {
-    FromBranch,
-    Expression(crate::Expression),
-}
-
-/// The behavior a sink exposes to expression validation and its connector host.
-///
-/// This lives in the vocabulary so the registry can validate an emitter without naming the
-/// connector crate that implements its sink.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SinkCapabilities {
-    writes_headers: bool,
-}
-
-impl SinkCapabilities {
-    pub const fn without_headers() -> Self {
-        Self {
-            writes_headers: false,
-        }
-    }
-
-    pub const fn with_headers() -> Self {
-        Self {
-            writes_headers: true,
-        }
-    }
-
-    pub const fn writes_headers(self) -> bool {
-        self.writes_headers
-    }
-}
-
-/// The SQS message size limit Nervix enforces, 256 KiB, which a batch payload cannot exceed.
-const SQS_MESSAGE_SIZE_MAXIMUM: crate::PayloadSizeLimit =
-    match crate::PayloadSizeLimit::new(nonzero_ext::nonzero!(256u64), crate::ByteSizeUnit::KiB) {
-        Some(maximum) => maximum,
-        None => panic!("256 KiB fits in a 64-bit byte count"),
-    };
-
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    IntoStaticStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum EmitSink {
-    /// The session consumer of this emitter's native Arrow output.
-    Client {
-        schema: SchemaName,
-    },
-    Http {
-        client: ClientName,
-        method: crate::Expression,
-        path: crate::Expression,
-    },
-    Kafka {
-        client: ClientName,
-        topic: TopicName,
-    },
-    Pulsar {
-        client: ClientName,
-        topic: TopicName,
-    },
-    #[strum(serialize = "RABBITMQ")]
-    RabbitMq {
-        client: ClientName,
-        queue: QueueName,
-    },
-    Redis {
-        client: ClientName,
-        channel: ChannelName,
-    },
-    Mqtt {
-        client: ClientName,
-        topic: TopicName,
-    },
-    Nats {
-        client: ClientName,
-        subject: SubjectName,
-    },
-    #[strum(serialize = "ZEROMQ")]
-    ZeroMq {
-        client: ClientName,
-    },
-    Sqs {
-        client: ClientName,
-        queue: String,
-        fifo_group: Option<SqsFifoGroup>,
-    },
-    Sentry {
-        client: ClientName,
-    },
-    Syslog {
-        client: ClientName,
-    },
-    Otel {
-        client: ClientName,
-        signal: OtelSignal,
-        values: Vec<OtelValueMapping>,
-        attributes: Vec<OtelValueMapping>,
-        resource: Vec<OtelValueMapping>,
-        scope: Option<OtelScope>,
-    },
-    #[strum(serialize = "CLICKHOUSE")]
-    ClickHouse {
-        client: ClientName,
-        table: TableName,
-        values: Vec<ClickHouseValueMapping>,
-    },
-    Postgres {
-        client: ClientName,
-        table: TableName,
-        values: Vec<PostgresValueMapping>,
-        conflict_action: PostgresConflictAction,
-    },
-    #[strum(serialize = "MYSQL")]
-    MySql {
-        client: ClientName,
-        table: TableName,
-        values: Vec<MySqlValueMapping>,
-        conflict_action: MySqlConflictAction,
-    },
-    #[strum(serialize = "MONGODB")]
-    MongoDb {
-        client: ClientName,
-        collection: CollectionName,
-        values: Vec<MongoDbValueMapping>,
-        conflict_action: MongoDbConflictAction,
-    },
-    Iceberg {
-        backend: IcebergStorageBackend,
-        client: ClientName,
-        table: TableName,
-        values: Vec<IcebergValueMapping>,
-        location: String,
-        catalog: IcebergCatalog,
-        commit_each: String,
-        max_commit_size: String,
-    },
-}
-
-/// The sink transport class used by capability decisions before an emitter is fully parsed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EmitSinkKind {
-    Client,
-    Http,
-    Kafka,
-    Pulsar,
-    RabbitMq,
-    Redis,
-    Mqtt,
-    Nats,
-    ZeroMq,
-    Sqs,
-    Sentry,
-    Syslog,
-    Otel,
-    ClickHouse,
-    Postgres,
-    MySql,
-    MongoDb,
-    Iceberg,
-}
-
-impl EmitSinkKind {
-    pub const fn capabilities(self) -> SinkCapabilities {
-        match self {
-            Self::Client => SinkCapabilities::without_headers(),
-            Self::Http | Self::Kafka | Self::Pulsar | Self::RabbitMq | Self::Nats | Self::Sqs => {
-                SinkCapabilities::with_headers()
-            }
-            Self::Redis
-            | Self::Mqtt
-            | Self::ZeroMq
-            | Self::Sentry
-            | Self::Syslog
-            | Self::Otel
-            | Self::ClickHouse
-            | Self::Postgres
-            | Self::MySql
-            | Self::MongoDb
-            | Self::Iceberg => SinkCapabilities::without_headers(),
-        }
-    }
-}
-
-impl EmitSink {
-    pub const fn transport_kind(&self) -> EmitSinkKind {
-        match self {
-            Self::Client { .. } => EmitSinkKind::Client,
-            Self::Http { .. } => EmitSinkKind::Http,
-            Self::Kafka { .. } => EmitSinkKind::Kafka,
-            Self::Pulsar { .. } => EmitSinkKind::Pulsar,
-            Self::RabbitMq { .. } => EmitSinkKind::RabbitMq,
-            Self::Redis { .. } => EmitSinkKind::Redis,
-            Self::Mqtt { .. } => EmitSinkKind::Mqtt,
-            Self::Nats { .. } => EmitSinkKind::Nats,
-            Self::ZeroMq { .. } => EmitSinkKind::ZeroMq,
-            Self::Sqs { .. } => EmitSinkKind::Sqs,
-            Self::Sentry { .. } => EmitSinkKind::Sentry,
-            Self::Syslog { .. } => EmitSinkKind::Syslog,
-            Self::Otel { .. } => EmitSinkKind::Otel,
-            Self::ClickHouse { .. } => EmitSinkKind::ClickHouse,
-            Self::Postgres { .. } => EmitSinkKind::Postgres,
-            Self::MySql { .. } => EmitSinkKind::MySql,
-            Self::MongoDb { .. } => EmitSinkKind::MongoDb,
-            Self::Iceberg { .. } => EmitSinkKind::Iceberg,
-        }
-    }
-
-    pub const fn capabilities(&self) -> SinkCapabilities {
-        self.transport_kind().capabilities()
-    }
-
-    pub fn transport_label(&self) -> &'static str {
-        self.into()
-    }
-
-    pub fn client(&self) -> Option<&ClientName> {
-        match self {
-            Self::Client { .. } => None,
-            Self::Http { client, .. }
-            | Self::Kafka { client, .. }
-            | Self::Pulsar { client, .. }
-            | Self::RabbitMq { client, .. }
-            | Self::Redis { client, .. }
-            | Self::Mqtt { client, .. }
-            | Self::Nats { client, .. }
-            | Self::ZeroMq { client }
-            | Self::Sqs { client, .. }
-            | Self::Sentry { client }
-            | Self::Syslog { client }
-            | Self::Otel { client, .. }
-            | Self::ClickHouse { client, .. }
-            | Self::Postgres { client, .. }
-            | Self::MySql { client, .. }
-            | Self::MongoDb { client, .. }
-            | Self::Iceberg { client, .. } => Some(client),
-        }
-    }
-
-    /// The expressions a direct `VALUES` sink sends across its external boundary, in written order.
-    pub fn direct_value_mappings(&self) -> impl Iterator<Item = &ClickHouseValueMapping> {
-        let (values, attributes, resource): (&[_], &[_], &[_]) = match self {
-            Self::Otel {
-                values,
-                attributes,
-                resource,
-                ..
-            } => (values, attributes, resource),
-            Self::ClickHouse { values, .. }
-            | Self::Postgres { values, .. }
-            | Self::MySql { values, .. }
-            | Self::MongoDb { values, .. }
-            | Self::Iceberg { values, .. } => (values, &[], &[]),
-            _ => (&[], &[], &[]),
-        };
-        values.iter().chain(attributes).chain(resource)
-    }
-
-    pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
-        match self {
-            Self::Client { .. } => matches!(mode, EmitterPublishingMode::ClientAck { .. }),
-            Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } => {
-                matches!(
-                    mode,
-                    EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
-                )
-            }
-            Self::Mqtt { .. } => matches!(
-                mode,
-                EmitterPublishingMode::MqttQos0 { .. }
-                    | EmitterPublishingMode::MqttQos1 { .. }
-                    | EmitterPublishingMode::MqttQos2 { .. }
-            ),
-            Self::Nats { .. } => matches!(
-                mode,
-                EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::NatsJetStream { .. }
-            ),
-            Self::Redis { .. } | Self::ZeroMq { .. } | Self::Syslog { .. } => {
-                matches!(mode, EmitterPublishingMode::NoAck { .. })
-            }
-            Self::Sqs { .. } => matches!(
-                mode,
-                EmitterPublishingMode::SqsSingle { .. } | EmitterPublishingMode::SqsBatch { .. }
-            ),
-            Self::Http { .. }
-            | Self::Sentry { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. }
-            | Self::Iceberg { .. } => {
-                matches!(mode, EmitterPublishingMode::RequestAck { .. })
-            }
-        }
-    }
-
-    fn client_mut(&mut self) -> Option<&mut ClientName> {
-        match self {
-            Self::Client { .. } => None,
-            Self::Http { client, .. }
-            | Self::Kafka { client, .. }
-            | Self::Pulsar { client, .. }
-            | Self::RabbitMq { client, .. }
-            | Self::Redis { client, .. }
-            | Self::Mqtt { client, .. }
-            | Self::Nats { client, .. }
-            | Self::ZeroMq { client }
-            | Self::Sqs { client, .. }
-            | Self::Sentry { client }
-            | Self::Syslog { client }
-            | Self::Otel { client, .. }
-            | Self::ClickHouse { client, .. }
-            | Self::Postgres { client, .. }
-            | Self::MySql { client, .. }
-            | Self::MongoDb { client, .. }
-            | Self::Iceberg { client, .. } => Some(client),
-        }
-    }
-
-    /// The catalog client this sink commits through, for a sink that names one beside its own.
-    pub fn catalog_client(&self) -> Option<&ClientName> {
-        if let Self::Iceberg {
-            catalog: IcebergCatalog::Rest { client },
-            ..
-        } = self
-        {
-            Some(client)
-        } else {
-            None
-        }
-    }
-
-    pub fn expected_client_type(&self) -> &'static str {
-        match self {
-            Self::Client { .. } => "CLIENT",
-            Self::Http { .. } => "HTTP",
-            Self::Kafka { .. } => "KAFKA",
-            Self::Pulsar { .. } => "PULSAR",
-            Self::RabbitMq { .. } => "RABBITMQ",
-            Self::Redis { .. } => "REDIS",
-            Self::Mqtt { .. } => "MQTT",
-            Self::Nats { .. } => "NATS",
-            Self::ZeroMq { .. } => "ZEROMQ",
-            Self::Sqs { .. } => "SQS",
-            Self::Sentry { .. } => "SENTRY",
-            Self::Syslog { .. } => "SYSLOG",
-            Self::Otel { .. } => "OTEL",
-            Self::ClickHouse { .. } => "CLICKHOUSE",
-            Self::Postgres { .. } => "POSTGRES",
-            Self::MySql { .. } => "MYSQL",
-            Self::MongoDb { .. } => "MONGODB",
-            Self::Iceberg {
-                backend: IcebergStorageBackend::S3,
-                ..
-            } => "S3",
-            Self::Iceberg {
-                backend: IcebergStorageBackend::Gcs,
-                ..
-            } => "GCS",
-            Self::Iceberg {
-                backend: IcebergStorageBackend::AzureBlob,
-                ..
-            } => "AZURE_BLOB",
-        }
-    }
-
-    pub fn accepts_client(&self, client: &Model) -> bool {
-        matches!(
-            (self, client),
-            (Self::Http { .. }, Model::ClientHttp(_))
-                | (Self::Kafka { .. }, Model::ClientKafka(_))
-                | (Self::Pulsar { .. }, Model::ClientPulsar(_))
-                | (Self::RabbitMq { .. }, Model::ClientRabbitMq(_))
-                | (Self::Redis { .. }, Model::ClientRedis(_))
-                | (Self::Mqtt { .. }, Model::ClientMqtt(_))
-                | (Self::Nats { .. }, Model::ClientNats(_))
-                | (Self::ZeroMq { .. }, Model::ClientZeroMq(_))
-                | (Self::Sqs { .. }, Model::ClientSqs(_))
-                | (Self::Sentry { .. }, Model::ClientSentry(_))
-                | (Self::Syslog { .. }, Model::ClientSyslog(_))
-                | (Self::Otel { .. }, Model::ClientOtel(_))
-                | (Self::ClickHouse { .. }, Model::ClientClickHouse(_))
-                | (Self::Postgres { .. }, Model::ClientPostgres(_))
-                | (Self::MySql { .. }, Model::ClientMySql(_))
-                | (Self::MongoDb { .. }, Model::ClientMongoDb(_))
-                | (
-                    Self::Iceberg {
-                        backend: IcebergStorageBackend::S3,
-                        ..
-                    },
-                    Model::ClientS3(_),
-                )
-                | (
-                    Self::Iceberg {
-                        backend: IcebergStorageBackend::Gcs,
-                        ..
-                    },
-                    Model::ClientGcs(_),
-                )
-                | (
-                    Self::Iceberg {
-                        backend: IcebergStorageBackend::AzureBlob,
-                        ..
-                    },
-                    Model::ClientAzureBlob(_),
-                )
-        )
-    }
-
-    pub fn requires_codec(&self) -> bool {
-        match self {
-            Self::Client { .. } => false,
-            Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. } => true,
-            Self::Syslog { .. } => true,
-            Self::Http { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. }
-            | Self::Iceberg { .. } => false,
-        }
-    }
-
-    /// Whether an emitter publishing to this sink may omit the batching clause.
-    pub const fn batch_requirement(&self) -> crate::EmitterBatchRequirement {
-        match self {
-            Self::Client { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. } => crate::EmitterBatchRequirement::Required,
-            Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. }
-            | Self::Iceberg { .. } => crate::EmitterBatchRequirement::Optional,
-        }
-    }
-
-    /// True when a batch can only be published through the codec's `ON EMITTING BATCH` value.
-    ///
-    /// A Sentry envelope carries at most one `event` item, so a batch is one event, and only the
-    /// codec's batch transformation can say where in that event the members go.
-    pub const fn requires_batch_transformation(&self) -> bool {
-        match self {
-            Self::Sentry { .. } => true,
-            Self::Client { .. }
-            | Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. }
-            | Self::Iceberg { .. } => false,
-        }
-    }
-
-    /// The largest batch payload the destination protocol itself admits, where it fixes one.
-    pub const fn batch_size_maximum(&self) -> Option<crate::PayloadSizeLimit> {
-        match self {
-            Self::Client { .. } => None,
-            Self::Sqs { .. } => Some(SQS_MESSAGE_SIZE_MAXIMUM),
-            Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. }
-            | Self::Iceberg { .. } => None,
-        }
-    }
-
-    pub fn commit_policy(&self) -> Option<(&str, &str)> {
-        match self {
-            Self::Iceberg {
-                commit_each,
-                max_commit_size,
-                ..
-            } => Some((commit_each.as_str(), max_commit_size.as_str())),
-            Self::Client { .. }
-            | Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. } => None,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct ClickHouseValueMapping {
-    pub column: String,
-    pub expression: crate::Expression,
-}
-
-pub type OtelValueMapping = ClickHouseValueMapping;
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum OtelSignal {
-    Logs,
-    Traces,
-    Metric(OtelMetric),
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct OtelMetric {
-    pub name: String,
-    pub unit: String,
-    pub description: Option<String>,
-    pub kind: OtelMetricKind,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum OtelMetricKind {
-    Gauge,
-    Sum {
-        monotonic: bool,
-        temporality: OtelAggregationTemporality,
-    },
-    Histogram {
-        temporality: OtelAggregationTemporality,
-    },
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum OtelAggregationTemporality {
-    Delta,
-    Cumulative,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct OtelScope {
-    pub name: String,
-    pub version: Option<String>,
-}
-
-pub type PostgresValueMapping = ClickHouseValueMapping;
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum PostgresConflictAction {
-    None,
-    DoNothing { target: Vec<String> },
-    DoUpdate { target: Vec<String> },
-}
-
-pub type MySqlValueMapping = ClickHouseValueMapping;
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum MySqlConflictAction {
-    None,
-    DoNothing,
-    DoUpdate,
-}
-
-pub type MongoDbValueMapping = ClickHouseValueMapping;
-pub type IcebergValueMapping = ClickHouseValueMapping;
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum IcebergCatalog {
-    Rest { client: ClientName },
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum IcebergStorageBackend {
-    S3,
-    #[strum(serialize = "GCS")]
-    Gcs,
-    #[strum(serialize = "AZURE_BLOB")]
-    AzureBlob,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum MongoDbConflictAction {
-    None,
-    DoNothing { target: Vec<String> },
-    DoUpdate { target: Vec<String> },
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct ClientConfigEntry {
-    pub key: String,
-    pub value: String,
-}
-
-/// The one resource version mounted into a client's configuration namespace.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct ClientResourceMount<Version = u64> {
-    pub resource: ResourceName,
-    pub version: Version,
-}
-
-/// Why a declared pair of connection-pool sizes is not a usable bound.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ClientPoolBoundsError {
-    #[error("minimum pool size {minimum} must not exceed maximum pool size {maximum}")]
-    MinimumExceedsMaximum { minimum: u32, maximum: NonZeroU32 },
-}
-
-/// The connection-pool bounds a database client declares.
-///
-/// The two counts only mean anything together: a minimum above its maximum asks for a maintained
-/// size the ceiling forbids. [`ClientPoolBounds::new`] is the one place that ordering is decided,
-/// so every holder of a pair already knows its minimum is reachable. The serde and archived forms
-/// are decoded through it too.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
-pub struct ClientPoolBounds {
-    minimum: u32,
-    maximum: NonZeroU32,
-}
-
-impl<'de> Deserialize<'de> for ClientPoolBounds {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        /// The two counts as the serde form carries them, before they are paired.
-        #[derive(Deserialize)]
-        struct Counts {
-            minimum: u32,
-            maximum: NonZeroU32,
-        }
-
-        let Counts { minimum, maximum } = Counts::deserialize(deserializer)?;
-        Self::new(minimum, maximum)
-            .map_err(|report| <D::Error as serde::de::Error>::custom(report.current_context()))
-    }
-}
-
-impl<D> RkyvDeserialize<ClientPoolBounds, D> for ArchivedClientPoolBounds
-where
-    D: rkyv::rancor::Fallible + ?Sized,
-    D::Error: rkyv::rancor::Source,
-{
-    fn deserialize(&self, deserializer: &mut D) -> Result<ClientPoolBounds, D::Error> {
-        let minimum: u32 = self.minimum.deserialize(deserializer)?;
-        let maximum: NonZeroU32 = self.maximum.deserialize(deserializer)?;
-        ClientPoolBounds::new(minimum, maximum).map_err(|report| {
-            <D::Error as rkyv::rancor::Source>::new(report.current_context().clone())
-        })
-    }
-}
-
-impl ClientPoolBounds {
-    /// Pair a declared minimum with its maximum, rejecting a minimum the ceiling cannot reach.
-    pub fn new(minimum: u32, maximum: NonZeroU32) -> Result<Self, Report<ClientPoolBoundsError>> {
-        if minimum > maximum.get() {
-            return Err(Report::new(ClientPoolBoundsError::MinimumExceedsMaximum {
-                minimum,
-                maximum,
-            }));
-        }
-        Ok(Self { minimum, maximum })
-    }
-
-    /// The declared number of established, usable connections to keep available.
-    pub const fn minimum(&self) -> u32 {
-        self.minimum
-    }
-
-    /// The declared ceiling on managed connections, counting those being established or retired.
-    pub const fn maximum(&self) -> NonZeroU32 {
-        self.maximum
-    }
-}
-
-/// Declare clients that share the connector-owned name, mount and configuration shape.
-///
-/// A pooled client carries its declared [`ClientPoolBounds`] as well, because connection capacity
-/// belongs to the client itself rather than to the connector's string configuration.
-macro_rules! declare_clients {
-    (
-        unpooled { $($Client:ident => $Config:ident,)+ }
-        pooled { $($PooledClient:ident => $PooledConfig:ident,)+ }
-    ) => {
-        $(
-            #[derive(
-                Debug,
-                Clone,
-                PartialEq,
-                Eq,
-                Serialize,
-                Deserialize,
-                Archive,
-                RkyvSerialize,
-                RkyvDeserialize,
-            )]
-            pub struct $Client<Version = u64> {
-                pub name: ClientName,
-                pub mount: Option<ClientResourceMount<Version>>,
-                pub config: Vec<ClientConfigEntry>,
-            }
-
-            pub type $Config = ClientConfigEntry;
-        )+
-        $(
-            #[derive(
-                Debug,
-                Clone,
-                PartialEq,
-                Eq,
-                Serialize,
-                Deserialize,
-                Archive,
-                RkyvSerialize,
-                RkyvDeserialize,
-            )]
-            pub struct $PooledClient<Version = u64> {
-                pub name: ClientName,
-                pub pool: ClientPoolBounds,
-                pub mount: Option<ClientResourceMount<Version>>,
-                pub config: Vec<ClientConfigEntry>,
-            }
-
-            pub type $PooledConfig = ClientConfigEntry;
-        )+
-    };
-}
-
-declare_clients! {
-    unpooled {
-        CreateClientKafka => KafkaConfigEntry,
-        CreateClientPulsar => PulsarConfigEntry,
-        CreateClientHttp => HttpConfigEntry,
-        CreateClientSentry => SentryConfigEntry,
-        CreateClientOtel => OtelConfigEntry,
-        CreateClientPrometheus => PrometheusConfigEntry,
-        CreateClientMqtt => MqttConfigEntry,
-        CreateClientNats => NatsConfigEntry,
-        CreateClientRabbitMq => RabbitMqConfigEntry,
-        CreateClientZeroMq => ZeroMqConfigEntry,
-        CreateClientSqs => SqsConfigEntry,
-        CreateClientSyslog => SyslogConfigEntry,
-        CreateClientClickHouse => ClickHouseConfigEntry,
-        CreateClientS3 => S3ConfigEntry,
-        CreateClientGcs => GcsConfigEntry,
-        CreateClientAzureBlob => AzureBlobConfigEntry,
-        CreateClientIcebergRest => IcebergRestConfigEntry,
-    }
-    pooled {
-        CreateClientRedis => RedisConfigEntry,
-        CreateClientPostgres => PostgresConfigEntry,
-        CreateClientMySql => MySqlConfigEntry,
-        CreateClientMongoDb => MongoDbConfigEntry,
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct CreateClientWebsockets<Version = u64> {
-    pub name: ClientName,
-    pub mount: Option<ClientResourceMount<Version>>,
-    pub signaling_protocol: Option<SignalingProtocolName>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-pub type WebsocketsConfigEntry = ClientConfigEntry;
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
 pub struct CreateBranch {
     pub name: BranchName,
     pub schema: SchemaName,
@@ -3363,7 +2501,7 @@ pub struct AlterIngestor {
 )]
 pub enum AlterIngestorOperation {
     SetSource { source: IngestSource },
-    SetClientSource { source: crate::ClientIngestSource },
+    SetClientSource { source: crate::ClientProducerSource },
     SetQuiesce { quiesce: IngestQuiesceMode },
     SetDecodeUsing { codec: CodecName },
     SetTimestamp { source: IngestTimestampSource },
@@ -4130,479 +3268,6 @@ impl SignalingProtocolOnConnect {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum IngestSource {
-    Http {
-        client: ClientName,
-        every: DomainClockPeriod,
-        quiesce: IngestQuiesceMode,
-    },
-    Kafka {
-        client: ClientName,
-        topic: TopicName,
-        offset_mode: KafkaOffsetMode,
-        instances: NonZeroU64,
-        mode: KafkaIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Pulsar {
-        client: ClientName,
-        topic: TopicName,
-        subscription: PulsarSubscriptionName,
-        instances: NonZeroU64,
-        mode: PulsarIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Mqtt {
-        client: ClientName,
-        topic: String,
-        instances: NonZeroU64,
-        mode: MqttIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Nats {
-        client: ClientName,
-        subject: SubjectName,
-        queue_group: QueueGroupName,
-        instances: NonZeroU64,
-        mode: NatsIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    #[strum(serialize = "RABBITMQ")]
-    RabbitMq {
-        client: ClientName,
-        queue: QueueName,
-        instances: NonZeroU64,
-        mode: RabbitMqIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    #[strum(serialize = "REDIS")]
-    RedisPubSub {
-        client: ClientName,
-        channel: ChannelName,
-        mode: RedisPubSubIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Prometheus {
-        client: ClientName,
-        query: String,
-        every: DomainClockPeriod,
-        quiesce: IngestQuiesceMode,
-    },
-    #[strum(serialize = "ZEROMQ")]
-    ZeroMq {
-        client: ClientName,
-        mode: ZeroMqIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Sqs {
-        client: ClientName,
-        queue: QueueName,
-        instances: NonZeroU64,
-        mode: SqsIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Endpoint {
-        endpoint: EndpointName,
-        mode: EndpointIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Websockets {
-        client: ClientName,
-        mode: WebsocketsIngestMode,
-        quiesce: IngestQuiesceMode,
-    },
-    Syslog {
-        client: ClientName,
-        quiesce: IngestQuiesceMode,
-    },
-}
-
-/// The source transport class used by capability decisions before an ingestor is fully parsed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IngestSourceKind {
-    Client,
-    Http,
-    Kafka,
-    Pulsar,
-    Mqtt,
-    Nats,
-    RabbitMq,
-    RedisPubSub,
-    Prometheus,
-    ZeroMq,
-    Sqs,
-    Endpoint,
-    Websockets,
-    Syslog,
-}
-
-impl IngestSourceKind {
-    /// The transport sources the web console's visual editor offers. A client source takes
-    /// batches applications publish rather than a transport, and is created in NSPL.
-    pub const ALL: [Self; 13] = [
-        Self::Http,
-        Self::Kafka,
-        Self::Pulsar,
-        Self::Mqtt,
-        Self::Nats,
-        Self::RabbitMq,
-        Self::RedisPubSub,
-        Self::Prometheus,
-        Self::ZeroMq,
-        Self::Sqs,
-        Self::Endpoint,
-        Self::Websockets,
-        Self::Syslog,
-    ];
-
-    pub const fn form_key(self) -> &'static str {
-        match self {
-            Self::Client => "client",
-            Self::Http => "http",
-            Self::Kafka => "kafka",
-            Self::Pulsar => "pulsar",
-            Self::Mqtt => "mqtt",
-            Self::Nats => "nats",
-            Self::RabbitMq => "rabbitmq",
-            Self::RedisPubSub => "redis-pubsub",
-            Self::Prometheus => "prometheus",
-            Self::ZeroMq => "zeromq",
-            Self::Sqs => "sqs",
-            Self::Endpoint => "endpoint",
-            Self::Websockets => "websockets",
-            Self::Syslog => "syslog",
-        }
-    }
-
-    pub const fn form_label(self) -> &'static str {
-        match self {
-            Self::Client => "Client batches",
-            Self::Http => "HTTP polling",
-            Self::Kafka => "Kafka",
-            Self::Pulsar => "Pulsar",
-            Self::Mqtt => "MQTT",
-            Self::Nats => "NATS",
-            Self::RabbitMq => "RabbitMQ",
-            Self::RedisPubSub => "Redis Pub/Sub",
-            Self::Prometheus => "Prometheus",
-            Self::ZeroMq => "ZeroMQ",
-            Self::Sqs => "SQS",
-            Self::Endpoint => "Endpoint",
-            Self::Websockets => "WebSocket client",
-            Self::Syslog => "Syslog",
-        }
-    }
-
-    /// The configured client type a source may read. Endpoint ingestion names an endpoint instead,
-    /// and a client source reads the batches producers submit.
-    pub const fn client_type_label(self) -> Option<&'static str> {
-        match self {
-            Self::Client => None,
-            Self::Http => Some("HTTP"),
-            Self::Kafka => Some("KAFKA"),
-            Self::Pulsar => Some("PULSAR"),
-            Self::Mqtt => Some("MQTT"),
-            Self::Nats => Some("NATS"),
-            Self::RabbitMq => Some("RABBITMQ"),
-            Self::RedisPubSub => Some("REDIS"),
-            Self::Prometheus => Some("PROMETHEUS"),
-            Self::ZeroMq => Some("ZEROMQ"),
-            Self::Sqs => Some("SQS"),
-            Self::Endpoint => None,
-            Self::Websockets => Some("WEBSOCKETS"),
-            Self::Syslog => Some("SYSLOG"),
-        }
-    }
-
-    pub const fn reads_headers(self) -> bool {
-        match self {
-            Self::Endpoint
-            | Self::Http
-            | Self::Kafka
-            | Self::Nats
-            | Self::Pulsar
-            | Self::RabbitMq
-            | Self::Sqs => true,
-            Self::Mqtt
-            | Self::RedisPubSub
-            | Self::Prometheus
-            | Self::ZeroMq
-            | Self::Websockets
-            | Self::Syslog
-            | Self::Client => false,
-        }
-    }
-}
-
-impl IngestSource {
-    pub const fn transport_kind(&self) -> IngestSourceKind {
-        match self {
-            Self::Http { .. } => IngestSourceKind::Http,
-            Self::Kafka { .. } => IngestSourceKind::Kafka,
-            Self::Pulsar { .. } => IngestSourceKind::Pulsar,
-            Self::Mqtt { .. } => IngestSourceKind::Mqtt,
-            Self::Nats { .. } => IngestSourceKind::Nats,
-            Self::RabbitMq { .. } => IngestSourceKind::RabbitMq,
-            Self::RedisPubSub { .. } => IngestSourceKind::RedisPubSub,
-            Self::Prometheus { .. } => IngestSourceKind::Prometheus,
-            Self::ZeroMq { .. } => IngestSourceKind::ZeroMq,
-            Self::Sqs { .. } => IngestSourceKind::Sqs,
-            Self::Endpoint { .. } => IngestSourceKind::Endpoint,
-            Self::Websockets { .. } => IngestSourceKind::Websockets,
-            Self::Syslog { .. } => IngestSourceKind::Syslog,
-        }
-    }
-    pub fn executes_on_every_cluster_node(&self) -> bool {
-        match self {
-            Self::Endpoint { .. } | Self::Syslog { .. } => true,
-            Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::Mqtt { .. }
-            | Self::Nats { .. }
-            | Self::RabbitMq { .. }
-            | Self::RedisPubSub { .. }
-            | Self::Prometheus { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sqs { .. }
-            | Self::Websockets { .. } => false,
-        }
-    }
-
-    pub fn transport_label(&self) -> &str {
-        self.as_ref()
-    }
-
-    pub fn source_ref(&self) -> ModelName {
-        match self {
-            Self::Http { client, .. }
-            | Self::Kafka { client, .. }
-            | Self::Pulsar { client, .. }
-            | Self::Mqtt { client, .. }
-            | Self::Nats { client, .. }
-            | Self::RabbitMq { client, .. }
-            | Self::RedisPubSub { client, .. }
-            | Self::Prometheus { client, .. }
-            | Self::ZeroMq { client, .. }
-            | Self::Sqs { client, .. }
-            | Self::Websockets { client, .. }
-            | Self::Syslog { client, .. } => client.into(),
-            Self::Endpoint { endpoint, .. } => endpoint.into(),
-        }
-    }
-
-    pub fn source_kind(&self) -> ModelKind {
-        match self {
-            Self::Endpoint { .. } => ModelKind::Endpoint,
-            _ => ModelKind::Client,
-        }
-    }
-
-    /// Whether the messages this source reads carry transport headers that `read_header` and
-    /// `read_headers` can read.
-    ///
-    /// This lives in the vocabulary so the registry can validate header reads without naming the
-    /// runtime that hosts the source.
-    pub const fn reads_headers(&self) -> bool {
-        self.transport_kind().reads_headers()
-    }
-
-    /// The acknowledgement this source's delivery mode declares. A source whose statement declares
-    /// no delivery mode acknowledges nothing.
-    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::Kafka { mode, .. } | Self::Pulsar { mode, .. } => mode.acknowledgement(),
-            Self::Mqtt { mode, .. } => mode.acknowledgement(),
-            Self::Nats { mode, .. } => mode.acknowledgement(),
-            Self::RabbitMq { mode, .. } => mode.acknowledgement(),
-            Self::RedisPubSub { mode, .. } => mode.acknowledgement(),
-            Self::ZeroMq { mode, .. } => mode.acknowledgement(),
-            Self::Sqs { mode, .. } => mode.acknowledgement(),
-            Self::Endpoint { mode, .. } => mode.acknowledgement(),
-            Self::Websockets { mode, .. } => mode.acknowledgement(),
-            Self::Http { .. } | Self::Prometheus { .. } | Self::Syslog { .. } => {
-                IngestAcknowledgement::Unacknowledged
-            }
-        }
-    }
-
-    pub fn quiesce(&self) -> &IngestQuiesceMode {
-        match self {
-            Self::Http { quiesce, .. }
-            | Self::Kafka { quiesce, .. }
-            | Self::Pulsar { quiesce, .. }
-            | Self::Mqtt { quiesce, .. }
-            | Self::Nats { quiesce, .. }
-            | Self::RabbitMq { quiesce, .. }
-            | Self::RedisPubSub { quiesce, .. }
-            | Self::Prometheus { quiesce, .. }
-            | Self::ZeroMq { quiesce, .. }
-            | Self::Sqs { quiesce, .. }
-            | Self::Endpoint { quiesce, .. }
-            | Self::Websockets { quiesce, .. }
-            | Self::Syslog { quiesce, .. } => quiesce,
-        }
-    }
-
-    pub fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        match self {
-            Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } | Self::Sqs { .. } => {
-                matches!(quiesce, IngestQuiesceMode::Suspend)
-            }
-            Self::Mqtt { mode, .. } => match quiesce {
-                IngestQuiesceMode::Suspend => {
-                    mode.session() == MqttSession::Persistent && mode.qos() == MqttQos::AtLeastOnce
-                }
-                IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop => true,
-                IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. } => {
-                    false
-                }
-            },
-            Self::Nats { .. } | Self::RedisPubSub { .. } | Self::Websockets { .. } => {
-                matches!(
-                    quiesce,
-                    IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-                )
-            }
-            Self::ZeroMq { .. } | Self::Syslog { .. } => matches!(
-                quiesce,
-                IngestQuiesceMode::Suspend
-                    | IngestQuiesceMode::Buffer { .. }
-                    | IngestQuiesceMode::Drop
-            ),
-            Self::Http { .. } | Self::Prometheus { .. } => matches!(
-                quiesce,
-                IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. }
-            ),
-            Self::Endpoint { .. } => matches!(
-                quiesce,
-                IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. }
-            ),
-        }
-    }
-
-    pub fn set_quiesce(
-        &mut self,
-        quiesce: IngestQuiesceMode,
-    ) -> error_stack::Result<(), AlterIngestorError> {
-        if !self.supports_quiesce(&quiesce) {
-            return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
-                transport: self.transport_label().to_string(),
-                mode: quiesce.kind_label().to_string(),
-            }));
-        }
-        match self {
-            Self::Http {
-                quiesce: current, ..
-            }
-            | Self::Kafka {
-                quiesce: current, ..
-            }
-            | Self::Pulsar {
-                quiesce: current, ..
-            }
-            | Self::Mqtt {
-                quiesce: current, ..
-            }
-            | Self::Nats {
-                quiesce: current, ..
-            }
-            | Self::RabbitMq {
-                quiesce: current, ..
-            }
-            | Self::RedisPubSub {
-                quiesce: current, ..
-            }
-            | Self::Prometheus {
-                quiesce: current, ..
-            }
-            | Self::ZeroMq {
-                quiesce: current, ..
-            }
-            | Self::Sqs {
-                quiesce: current, ..
-            }
-            | Self::Endpoint {
-                quiesce: current, ..
-            }
-            | Self::Websockets {
-                quiesce: current, ..
-            }
-            | Self::Syslog {
-                quiesce: current, ..
-            } => *current = quiesce,
-        }
-        Ok(())
-    }
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub enum IngestQuiesceOverflow {
-    DropOldest,
-    DropNewest,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum IngestQuiesceMode {
-    Suspend,
-    Buffer {
-        max_size: String,
-        overflow: IngestQuiesceOverflow,
-    },
-    Drop,
-    Reject {
-        retry_after: String,
-    },
-    EndpointBuffer {
-        max_size: String,
-    },
-}
-
-impl IngestQuiesceMode {
-    pub const fn kind_label(&self) -> &'static str {
-        match self {
-            Self::Suspend => "SUSPEND",
-            Self::Buffer { .. } | Self::EndpointBuffer { .. } => "BUFFER",
-            Self::Drop => "DROP",
-            Self::Reject { .. } => "REJECT",
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum KafkaOffsetMode {
-    ConsumerGroup(ConsumerGroupName),
-    Domain,
-}
-
-#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RetryPolicy {
@@ -4718,314 +3383,6 @@ impl EmitterPublishingMode {
             Self::SqsSingle { .. } => "SINGLE",
             Self::SqsBatch { .. } => "BATCH",
             Self::RequestAck { .. } => "ACK",
-        }
-    }
-}
-
-/// The acknowledgement a source's delivery mode declares, with its durations as written.
-///
-/// Every delivery mode states its acknowledgement through this one shape, so validating a mode and
-/// parsing it into the policy a source runs read the same declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngestAcknowledgement<'a> {
-    /// No message waits on an acknowledgement.
-    Unacknowledged,
-    /// One message at a time waits on its acknowledgement.
-    Sequential {
-        timeout: &'a str,
-        retry: &'a RetryPolicy,
-    },
-    /// Up to `max` messages wait on their acknowledgements together.
-    Parallel {
-        max: NonZeroU64,
-        batch_timeout: &'a str,
-        timeout: &'a str,
-        retry: &'a RetryPolicy,
-    },
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum KafkaIngestMode {
-    AckParallel {
-        max: NonZeroU64,
-        batch_timeout: String,
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-    AckSequential {
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-    NoAckParallel,
-}
-
-impl KafkaIngestMode {
-    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            } => IngestAcknowledgement::Parallel {
-                max: *max,
-                batch_timeout,
-                timeout,
-                retry: retry_policy,
-            },
-            Self::AckSequential {
-                timeout,
-                retry_policy,
-            } => IngestAcknowledgement::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-            Self::NoAckParallel => IngestAcknowledgement::Unacknowledged,
-        }
-    }
-}
-
-pub type PulsarIngestMode = KafkaIngestMode;
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum MqttSession {
-    Clean,
-    Persistent,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub enum MqttQos {
-    AtMostOnce,
-    AtLeastOnce,
-}
-
-impl MqttQos {
-    pub const fn level(self) -> u8 {
-        match self {
-            Self::AtMostOnce => 0,
-            Self::AtLeastOnce => 1,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum MqttIngestMode {
-    NoAckSequential {
-        session: MqttSession,
-        qos: MqttQos,
-    },
-    NoAckParallel {
-        session: MqttSession,
-        qos: MqttQos,
-    },
-    AckSequential {
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-    AckParallel {
-        max: NonZeroU64,
-        batch_timeout: String,
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-}
-
-impl MqttIngestMode {
-    pub const fn session(&self) -> MqttSession {
-        match self {
-            Self::NoAckSequential { session, .. } | Self::NoAckParallel { session, .. } => *session,
-            Self::AckSequential { .. } | Self::AckParallel { .. } => MqttSession::Persistent,
-        }
-    }
-
-    pub const fn qos(&self) -> MqttQos {
-        match self {
-            Self::NoAckSequential { qos, .. } | Self::NoAckParallel { qos, .. } => *qos,
-            Self::AckSequential { .. } | Self::AckParallel { .. } => MqttQos::AtLeastOnce,
-        }
-    }
-
-    pub const fn is_ack(&self) -> bool {
-        match self {
-            Self::AckSequential { .. } | Self::AckParallel { .. } => true,
-            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => false,
-        }
-    }
-
-    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            } => IngestAcknowledgement::Parallel {
-                max: *max,
-                batch_timeout,
-                timeout,
-                retry: retry_policy,
-            },
-            Self::AckSequential {
-                timeout,
-                retry_policy,
-            } => IngestAcknowledgement::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => {
-                IngestAcknowledgement::Unacknowledged
-            }
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum NatsIngestMode {
-    NoAckSequential,
-}
-
-impl NatsIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum RabbitMqIngestMode {
-    AckSequential {
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-}
-
-impl RabbitMqIngestMode {
-    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::AckSequential {
-                timeout,
-                retry_policy,
-            } => IngestAcknowledgement::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum RedisPubSubIngestMode {
-    NoAckSequential,
-}
-
-impl RedisPubSubIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum ZeroMqIngestMode {
-    NoAckSequential,
-}
-
-impl ZeroMqIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum SqsIngestMode {
-    AckSequential {
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-}
-
-impl SqsIngestMode {
-    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::AckSequential {
-                timeout,
-                retry_policy,
-            } => IngestAcknowledgement::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum EndpointIngestMode {
-    NoAckSequential,
-}
-
-impl EndpointIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum WebsocketsIngestMode {
-    NoAckSequential,
-}
-
-impl WebsocketsIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -5640,10 +3997,8 @@ impl ScheduledNode {
         }
         if let Model::Ingestor(ingestor) = self.config.as_ref()
             && let crate::IngestorInput::Transport(input) = &ingestor.input
-            && let IngestSource::Kafka {
-                offset_mode: KafkaOffsetMode::Domain,
-                ..
-            } = &input.source
+            && let IngestSource::Kafka(KafkaSource::Topic(topic)) = &input.source
+            && topic.offset_mode == KafkaOffsetMode::Domain
         {
             components.push(OwnershipStateComponent::KafkaOffsets);
         }
@@ -6440,44 +4795,29 @@ mod tests {
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
-        ClickHouseValueMapping, ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule,
-        CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-        CodecWireFormat, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
-        CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
-        EmitterBatchContractError, EmitterBody, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
-        GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, InferencerExecutionMode,
+        ClusterSchedule, CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations,
+        CodecProtobufConfig, CodecWireFormat, CreateDeduplicator, CreateEmitter, CreateGenerator,
+        CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+        DomainSchedule, EmitSink, EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
+        ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerExecutionMode,
         InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
         InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
         InferencerTensorSchemaError, KafkaPartitionSchedule, MaterializedRelayState, Model,
-        ModelKind, MongoDbConflictAction, MySqlConflictAction, OtelSignal, PlacementPolicy,
-        PostgresConflictAction, RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
+        ModelKind, PlacementPolicy, RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
-        ClientName, ClusterNodeName, CollectionName, CreateInferencer, CreateIngestor,
-        CreateJunction, DomainName, EndpointIngestMode, Expression, IngestQuiesceMode,
-        IngestSource, Literal, MaterializedStateDependency, MaterializedStatePolicy, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField, SchemaFingerprint,
-        TableName,
+        ClickHouseSink, ClickHouseTableSink, ClickHouseValueMapping, ClientName, ClientPoolBounds,
+        ClientPoolBoundsError, ClusterNodeName, CollectionName, CreateInferencer, CreateIngestor,
+        CreateJunction, DomainName, EndpointEndpointSource, EndpointIngestMode, EndpointSource,
+        Expression, HttpRequestSink, HttpSink, IcebergCatalog, IcebergSink, IcebergStorageBackend,
+        IcebergTableSink, IngestQuiesceMode, IngestSource, KafkaSink, KafkaTopicSink, Literal,
+        MaterializedStateDependency, MaterializedStatePolicy, MongoDbCollectionSink,
+        MongoDbConflictAction, MongoDbSink, MySqlConflictAction, MySqlSink, MySqlTableSink,
+        OtelLogsSink, OtelMappings, ParseAsType, PostgresConflictAction, PostgresSink,
+        PostgresTableSink, ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField,
+        SchemaFingerprint, SentryEventSink, SentrySink, SqsQueueSink, SqsSink,
+        SyslogListenerSource, SyslogSource, TableName, ZeroMqPushSink, ZeroMqSink,
     };
-
-    /// The archived layout of pool bounds, so a test can archive a pair the constructor refuses.
-    #[derive(rkyv::Archive, rkyv::Serialize)]
-    struct ArchivedPoolBounds {
-        minimum: u32,
-        maximum: std::num::NonZeroU32,
-    }
-
-    #[test]
-    fn decoders_refuse_a_minimum_above_the_maximum() {
-        let json = r#"{"minimum":5,"maximum":3}"#;
-        assert!(serde_json::from_str::<ClientPoolBounds>(json).is_err());
-        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&ArchivedPoolBounds {
-            minimum: 5,
-            maximum: nonzero!(3_u32),
-        })
-        .assured("the fields archive");
-        assert!(rkyv::from_bytes::<ClientPoolBounds, rkyv::rancor::Error>(&archived).is_err());
-    }
 
     #[test]
     fn branch_selection_displays_its_named_or_unbranched_declaration() {
@@ -6485,98 +4825,6 @@ mod tests {
             crate::BranchName::parse("by_tenant").assured("by_tenant is a valid branch identifier");
         assert_eq!(BranchSelection::branched_by(name).to_string(), "by_tenant");
         assert_eq!(BranchSelection::unbranched().to_string(), "UNBRANCHED");
-    }
-
-    #[test]
-    fn direct_value_mappings_cover_all_external_value_sections() {
-        let client: ClientName = named("sink");
-        let table: TableName = named("events");
-        let mapping = |column: &str| ClickHouseValueMapping {
-            column: column.to_owned(),
-            expression: Expression::Literal(Literal::String(column.to_owned())),
-        };
-        let single_value = || vec![mapping("value")];
-        let sinks = [
-            EmitSink::Otel {
-                client: client.clone(),
-                signal: OtelSignal::Logs,
-                values: single_value(),
-                attributes: vec![mapping("attribute")],
-                resource: vec![mapping("resource")],
-                scope: None,
-            },
-            EmitSink::ClickHouse {
-                client: client.clone(),
-                table: table.clone(),
-                values: single_value(),
-            },
-            EmitSink::Postgres {
-                client: client.clone(),
-                table: table.clone(),
-                values: single_value(),
-                conflict_action: PostgresConflictAction::None,
-            },
-            EmitSink::MySql {
-                client: client.clone(),
-                table: table.clone(),
-                values: single_value(),
-                conflict_action: MySqlConflictAction::None,
-            },
-            EmitSink::MongoDb {
-                client: client.clone(),
-                collection: named::<CollectionName>("events"),
-                values: single_value(),
-                conflict_action: MongoDbConflictAction::None,
-            },
-            EmitSink::Iceberg {
-                backend: IcebergStorageBackend::S3,
-                client: client.clone(),
-                table,
-                values: single_value(),
-                location: "s3://bucket/events".to_owned(),
-                catalog: IcebergCatalog::Rest {
-                    client: client.clone(),
-                },
-                commit_each: "1s".to_owned(),
-                max_commit_size: "1MB".to_owned(),
-            },
-        ];
-
-        for (index, sink) in sinks.iter().enumerate() {
-            let columns = sink
-                .direct_value_mappings()
-                .map(|mapping| mapping.column.as_str())
-                .collect::<Vec<_>>();
-            let expected = if index == 0 {
-                vec!["value", "attribute", "resource"]
-            } else {
-                vec!["value"]
-            };
-            assert_eq!(columns, expected, "{sink:?}");
-        }
-
-        let sink_without_values = EmitSink::Sentry { client };
-        assert_eq!(sink_without_values.direct_value_mappings().count(), 0);
-    }
-
-    #[test]
-    fn pool_bounds_accept_a_minimum_up_to_the_maximum_and_reject_one_above_it() {
-        let bounds = ClientPoolBounds::new(0, nonzero!(1u32)).expect("zero is below one");
-        assert_eq!(bounds.minimum(), 0);
-        assert_eq!(bounds.maximum(), nonzero!(1u32));
-
-        let bounds = ClientPoolBounds::new(3, nonzero!(3u32)).expect("equal bounds are allowed");
-        assert_eq!(bounds.minimum(), 3);
-        assert_eq!(bounds.maximum(), nonzero!(3u32));
-
-        let error = ClientPoolBounds::new(4, nonzero!(3u32)).expect_err("four exceeds three");
-        assert_eq!(
-            error.current_context(),
-            &ClientPoolBoundsError::MinimumExceedsMaximum {
-                minimum: 4,
-                maximum: nonzero!(3u32),
-            }
-        );
     }
 
     fn named<N>(raw: &str) -> N
@@ -6824,13 +5072,15 @@ mod tests {
                     },
                 )]),
                 input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                    source: IngestSource::Endpoint {
-                        endpoint: named("public_http"),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
+                    source: IngestSource::Endpoint(EndpointSource::Endpoint(
+                        EndpointEndpointSource {
+                            endpoint: named("public_http"),
+                            mode: EndpointIngestMode::NoAckSequential,
+                            quiesce: IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
-                    },
+                    )),
                     codec: named("codec"),
                 }),
                 timestamp_source: None,
@@ -6858,10 +5108,10 @@ mod tests {
                     },
                 )]),
                 input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                    source: IngestSource::Syslog {
+                    source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
                         client: named("syslog_listener"),
                         quiesce: IngestQuiesceMode::Suspend,
-                    },
+                    })),
                     codec: named("codec"),
                 }),
                 timestamp_source: None,
@@ -7311,9 +5561,9 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink_a"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
@@ -7398,11 +5648,11 @@ mod tests {
             name: named("request_sink"),
             from: ProcessorInputs::single(named("events")),
             body: EmitterBody::WithoutBody,
-            sink: Box::new(EmitSink::Http {
+            sink: Box::new(EmitSink::Http(HttpSink::Request(HttpRequestSink {
                 client: named("api"),
                 method: Expression::Literal(Literal::String("DELETE".to_string())),
                 path: Expression::Literal(Literal::String("/events".to_string())),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -7416,11 +5666,11 @@ mod tests {
         let replacement = AlterEmitter {
             emitter: named("request_sink"),
             operations: vec![AlterEmitterOperation::SetSink {
-                sink: Box::new(EmitSink::Http {
+                sink: Box::new(EmitSink::Http(HttpSink::Request(HttpRequestSink {
                     client: named("other_api"),
                     method: Expression::Literal(Literal::String("HEAD".to_string())),
                     path: Expression::Literal(Literal::String("/health".to_string())),
-                }),
+                }))),
                 publishing_mode: EmitterPublishingMode::RequestAck { retry_policy },
                 body: Some(EmitterBody::WithoutBody),
             }],
@@ -7508,20 +5758,20 @@ mod tests {
     }
 
     fn postgres_sink() -> EmitSink {
-        EmitSink::Postgres {
+        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
             client: named("db"),
             table: named("events"),
             values: Vec::new(),
             conflict_action: PostgresConflictAction::None,
-        }
+        }))
     }
 
     #[test]
     fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
         let mut emitter = batching_emitter(
-            EmitSink::ZeroMq {
+            EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            },
+            })),
             None,
         );
         let set = |policy| AlterEmitter {
@@ -7571,9 +5821,9 @@ mod tests {
         assert_eq!(dropped, base, "a failed ALTER must not partially apply");
 
         let mut unbatched = batching_emitter(
-            EmitSink::ZeroMq {
+            EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            },
+            })),
             None,
         );
         let to_postgres = |operations| AlterEmitter {
@@ -7619,10 +5869,12 @@ mod tests {
 
     #[test]
     fn batch_size_is_bounded_by_the_largest_sqs_message() {
-        let sqs = || EmitSink::Sqs {
-            client: named("queue_client"),
-            queue: "events".to_string(),
-            fifo_group: None,
+        let sqs = || {
+            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                client: named("queue_client"),
+                queue: "events".to_string(),
+                fifo_group: None,
+            }))
         };
 
         assert_eq!(
@@ -7637,10 +5889,10 @@ mod tests {
                 maximum: "256KiB".parse().assured("a whole number of bytes"),
             })
         );
-        let kafka = EmitSink::Kafka {
+        let kafka = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
             client: named("broker"),
             topic: named("events"),
-        };
+        }));
         assert_eq!(
             batch_violation(&batching_emitter(kafka, Some(batch_policy(10, "1GiB")))),
             None
@@ -7650,24 +5902,24 @@ mod tests {
     #[test]
     fn database_sinks_require_the_batch_clause_and_the_others_do_not() {
         let database_sinks = [
-            EmitSink::ClickHouse {
+            EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
                 client: named("db"),
                 table: named("events"),
                 values: Vec::new(),
-            },
+            })),
             postgres_sink(),
-            EmitSink::MySql {
+            EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
                 client: named("db"),
                 table: named("events"),
                 values: Vec::new(),
                 conflict_action: MySqlConflictAction::None,
-            },
-            EmitSink::MongoDb {
+            })),
+            EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
                 client: named("db"),
                 collection: named("events"),
                 values: Vec::new(),
                 conflict_action: MongoDbConflictAction::None,
-            },
+            })),
         ];
         for sink in database_sinks {
             let label = sink.transport_label();
@@ -7680,9 +5932,9 @@ mod tests {
                 None
             );
         }
-        let sentry = EmitSink::Sentry {
+        let sentry = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
             client: named("sentry"),
-        };
+        }));
         assert_eq!(batch_violation(&batching_emitter(sentry, None)), None);
     }
 
@@ -7737,9 +5989,9 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -7838,9 +6090,9 @@ mod tests {
                 AlterEmitter {
                     emitter: named("event_sink"),
                     operations: vec![AlterEmitterOperation::SetSink {
-                        sink: Box::new(EmitSink::ZeroMq {
+                        sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                             client: named("other_sink"),
-                        }),
+                        }))),
                         publishing_mode: EmitterPublishingMode::SqsSingle {
                             retry_policy: RetryPolicy {
                                 backoff: "250ms".to_string(),
@@ -7885,13 +6137,13 @@ mod tests {
             name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint {
+                source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                     endpoint: named("ingress_a"),
                     mode: EndpointIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
-                },
+                })),
                 codec: named("event_codec"),
             }),
             timestamp_source: None,
@@ -7903,13 +6155,15 @@ mod tests {
                 ingestor: named("event_source"),
                 operations: vec![
                     AlterIngestorOperation::SetSource {
-                        source: IngestSource::Endpoint {
-                            endpoint: named("ingress_b"),
-                            mode: EndpointIngestMode::NoAckSequential,
-                            quiesce: IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
+                        source: IngestSource::Endpoint(EndpointSource::Endpoint(
+                            EndpointEndpointSource {
+                                endpoint: named("ingress_b"),
+                                mode: EndpointIngestMode::NoAckSequential,
+                                quiesce: IngestQuiesceMode::EndpointBuffer {
+                                    max_size: "1MiB".to_string(),
+                                },
                             },
-                        },
+                        )),
                     },
                     AlterIngestorOperation::SetDecodeUsing {
                         codec: named("event_codec_v2"),
@@ -7943,13 +6197,13 @@ mod tests {
         assert_eq!(
             ingestor.input,
             crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint {
+                source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                     endpoint: named("ingress_b"),
                     mode: EndpointIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
-                },
+                })),
                 codec: named("event_codec_v2"),
             })
         );
@@ -7990,13 +6244,13 @@ mod tests {
             name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint {
+                source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                     endpoint: named("ingress"),
                     mode: EndpointIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
-                },
+                })),
                 codec: named("event_codec"),
             }),
             timestamp_source: None,
@@ -8604,34 +6858,5 @@ mod tests {
                 .expect_err("the tensor schemas admit no execution mode");
             assert_eq!(error.current_context(), &expected);
         }
-    }
-
-    #[test]
-    fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
-        let buffer = IngestQuiesceMode::EndpointBuffer {
-            max_size: "1MiB".to_string(),
-        };
-        let mut source = IngestSource::Endpoint {
-            endpoint: named("ingress"),
-            mode: EndpointIngestMode::NoAckSequential,
-            quiesce: buffer.clone(),
-        };
-
-        let error = source
-            .set_quiesce(IngestQuiesceMode::Suspend)
-            .expect_err("an endpoint cannot suspend its callers");
-
-        assert_eq!(
-            error.current_context(),
-            &AlterIngestorError::UnsupportedQuiesceMode {
-                transport: "ENDPOINT".to_string(),
-                mode: "SUSPEND".to_string(),
-            }
-        );
-        assert_eq!(
-            error.to_string(),
-            "ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
-        );
-        assert_eq!(source.quiesce(), &buffer);
     }
 }
