@@ -1535,13 +1535,14 @@ its restarted clusters stopped in 4.5 seconds at the median.
 What a three-node stop still costs after this is bounded by the deadlines of the calls its nodes had
 in flight when the stop began, and each wait is named in the node's log. A relay owner that is
 delivering to a peer which has already stopped waits out the five seconds that delivery's admission
-is given and the five its cancellation is given. Placement tasks that are announcing a checkpoint to
-a stopped peer are waited for in turn, two seconds each, until the announcement's own five seconds
-end the ones still waiting. The node's generators share their two seconds. In
-`Every node stopping at once ends its generators together`, the slowest node of the three-node
-cluster took between 2.0 and 12.0 seconds to stop in eight runs of the ordinary build. Before the
-generators shared their grace it took between 22.0 and 30.1 seconds in five of six runs, and 8.1 in
-the sixth, where two of the nodes had no generator waiting on a peer.
+is given and the five its cancellation is given. A checkpoint announcement to a replica that has
+stopped is waited for until its five-second dispatch deadline has passed. A replica's placement task
+that is fetching or acknowledging a checkpoint when its owner stops does not observe the stop, and
+such tasks are aborted one after another, two seconds each. The node's generators share their two
+seconds. In `Every node stopping at once ends its generators together`, the slowest node of the
+three-node cluster took between 2.0 and 12.0 seconds to stop in nine runs of the ordinary build.
+Before the generators shared their grace it took between 22.0 and 30.1 seconds in five of six runs,
+and 8.1 in the sixth, where two of the nodes had no generator waiting on a peer.
 
 The stress selections keep running one scenario at a time: their budgets were measured that way,
 and two per process remains the comparison below rather than a lane.

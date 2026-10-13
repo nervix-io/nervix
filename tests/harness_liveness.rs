@@ -2360,6 +2360,23 @@ mod tests {
             "node 'node-1' stop: ended without a stop request from the harness, inside its 300s \
              watchdog: clean application exit; no shutdown outcome was reported"
         );
+
+        // A node that was to end by itself and did not is read the same way as one the harness
+        // stopped.
+        let unasked_and_running = NodeStopRecord {
+            node: "node-1".to_string(),
+            stopping_for: None,
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::StillStopping(NodeStopProgress {
+                phase: ShutdownPhase::Serving,
+                deadline: ProductShutdownDeadline::NotRequested,
+            }),
+        };
+        assert_eq!(
+            unasked_and_running.to_string(),
+            "node 'node-1' stop: still running without a stop request from the harness, at the \
+             end of its 300s watchdog, in shutdown phase Serving, with no stop request accepted"
+        );
     }
 
     #[nervix_primitives::test(start_paused = true)]
