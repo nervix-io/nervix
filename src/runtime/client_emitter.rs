@@ -203,7 +203,7 @@ pub(crate) struct ClientEmitterEndpoint {
     series: ClientEmitterSeries,
 }
 
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(crate) struct ClientEmitterDescription {
     pub(crate) fields: Vec<SchemaField>,
     pub(crate) maximum_payload_bytes: u64,
