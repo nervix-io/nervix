@@ -224,11 +224,21 @@ impl<'tcx> Walker<'_, 'tcx> {
         self.cx.tcx.sess.source_map().span_to_snippet(span).ok()
     }
 
-    fn adt_path(&self, value: Ty<'tcx>) -> Option<String> {
-        let mut value = self
+    /// Normalized when the body's environment can normalize it; a projection that a closure's
+    /// environment cannot resolve keeps its declared form.
+    fn normalize(&self, value: Ty<'tcx>) -> Ty<'tcx> {
+        match self
             .cx
             .tcx
-            .normalize_erasing_regions(self.cx.typing_env(), ty::Unnormalized::new_wip(value));
+            .try_normalize_erasing_regions(self.cx.typing_env(), ty::Unnormalized::new_wip(value))
+        {
+            Ok(value) => value,
+            Err(_) => value,
+        }
+    }
+
+    fn adt_path(&self, value: Ty<'tcx>) -> Option<String> {
+        let mut value = self.normalize(value);
         while let ty::Ref(_, referent, _) = value.kind() {
             value = *referent;
         }
@@ -602,10 +612,7 @@ impl<'tcx> Walker<'_, 'tcx> {
     }
 
     fn error_type(&self, result: Ty<'tcx>) -> Option<Ty<'tcx>> {
-        let mut result = self
-            .cx
-            .tcx
-            .normalize_erasing_regions(self.cx.typing_env(), ty::Unnormalized::new_wip(result));
+        let mut result = self.normalize(result);
         while let ty::Ref(_, referent, _) = result.kind() {
             result = *referent;
         }
