@@ -180,7 +180,7 @@ pub enum StateCheckpointRead {
     HandoffCapture,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct FetchStateCheckpoint {
     pub placement: StatePlacementEnvelope,
     pub lsm: u64,
@@ -190,7 +190,7 @@ pub struct FetchStateCheckpoint {
 /// Kafka checkpoints may exceed either the replication message or bulk memory ceiling. The
 /// request selects a retained state handle once, and its response streams the current native
 /// checkpoint rather than carrying that checkpoint inside a control response.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct SyncKafkaOffsets {
     pub placement: StatePlacementEnvelope,
     pub after_lsm: Option<u64>,
@@ -199,13 +199,13 @@ pub struct SyncKafkaOffsets {
 /// A typed admission and revision check precedes the bulk transfer. An unchanged checkpoint
 /// requires neither encoding nor a Snapshot stream, and ordinary absence remains distinct from a
 /// failed checkpoint read.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub struct DescribeKafkaOffsets {
     pub placement: StatePlacementEnvelope,
     pub after_lsm: u64,
 }
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KafkaOffsetRevision {
     Current,
     Advanced(u64),
@@ -335,6 +335,13 @@ impl InterconnectStreamRequest for FetchStateCheckpoint {
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
     const TIMEOUT: Duration = Duration::from_secs(60);
 }
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "turmoil", feature = "loom"))
+))]
+#[path = "runtime_state_properties.rs"]
+mod replication_properties;
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
 mod wire_properties {

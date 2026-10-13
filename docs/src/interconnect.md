@@ -1331,6 +1331,29 @@ node's opaque diagnostic text. A materialized snapshot is streamed only after a 
 description identifies its exact length, digest, revision, fence, and branch generation; the
 placement that the request names supplies its schema fingerprint.
 
+Runtime-state message properties use the production bounded encoder and decoder on each
+request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
+complete request and response values, including every state kind, schema and WASM generation,
+model kind, checkpoint read kind, ordered listing, full-width counters, checkpoint length and
+digest, and each remote-operation refusal and subject. Branch floats are compared by their bits,
+including signed zero and nested collection values. `runtime-checkpoint-listing-owner` additionally
+checks the complete runtime owner listing across its semantic conversion and the replication
+response codec. Its current branch-key domain is nonempty, has distinct canonical field names,
+valid datetime text and finite floats; datetime spelling is canonicalized by the runtime owner.
+The separate `runtime-state-replication-malformed` and `runtime-checkpoint-listing-malformed`
+targets exercise bounded damaged frames, encoding limits and typed invalid-branch refusals in
+removed and revised entries. Each property checks that no codec reservation survives its case.
+These are message and conversion checks; transport framing, scheduling and recovery retain their
+separate simulation and public-scenario evidence. Run each named target with `just test-bolero
+<target>` for randomized/corpus checks and `just fuzz <target> <seconds>` for an actual sanitizer
+campaign through the same assertion.
+
+`RkyvMessage`, the public supertrait and response bound of the typed request contracts, is
+nameable at the interconnect crate boundary. Its existing encode/decode methods use the owning
+executor, pool class and byte limit; semantic conversion callers use that same codec rather than
+recreating serialization or validation outside the engine. This introduces no separate codec,
+message shape or execution mode.
+
 Domain routing retains each materialized relay's installed-state publication from the shared
 state-replication routing owner. Branch reads and generator scans use that relay's immutable index,
 while the selected route validates its retained assignment identity. Retirement ends the exact
