@@ -18,6 +18,8 @@ Generators and Arrow dependencies remain in their owning test harnesses.
 | Arrow selection rejection | `client-arrow-selection` | Typed whole-input failure on bounds/order/duplicates and branch-count mismatch; a subsequent complete encoding succeeds |
 | Shared C binding | `client-binding-rows` | Exact schema, column states, native scalar bits, variable bytes and offsets, branch values and retained frame bytes after releasing the original reference |
 | Shared C binding batch builder and Arrow IPC | `client-ffi-host-columns` | Existing owning property compares complete host columns at every nested level with the built batch and its canonical Arrow IPC stream, after overwriting the input buffers |
+| Shared C binding field descriptors | `client-ffi-field-descriptors`, `client-ffi-field-descriptors-malformed` | A field described level by level equals the complete original field, a name in any letter case folding to its canonical spelling; the field and level accessors read back every level's `nx_type` and element count as the header declares them; every invalid level, name or call order fails as an invalid argument and leaves the list as the accepted calls built it |
+| Client emitter delivery decoder | `client-emitter-deliveries` | The server's owning property decodes the stream a client emitter sink wrote through `EmitterDelivery::decode_record_batch`, the decoder every delivery uses, to the Arrow schema of exactly the declared fields and every delivered row, and has the same bytes refused under another row count or other fields; the [Arrow map](./arrow-representation-coverage.md) records its oracle |
 | Every FlatBuffers root under hostile bytes | `client-arbitrary-frames`, `client-frame-corruption` | Production verification and actual decoding under fixed frame, string, collection and depth budgets; typed failure or deterministic acceptance, including Row validation |
 | Request union tags | `client-discriminators` | All byte-valued tags structurally verified before use; unknown tags return the owning typed union error |
 
@@ -38,6 +40,10 @@ the complete equality assertion.
 - The generic wire properties own no Arrow representation. Graph JSON, connector submission and
   consumer payloads remain exact opaque text or bytes. There is no Row JSON conversion or implicit
   cast in these assertions.
+- A host spells a field name in any ASCII letter case, and the binding folds it to the
+  vocabulary's lower-case name, so a name read back is the canonical spelling. The descriptor
+  properties compare `nx_type` integers with the values the header declares, not with the
+  binding's own type conversions.
 - The binding's scalar column copies use native byte order. Nested vectors remain readable from
   retained Row frames; asking for a scalar variable-width view of a vector fails with the typed
   type error.

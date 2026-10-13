@@ -160,6 +160,7 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod paced_replication;
 mod paced_simulation;
 mod process_cluster;
 mod restarted_voter;
@@ -228,6 +229,13 @@ struct DurableCatchUpObservation {
     commit_delay: Duration,
     started_at: Instant,
     append_stream_opens_at_start: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug)]
+struct AppendSetupObservation {
+    target: String,
+    started_at: Instant,
+    attempts_at_start: BTreeMap<String, u64>,
 }
 
 struct DurableCatchUpWriter {
@@ -418,6 +426,8 @@ struct ScenarioWorld {
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
     saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
+    append_setup_observation: Option<AppendSetupObservation>,
+    moving_catch_up: Option<paced_replication::MovingCatchUp>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
     transaction_qualification: Option<TransactionQualificationObservation>,
@@ -5899,6 +5909,82 @@ fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, dura
     world.consensus_commit_delays.insert(node_id, duration);
 }
 
+#[given(expr = "the next start of node {string} has an occupied observability port")]
+async fn given_next_start_has_an_occupied_observability_port(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .occupy_observability_port_for_start(&node_id)
+        .await
+        .assured("a stopped follower's observability port can be held for its next startup");
+}
+
+#[given(expr = "append-stream setup attempts toward node {string} are observed")]
+fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: String) {
+    let target = expand_placeholders(world, &target);
+    let target_name = crate::common::cluster::node_name(&target);
+    let mut attempts_at_start = BTreeMap::new();
+    for source in world.cluster().node_ids() {
+        if source == target {
+            continue;
+        }
+        let attempts = world.fault_injection.consensus_append_stream_attempt_count(
+            &crate::common::cluster::node_name(&source),
+            &target_name,
+        );
+        attempts_at_start.insert(source, attempts);
+    }
+    world.append_setup_observation = Some(AppendSetupObservation {
+        target,
+        started_at: Instant::now(),
+        attempts_at_start,
+    });
+}
+
+#[then(expr = "append-stream setup attempts toward node {string} respect the caller retry delay")]
+fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, target: String) {
+    let target = expand_placeholders(world, &target);
+    let observation = world
+        .append_setup_observation
+        .take()
+        .verified("the scenario observed append-stream setup before its writes");
+    assert_eq!(
+        target, observation.target,
+        "observe the same departed voter"
+    );
+    // OpenRaft's configured default retry series is 200ms. Permit the attempt already in flight
+    // when observation began and one boundary attempt; elapsed time absorbs parallel-suite load.
+    let maximum = u64::try_from(observation.started_at.elapsed().as_millis() / 200)
+        .assured("the bounded scenario interval fits in u64")
+        .checked_add(2)
+        .assured("the bounded attempt count leaves room for two boundary attempts");
+    let target_name = crate::common::cluster::node_name(&target);
+    let mut total_attempts = 0_u64;
+    for (source, baseline) in observation.attempts_at_start {
+        let attempts = world
+            .fault_injection
+            .consensus_append_stream_attempt_count(
+                &crate::common::cluster::node_name(&source),
+                &target_name,
+            )
+            .checked_sub(baseline)
+            .verified("setup attempt counters only increase");
+        total_attempts = total_attempts.saturating_add(attempts);
+        assert!(
+            attempts <= maximum,
+            "source '{source}' attempted {attempts} append-stream setups to departed '{target}'; \
+             the caller retry delay permits at most {maximum} in this observation"
+        );
+    }
+    assert!(
+        total_attempts > 0,
+        "the departed follower must exercise failed stream setup"
+    );
+}
+
 #[when(expr = "{int} domains named {string} are created on the leader node")]
 async fn when_domains_are_created_in_a_burst(
     world: &mut ScenarioWorld,
@@ -6096,7 +6182,7 @@ async fn when_node_starts_durable_catch_up(
     // sampler skips scrapes the starting node has not answered yet.
     let metrics_url = world
         .cluster()
-        .observability_metrics_url(&follower)
+        .observability_metrics_stream(&follower)
         .unwrap_or_else(|error| {
             panic!("failed to resolve the catch-up follower's metrics endpoint: {error}")
         });
@@ -10999,6 +11085,63 @@ async fn given_transaction_commit_pause(
 async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_entity_gate(domain);
+}
+
+#[given(expr = "ingestor {string} pauses before polling its route")]
+async fn given_ingestor_route_poll_pause(world: &mut ScenarioWorld, ingestor: String) {
+    world
+        .fault_injection
+        .pause_ingestor_route_poll(world.ingestor_dispatch_ref(&ingestor));
+}
+
+#[then(expr = "ingestor {string} reaches the route poll pause")]
+async fn then_ingestor_route_poll_pause(world: &mut ScenarioWorld, ingestor: String) {
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_ingestor_route_poll_pause(&ingestor),
+    )
+    .await
+    .expect("the route must reach its armed poll pause");
+}
+
+#[when(expr = "ingestor {string} leaves the route poll pause")]
+async fn when_ingestor_route_poll_pause_released(world: &mut ScenarioWorld, ingestor: String) {
+    world
+        .fault_injection
+        .release_ingestor_route_poll_pause(&world.ingestor_dispatch_ref(&ingestor));
+}
+
+#[given(expr = "ownership handoff for domain {string} pauses after requesting flush")]
+async fn given_ownership_handoff_flush_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world.fault_injection.pause_ownership_handoff_flush(domain);
+}
+
+#[then(expr = "the ownership handoff flush pause for domain {string} is reached")]
+async fn then_ownership_handoff_flush_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_flush_pause(&domain),
+    )
+    .await
+    .expect("handoff must publish its flush request and reach its pause");
+}
+
+#[when(expr = "the ownership handoff flush pause for domain {string} is released")]
+async fn when_ownership_handoff_flush_pause_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_flush_pause(&domain);
 }
 
 #[given(expr = "ingestor {string} pauses inside dispatch")]
@@ -26359,10 +26502,14 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
         {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for OpenTelemetry Collector to contain {expected:?}"
-        );
+        if Instant::now() >= deadline {
+            let logs = world.dependencies.otel_collector_logs().await;
+            panic!(
+                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; last \
+                 command output: {:?}; collector output:\n{logs:?}",
+                world.last_command_output
+            );
+        }
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }

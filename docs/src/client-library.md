@@ -460,6 +460,12 @@ while let Some(delivery) = consumer.next_batch().await? {
 consumer.close().await?;
 ```
 
+`record_batch` accepts a delivery only when its Arrow IPC stream declares exactly the Arrow schema
+of the fields the emitter declares and holds one record batch of the delivery's member count; any
+other stream is a `ClientError::UnexpectedReply`. `EmitterDelivery::decode_record_batch(fields,
+batch, members)` applies the same check to bytes an application kept: it takes the fields of
+`consumer.description()`, a delivery's `batch` bytes and its `members`, and needs no live delivery.
+
 `delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
 backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
 emitter's message error policy for all members. Each reassignment carries a new reference; a

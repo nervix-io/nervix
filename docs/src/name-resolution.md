@@ -533,6 +533,13 @@ Each form of evidence establishes a stated part of this contract and nothing mor
 `tests/dns-resolution-ledger.md` is the acceptance record: it names every path, the delivery that
 moved it, and each test and scenario by name.
 
+The OTEL prepared-request check starts with a one-second negative DNS answer, then publishes a
+real loopback gRPC receiver. It requires a fresh question and one accepted export with the exact
+prepared bytes within ten seconds. This qualifies recovery through the connector's existing
+lazy channel; it does not attribute a historical Collector observation timeout or model the
+external collector. The public one- and three-node log/trace outline retains that timeout's
+failed attempt separately from successful controls and later qualification.
+
 | Evidence | Command | What it establishes | What it does not |
 | --- | --- | --- | --- |
 | The resolver's own checks against an in-process DNS authority | `just test-dns` | Literal and hosts-file answers without a question; search completion and fully qualified names; IPv4-first dual-stack answers; positive and negative TTL reuse and expiry; missing names, empty answers, refusals and invalid names as distinct failures; a silent server ended by the budget and, sooner, by the configured `timeout` and `attempts`; lookups beyond 64 waiting and freed by cancellation; a resolver rebuilt and torn down with its runtime; the configuration grammar and its rejections; both Reqwest hooks, the Hyper connector and the Smithy hook dialling a later answer, keeping the URL authority, following a redirect, reconnecting after TTL expiry, being cancelled by a request timeout, and keeping the typed failure and the lookup's whole report as a cause | The authority answers over UDP only, so truncation and DNS over TCP, a name server that cannot be reached, and the order in which several servers are asked are not exercised |
@@ -547,6 +554,11 @@ The scenario features are `cluster/dns_resolution.feature`, the `runtime/*_dns_r
 files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixture-name scenarios
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
 `tools/cli_session.feature`, and `runtime/client_wire_qualification.feature`.
+
+The consensus append-admission unit fixtures construct the ordinary resolver from temporary
+resolver and hosts files with an explicit loopback name-server address. Their transport rejects a
+departed target before lookup; these tests qualify the caller's retry and ended-input boundaries,
+and make no DNS-answer or network-resolution claim.
 
 The MQTT changed-answer and restart scenario requires the new post-restart payload inside a
 bounded delivery wait. Its persistent QoS 1 source may replay the preceding payload before that

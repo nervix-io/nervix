@@ -67,6 +67,12 @@ The representation depends on the question being asked:
 | Is a present value valid? | A validated type or a fallible conversion | Reject invalid input where the owner has enough context to explain it. |
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
+Consensus replication replies have explicit initial-probe, ordered-stream and finished phases.
+Leading empty requests confirm a log boundary over management capacity; the first data request
+transfers the remaining input to one ordered stream. Empty commit updates then remain in that
+stream's order. A failed or rejected initial probe ends its input, so no data stream can follow an
+unconfirmed boundary. These phases are volatile protocol state and are never persisted.
+
 A pure conversion refusal is an ordinary typed outcome, even when it implements
 `std::error::Error` for a parsing trait. Its owner states that contract at the exact error type
 with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextual operation failure
@@ -86,6 +92,12 @@ distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed
 identifier access and verifies offsets and counts before constructing owned values.
 
 ## Absence And Distinct States
+
+**Consensus append input.** `None` from the caller's request stream means that input has ended;
+the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed
+append request, retained exactly once while setup runs. A membership, admission or transport error
+after obtaining that request remains a failure naming its peer; it is not inferred from ended
+input. The caller's retry and cancellation gate runs before this distinction is resolved.
 
 **Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
 requester already holds the owner's current revision. `Some` carries a typed revision, byte length
@@ -289,7 +301,38 @@ duration clamped at its physical anchor. Neither encodes an absent clock. The
 [Domain Clock](./domain-clock.md) chapter defines clock absence, installation states, authority
 fencing, and overflow handling.
 
+An entity-gate operation owns pending, held, released and failed outcomes. A held operation has
+closed its admission scope and requested its force flush. Ownership capture also requires a freeze
+owned by that exact coordination identity. The exact operation's drain-status query publishes it
+only after observing no affected admitted work or flush obligations. The operation's registry guard
+keeps its hold alive through that observation and publication. Request cancellation leaves the
+receiver-owned engagement and its original lease intact; retries await the same operation and
+renew no lease. The preparation deadline separately bounds engagement, drain and capture.
+
+A domain schedule's planning snapshot keeps its captured consensus cordons with two distinct
+identity sets: all live voters and eligible placement destinations. Termination of an already
+cordoned voter leaves both sets unchanged; losing or restarting that voter changes its live
+identity and invalidates the plan. Schedule and transaction publication validate the composed
+destination set and retain the independent consensus topology fence.
+The snapshot also retains the terminating live voters independently for destination diagnostics.
+After membership and liveness, relocation reports that process state before a committed cordon.
+Its terminating set is a captured diagnostic fact, while publication continues to fence the
+composed destination identities; termination of an already cordoned former owner still changes
+no eligible destination.
+
 ## External Encodings And Conversion Failure
+
+The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts
+elapsed request time before each leader redirect; the receiving leader owns the typed budget for
+the handoffs it performs. Preparation and activation deadlines are derived from that one value,
+and exhaustion produces a failed drain outcome. The stopping-node answer distinguishes a failure
+while its coordinator still leads from an interrupted drain whose coordinator no longer leads.
+The latter routes the remaining moves through the next leader without resetting the budget or
+repeating committed moves. Classification consumes the typed command disposition and consensus
+leadership observation rather than matching diagnostic text. The interconnect verifies the archived
+action
+and fences its current representation with the wire fingerprint. [Shutdown And Recovery](./shutdown.md)
+owns the lifecycle and deadline policy.
 
 At an external boundary, a protocol may require a raw tag, signature, null lane, or optional
 scalar. The adapter owns that encoding and turns it into a typed internal state. In the other
@@ -572,6 +615,12 @@ its selected namespace and validates that it remains current before writing. The
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
 
+A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
+retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose
+different bytes for that revision. Initial, replica and persisted recovery preserve the received
+bytes with their revision. A dirty metric update selects the next revision; a snapshot mutex
+serializes capture and installation at that placement's cold boundary.
+
 Active chunk maintenance validates the placement and fixed revision/offset coordinates before
 forming a chunk-set cursor. A set remains referenced only when the same view's selected header is
 segmented and names that exact revision. A missing or inline header is an ordinary unreferenced
@@ -592,6 +641,12 @@ name. It requires lowercase stored text and retains the typed `NameError` beneat
 format failure.
 
 ## Qualification Evidence
+
+The integration harness's startup owner classifies a failed attempt once into a terminal outcome
+or a transient retry carrying its listener family. A listener bind failure names the addresses to
+replace; a readiness timeout names all listeners. The launcher applies that decision after cleanup
+within the same absolute startup budget. See [Integration Test Lifecycle](./integration-test-lifecycle.md)
+for its occupied-listener regression and endpoint observation.
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)
 maps each confirmed finding to its owning change, current source path, unit test, public Cucumber

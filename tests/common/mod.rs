@@ -8,6 +8,7 @@ pub(crate) mod dependencies;
 pub(crate) mod grpc_receiver;
 pub(crate) mod http_receiver;
 pub(crate) mod kafka_group_member;
+pub(crate) mod materialized_state_diagnostics;
 pub(crate) mod node_liveness;
 pub(crate) mod node_startup;
 pub(crate) mod node_trace_export;

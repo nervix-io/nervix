@@ -113,6 +113,20 @@ does not model publication, async channels, network waits or the atomic verdict;
 only the tracked acquisitions the diagnostic processes executed. Generated measurements and fault
 evidence belong on the task, and a failed required attempt remains recorded.
 
+Leading empty consensus append probes use management capacity. One task owns their replies and
+the transition to an ordered data stream; subsequent empty commit updates stay on that stream.
+Rejected probes end the input before data admission. This transition adds no shared map, lock or
+memory-ordering claim. Native real-transport and public catch-up checks cover it; Deloxide does
+not track these async network waits.
+
+Consensus append setup consumes its caller's first request before opening the transport. The
+caller owns the async retry and cancellation gate; the adapter retains and submits that request
+once, without adding a lock or retry timer. Native admission and ended-input regressions exercise
+this boundary, and the public three-node scenario checks paced failed setup while the surviving
+quorum commits and the returning voter catches up. The test probe counts attempts and successful
+opens in its existing blocking map. Deloxide does not track the request-stream or network waits;
+the applicable Turmoil suite and real-process Chaos faults retain their separate claims.
+
 ## Relay, Transport And Source Lifetimes
 
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a
@@ -395,6 +409,29 @@ Per-row mutation is kept close to the lane that orders it. A global concurrent m
 those lanes, not the owner of their inner state. Once a task has found its lane, later mutation does
 not repeatedly acquire the registry guard.
 
+### Ownership handoff drain before freeze
+
+The runtime closes intake and the affected boundary gates, then requests a force flush and
+confirms the admission hold. The coordinator can observe pending work and its timeout diagnostics
+while the installed ingestor routes and processors finish that flush. Each participant's exact
+operation drain-status query publishes its ownership freeze only when the local affected scope is
+drained. Capture requires both the held operation and its own coordination identity's freeze.
+The status query retains the operation's registry guard through publication, so release cannot
+withdraw its hold between observing drain and publishing capture readiness.
+
+This is lifecycle work: the polls read existing quiesce and acknowledgement registries, and hot
+paths continue to retain their counters and freeze publications. The existing force-flush and
+quiesce checks cover completion visibility; freeze checks cover publication and wakeup order.
+The ownership drain reads force-flush obligations before admitted-work counts. Acquiring a
+completed flush therefore makes a parked message that the flush resumed visible to that drain.
+`loom_an_ownership_handoff_drain_sees_work_resumed_before_flush_completion` exercises the production
+counter method; its qualification weakens that method's existing acquire. The handoff publication
+check races the production freeze decision against the actual participant's flush completion.
+The public shutdown regression holds an admitted Kafka route until handoff publishes its flush
+request, then verifies completed drain and exactly one acknowledged output. The diagnostic lane
+registers that path in all three selections; async wakeups, transport and deadlines remain outside
+tracked blocking-lock detection.
+
 ### Emitter payload assembly
 
 One emitter task owns the released carriers and their flush order. Its batch packer borrows each
@@ -521,8 +558,16 @@ that route from one immutable publication, never from the state, execution or id
 An announcer retains its selected route for its whole lifetime and reads the current primary and
 replica set from the assignment slot.
 
-Branch-aggregate byte capture keeps the existing narrow `lifecycle_call` expectation for
-scanning the metrics inventory at an explicit snapshot boundary. State-route selection uses the
+Branch-aggregate byte capture keeps the narrow `lifecycle_call` expectation for scanning the
+metrics inventory at an explicit snapshot boundary. Each placement retains one encoded snapshot
+under its own blocking mutex. Capture reads the dirty revision first and chooses that revision's
+bytes once; subsequent descriptors, streams and persistence reuse them, including elapsed metric
+fields. Initial, replica and persisted recovery install the received bytes with their revision.
+The guard serializes capture and installation, covers only that placement's snapshot work and
+never crosses an await. Metric recording advances the dirty revision without taking this guard;
+the next capture includes those measurements. The guard belongs to cold checkpoint work, not to
+record or batch execution. The two interleaved-tenant window drain and relocation scenarios run
+in both diagnostic selections and the stressed restore selection. State-route selection uses the
 installed state handle and retained assignment slot.
 Checkpoint synchronization sends a bounded revision, length and digest description through that
 selected route. The replica fetches the exact revision through the bulk pool, admits the whole
@@ -1554,6 +1599,15 @@ it does not broaden the ordering or interleaving guarantee. Mode reports remain 
 the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
 collection, artifacts, filtering and replay commands.
 
+The integrated ordinary cost probe is `just bench-primitives`. It measures the boundary's atomic
+access, `ArcSwap` publication, an uncontended blocking mutex, and shared-reference clone/drop
+without a model or diagnostic build's scheduling points. The production relay and admitted-work
+benches measure their owners, and `just bench-task-handles`
+retains timing and allocation samples. Compare uninstrumented builds on one host with the same
+profile and load; a model run or coverage build cannot serve as a throughput baseline. The
+[integrated qualification procedure](developing-nervix.md#integrated-primitive-qualification)
+keeps those measurements beside revision-bound model and external fault evidence.
+
 `just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
 and of every package on its own, the way a consumer builds it, with default features and without
 them, and rejects Loom, Shuttle, a Shuttle wrapper, Turmoil or Deloxide in any of them, and an
@@ -1790,8 +1844,7 @@ owners, a lost acknowledgement and a producer restart, session restarts that res
 consumer, a domain restart that replaces its consumer, a memory-pressure pause of scheduled
 ingestors, a Roto function's column builder, TLS rebinding of every HTTPS listener, batched
 inference over interleaved branches, a restarted voter's ownership, and graceful shutdown with a
-slow cordon release or a Kafka ingestor and attached emitter handoff, plus diagnostic server
-processes that stop gracefully, and its
+slow cordon release and diagnostic server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
 The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
 scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
@@ -1807,17 +1860,28 @@ and the coverage it declares: the disposable-process probes of `nervix-deadlock`
 locks' conformance checks of `nervix-primitives`, the diagnostic owner tests of the server library,
 and the tagged scenarios with the number of example runs each must make. The three
 `@remote_ack_owners` scenarios add four example runs across interleaved branches, a lost
-acknowledgement and producer restart; the active-only, order and stress selections exercise the
-tracked correlation and peer admission owner locks. The `@shutdown_kafka_handoff` scenario runs in
-those same selections. It reaches the ingestor quiesce control's tracked locks while a stopping
-node closes intake, waits for its attached emitter's handoff, and finishes admitted Kafka
-acknowledgements. The async gate wait, remote delivery and scheduling order remain outside the
-detector's observation and have the Cucumber and chaos checks in
-[Shutdown And Recovery](./shutdown.md). The inventory also bounds the lane: one real-time budget
-for a selection's
+acknowledgement and producer restart; every selection exercises the tracked correlation and peer
+admission owner locks. The `@shutdown_kafka_handoff` scenario runs in every selection and reaches
+the ingestor quiesce control's tracked locks while a stopping node closes intake, waits for its
+attached emitter's handoff, and finishes admitted Kafka acknowledgements. The async gate wait,
+remote delivery and scheduling order remain outside the detector's observation and have the
+Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The
+`@shutdown_leader_change` scenario also runs in every selection and reaches the tracked entity-gate
+state while a stopping follower repeats the remaining handoff through a new leader. Its leadership
+observation, transport waits and shared shutdown deadline remain outside the detector's observation.
+Both scenarios carry `@deloxide_stress`, with separate stress workload registrations that reach
+their owners under bounded scheduling disturbance. The inventory also bounds the lane: one real-time
+budget for a selection's
 diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.
+
+The fault harness shares its observation and release barriers through
+`src/fault_injection/pause.rs`. The barrier owns watch-backed reached, released and delivered
+state and the one-shot atomic claim; fault selection remains in the harness's owning modules.
+These async observations introduce no tracked blocking-lock owner. Deloxide continues to measure
+the registered product locks, while the public scenarios and model checks exercise pause ordering
+at their applicable boundaries.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
@@ -1851,8 +1915,12 @@ Stress widens timing windows; it does not make untracked waits visible. A Tokio 
 `Notify` wait, a DashMap shard, dependency locks, an atomic publication and a wait on another node
 are invisible to the detector with or without disturbance, and a workload that stalls on one of them
 ends as `timed-out`, not as an active cycle. Those owners keep their Shuttle, Loom, Turmoil and
-Chaos evidence. A stressed workload that fails is reproduced first as a focused failing test
-against its owner before the owner changes.
+Chaos evidence. A dependency's own channels are invisible in the same way: closing a database waits
+for the storage engine's background workers through the engine's worker channel and active-worker
+count, with no tracked lock involved, so that close is held by the pinned engine's own worker-stop
+tests and the store-close regression beside `ApplicationStartup::close_stores`, not by the lane. A
+stressed workload that fails is reproduced first as a focused failing test against its owner before
+the owner changes.
 
 Every process the lane starts runs in a session of its own. A process that outlives its bound
 receives `SIGTERM` and, after the stop grace period, `SIGKILL` with its whole group. The lane is a
@@ -2328,6 +2396,15 @@ and requires the checkpoint of that failure to replay it. This is what shows a m
 ordering it claims, rather than passing because something else synchronized its threads. A
 weakening whose original text no longer appears exactly once fails as well, so changing an owner's
 ordering means revisiting its qualification.
+
+Successful qualifications retain `target/loom-qualification/<qualification-id>/` as well: the
+counterexample checkpoint, the checkpoint advanced during replay, both outputs and metadata with
+the revision, toolchain, exploration bounds and complete registered weakening. CI uploads these
+records whether the qualification job passes or fails. To replay a retained counterexample, restore
+its recorded revision, apply its recorded weakening in an isolated worktree and run
+`just test-loom-replay <directory>`; replay against the unweakened owner is a different check.
+The isolated build copy is still removed after qualification, and an unsuccessful control retains
+its output and any checkpoint it produced.
 
 Loom models a `SeqCst` access as an acquire or a release, and models only `fence(SeqCst)` exactly. A
 protocol in which each side writes one location and then reads the other, such as a dispatch that

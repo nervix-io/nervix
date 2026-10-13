@@ -350,7 +350,7 @@ impl SessionServiceImpl {
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
         let live_nodes = planning.live_node_ids();
-        let placement_candidate_nodes = planning.placement_candidate_node_ids();
+        let terminating_node_ids = planning.terminating_node_ids();
         let schedulable_nodes = planning
             .cluster_nodes()
             .iter()
@@ -369,7 +369,7 @@ impl SessionServiceImpl {
             &relocation.destination,
             &inputs,
             &live_nodes,
-            &placement_candidate_nodes,
+            terminating_node_ids,
         )?;
 
         let moved = unit
@@ -470,7 +470,7 @@ impl SessionServiceImpl {
         destination: &ClusterNodeName,
         inputs: &DomainPlanningInputs,
         live_nodes: &BTreeSet<ClusterNodeName>,
-        placement_candidate_nodes: &BTreeSet<ClusterNodeName>,
+        terminating_node_ids: &BTreeSet<ClusterNodeName>,
     ) -> error_stack::Result<(), RelocationError> {
         if !inputs.topology().members().contains(destination) {
             return Err(Report::new(RelocationError::DestinationNotMember {
@@ -482,7 +482,7 @@ impl SessionServiceImpl {
                 node: destination.clone(),
             }));
         }
-        if !placement_candidate_nodes.contains(destination) {
+        if terminating_node_ids.contains(destination) {
             return Err(Report::new(RelocationError::DestinationTerminating {
                 node: destination.clone(),
             }));
@@ -745,6 +745,87 @@ mod tests {
             .iter()
             .map(|node| ClusterNodeName::parse(node).expect("valid node name"))
             .collect()
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cordoned_destination_keeps_its_typed_relocation_reason() {
+        use crate::application::test_fixtures::{TestService, build_test_service};
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").expect("valid domain");
+        let destination = service.inner.consensus.local_node_id().clone();
+        service
+            .inner
+            .consensus
+            .set_node_cordoned(destination.clone(), true)
+            .await
+            .expect("the cordon commits");
+        let inputs = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let planning = service
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        let error = SessionServiceImpl::validate_relocation_destination(
+            &destination,
+            &inputs,
+            &planning.live_node_ids(),
+            planning.terminating_node_ids(),
+        )
+        .expect_err("a live cordoned voter is not a relocation destination");
+        assert!(
+            matches!(error.current_context(), RelocationError::DestinationCordoned { node } if node == &destination)
+        );
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("remove the throwaway database");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_terminating_cordoned_destination_keeps_its_typed_relocation_reason() {
+        use crate::application::test_fixtures::{TestService, build_test_service};
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").expect("valid domain");
+        let destination = service.inner.consensus.local_node_id().clone();
+        service
+            .inner
+            .consensus
+            .set_node_cordoned(destination.clone(), true)
+            .await
+            .expect("the cordon commits");
+        service.inner.cluster.mark_local_terminating().await;
+        let inputs = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let planning = service
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        let error = SessionServiceImpl::validate_relocation_destination(
+            &destination,
+            &inputs,
+            &planning.live_node_ids(),
+            planning.terminating_node_ids(),
+        )
+        .expect_err("a terminating cordoned voter is not a relocation destination");
+        assert!(
+            matches!(error.current_context(), RelocationError::DestinationTerminating { node } if node == &destination)
+        );
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("remove the throwaway database");
     }
 
     #[test]

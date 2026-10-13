@@ -532,7 +532,7 @@ mixed_degrade_inject() {
     local receiver="$4"
     local profile="$5"
     failure_category=injection
-    link_ping "${action_dir}/ping-baseline.txt" "${sender}" "${receiver}"
+    link_ping "${action_dir}/ping-baseline.txt" "${sender}" "${receiver}" baseline
     local effect_evidence=("${action_dir}/ping-baseline.json" "${action_dir}/ping-fault.json")
     if [[ "${profile}" == rate-limit || "${profile}" == combined ]]; then
         link_rate_probe "${action_dir}/rate-baseline.json" "${sender}" "${receiver}"
@@ -541,13 +541,13 @@ mixed_degrade_inject() {
     link_degradation_start "${action_dir}" "${sender}" "${receiver}" "${profile}" \
         "${project_name}-degrade-${id}" "${mixed_degradation_lifetime}"
     link_degradation_verify "${action_dir}" "${sender}" "${receiver}" "${profile}"
-    link_ping "${action_dir}/ping-fault.txt" "${sender}" "${receiver}"
+    link_ping "${action_dir}/ping-fault.txt" "${sender}" "${receiver}" "${profile}"
     if [[ "${profile}" == rate-limit || "${profile}" == combined ]]; then
         link_rate_probe "${action_dir}/rate-fault.json" "${sender}" "${receiver}"
     fi
     "${script_dir}/verify-degraded-evidence.sh" effect "${profile}" "${effect_evidence[@]}" \
         >"${action_dir}/effect-verdict.txt" 2>&1 \
-        || recovery_fail injection "${profile} of ${id} did not measurably affect the link from ${sender} to ${receiver}"
+        || recovery_fail injection "${profile} of ${id} did not meet its measured effect limits from ${sender} to ${receiver}"
     failure_category=product
 }
 

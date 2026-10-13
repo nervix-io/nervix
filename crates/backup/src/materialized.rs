@@ -178,7 +178,7 @@ fn invalid(path: &str, field: &'static str) -> Report<ArchiveReadError> {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::Timestamp;
 
@@ -191,7 +191,8 @@ mod tests {
             .with_max_len(2048)
             .for_each(|bytes| {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-                let descriptor = MaterializedRelayDescriptor {
+                let groups = arbitrary.entropy().count(4);
+                let mut descriptor = MaterializedRelayDescriptor {
                     domain: arbitrary.name(),
                     entity: arbitrary.name(),
                     schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
@@ -200,42 +201,33 @@ mod tests {
                     revision: arbitrary.entropy().any_u64(),
                     fence: arbitrary.entropy().any_u64(),
                     branch_generation: arbitrary.entropy().any_u64(),
-                    record_count: 1,
-                    groups: 1,
+                    record_count: 0,
+                    groups: u32::try_from(groups).assured("at most four groups fit in u32"),
                 };
-                let low = arbitrary.entropy().any_i64();
-                let high = arbitrary.entropy().any_i64();
-                let branch = vec![StateField {
-                    name: "tenant".into(),
-                    value: crate::StateValue::Array(vec![
-                        crate::StateValue::String(arbitrary.string()),
-                        crate::StateValue::Vec(vec![
-                            crate::StateValue::U8(arbitrary.entropy().byte()),
-                            crate::StateValue::F64Bits(arbitrary.entropy().any_u64()),
-                        ]),
-                    ]),
-                }];
-                let branches = if arbitrary.entropy().byte() % 2 == 0 {
-                    vec![None]
-                } else {
-                    let mut other = branch.clone();
-                    other[0].value = crate::StateValue::Array(vec![
-                        crate::StateValue::String("another branch".into()),
-                        crate::StateValue::Vec(vec![crate::StateValue::U8(1)]),
-                    ]);
-                    vec![Some(branch), Some(other)]
-                };
-                let descriptor = MaterializedRelayDescriptor {
-                    record_count: u64::try_from(branches.len()).assured("bounded identities fit"),
-                    ..descriptor
-                };
-                let record = MaterializedIdentitiesRecord {
-                    domain: descriptor.domain.clone(),
-                    entity: descriptor.entity.clone(),
-                    group: 0,
-                    identities: branches
-                        .into_iter()
-                        .map(|branch| MaterializedRecordIdentity {
+                let mut records = Vec::with_capacity(groups);
+                for group in 0..groups {
+                    let maximum = std::num::NonZeroUsize::new(8)
+                        .assured("the identity group bound is nonzero");
+                    let rows = arbitrary.entropy().positive_count(maximum);
+                    let mut identities = Vec::with_capacity(rows);
+                    for _ in 0..rows {
+                        let low = arbitrary.entropy().any_i64();
+                        let high = arbitrary.entropy().any_i64();
+                        let branch = if arbitrary.entropy().flag() {
+                            Some(vec![StateField {
+                                name: "tenant".into(),
+                                value: crate::StateValue::Array(vec![
+                                    crate::StateValue::String(arbitrary.string()),
+                                    crate::StateValue::Vec(vec![
+                                        crate::StateValue::U8(arbitrary.entropy().byte()),
+                                        crate::StateValue::F64Bits(arbitrary.entropy().any_u64()),
+                                    ]),
+                                ]),
+                            }])
+                        } else {
+                            None
+                        };
+                        identities.push(MaterializedRecordIdentity {
                             branch,
                             watermarks: RemoteRuntimeRecordMetadata {
                                 ingested_at_low_watermark: Timestamp::from_unix_nanos(
@@ -245,9 +237,20 @@ mod tests {
                                     low.max(high),
                                 ),
                             },
-                        })
-                        .collect(),
-                };
+                        });
+                    }
+                    let rows = u64::try_from(rows).assured("at most eight identities fit in u64");
+                    descriptor.record_count = descriptor
+                        .record_count
+                        .checked_add(rows)
+                        .verified("at most four groups of eight rows are generated");
+                    records.push(MaterializedIdentitiesRecord {
+                        domain: descriptor.domain.clone(),
+                        entity: descriptor.entity.clone(),
+                        group: u32::try_from(group).assured("at most four groups fit in u32"),
+                        identities,
+                    });
+                }
                 let encoded = descriptor
                     .encode()
                     .assured("the bounded generation encodes");
@@ -256,19 +259,28 @@ mod tests {
                         .assured("the current descriptor validates"),
                     descriptor
                 );
-                let encoded = record.encode().assured("the bounded identities encode");
-                let decoded = MaterializedIdentitiesRecord::decode("identities.rkyv", &encoded)
-                    .assured("the current identities validate");
-                assert_eq!(decoded, record);
-                assert_eq!(
-                    decoded.encode().assured("the decoded identities encode"),
-                    encoded
-                );
-                for identity in decoded.identities {
-                    for field in identity.branch.into_iter().flatten() {
-                        assert_eq!(StateField::from_remote(field.clone().into_remote()), field);
+                let mut restored_rows = 0_u64;
+                for record in records {
+                    let encoded = record.encode().assured("the bounded identities encode");
+                    let decoded = MaterializedIdentitiesRecord::decode("identities.rkyv", &encoded)
+                        .assured("the current identities validate");
+                    assert_eq!(decoded, record);
+                    assert_eq!(
+                        decoded.encode().assured("the decoded identities encode"),
+                        encoded
+                    );
+                    let rows = u64::try_from(decoded.identities.len())
+                        .assured("at most eight identities fit in u64");
+                    restored_rows = restored_rows
+                        .checked_add(rows)
+                        .verified("at most four groups of eight rows are restored");
+                    for identity in decoded.identities {
+                        for field in identity.branch.into_iter().flatten() {
+                            assert_eq!(StateField::from_remote(field.clone().into_remote()), field);
+                        }
                     }
                 }
+                assert_eq!(restored_rows, descriptor.record_count);
             });
     }
 

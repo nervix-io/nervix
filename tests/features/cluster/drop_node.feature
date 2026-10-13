@@ -2,9 +2,13 @@ Feature: Drop node
 
   Scenario: A stopped node can be removed from cluster membership
     Given a 3 node nervix cluster is started
-    And node "node-3" is stopped
+    Then node "node-1" eventually reports interconnect to "node-3" as "connected"
+    And node "node-2" eventually reports interconnect to "node-3" as "connected"
+    When node "node-3" is stopped
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "raft member 'node-3' is not currently visible in gossip"
+    And node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable"
+    And node "node-2" eventually reports status containing "raft member 'node-3' is marked unavailable"
     When these NSPL commands are executed through the client on node "node-1"
       """
       DROP NODE node-3;

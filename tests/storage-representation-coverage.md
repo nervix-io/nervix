@@ -17,11 +17,17 @@ contain synthetic data and describe the current shapes.
 | Damaged registry records | `registry-stored-models-corruption` | The listing fails with `DecodeKey`, `InvalidModelArchive`, `DeserializeValue` or `StoredModelKindMismatch`, or lists Models whose own keys are exactly the stored keys |
 | Runtime-state physical keys, namespace prefixes, index keys and chunk prefixes | `runtime-state-keys` | A key decodes to its namespace, state, schema fingerprint, generation, Model kind and name and the fingerprint of its branch's canonical text; it lies under its own domain and namespace prefixes, and its index and chunk keys reach no other placement's |
 | Malformed runtime-state keys | `runtime-state-keys-malformed` | Damaged or arbitrary keys fail with the store's typed failure, or decode to a placement whose own key is exactly the stored key |
+| Malformed checkpoint chunk keys | `runtime-state-chunk-keys-malformed` | Damaged or arbitrary chunk keys fail with `InvalidCheckpointChunks`, `InvalidStorageFormat` or `DecodeState`, or name a segment set whose placement key decodes canonically and whose chunk prefix followed by the key's own offset is exactly the key, below the set's exclusive end |
+| Namespaces restore maintenance walks: the domain a key names after its namespace | `runtime-state-staging-namespaces` | Placement, index and chunk keys of several domains, in the initial namespace and restored generations, name their own domain; a walk from the start visits every namespace of every domain exactly once in key order, every key between where it resumes and where a namespace ends lies in that namespace, and none lies past the last |
+| Malformed keys under restore maintenance | `runtime-state-staging-namespaces-malformed` | The domain decoder fails with `InvalidStorageFormat` or names a domain whose text and separator open what it reads; a walk stops with `InvalidStorageFormat` at the first key whose namespace does not decode, and otherwise visits the namespace and domain the key's leading bytes spell exactly, resuming where that namespace ends |
 | Handoff preparations, forced-recovery preparations and completions | `runtime-state-identity-records` | Every coordination identity, operation, node, incarnation, entity and fingerprint, and every checkpoint with its placement compared by archived bits; two transitions share a key exactly when they name the same handoff or recovered entity |
 | Malformed identity records | `runtime-state-identity-records-malformed` | Arbitrary bytes fail with the typed decode failure, or decode to a record whose placements convert back and which stores back unchanged |
 | Kafka offset, branch lifecycle, deduplicator and branch-aggregated metrics snapshots in the inline checkpoint envelope | `runtime-state-snapshots` | Each owner's complete oracle: offsets with their topic schedules, lifecycle keys with activity and incarnations, keyspace parts bit for bit in arrival order, and every metrics series |
 | Malformed snapshot payloads | `runtime-state-snapshots-malformed` | Each kind's typed decode failure, or a value that stores back to the same payload |
-| Inline and chunked checkpoints in the runtime-state store | `runtime-state-store-checkpoints` | The exact payload at its revision through the latest-snapshot read and the streaming reader, before and after the database reopens, at, beside and between the chunk boundaries |
+| Inline, chunked and restored checkpoints in the runtime-state store, and a backup cut's listing of them | `runtime-state-store-checkpoints` | The exact payload at its revision through the latest-snapshot read and the streaming reader; a cut of the domain lists exactly its checkpoints in key order, filtered by kind and ignoring an unpublished generation and another domain, each with its stored size: a whole inline value or a chunked payload, and its exact payload and revision through the aligned, entry and bounded readers; before and after the database reopens, at, beside and between the chunk boundaries |
+| Native Kafka offset checkpoints a capture writes for a replica, with their topic schedules | `runtime-kafka-offset-captures` | Every partition offset and topic schedule the replica's cancellable reader restores, a written length within the bound the capture reserves, and a check before every native entry that stops the read wherever it refuses |
+| The Kafka offset transfer header: the checkpoint's little-endian revision and BLAKE3 digest ahead of its payload | `runtime-kafka-offset-transfer-headers` | The exact revision, digest and payload from a stream cut at every position and into generated chunks with empty ones between them |
+| Short, stale and arbitrary Kafka offset transfer streams | `runtime-kafka-offset-transfer-headers-malformed` | `HeaderLength` for a stream that ends inside its header, `Revision` for one whose revision does not advance the held one or precedes the described one, and otherwise the revision and digest the header spells; every stream forwards exactly the bytes behind its header, at every split |
 | Sealed window processor state | `runtime-window-snapshots` | Every retained row's sequence, ingestion time, branch bits and input and argument values, the next sequence, the branch lifetime and every aggregate's typed state; another branch lifetime restores nothing |
 | Malformed window snapshots | `runtime-window-snapshots-malformed` | A sealed window damaged once, or arbitrary bytes behind the snapshot magic, fail with the snapshot's typed failure, open nothing for the branch lifetime, or open a window that seals back to the same bytes |
 | Resource store directories and manifests | `resource-store-layout` | Every installed version reads back its complete manifest and the archive built for it after every other installation, after staging cleanup and after another version's removal; the removed version alone fails with `ReadFile` |
@@ -30,8 +36,10 @@ The earlier storage targets remain the owners of their codecs: `registry-archive
 registry's Model archive, `consensus-archived-counts` and `runtime-window-archived-counts` for
 archived counts, `restore-installation-storage` for staged restore records,
 `restore-native-lifecycle` and `restore-native-kafka` for the lifecycle and Kafka offsets a restore
-writes, and the WASM targets listed in the
-[WASM representation coverage map](./wasm-representation-coverage.md) for guest checkpoints.
+writes, `backup-native-kafka` for the archive record a backup cut streams from a stored offset
+checkpoint, and the WASM targets listed in the
+[WASM representation coverage map](./wasm-representation-coverage.md) for guest checkpoints and for
+the segment set a current chunk key projects to.
 
 ## Contract Boundaries
 
@@ -62,6 +70,14 @@ writes, and the WASM targets listed in the
   chunked payloads to three chunks, windows to three rows and branch keys to three fields of two
   levels of nesting. Volatile state, such as records in flight, ACKs, plans and attempts, is never
   generated or stored.
+- A Kafka offset capture reserves an upper bound on what it writes, not its exact length. Its
+  property writes through the same encoder a replica's transfer stages, and reads back through the
+  replica's own reader. The transfer header properties drive the receiver's header owner as the
+  transfer loop does; the staged payload's length and digest verification, and installation under
+  the replica's assignment token, keep their existing tests and public scenarios.
+- The maintenance walk reads namespaces, not placements: a key whose namespace and domain decode is
+  visited even when what follows does not spell a placement, and decoding that placement remains
+  `runtime-state-keys-malformed`'s contract.
 - These are serial representation properties. Storage engine durability, replication, snapshot
   transfer, catch-up and shutdown retain their Cucumber, Turmoil and Chaos evidence. No
   synchronization mechanism or ordering claim is added by this coverage.

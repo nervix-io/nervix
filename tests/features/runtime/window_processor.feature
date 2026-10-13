@@ -1,4 +1,5 @@
 Feature: Window processor runtime behavior
+  @metrics_checkpoint_handoff @deloxide_stress_restore
   Scenario: Graceful owner drain retains incomplete branch windows without emitting them early
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And graceful shutdown drain is enabled
@@ -76,6 +77,7 @@ Feature: Window processor runtime behavior
       key={"tenant":"beta"} | "first_value":100 | "samples":3
       """
 
+  @metrics_checkpoint_handoff @deloxide_stress_restore
   Scenario: Relocating a window owner preserves incomplete branch-local exact aggregates
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured

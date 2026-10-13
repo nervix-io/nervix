@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** NSPL graphs, client inputs, archive inventory assertions and generator subscriptions
-//!   that qualify many containers and a single container larger than the bulk memory budget.
+//!   that qualify many containers and a single container larger than the bulk memory budget,
+//!   plus bounded public state observations after an exact-row deadline expires.
 //! - **Depends on.** Public commands, acknowledged client producers, Row subscriptions and the
 //!   public archive reader.
 //! - **Must not know.** Runtime maps, checkpoint storage keys or private restore installation.
@@ -10,7 +11,7 @@
 use arrow_array::TimestampNanosecondArray;
 use nervix_backup::DescribedRuntimeState;
 use nervix_client_core::ProducerOutcome;
-use nervix_models::{ClientProducerLimits, IngestorName};
+use nervix_models::{ClientProducerLimits, ClusterNodeName, IngestorName};
 
 use super::*;
 
@@ -207,21 +208,28 @@ async fn then_materialized_generators_report_every_row(
     let length = kibibytes
         .checked_mul(1024)
         .assured("bounded row length fits");
-    let session = world
-        .active_session
-        .as_mut()
-        .assured("the summary subscription exists");
     while !pending.is_empty() {
         let now = Instant::now();
-        assert!(
-            now < deadline,
-            "missing materialized generator rows: {pending:?}"
-        );
-        let event = session
-            .try_next_subscription(deadline.saturating_duration_since(now))
-            .await
-            .assured("subscription remains connected")
-            .unwrap_or_else(|| panic!("missing materialized generator rows: {pending:?}"));
+        let event = if now < deadline {
+            world
+                .active_session
+                .as_mut()
+                .assured("the summary subscription exists")
+                .try_next_subscription(deadline.saturating_duration_since(now))
+                .await
+                .assured("subscription remains connected")
+        } else {
+            None
+        };
+        let Some(event) = event else {
+            println!(
+                "missing materialized generator rows at the observation deadline: {pending:?}; \
+                 domain={}, round={round}, value_bytes={length}, subscription_node={:?}",
+                world.domain, world.active_session_node
+            );
+            capture_missing_materialized_state(world, &pending).await;
+            panic!("missing materialized generator rows: {pending:?}");
+        };
         if !event.payload.contains(&format!("\"round\":{round}")) {
             continue;
         }
@@ -250,6 +258,38 @@ async fn then_materialized_generators_report_every_row(
             );
             pending.remove(&found);
         }
+    }
+}
+
+/// Observe the addressed owner's and replica's public state before failed-scenario teardown.
+async fn capture_missing_materialized_state(
+    world: &mut ScenarioWorld,
+    pending: &BTreeSet<(usize, usize)>,
+) {
+    let relays = pending
+        .iter()
+        .map(|(relay, _)| *relay)
+        .collect::<BTreeSet<_>>();
+    let nodes = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .map(|name| ClusterNodeName::parse(&name).assured("the fixture node name is valid"))
+        .collect::<Vec<_>>();
+    let cluster = world.cluster();
+    let domain = &world.domain;
+    let observations = crate::common::materialized_state_diagnostics::observe(
+        &nodes,
+        relays.into_iter(),
+        |node, relay| {
+            let node = node.clone();
+            let query = format!("SHOW RELAY state_{relay} MATERIALIZED STATE;");
+            async move { cluster.run_command(node.as_str(), domain, &query).await }
+        },
+    )
+    .await;
+    for observation in observations {
+        println!("{observation}");
     }
 }
 

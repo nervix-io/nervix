@@ -130,6 +130,17 @@ into it exactly where that shape is constructed. That construction is the one pl
 current context is cloned or its chain rendered into a field;
 [Guarantees And Limits](#guarantees-and-limits) lists the contexts that still copy a cause as text.
 
+Leading empty consensus probes return their matching boundary, conflict or higher vote through
+the existing management response. A conflict, higher vote or incomplete acceptance ends that input
+before data-stream admission. A management request failure uses the same unreachable-peer error
+as a heartbeat; subsequent data-stream setup failures remain transport failures. Neither path
+retries inside the adapter or changes the caller's retry gate.
+
+An ended consensus append input completes normally without a peer operation or a peer error. With
+a first request available, stream setup may return the existing typed admission, membership or
+transport failure as an unreachable-peer result. The caller's retry gate runs before that setup
+attempt, so reporting an immediate local refusal does not create an unpaced retry loop.
+
 | Boundary | Fixed shape | What crosses | Where a report resumes |
 | --- | --- | --- | --- |
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |
@@ -235,6 +246,16 @@ subsections after the boundary table follow this order.
 | Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
+
+### Cluster Availability Reports
+
+`SHOW CLUSTER STATUS` keeps gossip visibility and effective member unavailability separate. A Raft
+member missing from the raw live gossip set gets a visibility warning. Its unavailable-member
+warning comes from the cluster's effective availability snapshot, which retains an established
+peer while its health observation still bridges a gossip lapse. The reason names application
+health when that owner excludes the peer, or Chitchat when gossip excludes it after the retained
+observation ages out. A client observing the warning therefore sees the same availability owner
+that controls member removal. The report is an observation; the mutation checks availability again.
 
 ### Vocabulary Models
 
@@ -1015,6 +1036,11 @@ carries no acknowledgement, without logging branch field values.
 
 ### Interconnect
 
+The duplex writer's typed `TransportError::ProgressTimeout` means that a frame awaiting send
+capacity received no nonzero flow-control grant for its write progress bound. It does not bound
+the total time to transfer a frame. Expiry resets the exact stream; steady byte progress preserves
+the stream even when a large frame spans several progress intervals.
+
 The interconnect owns three kinds of failure. `TransportError` is a connection, TLS, framing,
 limit, deadline or relay delivery failure of the transport itself. `RequestError` is a typed
 request that could not be admitted, encoded, delivered or answered, with the peer's own
@@ -1062,14 +1088,43 @@ promoted owner. A commit that lacks its required replica acknowledgement still r
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
-the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
-observes next. When that request fails in transport, the drain counts as requested but unanswered:
+the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
+that receives the request without leading changes nothing. If leadership is lost during a drain,
+the interrupted report remains in the former leader's log and the new leader continues from the
+committed schedule within the original remaining budget. This classification uses the typed
+command disposition and the retained consensus leadership observation; it never interprets report
+text. A failed drain while the answering node still leads remains failed. When that request fails
+in transport, the drain counts as requested but unanswered:
 the sender reports its drain-support phase abandoned and still clears the cordon the request may
 have set; see [Topology Cases](./shutdown.md#topology-cases). A unit whose ownership handoff
 cannot prepare within its share of the stopping node's drain budget appears in the leader's failed
 drain report with its kind, name, former owner and typed entity-gate cause, including pending node
 and work counts when quiescence timed out. Exhausting the remaining unit budget is reported as a
-failed drain instead of waiting for the sender's outer timeout. A listing that arrives but names a
+failed drain instead of waiting for the sender's outer timeout.
+
+Schedule eligibility compares live voter identities and the placement candidates after the
+captured cordons and terminating flags are applied. A cordoned former owner's later terminating
+advertisement is an unchanged planning input. A changed live incarnation or eligible destination
+still reports `SchedulePlanningStale::Eligibility`; changed membership or cordons is rejected
+by the separate topology fence.
+
+Relocation validates membership and liveness, then reports a captured terminating incarnation as
+`RelocationError::DestinationTerminating`, then a committed cordon as `DestinationCordoned`.
+The planning snapshot captures termination independently from the composed placement destination
+set, so a cordon cannot be interpreted as termination and a terminating cordoned voter retains its
+termination reason. These diagnostic facts do not add a publication fence for an already excluded
+former owner.
+
+A handoff confirms closed admission while its local admitted work and flush can still be pending.
+The coordinator's exact-operation drain query retains the pending node and counts; exhaustion
+reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. Independent schedule
+units remain available to continue, and a subsequent attempt can retry the stalled unit. A gate
+that expires during engagement reports `EntityGateOperationError::EngagementExpired` and releases
+its partial intake and relay holds. The preparation deadline bounds engagement, drain and capture
+independently of the activation lease. A typed reply timeout can retry the same engagement identity
+and scope within that budget; rejection and other request failures keep their classification.
+
+A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
 naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
@@ -1811,6 +1866,19 @@ transfer to alter a later measurement. A failed required attempt remains evidenc
 subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
+Directed-link packet observations distinguish an incomplete sample from an effect outside the
+configured limits. The latter is an injection qualification failure whether too few packets were
+lost or too few replies remained; it does not assert that the fault was absent or that product
+recovery failed. Burst samples use 400 packets inside the existing observation window, and the
+effect verifier preserves the original received and lost fractions. Failed observations remain
+retained alongside subsequent qualified samples.
+
+The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
+failed measurement. Before any warm-up input, its empty-topic preparation retries only the
+driver's typed `NotLeaderForPartition` and `LeaderNotAvailable` metadata failures within one
+thirty-second query budget per topic. A nonempty topic, another query failure, or an exhausted
+budget fails preparation with the Kafka cause retained. Measured delivery and output auditing
+keep their own failure boundaries and are never repeated by this preparation check.
 
 A diagnostic node's findings retain a typed source. `WaitForGraph`/`ActiveCycle` establishes an
 active tracked-lock cycle and ends the diagnostic process with status `3` after recording.

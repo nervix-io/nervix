@@ -283,7 +283,56 @@ test-native-metadata-restore-repeat: tests-deps
 
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
 test-scenarios-binary binary *args: download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
+
+# Reproduce a focused public scenario in one diagnostic selection, with the same prerequisites
+# as the complete lane. This does not replace the lane's inventory and evidence qualification.
+test-diagnostic-scenarios selection feature *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    diagnostic_feature="$(realpath -- {{ quote(feature) }})"
+    if [[ ! -f "$diagnostic_feature" ]]; then
+        echo "expected an existing feature file" >&2
+        exit 2
+    fi
+    # A glob component makes Cucumber walk the containing directory and match this exact file.
+    diagnostic_input="${diagnostic_feature%/*}/{${diagnostic_feature##*/}}"
+    diagnostic_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$diagnostic_attempts"
+    diagnostic_attempt="$(mktemp -d "$diagnostic_attempts/run.XXXXXX")"
+    export NERVIX_DEADLOCK_EVIDENCE="${NERVIX_DEADLOCK_EVIDENCE:-$diagnostic_attempt/evidence}"
+    mkdir -p "$NERVIX_DEADLOCK_EVIDENCE"
+    echo "diagnostic scenario attempt: $diagnostic_attempt"
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }}
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --test scenarios -- --input "$diagnostic_input" {{ quote(args) }} 2>&1 | tee "$diagnostic_attempt/scenarios.log"
+    if ! rg --quiet '^[1-9][0-9]* scenarios?([ (]|$)' "$diagnostic_attempt/scenarios.log"; then
+        echo "diagnostic scenario selection executed no scenarios" >&2
+        exit 1
+    fi
+
+# Run focused harness regressions against a diagnostic build without changing its execution mode.
+test-diagnostic-harness selection *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    harness_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$harness_attempts"
+    harness_attempt="$(mktemp -d "$harness_attempts/harness.XXXXXX")"
+    echo "diagnostic harness attempt: $harness_attempt"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_attempt/harness.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$harness_attempt/harness.log"; then
+        echo "diagnostic harness selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
@@ -347,11 +396,19 @@ bench-endpoint-routing: build-web-console download-onnxruntime
 test-endpoint-intake *args: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
-test-web-console:
-    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console
+test-web-console *args:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console -- {{ args }}
 
 test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
+
+# Measure the ordinary harness owners without clearing the current workspace profiles.
+coverage-harness-liveness-workspace output *args: tests-deps
+    cargo llvm-cov --no-clean --features testing --test harness_liveness --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure native consensus transport regressions through the configured compiler cache.
+coverage-consensus output *args:
+    cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
@@ -1048,6 +1105,29 @@ check-coverage report="lcov-workspace.info":
 coverage-patch base="origin/main" report="lcov-workspace.info" *args:
     python3 -m scripts.patch_coverage --base {{ quote(base) }} --report {{ quote(report) }} --output {{ quote(cargo_target_dir + "/patch-coverage.md") }} {{ args }}
 
+# Measure ordinary harness regressions separately from product coverage and diagnostic profiles.
+coverage-harness-liveness *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    harness_reports={{ quote(cargo_target_dir + "/harness-coverage-reports") }}
+    mkdir -p "$harness_reports"
+    harness_report="$(mktemp -d "$harness_reports/run.XXXXXX")"
+    echo "harness coverage attempt: $harness_report"
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }}
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --features testing --package nervix-server --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_report/tests.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$harness_report/tests.log"; then
+        echo "harness coverage selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
+    cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path "$harness_report/lcov.info"
+    echo "harness coverage report: $harness_report/lcov.info"
+
+# Export the current ordinary harness profiles after a replay, without another test invocation.
+coverage-harness-liveness-report output:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }} cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every
 # label-gated method is on the pull request. Writes the register, with every gap an owner of tracked
@@ -1109,7 +1189,7 @@ test-coverage-feature +features: tests-deps
 # public-scenario coverage collected by `test-coverage-feature`.
 test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
-        --package nervix-client-core --package nervix-client-wire \
+        --package nervix-client-core --package nervix-client-wire --package nervix-client-ffi \
         --package nervix-models --package nervix-cli --package nervix-web-console
 
 # Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
@@ -1643,6 +1723,7 @@ coverage-model-runner:
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
 bench *args: build-web-console
+    cargo bench --package nervix-primitives --features native --bench ordinary_cost -- {{ args }}
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
@@ -1657,6 +1738,7 @@ bench-smoke: build-web-console wasm-processor-guests download-onnxruntime bench-
 # The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
 bench-smoke-bodies:
+    cargo bench --profile dev --package nervix-primitives --features native --bench ordinary_cost -- --test
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench admitted_work --features benchmarks -- --test
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
@@ -1678,6 +1760,16 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Measure ordinary native atomic, publication, lock and reference-count costs on this host.
+# Model and diagnostic builds have different instrumentation and are not performance baselines.
+bench-primitives *args:
+    cargo bench --package nervix-primitives --features native --bench ordinary_cost -- {{ args }}
+
+# Cover the primitive cost probe's executable paths without treating instrumented time as a
+# performance measurement.
+coverage-bench-primitives output="target/primitives-ordinary-cost.lcov":
+    cargo llvm-cov --package nervix-primitives --features native --bench ordinary_cost --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --test
 
 # Exercise the admission benchmark's current emitter context while measuring its line coverage.
 coverage-admitted-work output="target/admitted-work.lcov": build-web-console
@@ -1770,6 +1862,10 @@ benchmark *args:
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
 
+# Measure the load driver's preparation controls with ordinary native coverage.
+coverage-benchmark-load output="target/benchmark-load.lcov":
+    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- empty_topic_setup
+
 # Build the pinned Flink image with its matching Kafka SQL connector.
 benchmark-flink-image:
     docker build --file "{{ justfile_directory() }}/benches/flink/Dockerfile" \
@@ -1854,6 +1950,7 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 cargo-fmt:
     cargo +nightly fmt
 
+# Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format
 
@@ -2560,6 +2657,38 @@ chaos *args:
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
+
+# Exercise bounded packet sampling and the directed-link effect limits without a product image.
+test-chaos-degraded-evidence:
+    exec bash scripts/chaos/tests/degraded-self-test.sh
+
+# Retain shell coverage of packet sampling, evidence parsing and effect controls.
+coverage-chaos-degraded-evidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/link-degradation.sh") }},{{ quote(invocation_directory() / "scripts/chaos/verify-degraded-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/degraded-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-degraded-evidence-coverage") }} scripts/chaos/tests/degraded-self-test.sh
+
+# Judge retained public clock transcripts through the external verifier.
+verify-chaos-clock *args:
+    exec bash scripts/chaos/verify-clock-evidence.sh {{ args }}
+
+# Run the state, clock and window verifier controls without the other external harness checks.
+test-chaos-stateful-verifiers:
+    exec bash scripts/chaos/tests/stateful-self-test.sh
+
+# Retain shell coverage of the state, clock and window verifier controls.
+coverage-chaos-stateful-verifiers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-clock-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/stateful-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-stateful-verifier-coverage") }} scripts/chaos/tests/stateful-self-test.sh
 
 # Requires kcov; retains shell Cobertura coverage for the probe and its regression controls.
 coverage-chaos-rate-probe:

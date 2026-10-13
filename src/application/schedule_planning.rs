@@ -86,7 +86,10 @@ impl SchedulePlanningMode {
 pub(in crate::application) struct DomainSchedulePlanningSnapshot {
     domain: DomainName,
     voters: SortedSet<ClusterNodeName>,
+    cordoned: Vec<ClusterNodeName>,
     live_identities: BTreeSet<ClusterNodeIdentity>,
+    /// Captured process state for diagnostics, independent of the placement publication fence.
+    terminating_node_ids: BTreeSet<ClusterNodeName>,
     placement_candidate_identities: BTreeSet<ClusterNodeIdentity>,
     live_voters: SortedSet<ClusterNodeName>,
     cluster_nodes: SortedSet<ClusterNodeName>,
@@ -98,6 +101,7 @@ impl DomainSchedulePlanningSnapshot {
     fn eligibility_inputs(
         availability: &nervix_consensus::GossipState,
         voters: &[ClusterNodeName],
+        cordoned: &[ClusterNodeName],
     ) -> (BTreeSet<ClusterNodeIdentity>, BTreeSet<ClusterNodeIdentity>) {
         let live_identities = availability
             .live_identities()
@@ -107,7 +111,10 @@ impl DomainSchedulePlanningSnapshot {
         let placement_candidates = availability.placement_candidate_node_ids();
         let placement_candidate_identities = live_identities
             .iter()
-            .filter(|identity| placement_candidates.contains(identity.node_id()))
+            .filter(|identity| {
+                placement_candidates.contains(identity.node_id())
+                    && !cordoned.contains(identity.node_id())
+            })
             .cloned()
             .collect();
         (live_identities, placement_candidate_identities)
@@ -117,8 +124,10 @@ impl DomainSchedulePlanningSnapshot {
         planned: &nervix_consensus::GossipState,
         current: &nervix_consensus::GossipState,
         voters: &[ClusterNodeName],
+        cordoned: &[ClusterNodeName],
     ) -> bool {
-        Self::eligibility_inputs(planned, voters) == Self::eligibility_inputs(current, voters)
+        Self::eligibility_inputs(planned, voters, cordoned)
+            == Self::eligibility_inputs(current, voters, cordoned)
     }
 
     pub(in crate::application) fn prepare(
@@ -180,11 +189,8 @@ impl DomainSchedulePlanningSnapshot {
             .collect()
     }
 
-    pub(in crate::application) fn placement_candidate_node_ids(&self) -> BTreeSet<ClusterNodeName> {
-        self.placement_candidate_identities
-            .iter()
-            .map(|identity| identity.node_id().clone())
-            .collect()
+    pub(in crate::application) fn terminating_node_ids(&self) -> &BTreeSet<ClusterNodeName> {
+        &self.terminating_node_ids
     }
 
     pub(in crate::application) fn live_identities(&self) -> &BTreeSet<ClusterNodeIdentity> {
@@ -218,13 +224,16 @@ impl DomainSchedulePlanningSnapshot {
     }
 
     /// Recheck the volatile liveness and process-incarnation inputs consumed by this plan.
+    /// A captured cordon already excludes its node from placement; observing that same live
+    /// incarnation terminate does not change a destination the plan could use. The node's live
+    /// identity remains fenced because it may still own the state being handed over.
     pub(in crate::application) async fn validate_eligibility(
         &self,
         service: &SessionServiceImpl,
     ) -> error_stack::Result<(), SchedulePlanningStale> {
         let availability = service.inner.cluster.availability_state().await;
         let (live_identities, placement_candidate_identities) =
-            Self::eligibility_inputs(&availability, &self.voters);
+            Self::eligibility_inputs(&availability, &self.voters, &self.cordoned);
         if self.live_identities != live_identities
             || self.placement_candidate_identities != placement_candidate_identities
         {
@@ -242,8 +251,17 @@ impl SessionServiceImpl {
         expected: &TransactionScheduleEligibility,
     ) -> error_stack::Result<(), SchedulePlanningStale> {
         let availability = self.inner.cluster.availability_state().await;
+        let inputs = self
+            .inner
+            .consensus
+            .domain_planning_inputs(expected.domain())
+            .await;
         let (live_identities, placement_candidate_identities) =
-            DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, expected.voters());
+            DomainSchedulePlanningSnapshot::eligibility_inputs(
+                &availability,
+                expected.voters(),
+                inputs.topology().cordoned(),
+            );
         let expected_live = expected.live_identities().iter().cloned().collect();
         let expected_candidates = expected
             .placement_candidate_identities()
@@ -298,11 +316,17 @@ impl SessionServiceImpl {
         let availability = self.inner.cluster.availability_state().await;
         let voters: SortedSet<ClusterNodeName> =
             inputs.topology().voters().iter().cloned().collect();
+        let cordoned = inputs.topology().cordoned();
         let (live_identities, placement_candidate_identities) =
-            DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters);
+            DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters, cordoned);
         let live_node_ids = availability.live_node_ids();
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-        let cordoned = inputs.topology().cordoned();
+        let terminating_node_ids = availability
+            .latest_nodes_by_id()
+            .into_values()
+            .filter(|node| node.terminating && live_identities.contains(&node.identity()))
+            .map(|node| node.node_id)
+            .collect();
         let live_voters: SortedSet<ClusterNodeName> = live_node_ids
             .into_iter()
             .filter(|node| voters.contains(node))
@@ -321,7 +345,9 @@ impl SessionServiceImpl {
         DomainSchedulePlanningSnapshot {
             domain: inputs.domain().clone(),
             voters,
+            cordoned: cordoned.to_vec(),
             live_identities,
+            terminating_node_ids,
             placement_candidate_identities,
             live_voters,
             cluster_nodes,
@@ -389,14 +415,93 @@ mod tests {
             &planned,
             &terminating,
             &voters,
+            &[],
         ));
         assert!(!DomainSchedulePlanningSnapshot::same_eligibility(
-            &planned, &restarted, &voters,
+            &planned,
+            &restarted,
+            &voters,
+            &[],
         ));
         assert!(DomainSchedulePlanningSnapshot::same_eligibility(
-            &planned, &unrelated, &voters,
+            &planned,
+            &unrelated,
+            &voters,
+            &[],
+        ));
+        assert!(DomainSchedulePlanningSnapshot::same_eligibility(
+            &planned,
+            &terminating,
+            &voters,
+            &voters,
+        ));
+        assert!(!DomainSchedulePlanningSnapshot::same_eligibility(
+            &planned, &restarted, &voters, &voters,
+        ));
+        let absent = GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        assert!(!DomainSchedulePlanningSnapshot::same_eligibility(
+            &planned, &absent, &voters, &voters,
         ));
     }
+    #[nervix_primitives::test]
+    async fn a_cordoned_owner_can_begin_terminating_after_its_schedule_is_planned() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let local_node = service.inner.consensus.local_node_id().clone();
+        service
+            .inner
+            .consensus
+            .set_node_cordoned(local_node.clone(), true)
+            .await
+            .assured("the drain's cordon commits before planning");
+        let inputs = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let planning = service
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        let eligibility = planning.transaction_eligibility();
+        assert!(planning.cluster_nodes().is_empty());
+        assert!(planning.placement_candidate_identities().is_empty());
+        assert_eq!(planning.live_identities().len(), 1);
+        assert!(planning.terminating_node_ids().is_empty());
+        service.inner.cluster.mark_local_terminating().await;
+        let current = service
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        assert_eq!(
+            current.terminating_node_ids(),
+            &BTreeSet::from([local_node])
+        );
+
+        service
+            .validate_domain_planning_inputs(&inputs)
+            .await
+            .assured("the terminating advertisement does not change consensus inputs");
+        planning
+            .validate_eligibility(&service)
+            .await
+            .assured("a cordoned former owner was already excluded from placement");
+        service
+            .validate_transaction_schedule_eligibility(&eligibility)
+            .await
+            .assured("a transaction uses the same captured placement candidates");
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
     #[nervix_primitives::test]
     async fn captured_planning_basis_classifies_each_stale_input() {
         let TestService {
@@ -500,6 +605,14 @@ mod tests {
             error.current_context(),
             SchedulePlanningStale::Topology { .. }
         ));
+
+        let local_node = service.inner.consensus.local_node_id().clone();
+        service
+            .inner
+            .consensus
+            .set_node_cordoned(local_node, false)
+            .await
+            .assured("the fixture restores placement eligibility before testing termination");
 
         let inputs = service
             .inner

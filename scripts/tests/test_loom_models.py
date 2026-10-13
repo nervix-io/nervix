@@ -5,6 +5,7 @@ import json
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable, Mapping, Sequence
@@ -24,6 +25,7 @@ from scripts.loom_models import (
     listed_tests,
     parse_inventory,
     qualify,
+    qualify_one,
     qualification_failure,
     replay,
     run_models,
@@ -353,6 +355,73 @@ SECOND_WEAKENING = (
 
 
 class QualificationTests(unittest.TestCase):
+    def test_a_successful_qualification_retains_its_counterexample_and_replay(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.lock").write_text(
+                '[[package]]\nname = "loom"\nversion = "0.7.2"\n', encoding="utf-8"
+            )
+            manifest = root / "copy/Cargo.toml"
+            manifest.parent.mkdir()
+            manifest.write_text("[workspace]\n", encoding="utf-8")
+            target = root / "target"
+            registered = inventory()
+            qualification = registered.qualifications[0]
+            directory = target / "loom-qualification" / qualification.id
+            checkpoint_value = '{"pos": 0}\n'
+            replay_value = '{"pos": 1}\n'
+            bounds = "preemption bound: none, branch limit: 1000, thread limit: 5"
+            output = (
+                "Running unittests src/lib.rs\n"
+                f"nervix-model-harness: exploring loom invariant {qualification.invariant} "
+                f"to exhaustion ({bounds})\n"
+                f"thread panicked: {qualification.failure}\n"
+            )
+
+            def respond(arguments: Sequence[str]) -> Outcome:
+                if list(arguments) == ["git", "rev-parse", "HEAD"]:
+                    return Outcome(0, "f" * 40 + "\n")
+                if list(arguments) == ["git", "status", "--porcelain"]:
+                    return Outcome(0, "")
+                if list(arguments) == ["rustc", "-vV"]:
+                    return Outcome(0, "rustc qualification-fixture\n")
+                self.assertEqual(arguments[0], "cargo")
+                checkpoint = Path(commands.environments[-1]["LOOM_CHECKPOINT_FILE"])
+                if checkpoint.name == "checkpoint.json":
+                    checkpoint.write_text(checkpoint_value, encoding="utf-8")
+                else:
+                    self.assertEqual(checkpoint.read_text(encoding="utf-8"), checkpoint_value)
+                    checkpoint.write_text(replay_value, encoding="utf-8")
+                return Outcome(101, output)
+
+            commands = ScriptedCommands(root, respond)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                problem = qualify_one(
+                    commands, registered, target, qualification, manifest,
+                    {"CARGO_TARGET_DIR": str(root / "build")},
+                )
+            self.assertIsNone(problem)
+            self.assertTrue(
+                (directory / "checkpoint.json").is_file(), "successful counterexample was discarded"
+            )
+            self.assertEqual((directory / "checkpoint.json").read_text(), checkpoint_value)
+            self.assertEqual((directory / "replay-checkpoint.json").read_text(), replay_value)
+            self.assertEqual((directory / "output.log").read_text(), output)
+            self.assertEqual((directory / "replay.log").read_text(), output)
+            metadata = json.loads((directory / "metadata.json").read_text())
+            self.assertEqual(metadata["qualification"], asdict(qualification))
+            self.assertEqual(metadata["qualification_status"], "passed")
+            self.assertEqual(metadata["revision"], "f" * 40)
+            self.assertFalse(metadata["working_tree_modified"])
+            self.assertEqual(metadata["loom"], "0.7.2")
+            self.assertEqual(metadata["test"], PUBLICATION_TEST)
+            self.assertEqual(metadata["exploration"], bounds)
+            self.assertEqual(metadata["checkpoint"], "checkpoint.json")
+            self.assertEqual(metadata["exit_status"], 101)
+            self.assertEqual(metadata["checkpoint_replay"]["exit_status"], 101)
+            self.assertEqual(metadata["checkpoint_replay"]["checkpoint"], "replay-checkpoint.json")
+            self.assertEqual(metadata["checkpoint_replay"]["command"], metadata["command"])
+
     def qualify_tree(
         self, inventory_text: str, shard: Shard
     ) -> tuple[int, list[str], ScriptedCommands, Path]:

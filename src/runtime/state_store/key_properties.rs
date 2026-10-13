@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** Generated placements of every runtime state, Model kind, namespace and branch scope;
 //!   the projection the stored-key decoder recovers from their keys; the prefixes scans rely on;
-//!   and damaged keys read through the same decoder.
+//!   and damaged placement and chunk keys read through the same decoders.
 //! - **Depends on.** The production key layout and decoders, typed branch keys, and the
 //!   vocabulary generators.
 //! - **Must not know.** Checkpoint payloads, replication, or guest callbacks.
@@ -16,7 +16,10 @@
 use nervix_arbitrary::{Arbitrary, Domain};
 
 use super::{
-    generation::{StateNamespace, chunk_prefix, domain_prefix, index_key, physical_namespace},
+    generation::{
+        CheckpointChunkSet, StateNamespace, chunk_prefix, domain_prefix, index_key,
+        physical_namespace,
+    },
     *,
 };
 
@@ -53,7 +56,7 @@ pub(super) fn generated_placement(arbitrary: &mut Arbitrary<'_>) -> RuntimeState
 }
 
 /// The initial namespace, or a restored one of any generation.
-fn generated_namespace(arbitrary: &mut Arbitrary<'_>) -> StateNamespace {
+pub(super) fn generated_namespace(arbitrary: &mut Arbitrary<'_>) -> StateNamespace {
     if arbitrary.entropy().flag() {
         StateNamespace::Restored(arbitrary.entropy().any_u64())
     } else {
@@ -150,6 +153,75 @@ fn damage(arbitrary: &mut Arbitrary<'_>, key: &mut Vec<u8>) {
     }
 }
 
+/// The physical key of any placement in any namespace.
+pub(super) fn generated_placement_key(arbitrary: &mut Arbitrary<'_>) -> Vec<u8> {
+    let placement = generated_placement(arbitrary);
+    generated_namespace(arbitrary)
+        .key(&placement)
+        .assured("a generated placement stays inside the key bound")
+}
+
+/// The key of a chunk at any offset of any revision of the placement `placement_key` names.
+pub(super) fn generated_chunk_key(arbitrary: &mut Arbitrary<'_>, placement_key: &[u8]) -> Vec<u8> {
+    let mut key = chunk_prefix(placement_key, arbitrary.entropy().any_u64());
+    key.extend_from_slice(&arbitrary.entropy().any_u64().to_be_bytes());
+    key
+}
+
+/// Up to `bytes` arbitrary bytes.
+pub(super) fn arbitrary_key(arbitrary: &mut Arbitrary<'_>, bytes: usize) -> Vec<u8> {
+    let mut key = Vec::new();
+    for _ in 0..arbitrary.entropy().count(bytes) {
+        key.push(arbitrary.entropy().byte());
+    }
+    key
+}
+
+/// Damages `key` up to three times.
+pub(super) fn damage_repeatedly(arbitrary: &mut Arbitrary<'_>, key: &mut Vec<u8>) {
+    let damages = arbitrary.entropy().between(0..=3);
+    for _ in 0..damages {
+        damage(arbitrary, key);
+    }
+}
+
+/// Asserts that `key`, which the stored-key decoder read as `stored` in `namespace`, is exactly the
+/// key of that placement: a canonical domain, separators where the layout puts them, the canonical
+/// spelling of the kind and name, and a branch scope that ends the key or holds the branch text the
+/// fingerprint names.
+fn assert_canonical_placement_key(key: &[u8], namespace: StateNamespace, stored: &StoredPlacement) {
+    let domain_end = key
+        .iter()
+        .position(|byte| *byte == 0)
+        .verified("a decoded key separates its domain");
+    let domain =
+        std::str::from_utf8(&key[..domain_end]).assured("an accepted key holds its domain as text");
+    let domain = DomainName::decode(domain).assured("an accepted key holds a canonical domain");
+    let unbranched = RuntimeStatePlacement {
+        domain,
+        state: stored.state,
+        kind: stored.kind,
+        identifier: stored.identifier.clone(),
+        branch_key: None,
+    };
+    let unbranched = namespace
+        .key(&unbranched)
+        .assured("a decoded placement stays inside the key bound");
+    let Some(fingerprint) = stored.branch else {
+        assert_eq!(key, unbranched);
+        return;
+    };
+    let scope = unbranched
+        .len()
+        .checked_sub(1)
+        .verified("an unbranched key ends with its scope byte");
+    assert_eq!(key[..scope], unbranched[..scope]);
+    assert_eq!(key[scope], 1);
+    let text = std::str::from_utf8(&key[scope + 1..])
+        .assured("an accepted branched key holds its branch as text");
+    assert_eq!(fingerprint, BranchKeyFingerprint::of_canonical_text(text));
+}
+
 /// Damaged or arbitrary stored keys either fail with the store's typed storage failure, or decode
 /// to a placement whose own key is exactly the stored key: a canonical domain, separators where the
 /// layout puts them, the canonical spelling of the kind and name, and a branch scope that ends the
@@ -162,21 +234,11 @@ fn bolero_malformed_runtime_state_keys_fail_typed_or_decode_canonically() {
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
             let mut key = if arbitrary.entropy().flag() {
-                let placement = generated_placement(&mut arbitrary);
-                generated_namespace(&mut arbitrary)
-                    .key(&placement)
-                    .assured("a generated placement stays inside the key bound")
+                generated_placement_key(&mut arbitrary)
             } else {
-                let mut key = Vec::new();
-                for _ in 0..arbitrary.entropy().count(64) {
-                    key.push(arbitrary.entropy().byte());
-                }
-                key
+                arbitrary_key(&mut arbitrary, 64)
             };
-            let damages = arbitrary.entropy().between(0..=3);
-            for _ in 0..damages {
-                damage(&mut arbitrary, &mut key);
-            }
+            damage_repeatedly(&mut arbitrary, &mut key);
 
             let (namespace, stored) = match physical_placement(&key) {
                 Ok(decoded) => decoded,
@@ -192,37 +254,54 @@ fn bolero_malformed_runtime_state_keys_fail_typed_or_decode_canonically() {
                     return;
                 }
             };
-            let domain_end = key
-                .iter()
-                .position(|byte| *byte == 0)
-                .verified("a decoded key separates its domain");
-            let domain = std::str::from_utf8(&key[..domain_end])
-                .assured("an accepted key holds its domain as text");
-            let domain =
-                DomainName::decode(domain).assured("an accepted key holds a canonical domain");
-            let unbranched = RuntimeStatePlacement {
-                domain,
-                state: stored.state,
-                kind: stored.kind,
-                identifier: stored.identifier.clone(),
-                branch_key: None,
+            assert_canonical_placement_key(&key, namespace, &stored);
+        });
+}
+
+/// Damaged or arbitrary chunk keys either fail with the typed chunk, storage-format or decoding
+/// failure, or name a segment set whose placement key decodes canonically and whose chunk prefix,
+/// followed by the key's own offset, is exactly the key, below the set's exclusive end.
+#[test]
+fn bolero_malformed_chunk_keys_fail_typed_or_decode_canonically() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|bytes: &[u8]| {
+            let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+            let mut key = if arbitrary.entropy().flag() {
+                let placement_key = generated_placement_key(&mut arbitrary);
+                generated_chunk_key(&mut arbitrary, &placement_key)
+            } else {
+                arbitrary_key(&mut arbitrary, 96)
             };
-            let unbranched = namespace
-                .key(&unbranched)
-                .assured("a decoded placement stays inside the key bound");
-            let Some(fingerprint) = stored.branch else {
-                assert_eq!(key, unbranched);
-                return;
+            damage_repeatedly(&mut arbitrary, &mut key);
+
+            let chunks = match CheckpointChunkSet::try_from(key.as_slice()) {
+                Ok(chunks) => chunks,
+                Err(report) => {
+                    assert!(
+                        matches!(
+                            report.current_context(),
+                            RuntimePersistenceError::InvalidCheckpointChunks
+                                | RuntimePersistenceError::InvalidStorageFormat
+                                | RuntimePersistenceError::DecodeState
+                        ),
+                        "{report:?}"
+                    );
+                    return;
+                }
             };
-            let scope = unbranched
+            let offset = key
                 .len()
-                .checked_sub(1)
-                .verified("an unbranched key ends with its scope byte");
-            assert_eq!(key[..scope], unbranched[..scope]);
-            assert_eq!(key[scope], 1);
-            let text = std::str::from_utf8(&key[scope + 1..])
-                .assured("an accepted branched key holds its branch as text");
-            assert_eq!(fingerprint, BranchKeyFingerprint::of_canonical_text(text));
+                .checked_sub(std::mem::size_of::<u64>())
+                .verified("an accepted chunk key ends with its coordinates");
+            let mut respelled = chunk_prefix(chunks.placement_key, chunks.lsm);
+            respelled.extend_from_slice(&key[offset..]);
+            assert_eq!(respelled, key);
+            let (namespace, stored) = physical_placement(chunks.placement_key)
+                .assured("an accepted chunk key holds a decodable placement key");
+            assert_canonical_placement_key(chunks.placement_key, namespace, &stored);
+            assert!(key < chunks.exclusive_end());
         });
 }
 

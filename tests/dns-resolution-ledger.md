@@ -173,6 +173,7 @@ TLS verification, while its connection deadline includes lookup and ordered addr
 | Native DNS errors remain typed, a silent lookup is canceled by the connection deadline, and a second address can connect | `just test-package-lib nervix-client-core native_session_` |
 | OTEL exports logs, traces and metrics to a hostname, retries through an outage, and tries a usable address after an unreachable first address | `runtime/otel_emission.feature`: the log/trace and HTTP/gRPC metric outlines, each with one and three nodes |
 | Constructing OTEL's lazy gRPC channel makes no DNS query; its first export does | `just test-package-lib nervix-connector-otel lazy_grpc_channel_resolves_only_when_an_export_needs_a_connection` |
+| A prepared OTEL gRPC export recovers after a negative answer expires, asks DNS again and delivers its original bytes exactly once to a real receiver within ten seconds | `just test-package-lib nervix-connector-otel a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer_expires`; [Primitives 06.8](https://app.clickup.com/t/86bcgn382) retains the failed public attempt and later controls without attributing its cause |
 | The production, Shuttle, Turmoil and browser builds keep their boundaries | `just validate`, `just validate-dns-dependencies`, `just test-turmoil`; the web-console build is part of `just test-scenarios` setup |
 
 ## Hickory DNS 07 acceptance

@@ -1,5 +1,24 @@
 # Integration Test Lifecycle
 
+## Paced Interconnect Fixture
+
+The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
+node. Its listener takes the existing advertised endpoint and forwards opaque bytes to a private
+interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer
+routes also reach the pacer. Its port remains reserved for the test run, as for other retired test
+endpoints. The host, TLS identity, resolver policy and product deadlines stay fixed. Each accepted
+connection uses a 1024-byte inbound buffer, delays each chunk
+by its configured byte rate before forwarding, and forwards responses promptly. A scenario-owned
+task set retains and reaps connections. Cancellation or fixture drop closes the listener and aborts
+all its connections; the fixture cannot survive its node specification.
+
+The scenario starts the follower once without the harness's catch-up retries, records append
+stream opening baselines before that start, and waits for the applied NSPL domain backlog within
+its explicit assertion bound. The opening count is a diagnostic observation because normal initial
+catch-up probes can also open streams. An atomic maximum of bytes forwarded on one connection proves
+that the paced path carried more than one production progress interval. This observation does not inspect TLS or frame bytes
+and establishes no ordering the product relies on.
+
 The Cucumber scenario suite runs Nervix the way an operator does. It starts clusters, drives them
 through the session API, brokers, and HTTP endpoints, and asserts on what they do. Many scenarios
 run at once in one test process, each with nodes of its own, so the harness around them is a
@@ -337,6 +356,20 @@ The boundary between them is kept in four places.
   stopping the writer finishes its admitted command before counting completed writes: the response
   can arrive after all voters have already applied that command. The fixture still checks the
   storage-derived catch-up bound, append-stream limit and commands-memory budget.
+  A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
+  observability, web console, or interconnect. A readiness timeout may still move all listeners
+  within the same startup budget. A changed interconnect address remains reserved while a peer
+  may dial it. Metrics sampling follows the actual observability endpoint before the next launch.
+  The durable catch-up scenario deliberately occupies the stopped follower's observability port
+  until cleanup of its first startup attempt, so a metrics bind collision cannot silently turn
+  the measured catch-up into an interconnect address and membership change.
+  The planned Kafka handoff scenario installs its subscription and emitter stall, publishes and
+  flushes both branch records, and then starts intake. Both records are therefore available to
+  its first parallel batch. The source host waits for that batch's attached ACKs before polling
+  the next batch; separate publications after intake starts do not establish one batch.
+  `just coverage-harness-liveness-workspace <report>` measures the ordinary startup and other
+  harness owner regressions through the configured compiler cache and preserves the current
+  workspace profiles.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -511,6 +544,11 @@ node stopped. The OTEL metric scenario observes one successful export from each 
 owner before checking Collector output. HTTP intake acceptance does not establish sink export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
+The OTEL Collector content wait keeps its ten-second observation bound. If that bound expires,
+its failure includes the last command output and a collector log snapshot, or the snapshot's
+read error. A collector timeout alone does not establish that the emitter lost a record or failed
+to export it; retained diagnostics and a new attempt remain separate evidence.
+
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
@@ -605,15 +643,16 @@ After an attempt fails, the harness classifies the failure, cleans up, and recor
 | Failure | Classification |
 | --- | --- |
 | The harness could not launch the node: an address it could not parse, the test certificate authority, or the node's database directory | Terminal: the harness's own configuration, which the next launch repeats |
-| Readiness did not arrive before the attempt's deadline | Transient: the resource pressure the budget exists for |
-| The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient: another process took the port first, and fresh ports resolve it |
+| Readiness did not arrive before the attempt's deadline | Transient, selecting all listeners: the resource pressure the budget exists for |
+| The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient, selecting that listener family: another process took the port first, and its fresh addresses resolve it |
 | The task ended with any other application error, a clean exit, a panic, or a cancellation | Terminal: the node decided it from its configuration, its stored state, or its own code |
 
 Cleanup requests the node's stop and waits for its task within a 5-second slice of what the budget
 has left. A node that never became ready has no drain to finish, so the product's shutdown deadline
 plays no part here. A node whose task ended inside the slice gives back its consensus fault
-registration, and after a transient failure it moves to seven freshly allocated ports, so a launch
-that lost a port race does not repeat it, and the harness pauses one second before launching again.
+registration, and after a transient failure it moves the selected listeners to freshly allocated
+ports. A bind failure preserves unrelated addresses; a readiness timeout selects all seven ports.
+The harness pauses one second before launching again.
 
 A node still stopping when the slice passes is never launched again. It still holds its database
 and its listeners, and it will until its own shutdown has finished, so a fresh launch into the same
@@ -807,6 +846,15 @@ A step that replaces a scenario's cluster with a fresh one stops the old cluster
 budget and fails when a node of it was left stopping: that node still runs beside the cluster that
 would replace it, so the replacement has not happened.
 
+The consensus fault registration keeps an observer of the node's consensus state, as does every
+observer a step took from it, so the node's consensus database stays open after the node's task has
+ended until the last of those observers is dropped. That drop closes the database synchronously, on
+the task that makes it: the close synchronizes the journal and waits until none of the database's
+background workers is left. Cleanup and [scenario-driven stops](#scenario-driven-stops) give the
+registration back on the runner task, so every scenario and the suite watchdog wait for that close,
+while a keeper gives it back on a runtime worker. The close never waits for a worker whose flush or
+compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
+
 ### What Cleanup Releases
 
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
@@ -837,10 +885,12 @@ with it, so the harness never cuts a product deadline short.
 Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
 the graceful stop used to exercise ownership handoff during drain.
 
-A stop that ends cleanly is followed by a check that the node released its node and consensus
-database locks. The step fails when the node's task panicked, when the watchdog passed with the node
-still stopping, or when a lock outlived the stop. A node still stopping keeps its task, its ports
-and its fault registration, and the scenario's cleanup waits for it again or leaves it stopping.
+Once the node's task has ended, the stop gives back the node's consensus fault registration, which
+closes its consensus database as [Cluster Teardown](#cluster-teardown) describes, and a stop that
+ended cleanly then checks that the node released its node and consensus database locks. The step
+fails when the node's task panicked, when the watchdog passed with the node still stopping, or when
+a lock outlived the stop. A node still stopping keeps its task, its ports and its fault
+registration, and the scenario's cleanup waits for it again or leaves it stopping.
 Stopping every node requests every stop first and then waits for each node in turn. A scenario can
 also begin stopping a node without waiting, to observe how the cluster reacts while the node is on
 its way down; its cleanup waits for it later.
@@ -904,6 +954,18 @@ the process does between a signal and its exit is product behavior; see [Shutdow
 Recovery](./shutdown.md#exit-status).
 
 ## Test Dependencies
+
+The external Chaos directed-rate probe times the sender's connection and the receiver's complete
+byte count through helper-local kernel uptime. A successful observation requires the same kernel
+boot identity and boot-time offset at both helpers. Namespace identifiers are diagnostic values;
+they do not identify the clock coordinate. The ten-millisecond clock precision produces a duration
+upper bound. Its lower bound subtracts two ticks from that upper bound because both endpoint
+readings can round down. Rate-effect qualification requires the fault's lower bound to reach twice
+the baseline's upper bound. Docker control time remains in separate helper-lifetime evidence and the
+unchanged ninety-second total probe budget. Missing, malformed or mismatched clocks fail the
+observation with raw helper logs retained. Direct Docker controls exercise launch delay, actual
+connection and receiver stalls, byte-count failures, failed helper operations and the real rate
+effect; they qualify the harness measurement and establish no product recovery outcome.
 
 Brokers, databases, and the other external systems that scenarios use run as containers, started the
 first time a scenario needs one and shared by every scenario of the run. The run removes them when
@@ -1307,11 +1369,15 @@ timeout](#the-suite-watchdog) diagnostic and its own cleanup before the lane wou
 reserve is six minutes: the four the suite's own cleanup can take after its budget, with two to
 spare. A bound that expires anyway ends the binary with `SIGTERM` and, after the stop grace period,
 `SIGKILL` for its whole group; Ryuk removes the containers the binary started when its connection
-closes.
+closes. A stall of the runner task itself ends only this way, because the suite watchdog runs on
+that task, and the binary then prints no Cucumber summary. Unless a tracked lock takes part in the
+stall, the lane records it as `timed-out` with no finding: a wait inside a dependency, such as the
+storage engine's own worker channel while a database closes, is visible only in a stack of the
+binary's threads taken before the bound expires.
 
 In CI the `deloxide` job, which runs only for a pull request labeled `deloxide`, runs each
-selection on its own 16-vCPU runner through
-`just coverage-native-extras test-deloxide`, `test-deloxide-order` or `test-deloxide-stress`, then
+selection on its own 16-vCPU runner through `just coverage-native-extras test-deloxide`,
+`test-deloxide-order`, `test-deloxide-stress` or `test-deloxide-stress-restore`, then
 `just test-deloxide-qualification` for the same selection, and uploads every attempt whatever the
 verdict.
 
@@ -1380,6 +1446,60 @@ scenarios two to three times slower than CI, so `deloxide-stress-restore` expire
 saturated, or again once their builds are warm; an expired budget ends the lane with status `124`,
 never as a clean result.
 
+For a focused comparison, `just test-diagnostic-scenarios <selection> <feature> --name
+<scenario> --concurrency 2 --retry 0` builds and runs the public scenario in `deloxide`,
+`deloxide-order` or `deloxide-stress`, with the lane's prerequisites and ordinary CLI. Its builds
+share the diagnostic target directory. The recipe resolves its feature file to an absolute path:
+Cucumber's relative input glob walks the entire working directory, including build artifacts,
+before starting any scenario. The absolute input glob matches the exact file in its containing
+directory. Argument boundaries, including a scenario name with spaces, are preserved. Each attempt
+retains its output under `target/deloxide/focused/<selection>/run.*` and rejects an empty scenario
+selection. It records detector evidence there unless `NERVIX_DEADLOCK_EVIDENCE` names another
+directory. Use a fresh evidence directory for each run and retain the standard output, scenario
+log and suite summary together. The complete lane remains the entry point for inventory accounting
+and diagnostic evidence qualification.
+
+In this comparison, `--concurrency` counts scenarios in one process. Their in-process nodes share
+one runtime and one detector; the runtime still has one worker per available CPU. Record the
+available CPU count, affinity and host load, and keep them the same for the plain and stressed
+selections. A failure's phase matters: missing generator rows immediately after restore and missing
+rows after a subsequent restart exercise different installation boundaries. Preserve the first
+failure, the missing relay and tenant identities, and any stop or startup deadline outcome before
+running a control. A passing control or replay describes that run only.
+
+The oversized materialized-generation assertion preserves its missing relay and tenant pairs,
+expected round and value length, domain, and subscription node when its row deadline expires.
+Before teardown it queries `SHOW RELAY ... MATERIALIZED STATE` on at most three nodes for the first
+four missing relays. The observations share a ten-second budget, with at most two seconds per
+query. They keep the placement, branch, round, value byte length and watermarks, without printing
+the fixture's large values. Query failure or timeout stays a diagnostic observation; the original
+exact-row assertion still fails. This observation budget starts after the row deadline and grants
+no additional time for a missing row to satisfy the assertion.
+
+`just test-diagnostic-harness <selection> <filter>` runs focused harness regressions in the chosen
+diagnostic build. `just coverage-harness-liveness <filter>` measures ordinary harness regressions
+in a separate target directory and retains its log and `lcov.info`, including the harness source,
+in a fresh `target/harness-coverage-reports/run.*` directory. Both commands reject a selection
+that completed no tests or left selected tests ignored. These counters measure the harness itself
+and do not join product coverage or qualify a diagnostic lane.
+After replaying an instrumented ordinary scenario binary from that target directory without a
+source edit, `just coverage-harness-liveness-report <output>` exports the retained profiles without
+another test invocation.
+
+Public materialized-state inspection can read installed or checkpoint state and can forward an
+empty non-owner observation to the primary. Record the addressed node and returned placement;
+rows returned by a replica's endpoint alone do not prove that replica installed the generation.
+Correlate the observations with the restore execution report, runtime log and lifecycle snapshot
+before deciding which publication or delivery owner needs a regression.
+
+A debugger attached to this process suspends every in-process node while it collects thread
+stacks. Record that suspension separately and retain the attempt as a diagnostic run; its elapsed
+time and deadline outcomes cannot qualify an uninterrupted throughput comparison. Preserve an
+unprofiled failure before collecting stacks on a diagnostic replay. Thread stacks can identify
+workers blocked in a tracked lock or the detector itself, but a suspended async task is not a
+worker's call stack. Retain the node's lifecycle and placement observations alongside the dump
+when deciding whether the failure belongs to drain, state publication or scheduling contention.
+
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is
 running with that process's whole group, records `interrupted` in `lane.json` and exits; the upload
@@ -1430,6 +1550,14 @@ tail it needs.
 ends with, so a wedged suite is told apart from a passing or a failing one by its exit status alone.
 
 ## Adding A Harness Operation
+
+The append-setup regression observes each live source's test-only setup counter before issuing a
+burst of public domain creations with one voter stopped. It checks that both survivors apply the
+burst, that attempts to the departed voter fit OpenRaft's existing 200 ms retry series plus two
+boundary attempts per source, and that the returning voter catches up. Its count bound uses the
+whole observation's elapsed time, so parallel-suite delay does not tighten the assertion. A zero
+attempt observation fails rather than claiming that pacing was exercised. The counter shares the
+probe's existing map with successful opens and is absent from the ordinary production recorder.
 
 A new operation that starts, observes, or stops something on the harness's behalf follows the same
 contract.
@@ -1499,6 +1627,10 @@ Its limits:
 - Provisioning a Kafka topic's partitions and waiting for a consumer group's members query the
   broker synchronously on the runner task, for up to 5 seconds per query, and every scenario of the
   run waits while one of those queries runs.
+- Cleanup and stops give back a stopped node's consensus fault registration on the runner task, so
+  when no step still holds an observer of the node's consensus state, the node's consensus database
+  closes there, and every scenario of the run waits until the close has synchronized the journal and
+  the database's last background worker has left.
 - Kafka committed-offset assertions query on a blocking worker with a one-second request timeout.
   A query error retries within the assertion's original deadline; persistent errors fail rather
   than count as an offset observation. An offset that crosses a forbidden threshold fails

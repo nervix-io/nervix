@@ -3,6 +3,7 @@
 
 mod downloads;
 mod progress;
+mod properties;
 mod records;
 mod restores;
 
@@ -573,9 +574,16 @@ fn a_pending_backup_reads_back_from_the_entries_it_is_recorded_as() {
     assert_eq!(PendingBackup::of_entries(foreign_reference), None);
     let foreign_domain = RecordedEntries {
         domain: Some("not a domain".to_string()),
-        ..recorded
+        ..recorded.clone()
     };
     assert_eq!(PendingBackup::of_entries(foreign_domain), None);
+    // A domain is recorded in its canonical lower-case text. An entry in another spelling was
+    // written by no console, so it is refused rather than read as the name it would parse to.
+    let respelled_domain = RecordedEntries {
+        domain: Some("Tenant".to_string()),
+        ..recorded
+    };
+    assert_eq!(PendingBackup::of_entries(respelled_domain), None);
 }
 
 #[test]
