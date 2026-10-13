@@ -1897,6 +1897,27 @@ recovery failed. Burst samples use 400 packets inside the existing observation w
 effect verifier preserves the original received and lost fractions. Failed observations remain
 retained alongside subsequent qualified samples.
 
+Kafka end-offset observations retain their exact command, raw streams, command outcome, parsed
+offset, start time, elapsed time and effective bound before the controller relies on them. Output
+stability requires consecutive successful equal observations above the accepted-input minimum.
+A failed query or a value below that minimum resets the sequence, and an individual query cannot
+outlive the remaining 30-second observation window or the whole-run deadline. The final record
+distinguishes an exhausted whole-run budget (`controller`) from failed observations, insufficient
+output or a moving boundary (`observation`). None of those observations alone proves a missing
+record; the exact ledger owns that verdict. Baseline suite budgets separately account for the full
+600-second verifier preparation allowance and the topology's execution allowance, without
+extending a product deadline.
+Kafka administration borrows no stdin or interactive terminal from the controller. A failed final
+query retains its command failure classification even after earlier successful reads, and a
+refusal to create or finish an evidence record fails the controller instead of accepting an
+unrecorded observation.
+End-offset queries execute in the existing broker, with no ephemeral container lifetime inside
+each observation window. The packaged-binary preflight retains its labeled helper until final
+run cleanup and records the command and container inspection as separate outcomes. An expired
+Docker client command remains a failed observation even if inspection sees a successfully exited
+helper; a missing or invalid inspection is also a failure. The controller does not reinterpret
+such refusals as missing binaries. Its live Docker event recording begins before this probe.
+
 The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
 failed measurement. Before any warm-up input, its empty-topic preparation retries only the
 driver's typed `NotLeaderForPartition` and `LeaderNotAvailable` metadata failures within one

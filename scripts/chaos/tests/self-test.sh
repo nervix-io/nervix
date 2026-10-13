@@ -14,6 +14,8 @@ if ! chaos_jq_supported; then
 fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/output-boundary-self-test.sh"
+"${script_dir}/image-package-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
