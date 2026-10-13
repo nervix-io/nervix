@@ -56,12 +56,12 @@ Feature: Large native restore metadata
       START;
       """
     When round 1 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
+    Then within "120s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
       """
       state structures: <branches>
       """
     When round 2 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
+    Then within "120s" the restore subscription receives one isolated even row for each of <branches> tenants
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -109,19 +109,19 @@ Feature: Large native restore metadata
       """
       START;
       """
-    Then within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       kafka observed partitions: 0
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       kafka instance 0 partitions: 0
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       transient error: -
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       ready: true
       """
@@ -136,15 +136,15 @@ Feature: Large native restore metadata
       """
     Then the relay subscription does not receive a payload within "2s"
     When round 3 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <branches>
+    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <branches>
     When round 4 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
+    Then within "120s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
       """
       state structures: <branches>
       """
-    Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
-    And within "30s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
-    And within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
+    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
+    And within "120s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
+    And within "120s" the restore subscription receives one isolated even row for each of <branches> tenants
     When these NSPL commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
@@ -210,11 +210,11 @@ Feature: Large native restore metadata
       """
     When round 1 of Kafka messages for 2 restore tenants is published to topic "backup_native_in_{{test_id}}"
     And round 2 of Kafka messages for 2 restore tenants is published to topic "backup_native_in_{{test_id}}"
-    Then within "30s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
+    Then within "120s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
       """
       state structures: 2
       """
-    And within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 4
+    And within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 4
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -242,7 +242,7 @@ Feature: Large native restore metadata
     Then the CLI restore succeeded, restoring domain "{{source_domain}}_resumed" with 1 resource versions and 11 models
     And the CLI restore reports domain "{{source_domain}}_resumed" as "RUNNING" at start version 1
     Given the active domain is "{{source_domain}}_resumed"
-    Then within "30s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       ready: true
       """

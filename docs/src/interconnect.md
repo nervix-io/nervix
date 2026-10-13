@@ -585,7 +585,12 @@ operation's domain semantics.
    stream with the typed transport progress timeout. A frame is decoded under the pool's memory
    and CPU admission after it leaves the stream, and a receive its caller abandons, because a timer or command it selects
    against won, leaves that decoding to the next receive, which finishes the frame before it reads
-   another. No abandoned receive loses a frame or reorders one. Consensus append traffic,
+   another. No abandoned receive loses a frame or reorders one. A stream has one codec, fixed by
+   its operation's pool class: the opening message, the initiator's frames and the responder's
+   answers are all encoded and decoded through it, under that class's memory and CPU admission and
+   within its payload limit, so what one end encodes is exactly what the other decodes. A frame
+   that would grow past the limit fails to encode, as a typed failure of the end sending it, before
+   any of its bytes is sent. Consensus append traffic,
    [client producer links](#client-producer-links) and
    [client consumer streams](#client-consumer-streams) use this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
@@ -1367,7 +1372,15 @@ with `Opened` and the producer's description or `Refused` with its refusal, then
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other
-relay-pool operation.
+relay-pool operation. A frame is bounded by the relay pool's payload limit of 32 MiB, which the
+largest batch a session admits, 4 MiB less its submission envelope, fits with room to spare.
+
+Two registered properties hold the link's frames to the stream's codec.
+`client-producer-link-frames` generates the opening message, every frame of the serving node and
+every answer of the owning node, and requires each to reach the other end with every field it was
+sent with. `client-producer-link-frames-malformed` damages those encodings, reads a frame as
+another direction's type and reads arbitrary bytes, and requires the codec's typed decode failure
+or a frame the codec keeps whole. Neither leaves relay memory charged.
 
 The owning node queues a forwarded batch like any other, but admits it only once the serving node
 has cleared it. When the batch's turn in the ingestor's window comes, the owning node takes a slot
@@ -1412,7 +1425,8 @@ reserved the same grant against its session and node budgets.
 
 The owner sends each attempt's identity, fresh ACK reference, source relay, opaque branch
 fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes.
-It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool.
+It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool and
+well within its 32 MiB payload limit.
 The serving node checks the announced length against the grant and reassembles one delivery before
 answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
 one typed result for each; an independent writer keeps settlement and heartbeat sends from
@@ -1421,6 +1435,14 @@ seconds of peer silence. A lost stream detaches the owner's consumer, revokes it
 allows the retained batches to be reassigned. Output and ACK state stay volatile, so an owner
 loss can require upstream replay. [Client Session
 Protocol](./client-session-protocol.md#emitter-consumers) owns what clients observe.
+
+`client-consumer-stream-frames` and `client-consumer-stream-frames-malformed` hold the stream's
+frames to its codec as the two link properties hold a link's: every opening message, serving-node
+frame and owning-node answer reaches the other end whole, a chunk of the largest size included, and
+damaged bytes fail with the typed decode failure or decode to a frame the codec keeps whole. They
+check each frame alone. Putting a delivery's chunks back together stays with the serving loop, and
+no property splits a delivery at arbitrary bytes. `client-emitter-deliveries` holds the Arrow IPC
+stream those chunks carry, from the sink that writes it to the client library that decodes it.
 
 ## Domain Clock Progress
 

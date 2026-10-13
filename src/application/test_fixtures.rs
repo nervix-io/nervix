@@ -5,6 +5,11 @@
 //! is given. A fixture used by one module belongs in that module's own test module instead.
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
+//!
+//! The checks every forwarded client stream holds its frames to, which the client producer link
+//! and the client consumer stream properties share, are in [`duplex_frame_checks`].
+
+pub(in crate::application) mod duplex_frame_checks;
 
 use std::{path::PathBuf, time::Duration};
 
