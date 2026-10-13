@@ -347,7 +347,7 @@ A session serves each request on one of two lanes:
 
 - **The ordered lane** serves the requests that change the session or may change the cluster:
   commands, transaction attach, subscribe and unsubscribe, domain clock attach and detach, and
-  producer opens. They
+  producer and consumer opens. They
   run one at a time in the order the client wrote them. A mutating command never overtakes the
   command written before it, and a subscription never opens before the command that created its
   relay has completed. Every command runs on this lane, including a `SHOW` or `DESCRIBE`, so within
@@ -402,7 +402,7 @@ owns the complete lookup contract and the server's transaction-aware resolution.
 ```mermaid
 flowchart LR
     Client -- ClientMessage --> Decode[Verify and decode]
-    Decode -- commands, attach, subscribe, unsubscribe, clock attach and detach --> Ordered[Ordered lane: one at a time, in written order]
+    Decode -- commands, attach, subscribe, unsubscribe, clock attach and detach, producer and consumer opens --> Ordered[Ordered lane: one at a time, in written order]
     Decode -- suggest, choices, domains, inspection --> Concurrent[Concurrent tasks]
     Decode -- cancel --> Cancel[Answered at once]
     Decode -- submit batch, close producer --> Pumps[Producer tasks]
@@ -410,6 +410,7 @@ flowchart LR
     Ordered --> Control[Control lane: 16 frames]
     Concurrent --> Control
     Cancel --> Control
+    Clocks[Domain clock deliveries] --> Control
     Deliveries[Subscription deliveries] --> Rows[Subscription lane: 16 frames]
     Control -- always taken first --> Transport
     Rows -- taken while the control lane is empty --> Transport
@@ -418,7 +419,8 @@ flowchart LR
 ### What A Session Sends First
 
 A session queues its frames on two bounded outbound lanes. Replies, transfer parts, session events,
-domain clock frames, and the session ending wait on the control lane, which holds 16 frames.
+and domain clock frames wait on the control lane, which holds 16 frames. The session ending never
+waits: the transport writes it after the control frames already queued, and nothing after it.
 Subscription rows and the notices about them wait on the subscription lane, which holds 16 frames
 shared by every subscription of the session. The transport always takes a queued control frame first
 and takes subscription frames only while the control lane is empty. A reply, including the reply to
@@ -447,19 +449,24 @@ itself immediately before its first effect, and a cancellation that arrives firs
 request cancelled for good. `RequestCancelled` reports which came first:
 
 - **`BeforeAdmission`.** The request was not admitted and never will be. It has no effect.
-- **`AfterAdmission`.** The request was admitted. Cancelling ends only the wait for it; its effect
-  continues and is recovered by its execution reference, exactly as after a lost reply.
+- **`AfterAdmission`.** The request was admitted. Cancelling ends only the wait for it. A command's
+  effect continues and is recovered by its execution reference, exactly as after a lost reply; what
+  an admitted cancellation leaves of the other ordered requests is described below.
 
 A submitted batch cannot be cancelled: a `CancelRequest` naming it is refused with
 `InvalidRequest`, and the batch still receives its outcome, because a batch the ingestor may already
 have admitted cannot be withdrawn.
 
 A command admits itself just before its durable admission or first effect. Transaction attach,
-subscribe, unsubscribe, clock requests, and producer opens admit themselves when the ordered lane
-starts serving them, and a concurrent request never admits itself, so cancelling one always stops it. A command
-cancelled after admission keeps the ordered lane until its work finishes, and an attach cancelled
-after admission still binds the transaction. A cancellation never rolls back admitted work: it is
-how a client stops waiting, not how it undoes a command, and undoing is a new command.
+subscribe, unsubscribe, clock requests, and producer and consumer opens admit themselves when the
+ordered lane starts serving them, and a concurrent request never admits itself, so cancelling one
+always stops it. A command cancelled after admission keeps the ordered lane until its work finishes,
+and an attach cancelled after admission still binds the transaction. A domain clock attach cancelled
+after admission also keeps the ordered lane until it is served, but then attaches nothing, because
+the server delivers only an attachment whose reply it queued; a domain clock detach cancelled after
+admission has still detached, and sending it again reports the session's state. A cancellation never
+rolls back admitted work: it is how a client stops waiting, not how it undoes a command, and undoing
+is a new command.
 
 ### Rejections
 
@@ -868,31 +875,36 @@ Browser WebSocket and fetch resolution remains owned by the browser.
 
 ### Reconnecting A Session
 
-A lost session takes everything session-scoped with it. The Rust client rebuilds it in a fixed
-order. Domain clock attachments and subscriptions come before the transaction, because a session
-that holds a transaction refuses both, and the transaction comes before any command that belongs to
-it:
+A lost session takes everything session-scoped with it. As soon as its frames stop, the Rust client
+reports an interruption for every subscription and clock it held, and it rebuilds the session in a
+fixed order. Domain clock attachments and subscriptions come before the transaction, because a
+session that holds a transaction refuses both, and the transaction comes before any command that
+belongs to it:
 
 1. It opens a new session against the servers it knows: its configured seeds, then at most 32
    endpoints it learned from redirects and leadership observations, oldest first, then the server it
    was using, with the same backoff as an election.
 2. It attaches every domain clock it followed.
-3. It publishes the new session to its callers and ends the old one, reporting an interruption for
-   every subscription and clock the old session held. The old session's frames stop before the
-   interruption, so nothing it delivers afterwards can make an attachment look held.
-4. It attaches every clock the old session began to follow while the new one was opening, and
-   opens again every subscription the server had acknowledged, each as a new generation.
+3. It publishes the new session to its callers and ends the old one. When the old session was still
+   open, as after a leader redirect, ending it reports an interruption for every subscription and
+   clock it still held. Its frames stop before the interruption, so nothing it delivers afterwards
+   can make an attachment look held.
+4. It attaches every clock the old session began to follow while the new one was opening, opens
+   again every subscription the server had acknowledged, each as a new generation, and opens its
+   native producers and consumers again.
 5. It attaches its transaction before it repeats any command that belongs to it.
 
 The requests of steps 2 and 4 are sent before step 5 begins, not merely started, so the transaction
 can never overtake them on the ordered lane. Only then does the client repeat outstanding commands,
 each under its original execution reference and, for an append, its original expected position.
 
-The new session can still refuse a restoration, or leave it unanswered: a relay may no longer exist
-or not be running yet, the session may already hold as many requests as it admits, or a transaction
-a caller attached meanwhile may have made it refuse session-local requests. The client then reports
-a restoration failure for that subscription or clock, carrying the server's message and the wait
-before the next attempt, and sends the request again on the same session. The wait starts at one
+The new session can still refuse a restoration: a relay may no longer exist or not be running yet,
+the session may already hold as many requests as it admits, or a transaction a caller attached
+meanwhile may have made it refuse session-local requests. The client then reports a restoration
+failure for that subscription or clock, carrying the server's message and the wait before the next
+attempt, and sends the request again on the same session. A restoration the session leaves
+unanswered past the request timeout ends that session instead, as any request that outlives the
+timeout does, and the next session restores it again. The wait starts at one
 second and doubles after each refusal up to thirty seconds. It keeps trying for as long as the
 session stays open and the client still wants the subscription or follows the clock; the next
 session starts again from one second. An attach answered `DomainClockAlreadyAttached` means the
@@ -900,8 +912,8 @@ session already holds the attachment, so the client follows the clock on that se
 frames from then on.
 
 The client's event streams outlive the session. A caller reading subscription events, clock events,
-or notices keeps reading across the replacement: the interruptions of step 3 mark the gap, and
-events of the new session follow them. Reading subscription or clock events opens a new session
+or notices keeps reading across the replacement: the interruptions mark the gap, and events of the
+new session follow them. Reading subscription or clock events opens a new session
 while one waits to be restored; reading notices never does, and waits for the session something
 else opens. A failed attempt to open one is returned to the reader, and its next read tries again.
 
@@ -1201,7 +1213,7 @@ A session can follow the clock of a domain. `ATTACH DOMAIN CLOCK;` and `DETACH D
 the server as `AttachDomainClockRequest` and `DetachDomainClockRequest` naming the active domain,
 and the reply to an attach carries the `START` generation and the clock as the serving node has it
 installed. [Sessions](./sessions.md#domain-clock-attachment) owns the public contract and [Domain
-Clock](./domain-clock.md#session-observation) owns how an installation and accepted progress become
+Clock](./domain-clock.md#session-attachment) owns how an installation and accepted progress become
 observations; this section places the attachment in the protocol.
 
 An attachment is not a subscription, and the protocol keeps the two apart end to end. It reads no
@@ -1209,8 +1221,9 @@ relay, takes no interest lease, and has no name or generation of its own: it is 
 so a session follows each domain clock at most once, and every frame about it names the domain. Its
 frames travel on the control lane rather than the subscription lane. Attach and detach run on the
 ordered lane, in order with the session's commands. The attach reply is queued before delivery
-starts, so its state precedes every frame. If the node already holds a tick of that installed
-generation, its newest tick is the first frame after the reply. Each changed installation arrives
+starts, so its state precedes every frame. If the installation has not changed since the reply and
+the node already holds a tick of that generation, its newest tick is the first frame after the
+reply. Each changed installation arrives
 as `DomainClockObserved` before any tick of its generation. A committed unassigned authority
 produces uninstalled and then the same mapping on reassignment; a direct authority move retains the
 mapping and produces no state frame.
@@ -1234,11 +1247,20 @@ the last frame about the attachment.
 Every node serves attachments from its own installation, which it derives from the same committed
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
-attaches every clock it followed again on its next session, clears its previous tick, and reports
-the gap as an interruption. An attach that session refuses or leaves unanswered is reported as a
-restoration failure and sent again on the same session after a growing wait, and a reply that the
-session already follows the clock moves the attachment to that session, whose frames then report
-the clock and its ticks. The shared binding exposes this event stream through
+reports the gap as an interruption when the session ends, clears its previous tick, and attaches
+every clock it followed again on its next session. An attach that session refuses is reported as a
+restoration failure and sent again on the same session after a growing wait; an attach it leaves
+unanswered past the request timeout ends that session instead, and the next session attaches the
+clock again. A reply that the session already follows the clock moves the attachment to that
+session: the caller keeps the clock the previous session last reported, without a tick, until that
+session's later state or tick frames arrive. When the new session's attach reply arrives before
+the old session ends, as after a leader redirect, the attachment moves without an interruption,
+and the client reports the clock only if it changed. A detach the client sends while a clock waits
+to be restored reaches the current session: a closed session is opened again first, which attaches
+the clock before the detach releases it, and an open session that has not restored it answers
+`DomainClockNotAttached`, after which the client no longer follows the clock. After
+`DomainClockAttachmentEnded`, a detach is answered `DomainClockNotAttached` and an attach is served
+as a new attachment. The shared binding exposes this event stream through
 `nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle, and the clock the
 client holds for each followed domain, starting with the one the attach reply carried, through
 `nx_session_domain_clock` and a retained `nx_domain_clock` handle. The web console

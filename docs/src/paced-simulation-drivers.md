@@ -155,7 +155,8 @@ longer retains is skipped with a `SKIPPED` line instead of being submitted only 
 
 ## What A Run Does
 
-1. It opens one session and attaches it to the domain clock with `ATTACH DOMAIN CLOCK`. The clock
+1. It opens one session and attaches it to the domain clock: the Rust driver through
+   `Client::attach_domain_clock`, the Python driver by executing `ATTACH DOMAIN CLOCK`. The clock
    the attach reports decides whether the run can start: a stopped clock, an unpaced domain or
    a clock the node has not installed within 30 seconds ends the run with exit status 2.
 2. It opens the rejection consumer and the output consumers before the producer, because a reading
@@ -174,8 +175,9 @@ longer retains is skipped with a `SKIPPED` line instead of being submitted only 
    rejection notices of its completed batches, up to `--deadline`; closes its producer and
    consumers; detaches the clock; and prints its summary.
 
-The drivers compute no domain time themselves. Every wait, logical instant and admission check
-comes from the attached clock's projections: `wall_duration_until`, `logical_time_at` and
+The drivers take the tick centers from the committed logical origin and `PERIOD`, one center per
+period. Every wait, current logical instant and admission check comes from the attached clock's
+projections: `wall_duration_until`, `logical_time_at` and
 `admission_window` in Rust, and `nx_domain_clock_wall_duration_until`,
 `nx_domain_clock_logical_time_at`, `nx_domain_clock_admission_window` and `nx_domain_clock_admits`
 through the binding. `FLUSH EACH` and the admission window follow domain time, while `ACK TIMEOUT`,
