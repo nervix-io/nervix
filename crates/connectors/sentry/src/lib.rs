@@ -97,14 +97,18 @@ impl SentrySink {
         let dsn = Self::config_value(config, "dsn")?
             .parse::<Dsn>()
             .map_err(|error| Self::config_error(format!("invalid Sentry dsn: {error}")))?;
-        let client = HttpClientConfig::new(config, "Sentry", &dns)
-            .build()
-            .map_err(|error| {
-                let message = error.current_context().to_string();
-                error
-                    .change_context(SinkStartError::InvalidConfiguration { sink: SENTRY })
-                    .attach_printable(message)
-            })?;
+        let client = {
+            let mapping_input = HttpClientConfig::new(config, "Sentry", &dns).build();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: SENTRY })
+                        .attach_printable(message)
+                }),
+            }
+        }?;
         let envelope_url = dsn.envelope_api_url();
         let auth = HeaderValue::from_str(&dsn.to_auth(Some(SENTRY_CLIENT_AGENT)).to_string())
             .map_err(|error| {
@@ -118,12 +122,18 @@ impl SentrySink {
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
-        client_config_value(config, key, "Sentry").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: SENTRY })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = client_config_value(config, key, "Sentry");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: SENTRY })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {

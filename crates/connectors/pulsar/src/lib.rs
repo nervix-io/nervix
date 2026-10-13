@@ -208,14 +208,18 @@ impl PulsarSink {
 
         let mut tls_options = PulsarTlsOptions::default();
         if let Some(ca_file) = tls.ca_file.as_ref() {
-            tls_options.certificate_chain = Some(
-                read_tls_file(ca_file, "TLS CA certificate").map_err(|error| {
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
-                        .attach_printable(message)
-                })?,
-            );
+            tls_options.certificate_chain = Some({
+                let mapping_input = read_tls_file(ca_file, "TLS CA certificate");
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let message = error.current_context().to_string();
+                        error
+                            .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                            .attach_printable(message)
+                    }),
+                }
+            }?);
         }
         if let Some(allow_insecure_connection) = allow_insecure_connection {
             tls_options.allow_insecure_connection = allow_insecure_connection;
@@ -438,24 +442,36 @@ impl PulsarSink {
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
-        client_config_value(config, key, "Pulsar").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = client_config_value(config, key, "Pulsar");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn optional_bool_config_value(
         config: &[ClientConfigEntry],
         key: &str,
     ) -> SinkStartResult<Option<bool>> {
-        optional_bool_client_config_value(config, key).map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = optional_bool_client_config_value(config, key);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {

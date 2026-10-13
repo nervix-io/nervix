@@ -304,11 +304,15 @@ impl StagedSnapshotWriter {
                     let result = if cancellation.is_cancelled() {
                         Err(Report::new(SnapshotStagingError::Cancelled))
                     } else {
-                        file.write_all(chunk.as_ref())
-                            .map(|()| hasher.update(chunk.as_ref()))
-                            .map(|_| ())
-                            .map_err(Report::new)
-                            .change_context(SnapshotStagingError::Write)
+                        match file.write_all(chunk.as_ref()) {
+                            Ok(()) => {
+                                hasher.update(chunk.as_ref());
+                                Ok(())
+                            }
+                            Err(error) => {
+                                Err(Report::new(error).change_context(SnapshotStagingError::Write))
+                            }
+                        }
                     };
                     StagedWrite {
                         file,

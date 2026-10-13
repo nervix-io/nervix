@@ -286,11 +286,16 @@ impl ProtobufDescriptorPool {
     pub fn from_file_descriptor_set(
         file_descriptor_set: prost_types::FileDescriptorSet,
     ) -> error_stack::Result<Self, RuntimeSchemaError> {
-        DescriptorPool::from_file_descriptor_set(file_descriptor_set)
-            .map(|pool| Self { pool })
-            .map_err(|source| {
-                Report::new(RuntimeSchemaError::InvalidProtobufDescriptorSet { source })
-            })
+        {
+            let mapping_input = DescriptorPool::from_file_descriptor_set(file_descriptor_set)
+                .map(|pool| Self { pool });
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(source) => Err(Report::new(
+                    RuntimeSchemaError::InvalidProtobufDescriptorSet { source },
+                )),
+            }
+        }
     }
 
     pub fn message(
@@ -1227,6 +1232,11 @@ impl fmt::Display for PayloadLimitExceeded {
 /// decoder allocated instead, which for a string column runs many times the data it carries, so a
 /// limit expressed in payload bytes must never be enforced with it.
 pub(crate) fn batch_payload_bytes(batch: &RecordBatch) -> u64 {
+    let add_bytes = nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "overflow or an unmeasurable column must remain above every payload limit",
+        u64::saturating_add
+    );
     batch
         .columns()
         .iter()
@@ -1236,7 +1246,7 @@ pub(crate) fn batch_payload_bytes(batch: &RecordBatch) -> u64 {
             };
             bytes.arch_into()
         })
-        .fold(0_u64, u64::saturating_add)
+        .fold(0_u64, add_bytes)
 }
 
 impl RuntimeRecordBatch {
@@ -2954,11 +2964,15 @@ impl TryFrom<SerializableRuntimeValue> for RuntimeValue {
             SerializableRuntimeValue::I64(v) => Ok(Self::I64(v)),
             SerializableRuntimeValue::Bool(v) => Ok(Self::Bool(v)),
             SerializableRuntimeValue::String(v) => Ok(Self::String(v)),
-            SerializableRuntimeValue::Datetime(v) => DateTime::parse_from_rfc3339(&v)
-                .map(Self::Datetime)
-                .map_err(|source| {
-                    Report::new(RuntimeSchemaError::InvalidRuntimeDatetime { source })
-                }),
+            SerializableRuntimeValue::Datetime(v) => {
+                let mapping_input = DateTime::parse_from_rfc3339(&v).map(Self::Datetime);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(source) => Err(Report::new(RuntimeSchemaError::InvalidRuntimeDatetime {
+                        source,
+                    })),
+                }
+            }
             SerializableRuntimeValue::F32(v) => Ok(Self::F32(OrderedFloat(v))),
             SerializableRuntimeValue::F64(v) => Ok(Self::F64(OrderedFloat(v))),
             SerializableRuntimeValue::Array(values) => Ok(Self::Array(
@@ -4024,7 +4038,8 @@ fn append_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(incompatible)?;
+            let parsed = $parsed;
+            let parsed = parsed.ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -4196,7 +4211,8 @@ fn append_borrowed_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(incompatible)?;
+            let parsed = $parsed;
+            let parsed = parsed.ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -4370,7 +4386,8 @@ fn append_avro_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(incompatible)?;
+            let parsed = $parsed;
+            let parsed = parsed.ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value(parsed);
             Ok(())

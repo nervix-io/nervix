@@ -1159,14 +1159,17 @@ build and the existing tests, and nothing in it changes behavior.
   randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
 - Use `just validate` for formatting and validation.
-- Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
-  casts outside imports and qualified paths, `saturating_*` and `wrapping_*` calls outside the time
-  API, control flow written as `Option` and `Result` combinator chains, and struct fields gated on
-  `cfg(feature = "testing")`. CI fails when a structural count exceeds `debt-baseline.json`.
+- Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
+  Rust cast expressions, and struct fields whose presence depends on `cfg(feature = "testing")`.
+  The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
+  import aliases, qualified paths and conditional documentation attributes are not those facts.
+  Source discovery includes tracked and newly authored Rust. CI fails when a structural count
+  exceeds `debt-baseline.json`.
   A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
   and commit the baseline; `just ratchet --show <count>` lists its sites.
 - Model consumption, language dependencies, recurring cluster awaits, declared node identities,
-  installation state, synchronization, failure signatures, discarded outcomes and canonical panic APIs use real Nervix
+  installation state, synchronization, failure signatures, discarded outcomes, canonical panic APIs,
+  integer/Duration clamped arithmetic and Option/Result adapter control flow use real Nervix
   compiler diagnostics across the complete declared configuration
   matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
   beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual
@@ -1175,6 +1178,15 @@ build and the existing tests, and nothing in it changes behavior.
   names its owning repair task. Blanket allow, broad/undocumented/unfulfilled expectations and an
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
+- [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
+  fourteen-family contract matrix, source/compiler scope, qualification and review limits. A new
+  or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
+  resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
+  and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive
+  configuration and authored macro fragments. Registered bounded Bolero properties qualify
+  changed source parsing and complete lossless tooling representations. Remove a replaced
+  detector and its numeric entry at the same cutover; a source expectation names one real
+  operation and cannot become a second allowance catalog.
 - Classify pure conversion refusals, cancellation signals, semantic row/record/wire outcomes and
   modeled library error contracts with reason-bearing `nervix::error_boundary(outcome|library, ...)`
   at the exact error type or return contract. Such classifications never inherit from an enclosing

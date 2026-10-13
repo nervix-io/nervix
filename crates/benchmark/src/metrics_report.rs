@@ -976,7 +976,13 @@ fn split_metric_and_value(line: &str) -> error_stack::Result<(&str, &str), Prome
                     .assured("the braces counted here belong to one line held in memory");
             }
             // An unbalanced closing brace belongs to no label set, so the depth stays at zero.
-            '}' => braces = braces.saturating_sub(1),
+            '}' => {
+                braces = nervix_primitives::expect_lint!(
+                    nervix::clamped_arithmetic,
+                    "an unmatched closing brace leaves label nesting at zero",
+                    braces.saturating_sub(1)
+                )
+            }
             character if character.is_whitespace() && braces == 0 => {
                 let value = line[index..].trim();
                 let Some(value) = value.split_whitespace().next() else {

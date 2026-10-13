@@ -281,14 +281,16 @@ impl MySqlPool {
 
     /// Borrow one connection, which returns to the pool when the borrow is dropped.
     pub async fn connection(&self) -> SinkPublishResult<MySqlConnection> {
-        self.pool
-            .get_conn()
-            .await
-            .map(MySqlConnection)
-            .map_err(|source| {
-                Report::new(SinkPublishError::NotInitialized { sink: MYSQL })
-                    .attach_printable(source.to_string())
-            })
+        {
+            let mapping_input = self.pool.get_conn().await.map(MySqlConnection);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(source) => Err(
+                    Report::new(SinkPublishError::NotInitialized { sink: MYSQL })
+                        .attach_printable(source.to_string()),
+                ),
+            }
+        }
     }
 }
 
@@ -360,10 +362,16 @@ impl MySqlSink {
         rows: usize,
         params: Vec<Value>,
     ) -> error_stack::Result<u64, MySqlWriteError> {
-        let mut conn = self.connections.connection().await.map_err(|error| {
-            let reason = format!("{error:?}");
-            error.change_context(MySqlWriteError::Pool { reason })
-        })?;
+        let mut conn = {
+            let mapping_input = self.connections.connection().await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!("{error:?}");
+                    error.change_context(MySqlWriteError::Pool { reason })
+                }),
+            }
+        }?;
         conn.0
             .exec_drop(statement.sql(rows), Params::Positional(params))
             .await

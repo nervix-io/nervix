@@ -2168,12 +2168,22 @@ audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args: typed-ratchet-build
+ratchet *args: typed-ratchet-build typed-ratchet-source-build
     python3 -m scripts.ratchet {{ args }}
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
-test-ratchet-units:
+test-ratchet-units: typed-ratchet-source-build
     python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries
+
+# Structural Rust properties use a stable source parser, without the compiler driver.
+typed-ratchet-source-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source_toolchain="1.99"
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        source_toolchain="nightly-2026-09-17"
+    fi
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report
 
 typed-ratchet-build:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -2214,6 +2224,7 @@ test-typed-ratchet: test-typed-ratchet-ordinary test-typed-ratchet-product-docs 
 
 test-typed-ratchet-ordinary:
     just test-typed-ratchet-reports
+    just test-ratchet-units
     just test-typed-ratchet-compiler
     just test-typed-ratchet-contracts
     just test-typed-ratchet-docs
@@ -2268,12 +2279,12 @@ typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 [private, parallel]
 typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
-coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-modeled
+coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2405,8 +2416,8 @@ coverage-primitive-boundary:
     mkdir -p "{{ cargo_target_dir }}/primitive-boundary"
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/primitive-boundary/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.check_primitive_boundary,scripts.tests.test_check_primitive_boundary -m unittest scripts.tests.test_check_primitive_boundary
-    "${coverage[@]}" run --branch -a --source=scripts.check_primitive_boundary -m scripts.check_primitive_boundary
+    "${coverage[@]}" run --branch --source=scripts.check_primitive_boundary,scripts.rust_source,scripts.tests.test_check_primitive_boundary -m unittest scripts.tests.test_check_primitive_boundary
+    "${coverage[@]}" run --branch -a --source=scripts.check_primitive_boundary,scripts.rust_source -m scripts.check_primitive_boundary
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/primitive-boundary/python.lcov"
     "${coverage[@]}" json -o "{{ cargo_target_dir }}/primitive-boundary/python.json"
     "${coverage[@]}" report
@@ -2547,7 +2558,7 @@ validate-nspl-docs:
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
 
-test-docs:
+test-docs: typed-ratchet-source-build
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 

@@ -112,15 +112,20 @@ impl SyslogSink {
         dns: &DnsResolver,
     ) -> SinkStartResult<SyslogSender> {
         let budget = ConnectionBudget::start(CONNECT_BUDGET);
-        let addresses = dns
-            .resolve(&config.server_name, config.port, budget.remaining())
-            .await
-            .map_err(|error| {
-                let reason = error.current_context().to_string();
-                error
-                    .change_context(SinkStartError::Initialize { sink: SYSLOG })
-                    .attach_printable(reason)
-            })?;
+        let addresses = {
+            let mapping_input = dns
+                .resolve(&config.server_name, config.port, budget.remaining())
+                .await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::Initialize { sink: SYSLOG })
+                        .attach_printable(reason)
+                }),
+            }
+        }?;
         match config.protocol {
             SyslogProtocol::Udp => {
                 let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });

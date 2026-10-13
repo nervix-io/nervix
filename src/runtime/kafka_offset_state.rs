@@ -912,17 +912,22 @@ fn write_offset_snapshot(
         },
         schedules,
     };
-    rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
-        &snapshot,
-        rkyv::ser::writer::IoWriter::new(writer),
-        rkyv::ser::allocator::SubAllocator::new(&mut scratch),
-    )
-    .map(|_| ())
-    .map_err(|error| {
-        Report::new(error).change_context(RuntimePersistenceError::NativeEncoding {
-            state: RuntimeStateKind::KafkaOffset,
-        })
-    })
+    {
+        let mapping_input = rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+            &snapshot,
+            rkyv::ser::writer::IoWriter::new(writer),
+            rkyv::ser::allocator::SubAllocator::new(&mut scratch),
+        )
+        .map(|_| ());
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(Report::new(error).change_context(
+                RuntimePersistenceError::NativeEncoding {
+                    state: RuntimeStateKind::KafkaOffset,
+                },
+            )),
+        }
+    }
 }
 
 impl CapturedKafkaOffsets {

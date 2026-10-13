@@ -463,12 +463,15 @@ impl Runtime {
                         client: name.as_str().to_string(),
                     }));
                 };
-                SharedClientInstance::Redis(
-                    open_redis_command_pool(config, pool.bounds, dns.clone())
+                SharedClientInstance::Redis({
+                    let mapping_input = open_redis_command_pool(config, pool.bounds, dns.clone())
                         .await
-                        .map_err(OpenClientError::from_redis)
-                        .map_err(opened)?,
-                )
+                        .map_err(OpenClientError::from_redis);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(mapping_error) => Err((opened)(mapping_error)),
+                    }
+                }?)
             }
         };
         Ok(StdArc::new(SharedClient {
