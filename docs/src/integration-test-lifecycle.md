@@ -807,6 +807,15 @@ A step that replaces a scenario's cluster with a fresh one stops the old cluster
 budget and fails when a node of it was left stopping: that node still runs beside the cluster that
 would replace it, so the replacement has not happened.
 
+The consensus fault registration keeps an observer of the node's consensus state, as does every
+observer a step took from it, so the node's consensus database stays open after the node's task has
+ended until the last of those observers is dropped. That drop closes the database synchronously, on
+the task that makes it: the close synchronizes the journal and waits until none of the database's
+background workers is left. Cleanup and [scenario-driven stops](#scenario-driven-stops) give the
+registration back on the runner task, so every scenario and the suite watchdog wait for that close,
+while a keeper gives it back on a runtime worker. The close never waits for a worker whose flush or
+compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
+
 ### What Cleanup Releases
 
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
@@ -837,10 +846,12 @@ with it, so the harness never cuts a product deadline short.
 Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
 the graceful stop used to exercise ownership handoff during drain.
 
-A stop that ends cleanly is followed by a check that the node released its node and consensus
-database locks. The step fails when the node's task panicked, when the watchdog passed with the node
-still stopping, or when a lock outlived the stop. A node still stopping keeps its task, its ports
-and its fault registration, and the scenario's cleanup waits for it again or leaves it stopping.
+Once the node's task has ended, the stop gives back the node's consensus fault registration, which
+closes its consensus database as [Cluster Teardown](#cluster-teardown) describes, and a stop that
+ended cleanly then checks that the node released its node and consensus database locks. The step
+fails when the node's task panicked, when the watchdog passed with the node still stopping, or when
+a lock outlived the stop. A node still stopping keeps its task, its ports and its fault
+registration, and the scenario's cleanup waits for it again or leaves it stopping.
 Stopping every node requests every stop first and then waits for each node in turn. A scenario can
 also begin stopping a node without waiting, to observe how the cluster reacts while the node is on
 its way down; its cleanup waits for it later.
@@ -1307,11 +1318,15 @@ timeout](#the-suite-watchdog) diagnostic and its own cleanup before the lane wou
 reserve is six minutes: the four the suite's own cleanup can take after its budget, with two to
 spare. A bound that expires anyway ends the binary with `SIGTERM` and, after the stop grace period,
 `SIGKILL` for its whole group; Ryuk removes the containers the binary started when its connection
-closes.
+closes. A stall of the runner task itself ends only this way, because the suite watchdog runs on
+that task, and the binary then prints no Cucumber summary. Unless a tracked lock takes part in the
+stall, the lane records it as `timed-out` with no finding: a wait inside a dependency, such as the
+storage engine's own worker channel while a database closes, is visible only in a stack of the
+binary's threads taken before the bound expires.
 
 In CI the `deloxide` job, which runs only for a pull request labeled `deloxide`, runs each
-selection on its own 16-vCPU runner through
-`just coverage-native-extras test-deloxide`, `test-deloxide-order` or `test-deloxide-stress`, then
+selection on its own 16-vCPU runner through `just coverage-native-extras test-deloxide`,
+`test-deloxide-order`, `test-deloxide-stress` or `test-deloxide-stress-restore`, then
 `just test-deloxide-qualification` for the same selection, and uploads every attempt whatever the
 verdict.
 
@@ -1499,6 +1514,10 @@ Its limits:
 - Provisioning a Kafka topic's partitions and waiting for a consumer group's members query the
   broker synchronously on the runner task, for up to 5 seconds per query, and every scenario of the
   run waits while one of those queries runs.
+- Cleanup and stops give back a stopped node's consensus fault registration on the runner task, so
+  when no step still holds an observer of the node's consensus state, the node's consensus database
+  closes there, and every scenario of the run waits until the close has synchronized the journal and
+  the database's last background worker has left.
 - Kafka committed-offset assertions query on a blocking worker with a one-second request timeout.
   A query error retries within the assertion's original deadline; persistent errors fail rather
   than count as an offset observation. An offset that crosses a forbidden threshold fails
