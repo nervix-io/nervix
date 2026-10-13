@@ -1890,6 +1890,15 @@ transfer to alter a later measurement. A failed required attempt remains evidenc
 subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
+Network-fault preflight refusals retain the failing stage and original command status, exact
+arguments and bound, elapsed time, helper identities and both raw streams. The operation record
+exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the
+injector's state and logs before removing it and records its own failures independently of the
+original refusal. A sidecar that disappeared between enumeration and inspection is confirmed
+absent and recorded as an ordinary outcome; a failed inspection of a still-present sidecar fails
+cleanup. The public setup error reports the actual refusal rather than inferring that the worker
+lacks netem or iptables capabilities from a Docker client failure. A successful helper exit alone
+does not establish successful Docker-client completion within the inspection bound.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product

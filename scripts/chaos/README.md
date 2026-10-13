@@ -1372,6 +1372,38 @@ Run the external verifier, pinned tool image and Compose contract checks directl
 just chaos self-test
 ```
 
+`just test-chaos-network-preflight` exercises the actual network-fault preflight with the pinned
+Pumba, nettools and probe images. It verifies full-strength netem and iptables installation, blocked
+gateway traffic, SIGTERM healing and exact helper cleanup within the existing bounds. Its negative
+controls cover an abrupt rules-inspection refusal, a real 30-second Docker-client timeout after the
+inspection helper exited, a failed injector-state inspection, failed log retrieval, failed cleanup,
+a Docker launch that created a canary before refusing, an injector that cannot start its nettools
+image, and sidecar disappearance versus inspection failure while still present. The same controls run in `just chaos self-test`; `just coverage-chaos-network-preflight`
+retains their shell coverage under `target/chaos-network-preflight-coverage/`.
+Pass an already-built Nervix image as `just coverage-chaos-network-preflight IMAGE` to include
+the public runner's setup-error projection; the controlled refusal ends before any node starts.
+Existing evidence directories are refused, preserving their records and preventing stale launch
+cidfiles from becoming cleanup authority.
+
+Each network preflight retains `diagnostics/network-preflight/result.json` with its verdict, failing
+stage, original exit status, elapsed time, helper identities and independent cleanup outcome.
+`operations.ndjson` records completed commands with exact argument arrays, command bounds, start
+and elapsed times, identities and paths to both raw streams. Each numbered `operations/*.json`
+record exists before its command starts, so an interrupted command remains identifiable beside its
+partial streams. Injector inspection and raw Pumba logs are saved before cleanup removes a helper;
+failed log retrieval and cleanup retain their own command outcomes and cannot replace the primary
+failure. A sidecar that disappeared after enumeration is confirmed absent and recorded; an
+inspection failure while it still exists fails cleanup. Launch cidfiles keep helpers identifiable even when the Docker client fails after creating
+them. Cleanup removes only the run's canary, injector and Pumba sidecars joined to run-owned
+namespaces.
+
+The runner reports the actual preflight refusal and links these records. A Docker launch,
+inspection or timeout failure does not establish that the worker lacks fault capabilities. The
+30-second rules-inspection bound includes Docker client and helper-launch time; a helper that exited
+successfully does not establish that the client finished within that bound. The overall preflight
+bound remains 120 seconds, and this diagnostic work changes neither fault strength nor product
+deadlines.
+
 `just test-chaos-rate-probe` exercises the production probe with a six-second Docker launch delay
 that stays outside transfer time, a real healthy/256kbit twofold effect, a two-second connect delay,
 receiver completion delayed twelve seconds, partial bytes, complete loss, a receiver that does not

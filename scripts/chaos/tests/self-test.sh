@@ -848,6 +848,7 @@ if docker inspect "${foreign_sidecar}" >/dev/null 2>&1 || docker inspect "${fore
 fi
 
 printf 'chaos harness self-test passed\n'
+"${script_dir}/network-preflight-self-test.sh"
 "${script_dir}/degraded-self-test.sh"
 "${script_dir}/rate-probe-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"

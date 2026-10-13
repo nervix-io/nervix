@@ -2661,6 +2661,20 @@ deps-down:
 chaos *args:
     exec bash scripts/chaos/chaos.sh {{ args }}
 
+# Prove the network preflight and its retained failure outcomes through the external controller.
+test-chaos-network-preflight:
+    exec bash scripts/chaos/tests/network-preflight-self-test.sh
+
+# Retain source coverage of network-preflight failure recording and live fault controls.
+coverage-chaos-network-preflight image="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE={{ quote(image) }} kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/network-faults.sh") }},{{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/network-preflight-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-network-preflight-coverage") }} scripts/chaos/tests/network-preflight-self-test.sh
+
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
