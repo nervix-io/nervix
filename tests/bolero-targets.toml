@@ -2482,3 +2482,48 @@ random_iterations = 256
 source = "crates/connectors/postgres/src/lib.rs"
 test = "tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/web-console/src/backup_dialog/tests/__fuzz__/backup_dialog__tests__properties__bolero_pending_backups_survive_a_reload/corpus"
+domain_version = 1
+features = []
+id = "console-pending-backups"
+invariant = "A pending backup under any execution reference, with any query text and with or without a domain of any spelling the name rule admits, is recorded as one entry per value that replaces an earlier record and its domain entry, reads back from those entries and from the tab's storage as the complete backup, and is forgotten only by its own reference."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-web-console"
+random_iterations = 256
+source = "crates/web-console/src/backup_dialog/tests/properties.rs"
+test = "backup_dialog::tests::properties::bolero_pending_backups_survive_a_reload"
+test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/web-console/src/backup_dialog/tests/__fuzz__/backup_dialog__tests__properties__bolero_recorded_entries_read_back_exactly_or_are_forgotten/corpus"
+domain_version = 1
+features = []
+id = "console-pending-backups-malformed"
+invariant = "Session storage entries a console did not write, missing, edited, upper-cased or drawn from foreign characters, read back as no backup and forget the record while the tab's other entries stay; entries in a backup's canonical text read back as exactly that backup, never in another spelling."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-web-console"
+random_iterations = 256
+source = "crates/web-console/src/backup_dialog/tests/properties.rs"
+test = "backup_dialog::tests::properties::bolero_recorded_entries_read_back_exactly_or_are_forgotten"
+test_target = "bin:nervix-web-console"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/web-console/src/backup_dialog/tests/__fuzz__/backup_dialog__tests__properties__bolero_restore_drafts_lower_to_the_restore_they_were_filled_from/corpus"
+domain_version = 1
+features = []
+id = "console-restore-drafts"
+invariant = "The restore form's draft of a RESTORE of any scope, source, mode, runtime state and lifecycle, its domains in any spelling the name rule admits, lowers back to the complete RESTORE, and every existing-user policy reads back from the text its form option carries."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-web-console"
+random_iterations = 256
+source = "crates/web-console/src/backup_dialog/tests/properties.rs"
+test = "backup_dialog::tests::properties::bolero_restore_drafts_lower_to_the_restore_they_were_filled_from"
+test_target = "bin:nervix-web-console"

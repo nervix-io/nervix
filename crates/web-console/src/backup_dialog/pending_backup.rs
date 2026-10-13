@@ -51,13 +51,14 @@ impl PendingBackup {
     }
 
     /// The backup recorded as `entries`, or `None` when an entry does not read back as the value
-    /// it records.
+    /// it records. A domain entry holds a name's canonical text, so another spelling of a valid
+    /// name is refused rather than read as that name.
     pub(crate) fn of_entries(entries: RecordedEntries) -> Option<Self> {
         let Ok(reference) = CommandExecutionReference::parse(entries.reference) else {
             return None;
         };
         let domain = match entries.domain {
-            Some(text) => match DomainName::parse(&text) {
+            Some(text) => match DomainName::decode(&text) {
                 Ok(domain) => Some(domain),
                 Err(_) => return None,
             },
