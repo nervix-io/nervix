@@ -118,6 +118,8 @@ class RepositoryTests(unittest.TestCase):
     def candidate(self, path: str, first: int, second: int) -> dict[str, Any]:
         lines = (self.root / path).read_text().splitlines()
         candidate = lookup(path, first)
+        candidate["span"] = span(path, first, lines[first - 1].strip())
+        candidate["pattern"]["operations"][0]["span"] = span(path, first, lines[first - 1].strip())
         candidate["pattern"]["operations"][1]["span"] = span(path, second, lines[second - 1].strip())
         return lint_audit.collect([evidence("ordinary", candidate)])[0]
 
@@ -126,8 +128,12 @@ class RepositoryTests(unittest.TestCase):
         history = lint_audit.History(self.root)
         blame = lint_audit.Blame(self.root)
         blame.load({candidate["path"]})
-        return lint_audit.attribute(candidate, history, blame, lint_audit.Hunks(self.root),
-                                    lint_audit.CommitSpellings(self.root), pull_requests)
+        lines = lint_audit.LineHistory(self.root)
+        lines.load({lint_audit.primary_range(candidate)})
+        attribution = lint_audit.Attribution(history, blame, lint_audit.Hunks(self.root),
+                                              lint_audit.CommitSpellings(self.root, history), lines,
+                                              pull_requests)
+        return attribution.attribute(candidate)
 
     def test_history_records_introductions_and_lowerings(self) -> None:
         history = lint_audit.History(self.root)
@@ -167,12 +173,9 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual((rule["event"], rule["spelling_removed"], rule["commit_spelling_removed"]),
                          ("lowered 3->2", False, True))
 
-    def test_a_pull_request_that_rewrote_the_spelling_before_its_squash_is_suspected(self) -> None:
+    def pull_request(self, rewritten: str) -> lint_audit.PullRequests:
+        """A squash-merged pull request #7 whose second commit replaced an entry with `rewritten`."""
         self.git("remote", "add", "origin", "https://github.com/example/project.git")
-        self.commit("2026-09-23", "feat(window): add pane sketches (#7)", {
-            "src/runtime/sketches.rs": ("fn admit(map: &mut M, pane: i64) {\n    if let Some(sketch) = map.get_mut(&pane) {\n"
-                                        "        sketch.add(1);\n    } else {\n        map.insert(pane, S::new());\n    }\n}\n"),
-        })
         pages = {
             "repos/example/project/pulls/7/commits": [[{"sha": "a" * 40, "parents": [{}]},
                                                         {"sha": "b" * 40, "parents": [{}]},
@@ -182,16 +185,45 @@ class RepositoryTests(unittest.TestCase):
                 "patch": "@@ -0,0 +1,3 @@\n+fn admit(map: &mut M, pane: i64) {\n+    map.entry(pane).or_insert_with(S::new).add(1);\n+}"}]}],
             f"repos/example/project/commits/{'b' * 40}": [{"files": [{
                 "filename": "src/runtime/sketches.rs",
-                "patch": "@@ -2 +2,5 @@\n-    map.entry(pane).or_insert_with(S::new).add(1);\n+    if let Some(sketch) = map.get_mut(&pane) {"}]}],
+                "patch": f"@@ -2 +2,5 @@\n-    map.entry(pane).or_insert_with(S::new).add(1);\n+{rewritten}"}]}],
         }
         pull_requests = lint_audit.PullRequests(self.root)
-        with mock.patch.object(pull_requests, "api", side_effect=lambda path: pages[path]):
-            attribution = self.attribute(self.candidate("src/runtime/sketches.rs", 2, 5), pull_requests)
+        pull_requests.api = lambda path: pages[path]
+        return pull_requests
+
+    def squash_sketches(self) -> None:
+        self.commit("2026-09-23", "feat(window): add pane sketches (#7)", {
+            "src/runtime/sketches.rs": ("fn admit(map: &mut M, pane: i64) {\n    if let Some(sketch) = map.get_mut(&pane) {\n"
+                                        "        sketch.add(1);\n    } else {\n        map.insert(pane, S::new());\n    }\n}\n"),
+        })
+
+    def test_a_pull_request_that_rewrote_the_spelling_before_its_squash_is_suspected(self) -> None:
+        self.squash_sketches()
+        pull_requests = self.pull_request("    if let Some(sketch) = map.get_mut(&pane) {")
+        attribution = self.attribute(self.candidate("src/runtime/sketches.rs", 2, 5), pull_requests)
         self.assertEqual(attribution["suggestion"], "suspected")
         rewrite = attribution["rules"][0]["pull_request_rewrite"]
         self.assertEqual(rewrite["sha"], "b" * 40)
         self.assertEqual(rewrite["removed"], ["    map.entry(pane).or_insert_with(S::new).add(1);"])
         self.assertIsNone(pull_requests.number("refactor: no pull request"))
+
+    def test_a_pull_request_rewrite_of_other_lines_is_not_this_candidates(self) -> None:
+        self.squash_sketches()
+        pull_requests = self.pull_request("    let other = map.len();")
+        attribution = self.attribute(self.candidate("src/runtime/sketches.rs", 2, 5), pull_requests)
+        self.assertEqual(attribution["suggestion"], "unattributed")
+        self.assertNotIn("pull_request_rewrite", attribution["rules"][0])
+
+    def test_a_later_change_that_carried_the_pattern_keeps_its_origin(self) -> None:
+        path = self.root / "src/runtime/panes.rs"
+        path.write_text(path.read_text().replace("values.push(1);", "values.push(2);")
+                        .replace("map.get_mut(&pane)", "map.get_mut(&(pane))"))
+        self.git("add", "--all")
+        self.git("commit", "--quiet", "-m", "tune admission", date="2026-09-26")
+        attribution = self.attribute(self.candidate("src/runtime/panes.rs", 2, 5))
+        self.assertEqual(attribution["commit"]["subject"], "tune admission")
+        self.assertEqual(attribution["suggestion"], "suspected")
+        self.assertEqual(attribution["origin"]["subject"], "lower the lock count")
 
     def test_error_signature_spelling_names_a_plain_failure_not_a_report(self) -> None:
         spelling = lint_audit.RULES["bare_error_signatures"].spelling

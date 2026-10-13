@@ -1167,6 +1167,13 @@ build and the existing tests, and nothing in it changes behavior.
   exceeds `debt-baseline.json`.
   A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
   and commit the baseline; `just ratchet --show <count>` lists its sites.
+- A rule that misjudges code is repaired in the rule, or the operation it misjudges carries a
+  narrow reviewed exception; correct code is never reshaped only to satisfy it. Respelling an
+  operation, splitting one lookup into two, moving code into a helper or another file, or
+  defaulting a failure to lower a finding is a workaround, and the owner it degraded keeps the
+  repair. `just lint-audit` reports resolved candidates for such workarounds, attributed to the
+  commits and counts that introduced them; its report is review input under `target/`, and review
+  dispositions and measurements belong on the owning task.
 - Model consumption, language dependencies, recurring cluster awaits, declared node identities,
   installation state, synchronization, failure signatures, discarded outcomes, canonical panic APIs,
   integer/Duration clamped arithmetic and Option/Result adapter control flow use real Nervix

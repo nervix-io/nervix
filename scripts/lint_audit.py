@@ -296,31 +296,46 @@ class Hunks:
 
 
 class CommitSpellings:
-    """Governed spellings a commit's Rust changes removed, across every file it touched."""
+    """Governed spellings a commit's Rust changes removed, across every file the count read."""
 
-    def __init__(self, root: pathlib.Path) -> None:
+    DIFF = re.compile(r"^diff --git a/(?P<before>\S+) b/(?P<after>\S+)$")
+
+    def __init__(self, root: pathlib.Path, history: History) -> None:
         self.root = root
+        self.history = history
         self.removed: dict[str, dict[str, int]] = {}
+
+    def counted(self, rule: Rule, path: str, date: str) -> bool:
+        """Whether the textual counter of `rule` read `path` at `date`. The lock counter read only
+        the data-plane files; the other counts read every Rust file."""
+        if rule.name != "data_plane_lock_acquisitions":
+            return True
+        return lock_counter_scope(path, date, self.history)
 
     def net_removed(self, sha: str, rule: Rule) -> bool:
         if rule.spelling is None:
             return False
         if sha not in self.removed:
+            date = git(self.root, "show", "-s", "--format=%ad", "--date=short", sha).strip()
             diff = git(self.root, "show", "--format=", "--unified=0", sha, "--", "*.rs")
-            counts: dict[str, int] = {}
-            for name, candidate in RULES.items():
-                if candidate.spelling is None:
+            counts: dict[str, int] = {name: 0 for name in RULES}
+            path = ""
+            for line in diff.splitlines():
+                header = self.DIFF.match(line)
+                if header:
+                    path = header.group("after")
                     continue
-                removed = 0
-                added = 0
-                for line in diff.splitlines():
-                    if line.startswith("-") and not line.startswith("---"):
-                        removed += len(candidate.spelling.findall(line))
-                    elif line.startswith("+") and not line.startswith("+++"):
-                        added += len(candidate.spelling.findall(line))
-                counts[name] = removed - added
+                removed = line.startswith("-") and not line.startswith("---")
+                added = line.startswith("+") and not line.startswith("+++")
+                if not removed and not added:
+                    continue
+                for name, candidate in RULES.items():
+                    if candidate.spelling is None or not self.counted(candidate, path, date):
+                        continue
+                    matches = len(candidate.spelling.findall(line))
+                    counts[name] += matches if removed else -matches
             self.removed[sha] = counts
-        return self.removed[sha].get(rule.name, 0) > 0
+        return self.removed[sha][rule.name] > 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -377,17 +392,84 @@ class PullRequests:
         self.changes[number] = files
         return files
 
-    def rewrite(self, subject: str, path: str, rule: Rule) -> PullRequestChange | None:
-        """A pull-request commit that removed the rule's spelling from this file."""
+    def rewrite(self, subject: str, path: str, rule: Rule, fragments: list[str]) -> PullRequestChange | None:
+        """A pull-request commit that removed the rule's spelling from this file and wrote one of
+        the candidate's own source lines."""
         number = self.number(subject)
         if number is None or rule.spelling is None:
             return None
         for change in self.history(number).get(path, []):
             removed = sum(len(rule.spelling.findall(line)) for line in change.removed)
             added = sum(len(rule.spelling.findall(line)) for line in change.added)
-            if removed > added:
+            if removed <= added:
+                continue
+            written = [normalize(line) for line in change.added]
+            if any(fragment in line for fragment in fragments for line in written):
                 return change
         return None
+
+
+@dataclasses.dataclass(frozen=True)
+class LineRange:
+    path: str
+    start: int
+    end: int
+
+
+@dataclasses.dataclass(frozen=True)
+class LineChange:
+    sha: str
+    subject: str
+
+
+class LineHistory:
+    """Every commit that changed a range of lines, newest first, following moves and renames."""
+
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = root
+        self.changes: dict[LineRange, list[LineChange]] = {}
+
+    def load(self, ranges: set[LineRange]) -> None:
+        missing = sorted((item for item in ranges if item not in self.changes),
+                         key=lambda item: (item.path, item.start, item.end))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            for item, changes in zip(missing, executor.map(self.log, missing)):
+                self.changes[item] = changes
+
+    def log(self, item: LineRange) -> list[LineChange]:
+        output = git(self.root, "log", f"-L{item.start},{item.end}:{item.path}", "-s", "--format=%H%x09%s")
+        changes = []
+        for line in output.splitlines():
+            sha, _, subject = line.partition("\t")
+            if re.fullmatch(r"[0-9a-f]{40}", sha):
+                changes.append(LineChange(sha, subject))
+        return changes
+
+    def of(self, item: LineRange) -> list[LineChange]:
+        return self.changes.get(item, [])
+
+
+def normalize(text: str) -> str:
+    return " ".join(text.split())
+
+
+def fragments(candidate: dict[str, Any]) -> list[str]:
+    """The candidate's distinctive source lines, by which a rewrite is recognized."""
+    pattern = candidate["pattern"]
+    sources = [candidate["span"]["source"]]
+    sources.extend(operation["span"]["source"] for operation in pattern.get("operations", []))
+    sources.extend(occurrence["source"] for occurrence in pattern.get("occurrences", []))
+    found = []
+    for source in sources:
+        first = normalize(source.splitlines()[0]) if source else ""
+        if len(first) >= 8 and first not in found:
+            found.append(first)
+    return found
+
+
+def primary_range(candidate: dict[str, Any]) -> LineRange:
+    span = candidate["span"]
+    return LineRange(candidate["path"], span["line"], span["end_line"])
 
 
 def candidate_lines(candidate: dict[str, Any]) -> list[int]:
@@ -471,59 +553,102 @@ def lock_counter_scope(path: str, date: str, history: History) -> bool:
     return connectors is not None and date >= connectors.date
 
 
-def attribute(candidate: dict[str, Any], history: History, blame: Blame, hunks: Hunks,
-              spellings: CommitSpellings, pull_requests: PullRequests | None) -> dict[str, Any]:
-    """The commit that completed a candidate's lines, its diff, and the counts it touched."""
-    path = candidate["path"]
-    provenance = []
-    for number in candidate_lines(candidate):
-        line = blame.line(path, number)
-        if line is not None:
-            provenance.append(line)
-    if not provenance or not all(line.committed for line in provenance):
-        return {"suggestion": "uncommitted", "commit": None, "rules": []}
-    # The most recent line change is the one that completed the pattern.
-    introducing = max(provenance, key=lambda line: (line.author_time, line.sha))
-    date = blame.date(introducing.sha)
-    hunk = hunks.around(introducing.sha, introducing.path, introducing.original)
-    before = "\n".join(hunk.before)
-    after = "\n".join(hunk.after)
-    rules = []
-    strongest = "pre-existing"
-    for name in OWNERS.get(candidate["kind"], ()):
-        rule = RULES[name]
-        event = history.event(introducing.sha, name)
-        removed = False
-        if rule.spelling is not None:
-            removed = len(rule.spelling.findall(before)) > len(rule.spelling.findall(after))
-        commit_removed = spellings.net_removed(introducing.sha, rule)
-        rewrite = None
-        if pull_requests is not None:
-            rewrite = pull_requests.rewrite(introducing.subject, introducing.path, rule)
-        predates = history.predates(date, name)
-        evidence = {"rule": name, "event": event, "spelling_removed": removed,
-                    "commit_spelling_removed": commit_removed, "predates_rule": predates}
-        if rewrite is not None:
-            evidence["pull_request_rewrite"] = {"sha": rewrite.sha, "removed": rewrite.removed, "added": rewrite.added}
-        rules.append(evidence)
-        if predates:
-            continue
-        if rewrite is not None or (event is not None and (removed or commit_removed or rule.spelling is None)):
-            level = "suspected"
-        elif event is not None or removed or commit_removed:
-            level = "possible"
-        else:
-            level = "unattributed"
-        if SUGGESTIONS.index(level) < SUGGESTIONS.index(strongest):
-            strongest = level
-    return {
-        "suggestion": strongest,
-        "commit": {"sha": introducing.sha, "date": date, "subject": introducing.subject},
-        "commits": sorted({line.sha[:12] for line in provenance}),
-        "before": hunk.before,
-        "after": hunk.after,
-        "rules": rules,
-    }
+@dataclasses.dataclass(frozen=True)
+class Evidence:
+    """What one commit did to the counts one candidate's kind could have worked around."""
+
+    rules: list[dict[str, Any]]
+    suggestion: str
+
+
+class Attribution:
+    """The history sources one audit reads, and how they combine into a suggestion."""
+
+    def __init__(self, history: History, blame: Blame, hunks: Hunks, spellings: CommitSpellings,
+                 lines: LineHistory, pull_requests: PullRequests | None) -> None:
+        self.history = history
+        self.blame = blame
+        self.hunks = hunks
+        self.spellings = spellings
+        self.lines = lines
+        self.pull_requests = pull_requests
+
+    def evidence(self, candidate: dict[str, Any], sha: str, subject: str, path: str,
+                 hunk: Hunk | None) -> Evidence:
+        date = self.blame.date(sha)
+        rules = []
+        strongest = "pre-existing"
+        for name in OWNERS.get(candidate["kind"], ()):
+            rule = RULES[name]
+            event = self.history.event(sha, name)
+            removed = False
+            if hunk is not None and rule.spelling is not None:
+                before = len(rule.spelling.findall("\n".join(hunk.before)))
+                removed = before > len(rule.spelling.findall("\n".join(hunk.after)))
+            commit_removed = self.spellings.net_removed(sha, rule)
+            rewrite = None
+            if self.pull_requests is not None:
+                rewrite = self.pull_requests.rewrite(subject, path, rule, fragments(candidate))
+            predates = self.history.predates(date, name)
+            found = {"rule": name, "event": event, "spelling_removed": removed,
+                     "commit_spelling_removed": commit_removed, "predates_rule": predates}
+            if rewrite is not None:
+                found["pull_request_rewrite"] = {"sha": rewrite.sha, "removed": rewrite.removed,
+                                                 "added": rewrite.added}
+            rules.append(found)
+            if predates:
+                continue
+            if rewrite is not None or (event is not None and (removed or commit_removed or rule.spelling is None)):
+                level = "suspected"
+            elif event is not None or removed or commit_removed:
+                level = "possible"
+            else:
+                level = "unattributed"
+            if SUGGESTIONS.index(level) < SUGGESTIONS.index(strongest):
+                strongest = level
+        return Evidence(rules, strongest)
+
+    def attribute(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """The commit that completed a candidate's lines, its diff, the counts it touched and,
+        when it carried the pattern forward, the earlier commit of its lines that shaped it."""
+        path = candidate["path"]
+        provenance = []
+        for number in candidate_lines(candidate):
+            line = self.blame.line(path, number)
+            if line is not None:
+                provenance.append(line)
+        if not provenance or not all(line.committed for line in provenance):
+            return {"suggestion": "uncommitted", "commit": None, "rules": []}
+        # The most recent line change is the one that completed the pattern.
+        introducing = max(provenance, key=lambda line: (line.author_time, line.sha))
+        hunk = self.hunks.around(introducing.sha, introducing.path, introducing.original)
+        found = self.evidence(candidate, introducing.sha, introducing.subject, introducing.path, hunk)
+        attribution: dict[str, Any] = {
+            "suggestion": found.suggestion,
+            "commit": {"sha": introducing.sha, "date": self.blame.date(introducing.sha),
+                       "subject": introducing.subject},
+            "commits": sorted({line.sha[:12] for line in provenance}),
+            "before": hunk.before,
+            "after": hunk.after,
+            "rules": found.rules,
+        }
+        if found.suggestion == "suspected":
+            return attribution
+        # A later change can carry a workaround forward; read the lines' earlier history.
+        for change in self.lines.of(primary_range(candidate)):
+            if change.sha == introducing.sha:
+                continue
+            earlier = self.evidence(candidate, change.sha, change.subject, path, None)
+            if SUGGESTIONS.index(earlier.suggestion) >= SUGGESTIONS.index(attribution["suggestion"]):
+                continue
+            if earlier.suggestion not in {"suspected", "possible"}:
+                continue
+            attribution["suggestion"] = earlier.suggestion
+            attribution["origin"] = {"sha": change.sha, "date": self.blame.date(change.sha),
+                                     "subject": change.subject, "rules": earlier.rules}
+            if earlier.suggestion == "suspected":
+                break
+        return attribution
 
 
 def relocated_acquisitions(sites: list[dict[str, Any]], history: History, blame: Blame) -> list[dict[str, Any]]:
@@ -671,12 +796,14 @@ def main(argv: list[str] | None = None) -> int:
         history = History(args.root)
         blame = Blame(args.root)
         blame.load({candidate["path"] for candidate in candidates})
-        hunks = Hunks(args.root)
-        spellings = CommitSpellings(args.root)
         pull_requests = PullRequests(args.root) if args.pull_requests else None
         candidates.extend(relocated_acquisitions(report["findings"], history, blame))
+        lines = LineHistory(args.root)
+        lines.load({primary_range(candidate) for candidate in candidates})
+        attribution = Attribution(history, blame, Hunks(args.root), CommitSpellings(args.root, history),
+                                  lines, pull_requests)
         for candidate in candidates:
-            candidate["attribution"] = attribute(candidate, history, blame, hunks, spellings, pull_requests)
+            candidate["attribution"] = attribution.attribute(candidate)
         revision = git(args.root, "rev-parse", "HEAD").strip()
         output = {
             "revision": revision,

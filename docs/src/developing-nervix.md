@@ -313,7 +313,13 @@ just typed-ratchet --configuration shuttle --inventory
 just test-typed-ratchet
 just test-typed-ratchet-docs
 just qualify-typed-ratchet-cache
+just lint-audit
 ```
+
+`just lint-audit` reads the same complete evidence and reports review candidates for code shaped
+around an inaccurate lint, each attributed to the commits and debt counts that introduced it.
+[Architecture Rules And The Debt Ratchet](architecture-enforcement.md#auditing-lint-workarounds)
+states the candidates, the attribution and the review contract.
 
 Declare `#[cfg_attr(nervix_lint, nervix::context(...))]` at the source's owning execution boundary.
 Choose recurring, lifecycle, observer, outside or bounded; every kind requires a reason, and
