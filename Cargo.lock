@@ -7793,6 +7793,7 @@ dependencies = [
  "clap",
  "error-stack",
  "hickory-proto 0.26.3",
+ "memchr",
  "meticulous",
  "nervix-primitives",
  "nervix-recovery",

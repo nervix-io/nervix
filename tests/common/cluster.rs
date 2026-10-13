@@ -122,6 +122,7 @@ use super::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
         StartupPorts, cluster_startup_budget,
     },
+    node_stop::{NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord},
     peer_addressing::{
         ClusterDns, FixtureAnswer, InterconnectAddress, PeerAddressing, PublishedNode,
         qualified_name,
@@ -3118,6 +3119,9 @@ struct NodeHandle {
     /// How the last stop a scenario requested and waited for ended, kept after its coordinator
     /// is released so the scenario can read the outcome of each shutdown phase.
     last_shutdown: Option<ShutdownOutcome>,
+    /// When the current launch was first asked to stop and when its task ended, for the record of
+    /// a stop a scenario waits for. `None` until the node has been launched.
+    stop_clock: Option<NodeStopClock>,
     /// The cluster's storage and watchdog registration, which a node left stopping keeps until its
     /// task has ended.
     roots: Arc<ClusterRoots>,
@@ -3141,6 +3145,7 @@ impl NodeHandle {
             task: OwnedNodeTask::not_started(),
             shutdown: None,
             last_shutdown: None,
+            stop_clock: None,
             roots,
         }
     }
@@ -3240,9 +3245,13 @@ impl NodeHandle {
             .live
             .handle()
             .node_started(&self.spec.node_id, StdArc::new(shutdown.clone()));
+        let (stop_clock, ended) = NodeStopClock::start();
         self.shutdown = Some(shutdown);
+        self.stop_clock = Some(stop_clock);
         self.task = OwnedNodeTask::spawn(async move {
             let _live = live;
+            // Dropped when this task ends, however it ends, which records when that was.
+            let _ended = ended;
             application.run().await
         });
         Ok(())
@@ -3284,35 +3293,72 @@ impl NodeHandle {
     /// back here.
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
-        let task_result = match self.task.wait(PhaseDeadline::after(shutdown_timeout)).await {
+        let waited = self.task.wait(PhaseDeadline::after(shutdown_timeout)).await;
+        // A stop is printed by the wait that observed the node's ending, and only by that one.
+        let observed_by_this_wait = matches!(waited, NodeTaskWaitOutcome::Joined(_));
+        let outcome = match waited {
             NodeTaskWaitOutcome::NotStarted => return Ok(()),
             NodeTaskWaitOutcome::AlreadyObserved(outcome)
-            | NodeTaskWaitOutcome::Joined(outcome) => {
-                if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
-                    Err(io::Error::other(NodeShutdownError::Task {
-                        node: node_name(&self.spec.node_id),
-                        outcome,
-                    }))
-                } else {
-                    Ok(())
-                }
-            }
+            | NodeTaskWaitOutcome::Joined(outcome) => outcome,
             NodeTaskWaitOutcome::StillRunning | NodeTaskWaitOutcome::LeftStopping => {
-                return Err(io::Error::other(NodeShutdownError::Deadline {
-                    node: node_name(&self.spec.node_id),
-                    timeout: shutdown_timeout,
-                }));
+                let ending = match &self.shutdown {
+                    Some(shutdown) => {
+                        NodeStopEnding::StillStopping(NodeStopProgress::observe(shutdown))
+                    }
+                    // A node left stopping before this wait went to its keeper with its
+                    // coordinator.
+                    None => NodeStopEnding::LeftToKeeper,
+                };
+                let record = self.stop_record(shutdown_timeout, ending);
+                eprintln!("{record}");
+                return Err(io::Error::other(NodeShutdownError::Deadline(record)));
             }
         };
-        if let Some(shutdown) = self.shutdown.take() {
-            self.last_shutdown = shutdown.outcome();
+        let shutdown_outcome = match self.shutdown.take() {
+            Some(shutdown) => {
+                self.last_shutdown = shutdown.outcome();
+                self.last_shutdown
+            }
+            None => None,
+        };
+        if observed_by_this_wait {
+            let record = self.stop_record(
+                shutdown_timeout,
+                NodeStopEnding::Ended {
+                    task: outcome.clone(),
+                    shutdown: shutdown_outcome,
+                },
+            );
+            eprintln!("{record}");
         }
+        let task_result = if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
+            Err(io::Error::other(NodeShutdownError::Task {
+                node: node_name(&self.spec.node_id),
+                outcome,
+            }))
+        } else {
+            Ok(())
+        };
         self.fault_injection
             .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
             self.ensure_database_unlocked().await?;
         }
         task_result
+    }
+
+    /// The record of a stop this handle waited for under `watchdog`.
+    fn stop_record(&self, watchdog: Duration, ending: NodeStopEnding) -> NodeStopRecord {
+        let stopping_for = match &self.stop_clock {
+            Some(clock) => clock.stopping_for(),
+            None => None,
+        };
+        NodeStopRecord {
+            node: self.spec.node_id.clone(),
+            stopping_for,
+            watchdog,
+            ending,
+        }
     }
 
     /// Returns this node's ports to the pool unless its task still runs, here or under a keeper,
@@ -3426,11 +3472,18 @@ impl TeardownNode for NodeHandle {
     fn request_stop(&mut self) {
         if let Some(shutdown) = &self.shutdown {
             shutdown.request_stop();
+            if let Some(stop_clock) = &mut self.stop_clock {
+                stop_clock.stop_requested();
+            }
         }
     }
 
     fn owned_task(&mut self) -> &mut OwnedNodeTask {
         &mut self.task
+    }
+
+    fn stop_progress(&self) -> Option<NodeStopProgress> {
+        self.shutdown.as_ref().map(NodeStopProgress::observe)
     }
 
     fn release(&mut self) {
@@ -3497,11 +3550,10 @@ enum NodeShutdownError {
         node: ClusterNodeName,
         outcome: Arc<NodeTaskTerminalOutcome>,
     },
-    #[error("timed out after {timeout:?} waiting for node '{node}' shutdown; it is still stopping")]
-    Deadline {
-        node: ClusterNodeName,
-        timeout: Duration,
-    },
+    /// The watchdog of a stop a scenario waited for passed with the node still stopping. The
+    /// record names how long it had been stopping and where its own shutdown stood.
+    #[error("{0}")]
+    Deadline(NodeStopRecord),
 }
 
 #[derive(Debug)]

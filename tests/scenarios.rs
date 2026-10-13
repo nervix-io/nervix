@@ -113,11 +113,12 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
-        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
-        POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
-        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorWait, DependencyEndpoints,
+        ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
+        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+        TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -12072,6 +12073,27 @@ async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
     let node_id = expand_placeholders(world, &node_id);
     if let Some(failure) = world.cluster().node_run_failure(&node_id) {
         panic!("node '{node_id}' did not finish its shutdown cleanly: {failure}");
+    }
+}
+
+#[then("every node reports that its last shutdown finished before its deadline")]
+async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+    world: &mut ScenarioWorld,
+) {
+    for node_id in world.cluster().node_ids() {
+        let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
+            panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
+        };
+        if let Some(failure) = world.cluster().node_run_failure(&node_id) {
+            panic!(
+                "node '{node_id}' did not finish its shutdown cleanly, with phases {shutdown:?}: \
+                 {failure}"
+            );
+        }
+        assert!(
+            !shutdown.deadline_expired(),
+            "node '{node_id}' finished its last shutdown past its deadline: {shutdown:?}"
+        );
     }
 }
 
@@ -26488,30 +26510,31 @@ async fn then_quickwit_index_eventually_contains(
     }
 }
 
+/// How long a scenario waits for text in the OpenTelemetry Collector's followed output.
+const OTEL_COLLECTOR_CONTENT_BOUND: Duration = Duration::from_secs(10);
+
 #[then(expr = "OpenTelemetry Collector eventually contains {string}")]
 async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expected: String) {
     let expected = expand_placeholders(world, &expected);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        if world
-            .dependencies
-            .otel_collector_contains(&expected)
-            .await
-            .expect("OpenTelemetry Collector logs must be readable")
-        {
-            return;
-        }
-        if Instant::now() >= deadline {
-            let logs = world.dependencies.otel_collector_logs().await;
-            panic!(
-                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; last \
-                 command output: {:?}; collector output:\n{logs:?}",
-                world.last_command_output
-            );
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let wait = output
+        .wait_for(&expected, OTEL_COLLECTOR_CONTENT_BOUND)
+        .await;
+    let ended = match wait {
+        CollectorWait::Found => return,
+        CollectorWait::Elapsed => format!("its {OTEL_COLLECTOR_CONTENT_BOUND:?} bound passed"),
+        CollectorWait::FollowerStopped => "the follower stopped reading it".to_string(),
+    };
+    let missed = output.missed(&expected, &world.test_id);
+    panic!(
+        "timed out waiting for OpenTelemetry Collector to contain {expected:?}: {ended}; \
+         {missed}; last command output: {:?}",
+        world.last_command_output
+    );
 }
 
 #[then(
@@ -26536,15 +26559,16 @@ async fn then_otel_collector_receives_split_exports(
         .filter(|member| !member.is_empty())
         .collect::<Vec<_>>();
     assert_eq!(members.len(), 3, "the step names exactly three members");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let deadline = Instant::now() + OTEL_COLLECTOR_CONTENT_BOUND;
     let export_boundary = format!("\tinfo\t{heading}\t");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let logs = world
-            .dependencies
-            .otel_collector_logs()
-            .await
-            .expect("OpenTelemetry Collector logs must be readable");
+        let logs = output.text();
         let mut two_record_export = None;
         let mut one_record_export = None;
         let mut observed = Vec::new();
