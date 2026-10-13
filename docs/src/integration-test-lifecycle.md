@@ -367,9 +367,10 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
-  `just coverage-harness-liveness-workspace <report>` measures the ordinary startup and other
-  harness owner regressions through the configured compiler cache and preserves the current
-  workspace profiles.
+  `just coverage-harness-liveness <filter>` measures the ordinary startup and other harness owner
+  regressions with counters of their own, as the [diagnostic lane](#diagnostic-lane) section
+  describes. A patch that also changes product code passes the retained `lcov.info` to
+  `just coverage-patch` as another `--report`, beside the workspace report.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
