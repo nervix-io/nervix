@@ -128,6 +128,8 @@ class InventoryTests(unittest.TestCase):
             "backup-window-groups",
             "client-processor-choice-request",
             "client-ffi-host-columns",
+            "client-ffi-field-descriptors",
+            "client-ffi-field-descriptors-malformed",
             "branch-membership",
             "restore-installation-wire",
             "stopping-node-drain-wire",
