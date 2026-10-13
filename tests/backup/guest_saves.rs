@@ -127,6 +127,60 @@ impl GuestSaveDifference {
         difference
     }
 
+    /// Qualify the comparison against known alterations of `saves`, so a passing comparison is
+    /// never a vacuous one: a save altered in its last byte is reported at exactly that offset,
+    /// and a save one archive lacks is reported as absent there.
+    fn qualify(saves: &BTreeMap<String, Vec<u8>>) {
+        let mut altered = saves.clone();
+        let mut entries = altered.keys().cloned();
+        let changed_entry = entries
+            .next()
+            .verified("archived_guest_saves asserted that the archive holds two saves");
+        let removed_entry = entries
+            .next()
+            .verified("archived_guest_saves asserted that the archive holds two saves");
+        let changed = altered
+            .get_mut(&changed_entry)
+            .verified("the entry was just read from this map");
+        let last_offset = changed
+            .len()
+            .checked_sub(1)
+            .verified("archived_guest_saves asserted that every save exceeds 32 MiB");
+        let original_byte = changed[last_offset];
+        changed[last_offset] = !original_byte;
+        altered.remove(&removed_entry);
+
+        let differences = Self::between(saves, &altered);
+        assert_eq!(differences.len(), 2, "both altered saves are reported");
+        let changed_difference = &differences[0];
+        assert_eq!(changed_difference.entry, changed_entry);
+        assert_eq!(changed_difference.first_differing_offset, Some(last_offset));
+        assert_eq!(
+            changed_difference.source_bytes_at_offset,
+            vec![original_byte]
+        );
+        assert_eq!(
+            changed_difference.restored_bytes_at_offset,
+            vec![!original_byte]
+        );
+        let removed_difference = &differences[1];
+        assert_eq!(removed_difference.entry, removed_entry);
+        assert!(
+            removed_difference.restored.is_none(),
+            "the removed save is reported absent"
+        );
+        let described = removed_difference.to_string();
+        assert!(
+            described.ends_with(", restored absent"),
+            "the absent save is described as absent: {described}"
+        );
+        let described = changed_difference.to_string();
+        assert!(
+            described.contains(&format!("first differing offset {last_offset}")),
+            "the altered save is described at its offset: {described}"
+        );
+    }
+
     fn window(bytes: &[u8], offset: usize) -> Vec<u8> {
         let tail = bytes.get(offset..).unwrap_or_default();
         tail.iter()
@@ -169,6 +223,7 @@ impl std::fmt::Display for GuestSaveDifference {
 fn then_large_guest_saves_match(world: &mut ScenarioWorld, source: String, restored: String) {
     let source_saves = archived_guest_saves(&archive_path(world, &source));
     let restored_saves = archived_guest_saves(&archive_path(world, &restored));
+    GuestSaveDifference::qualify(&source_saves);
     let differences = GuestSaveDifference::between(&source_saves, &restored_saves);
     let described = differences
         .iter()
