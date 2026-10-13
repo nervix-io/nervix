@@ -764,6 +764,23 @@ Feature: Graceful shutdown
       """
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_everyone_{{test_id}}" next offset for topic "shutdown_everyone_{{test_id}}" partition 0 is "at least 2"
 
+  Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And shutdown timeout is configured as "20s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When a materialized restore workload with 40 relays is created
+    And round 1 of 512 KiB materialized rows is submitted for 2 tenants
+    Then within "180s" the materialized generators report round 1, 512 KiB, 40 relays and 2 tenants
+    When the materialized summary subscription "summary_subscription" is closed
+    And all nodes are stopped
+    Then every node reports that its last shutdown finished before its deadline
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   Scenario: A generator releases its buffered output and stops producing when its node drains
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
