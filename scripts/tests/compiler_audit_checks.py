@@ -75,9 +75,13 @@ class CompilerAuditTests(unittest.TestCase):
         self.assertEqual((counted["operation"], counted["allocation"]), ("entry", "clone"))
         copies = self.by_owner(candidates, "borrowed_copy")
         self.assertEqual(set(copies), {"measured"})
-        # Formatting a number is not a copy; converting borrowed text into a String is.
+        # Formatting a number is not a copy; converting borrowed text into a String is, whether
+        # the text is a `str` or a `Cow` of one.
         self.assertEqual(sorted(candidate["pattern"]["operation"] for candidate in copies["measured"]),
-                         ["clone", "to_owned", "to_string"])
+                         ["clone", "to_owned", "to_string", "to_string"])
+        self.assertEqual(sorted(candidate["pattern"]["value_type"] for candidate in copies["measured"]
+                                if candidate["pattern"]["operation"] == "to_string"),
+                         ["std::string::String", "std::string::String"])
         self.assertNotIn("borrowed", {owner for kind in ("repeated_lookup", "discarded_error", "disguised_clamp")
                                       for owner in self.by_owner(candidates, kind)})
 

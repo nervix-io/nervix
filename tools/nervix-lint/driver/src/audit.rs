@@ -575,7 +575,8 @@ impl<'tcx> Walker<'_, 'tcx> {
                 let ty::Adt(_, arguments) = value.kind() else {
                     return false;
                 };
-                arguments.type_at(0).is_str()
+                // `Cow<'a, B>` lists its lifetime before the borrowed type.
+                arguments.type_at(1).is_str()
             }
             _ => false,
         }
