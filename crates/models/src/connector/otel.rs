@@ -20,8 +20,8 @@ use strum::AsRefStr;
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkEntity, SinkReference, SinkValueMapping,
-    SinkValueMappings,
+    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkValueMapping, SinkValueMappings,
 };
 
 configured_client!(Otel: unpooled CreateClientOtel => OtelConfigEntry);
@@ -152,10 +152,10 @@ macro_rules! otel_sink_declarations {
 
             impl SinkBody for $Sink {
                 fn reference(&self) -> SinkReference<'_> {
-                    SinkReference::Client {
+                    SinkReference::Client(SinkClientReference {
                         client: &self.client,
                         connector: ConnectorKind::Otel,
-                    }
+                    })
                 }
 
                 fn client_mut(&mut self) -> Option<&mut ClientName> {

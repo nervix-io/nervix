@@ -26,9 +26,9 @@ use super::{
 use crate::{
     ByteSizeUnit, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PayloadSizeLimit, QueueName, RetryPolicy, SinkBody, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    IngestSourceCapabilities, PayloadSizeLimit, QueueName, RetryPolicy, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Sqs: unpooled CreateClientSqs => SqsConfigEntry);
@@ -155,10 +155,10 @@ impl SinkEntity for SqsQueueSink {
 
 impl SinkBody for SqsQueueSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Sqs,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

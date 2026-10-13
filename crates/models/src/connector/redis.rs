@@ -23,8 +23,8 @@ use super::{
 use crate::{
     ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Redis: pooled CreateClientRedis => RedisConfigEntry);
@@ -124,10 +124,10 @@ impl SinkEntity for RedisPubSubSink {
 
 impl SinkBody for RedisPubSubSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Redis,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

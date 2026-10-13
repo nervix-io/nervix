@@ -25,8 +25,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, ConsumerGroupName, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    RetryPolicy, SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Kafka: unpooled CreateClientKafka => KafkaConfigEntry);
@@ -164,10 +164,10 @@ impl SinkEntity for KafkaTopicSink {
 
 impl SinkBody for KafkaTopicSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Kafka,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

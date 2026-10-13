@@ -245,7 +245,7 @@ macro_rules! connector_sinks {
                 }
             }
 
-            fn catalog_client(&self) -> Option<&$crate::ClientName> {
+            fn catalog_client(&self) -> Option<$crate::SinkClientReference<'_>> {
                 match self {
                     $(Self::$Variant(sink) => $crate::SinkBody::catalog_client(sink),)+
                 }
@@ -332,10 +332,26 @@ macro_rules! connector_sinks {
 /// union that names each connector and entity pair.
 ///
 /// A line names a connector with the enums its module declared. A connector listed under `kinds`
-/// has entities this union's Models never hold, so it appears in the kind union alone. The union
+/// has entities this union's Models never hold, so it appears in the kind union alone, and a kind
+/// union with such a connector also lists the pairs a Model exists for as `modeled`. The union
 /// reaches what a Model or a kind declares through `$Body` and `$EntityKind`, which every listed
 /// enum implements; the forwarding methods themselves are written beside each invocation.
 macro_rules! entity_union {
+    // A union that holds a Model of every pair has no narrower list of pairs than `all`.
+    (@modeled $Kind:ident; kinds {}; $($Connector:ident($Entity:ident),)+) => {};
+    (
+        @modeled $Kind:ident;
+        kinds { $($KindOnly:ident($KindOnlyEntity:ident),)+ };
+        $($Connector:ident($Entity:ident),)+
+    ) => {
+        impl $Kind {
+            /// Every pair this union holds a Model of, connector by connector in declared order.
+            pub fn modeled() -> impl Iterator<Item = Self> {
+                ::std::iter::empty()
+                    $(.chain($Entity::ALL.iter().copied().map(Self::$Connector)))+
+            }
+        }
+    };
     (
         $(#[$union_meta:meta])*
         pub enum $Union:ident as $Body:path;
@@ -410,12 +426,6 @@ macro_rules! entity_union {
                     $(.chain($Entity::ALL.iter().copied().map(Self::$Connector)))+
             }
 
-            /// Every pair this union holds a Model of, connector by connector in declared order.
-            pub fn modeled() -> impl Iterator<Item = Self> {
-                ::std::iter::empty()
-                    $(.chain($Entity::ALL.iter().copied().map(Self::$Connector)))+
-            }
-
             /// What the entity of this pair declares.
             fn entity(&self) -> &dyn $EntityKind {
                 match self {
@@ -424,6 +434,12 @@ macro_rules! entity_union {
                 }
             }
         }
+
+        $crate::connector::entity_union::entity_union!(
+            @modeled $Kind;
+            kinds { $($KindOnly($KindOnlyEntity),)* };
+            $($Connector($Entity),)+
+        );
 
         $(
             impl From<$KindOnlyEntity> for $Kind {

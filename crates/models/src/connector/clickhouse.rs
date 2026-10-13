@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkEntity, SinkReference, SinkValueMapping,
-    SinkValueMappings, TableName,
+    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkValueMapping, SinkValueMappings, TableName,
 };
 
 configured_client!(ClickHouse: unpooled CreateClientClickHouse => ClickHouseConfigEntry);
@@ -51,10 +51,10 @@ impl SinkEntity for ClickHouseTableSink {
 
 impl SinkBody for ClickHouseTableSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::ClickHouse,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

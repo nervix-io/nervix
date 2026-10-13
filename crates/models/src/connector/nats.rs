@@ -25,8 +25,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    QueueGroupName, SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    QueueGroupName, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
 };
 
 configured_client!(Nats: unpooled CreateClientNats => NatsConfigEntry);
@@ -131,10 +131,10 @@ impl SinkEntity for NatsSubjectSink {
 
 impl SinkBody for NatsSubjectSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Nats,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

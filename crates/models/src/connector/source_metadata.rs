@@ -33,30 +33,61 @@ pub enum SourceMetadataScope {
     Syslog,
 }
 
+/// One typed field a metadata namespace declares: its name and its exact type. Every field is
+/// optional and none is sensitive.
+pub(crate) struct SourceMetadataField {
+    pub(crate) name: &'static str,
+    pub(crate) ty: ParseAsType,
+}
+
+/// Where a Kafka message sits in its topic.
+const KAFKA_FIELDS: &[SourceMetadataField] = &[
+    SourceMetadataField {
+        name: "topic",
+        ty: ParseAsType::String,
+    },
+    SourceMetadataField {
+        name: "partition",
+        ty: ParseAsType::I32,
+    },
+    SourceMetadataField {
+        name: "offset",
+        ty: ParseAsType::I64,
+    },
+];
+
+/// The peer a syslog message arrived from.
+const SYSLOG_FIELDS: &[SourceMetadataField] = &[SourceMetadataField {
+    name: "peer_addr",
+    ty: ParseAsType::String,
+}];
+
 impl SourceMetadataScope {
+    /// The one declaration of this namespace's fields, in order. The schema fields a program is
+    /// validated against and the Arrow columns a host builds are both read from it, so neither
+    /// states a field a second time.
+    pub(crate) const fn declared_fields(self) -> &'static [SourceMetadataField] {
+        match self {
+            Self::Headers => &[],
+            Self::Kafka => KAFKA_FIELDS,
+            Self::Syslog => SYSLOG_FIELDS,
+        }
+    }
+
     /// The fields of this namespace in declared order.
     ///
     /// Every field is optional and none is sensitive. A scope without a typed namespace has no
     /// field.
     pub fn fields(self) -> Vec<SchemaField> {
-        match self {
-            Self::Headers => Vec::new(),
-            Self::Kafka => vec![
-                Self::field("topic", ParseAsType::String),
-                Self::field("partition", ParseAsType::I32),
-                Self::field("offset", ParseAsType::I64),
-            ],
-            Self::Syslog => vec![Self::field("peer_addr", ParseAsType::String)],
-        }
-    }
-
-    fn field(name: &'static str, ty: ParseAsType) -> SchemaField {
-        SchemaField {
-            name: FieldName::parse(name)
-                .assured("every metadata field name is a literal that satisfies the grammar"),
-            ty,
-            optional: true,
-            sensitive: false,
-        }
+        self.declared_fields()
+            .iter()
+            .map(|field| SchemaField {
+                name: FieldName::parse(field.name)
+                    .assured("every metadata field name is a literal that satisfies the grammar"),
+                ty: field.ty.clone(),
+                optional: true,
+                sensitive: false,
+            })
+            .collect()
     }
 }

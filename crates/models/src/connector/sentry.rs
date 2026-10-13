@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkEntity, SinkReference,
+    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
 };
 
 configured_client!(Sentry: unpooled CreateClientSentry => SentryConfigEntry);
@@ -49,10 +49,10 @@ impl SinkEntity for SentryEventSink {
 
 impl SinkBody for SentryEventSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Sentry,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

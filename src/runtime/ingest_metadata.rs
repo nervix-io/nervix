@@ -73,7 +73,7 @@ pub(super) type IngestMetadataResult<T> = Result<T, Report<IngestMetadataError>>
 #[derive(Debug, Error)]
 pub(super) enum IngestMetadataError {
     #[error("ingest metadata builders for {builders:?} cannot append a {row:?} row")]
-    BuilderKindMismatch {
+    BuilderScopeMismatch {
         builders: SourceMetadataScope,
         row: SourceMetadataScope,
     },
@@ -108,7 +108,7 @@ pub(super) struct KafkaIntegrationBuilders {
     pub(super) offset: Int64Builder,
 }
 
-/// The integration-field builders of one ingest group, one variant per source kind.
+/// The integration-field builders of one ingest group, one variant per metadata scope.
 ///
 /// The Kafka columns live behind one allocation taken when the group opens, so the variants
 /// stay comparable in size.
@@ -124,7 +124,7 @@ pub(super) enum IngestIntegrationBuilders {
 /// finishes it once when the group closes. No Arrow array, batch or builder is created per
 /// message, and no one-row batch is ever concatenated.
 pub(super) struct IngestMetadataBuilders {
-    pub(super) kind: SourceMetadataScope,
+    pub(super) scope: SourceMetadataScope,
     pub(super) integration: IngestIntegrationBuilders,
     pub(super) header_names: ListBuilder<StringBuilder>,
     pub(super) header_values: ListBuilder<StringBuilder>,
@@ -142,14 +142,14 @@ nervix_primitives::thread_local! {
 }
 
 impl IngestMetadataBuilders {
-    /// Opens a builder set for `kind`, sizing the integration fields for `row_bound` rows.
+    /// Opens a builder set for `scope`, sizing the integration fields for `row_bound` rows.
     ///
     /// Header builders start empty because most sources carry no headers at all.
     #[inline(never)]
-    pub(super) fn new(kind: SourceMetadataScope, row_bound: usize) -> Self {
+    pub(super) fn new(scope: SourceMetadataScope, row_bound: usize) -> Self {
         #[cfg(test)]
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
-        let integration = match kind {
+        let integration = match scope {
             SourceMetadataScope::Kafka => {
                 IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
                     topic: StringBuilder::with_capacity(row_bound, 0),
@@ -165,7 +165,7 @@ impl IngestMetadataBuilders {
         let item_field =
             || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
         Self {
-            kind,
+            scope,
             integration,
             header_names: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             header_values: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
@@ -215,8 +215,8 @@ impl IngestMetadataBuilders {
                 Some(*headers)
             }
             (_, row) => {
-                return Err(Report::new(IngestMetadataError::BuilderKindMismatch {
-                    builders: self.kind,
+                return Err(Report::new(IngestMetadataError::BuilderScopeMismatch {
+                    builders: self.scope,
                     row: row.scope(),
                 }));
             }
@@ -252,7 +252,7 @@ impl IngestMetadataBuilders {
             }
             IngestIntegrationBuilders::Headers => Vec::new(),
         };
-        let schema = match self.kind.arrow_schema() {
+        let schema = match self.scope.arrow_schema() {
             Some(schema) => StdArc::new(schema),
             None => StdArc::new(arrow_schema::Schema::empty()),
         };
@@ -569,7 +569,7 @@ mod tests {
             .expect_err("a header row cannot be appended to Kafka metadata builders");
         assert!(matches!(
             mismatch.current_context(),
-            IngestMetadataError::BuilderKindMismatch {
+            IngestMetadataError::BuilderScopeMismatch {
                 builders: SourceMetadataScope::Kafka,
                 row: SourceMetadataScope::Headers,
             }

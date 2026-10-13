@@ -194,10 +194,10 @@ pub trait SourceBody {
 pub trait SourceEntityKind {
     fn connector(&self) -> ConnectorKind;
 
-    /// How NSPL spells the entity.
+    /// The keyword that names the entity within its connector.
     fn keyword(&self) -> &'static str;
 
-    /// The connector and the entity together, as a statement head names them.
+    /// The name of the pair: the connector's keyword, then the entity's.
     fn phrase(&self) -> &'static str;
 
     /// The label a form shows for a source of this entity.
@@ -242,12 +242,12 @@ impl IngestSourceKind {
         self.entity().connector()
     }
 
-    /// How NSPL spells the entity this source consumes.
+    /// The keyword that names the entity this source consumes.
     pub fn entity_keyword(self) -> &'static str {
         self.entity().keyword()
     }
 
-    /// The connector and the entity together, as a statement head names them.
+    /// The name of this pair: its connector's keyword, then its entity's.
     pub fn phrase(self) -> &'static str {
         self.entity().phrase()
     }

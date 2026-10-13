@@ -16,15 +16,16 @@ use std::fs;
 
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
-    CodecName, CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientSqs,
-    CreateWireSchema, EmitterPublishingMode, EndpointEndpointSource, EndpointSource, ErrorPolicies,
-    FlushPolicy, GeneralErrorPolicy, IngestorName, JsonType, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState,
-    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelLogsSink, OtelMetric,
-    OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs,
+    CodecName, CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientS3,
+    CreateClientSqs, CreateWireSchema, EmitterPublishingMode, EndpointEndpointSource,
+    EndpointSource, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, IcebergCatalog,
+    IcebergStorageBackend, IcebergTableSink, IngestorName, JsonType, KafkaIngestMode,
+    KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
+    MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelLogsSink,
+    OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs,
     ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink, SignalingProtobufConfig,
-    SyslogCollectorSink, SyslogSink, TopicName, WireSchemaField, WireSchemaName, ZeroMqPushSink,
-    ZeroMqSink,
+    SyslogCollectorSink, SyslogListenerSource, SyslogSink, TopicName, WireSchemaField,
+    WireSchemaName, ZeroMqPushSink, ZeroMqSink,
 };
 use nonzero_ext::nonzero;
 
@@ -1664,6 +1665,109 @@ fn sentry_emitter_rejects_http_client() {
         format!("{error:#}")
             .contains("SENTRY emitter requires a SENTRY client, found HTTP client 'sentry_main'"),
         "unexpected error: {error:#}"
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
+    let path = temp_db_path();
+    let registry = Registry::open(&path).expect("registry should open");
+    let domain = DomainName::parse("default").expect("valid domain");
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![
+                schema("event_schema"),
+                wire_schema("event_wire"),
+                codec("event_codec", "event_schema"),
+                client_model("collector"),
+                relay("notifications", "event_schema"),
+                Model::Ingestor(CreateIngestor {
+                    name: named("syslog_ing"),
+                    output_routes: unbranched_transforming_outputs("notifications"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::from(SyslogListenerSource {
+                                client: named("collector"),
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            }),
+                            codec: named("event_codec"),
+                        },
+                    ),
+                    timestamp_source: None,
+                    general_error_policy: GeneralErrorPolicy::Log,
+                    filter_where: None,
+                }),
+            ],
+        )
+        .expect_err("a SYSLOG ingestor must reject a KAFKA client");
+
+    assert_invalid_model_reason(
+        &error,
+        "SYSLOG ingestor requires a SYSLOG client, found KAFKA client 'collector'",
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
+    let path = temp_db_path();
+    let registry = Registry::open(&path).expect("registry should open");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let Model::Emitter(mut iceberg_emitter) =
+        emitter("emit", "notifications", "event_codec", "lake")
+    else {
+        unreachable!("emitter helper must build an emitter model")
+    };
+    iceberg_emitter.body = nervix_models::EmitterBody::Values;
+    iceberg_emitter.construction = nervix_models::RouteConstruction::default();
+    iceberg_emitter.sink = Box::new(EmitSink::from(IcebergTableSink {
+        backend: IcebergStorageBackend::S3,
+        client: named("lake"),
+        table: named("events"),
+        values: vec![nervix_models::IcebergValueMapping {
+            column: "value".to_string(),
+            expression: nervix_nspl::parse_expression("input.value")
+                .assured("input.value is a valid expression"),
+        }],
+        location: "s3://lake/events".to_string(),
+        catalog: IcebergCatalog::Rest {
+            client: named("catalog"),
+        },
+        commit_each: "100ms".to_string(),
+        max_commit_size: "1MiB".to_string(),
+    }));
+    iceberg_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
+        retry_policy: RetryPolicy {
+            backoff: "250ms".to_string(),
+            max_backoff: "30s".to_string(),
+        },
+    };
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![
+                schema("event_schema"),
+                Model::ClientS3(CreateClientS3 {
+                    name: named("lake"),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+                client_model("catalog"),
+                relay("notifications", "event_schema"),
+                Model::Emitter(iceberg_emitter),
+            ],
+        )
+        .expect_err("an ICEBERG emitter must reject a KAFKA catalog client");
+
+    assert_invalid_model_reason(
+        &error,
+        "ICEBERG emitter requires an ICEBERG_REST catalog client, found KAFKA client 'catalog'",
     );
 
     let _ = fs::remove_dir_all(path);

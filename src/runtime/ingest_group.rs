@@ -421,7 +421,7 @@ pub(super) struct IngestGroupRows {
 /// accepts the payloads that did decode, giving every message of each payload the payload's
 /// metadata row and a share of its ACK set.
 pub(super) struct PendingIngestGroup {
-    pub(super) kind: SourceMetadataScope,
+    pub(super) scope: SourceMetadataScope,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
@@ -437,9 +437,9 @@ pub(super) struct PendingIngestGroup {
 }
 
 impl PendingIngestGroup {
-    pub(super) fn new(kind: SourceMetadataScope, row_bound: usize) -> Self {
+    pub(super) fn new(scope: SourceMetadataScope, row_bound: usize) -> Self {
         Self {
-            kind,
+            scope,
             row_bound,
             records: None,
             decoder: JsonDecoder::default(),
@@ -541,10 +541,10 @@ impl PendingIngestGroup {
             }));
         }
 
-        let (kind, row_bound) = (self.kind, self.row_bound);
+        let (scope, row_bound) = (self.scope, self.row_bound);
         let builders = self
             .metadata
-            .get_or_insert_with(|| IngestMetadataBuilders::new(kind, row_bound));
+            .get_or_insert_with(|| IngestMetadataBuilders::new(scope, row_bound));
         for (row, payload_acks) in metadata.iter().zip(acks) {
             let messages = self
                 .undispatched_payloads
@@ -727,10 +727,10 @@ pub(super) struct IngestorMessageError<'a> {
 ///
 /// A source decodes each payload into the open group with `decode_payload` and accepts the payloads
 /// that decoded with `collect`, so the group's records, metadata and ACKs stay row-aligned. The
-/// metadata schema is fixed by the source kind when the ingestor starts, so every group the
+/// metadata schema is fixed by the source's scope when the ingestor starts, so every group the
 /// collector opens builds the same columns.
 pub(super) struct IngestRouteCollector {
-    pub(super) kind: SourceMetadataScope,
+    pub(super) scope: SourceMetadataScope,
     /// The number of rows a group is expected to reach, used to size its metadata builders.
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
@@ -742,22 +742,22 @@ pub(super) struct IngestRouteCollector {
 }
 
 impl IngestRouteCollector {
-    /// Opens a collector for a source of `kind` whose groups close at `row_bound` rows.
+    /// Opens a collector for a source of `scope` whose groups close at `row_bound` rows.
     ///
     /// Sources that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
     pub(super) fn new(
-        kind: SourceMetadataScope,
+        scope: SourceMetadataScope,
         row_bound: usize,
         metrics: MessageMetricsHandle,
     ) -> Self {
         Self {
-            kind,
+            scope,
             row_bound,
             context: None,
             metrics,
             routing: None,
-            pending: PendingIngestGroup::new(kind, row_bound),
+            pending: PendingIngestGroup::new(scope, row_bound),
             routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
         }
@@ -861,7 +861,7 @@ impl IngestRouteCollector {
         );
         let pending = std::mem::replace(
             &mut self.pending,
-            PendingIngestGroup::new(self.kind, self.row_bound),
+            PendingIngestGroup::new(self.scope, self.row_bound),
         );
         Ok(Some((context, pending.into_rows()?)))
     }

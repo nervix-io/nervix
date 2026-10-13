@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkEntity, SinkReference, SinkValueMapping,
-    SinkValueMappings, TableName,
+    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkValueMapping, SinkValueMappings, TableName,
 };
 
 configured_client!(Postgres: pooled CreateClientPostgres => PostgresConfigEntry);
@@ -62,10 +62,10 @@ impl SinkEntity for PostgresTableSink {
 
 impl SinkBody for PostgresTableSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Postgres,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

@@ -119,14 +119,14 @@ impl nervix_connector::IngestMessageHeaders for TestIngestHeaders<'_> {
 
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 pub(super) fn ingest_metadata_for_test(
-    kind: super::SourceMetadataScope,
+    scope: super::SourceMetadataScope,
     rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
-    let mut builders = super::IngestMetadataBuilders::new(kind, rows.len());
+    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len());
     for row in rows {
         builders
             .append(row)
-            .expect("test metadata row must match the group's source kind");
+            .expect("test metadata row must match the group's metadata scope");
     }
     builders.finish().expect("test metadata must build")
 }

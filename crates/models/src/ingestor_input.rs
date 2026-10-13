@@ -4,9 +4,11 @@
 //!
 //! - **Owns.** The two input contracts an ingestor declares — an external transport together with
 //!   the codec that decodes its payloads, or the typed batches application clients submit through
-//!   their sessions — and the capabilities each contract carries: header reads, execution on every
-//!   node, the source it references, its quiesce modes and its acknowledgement.
-//! - **Depends on.** The source Models and the schema and codec names they reference.
+//!   their sessions — and how either one answers what its source declares: header reads, execution
+//!   on every node, the model it references, its quiesce mode and its acknowledgement. A client
+//!   contract writes no quiesce mode, so the one it honors is fixed here.
+//! - **Depends on.** The source Models with what their entities declare, and the schema and codec
+//!   names they reference.
 //! - **Must not know.** How a source is opened, how a batch is decoded or admitted, or which node
 //!   executes an ingestor.
 //!

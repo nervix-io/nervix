@@ -26,8 +26,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    RetryPolicy, SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Mqtt: unpooled CreateClientMqtt => MqttConfigEntry);
@@ -243,10 +243,10 @@ impl SinkEntity for MqttTopicSink {
 
 impl SinkBody for MqttTopicSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Mqtt,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

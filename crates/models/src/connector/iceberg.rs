@@ -21,8 +21,8 @@ use strum::AsRefStr;
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkEntity, SinkReference, SinkValueMapping,
-    SinkValueMappings, TableName,
+    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkValueMapping, SinkValueMappings, TableName,
 };
 
 configured_client!(S3: unpooled CreateClientS3 => S3ConfigEntry);
@@ -61,6 +61,16 @@ impl IcebergCatalog {
     pub const fn connector(&self) -> ConnectorKind {
         match self {
             Self::Rest { .. } => ConnectorKind::IcebergRest,
+        }
+    }
+
+    /// The client the catalog is reached through, with the connector it must configure.
+    pub const fn client_reference(&self) -> SinkClientReference<'_> {
+        match self {
+            Self::Rest { client } => SinkClientReference {
+                client,
+                connector: self.connector(),
+            },
         }
     }
 }
@@ -114,20 +124,18 @@ impl SinkEntity for IcebergTableSink {
 
 impl SinkBody for IcebergTableSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: self.backend.connector(),
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {
         Some(&mut self.client)
     }
 
-    fn catalog_client(&self) -> Option<&ClientName> {
-        match &self.catalog {
-            IcebergCatalog::Rest { client } => Some(client),
-        }
+    fn catalog_client(&self) -> Option<SinkClientReference<'_>> {
+        Some(self.catalog.client_reference())
     }
 
     fn value_mappings(&self) -> SinkValueMappings<'_> {

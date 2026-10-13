@@ -72,13 +72,22 @@ impl SchemaField {
 }
 
 impl SourceMetadataScope {
-    /// The Arrow schema of the typed fields this namespace exposes, in declared order. A scope
-    /// that exposes transport headers only has no typed namespace, so it has no schema.
+    /// The Arrow schema of the typed fields this namespace exposes, in declared order and every one
+    /// nullable. A scope that exposes transport headers only has no typed namespace, so it has no
+    /// schema.
+    ///
+    /// A host builds this once for every ingest group, so the fields are read straight from the
+    /// namespace's declaration, without the schema fields a validation reads them as.
     pub fn arrow_schema(self) -> Option<Schema> {
-        match self {
-            Self::Headers => None,
-            Self::Kafka | Self::Syslog => Some(SchemaField::arrow_schema(&self.fields())),
+        let declared = self.declared_fields();
+        if declared.is_empty() {
+            return None;
         }
+        let fields = declared
+            .iter()
+            .map(|field| Field::new(field.name, field.ty.arrow_data_type(), true))
+            .collect::<Vec<_>>();
+        Some(Schema::new(fields))
     }
 }
 
@@ -153,6 +162,18 @@ mod tests {
             described(SourceMetadataScope::Syslog),
             Some(vec![("peer_addr".to_owned(), DataType::Utf8, true)])
         );
+    }
+
+    #[test]
+    fn a_metadata_scope_s_columns_are_the_schema_fields_a_program_is_validated_against() {
+        for scope in [SourceMetadataScope::Kafka, SourceMetadataScope::Syslog] {
+            assert_eq!(
+                scope.arrow_schema(),
+                Some(SchemaField::arrow_schema(&scope.fields())),
+                "{scope:?}"
+            );
+        }
+        assert!(SourceMetadataScope::Headers.fields().is_empty());
     }
 
     #[test]

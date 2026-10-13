@@ -25,8 +25,9 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    KafkaIngestMode, PulsarSubscriptionName, SinkBody, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    KafkaIngestMode, PulsarSubscriptionName, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, TopicName,
 };
 
 configured_client!(Pulsar: unpooled CreateClientPulsar => PulsarConfigEntry);
@@ -116,10 +117,10 @@ impl SinkEntity for PulsarTopicSink {
 
 impl SinkBody for PulsarTopicSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Pulsar,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

@@ -23,8 +23,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(ZeroMq: unpooled CreateClientZeroMq => ZeroMqConfigEntry);
@@ -122,10 +122,10 @@ impl SinkEntity for ZeroMqPushSink {
 
 impl SinkBody for ZeroMqPushSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::ZeroMq,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

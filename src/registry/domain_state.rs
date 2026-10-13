@@ -1443,20 +1443,17 @@ impl DomainState {
                         graph.add_edge(client, source, EdgeKind::RequiredBy);
                     }
 
-                    if let Some(catalog_client_name) = emitter.sink.catalog_client() {
+                    if let Some(catalog) = emitter.sink.catalog_client() {
                         let catalog_client = expect_kind(
                             domain,
                             identifier,
                             models,
                             &indices,
-                            catalog_client_name,
+                            catalog.client,
                             ModelKind::Client,
                         )?;
                         let catalog_client_model = models
-                            .get(&NodeRef::new(
-                                ModelKind::Client,
-                                catalog_client_name.clone(),
-                            ))
+                            .get(&NodeRef::new(ModelKind::Client, catalog.client.clone()))
                             .verified(
                                 "expect_kind above resolved this client reference against the \
                                  same model set",
@@ -1465,15 +1462,17 @@ impl DomainState {
                             "this model was resolved as a client above, and every client model \
                              configures a connector",
                         );
-                        if found != ConnectorKind::IcebergRest {
+                        if found != catalog.connector {
                             return Err(Report::new(RegistryError::InvalidModel {
                                 domain: domain.as_str().to_string(),
                                 identifier: identifier.as_str().to_string(),
                                 reason: format!(
-                                    "ICEBERG emitter requires an ICEBERG_REST catalog client, \
-                                     found {} client '{}'",
+                                    "{} emitter requires an {} catalog client, found {} client \
+                                     '{}'",
+                                    emitter.sink.transport_label(),
+                                    catalog.connector.keyword(),
                                     found.keyword(),
-                                    catalog_client_name.as_str(),
+                                    catalog.client.as_str(),
                                 ),
                             }));
                         }

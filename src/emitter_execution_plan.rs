@@ -137,7 +137,7 @@ impl EmitterExecutionPlan {
         };
         let catalog_client = match emitter.sink.catalog_client() {
             Some(catalog) => nodes
-                .get(&NodeRef::new(ModelKind::Client, catalog))
+                .get(&NodeRef::new(ModelKind::Client, catalog.client))
                 .map(|node| node.config.as_ref()),
             None => None,
         };

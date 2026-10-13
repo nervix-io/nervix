@@ -25,8 +25,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    QueueName, RetryPolicy, SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    QueueName, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(RabbitMq: unpooled CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -136,10 +136,10 @@ impl SinkEntity for RabbitMqQueueSink {
 
 impl SinkBody for RabbitMqQueueSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::RabbitMq,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

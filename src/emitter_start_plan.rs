@@ -567,8 +567,8 @@ single_client_sink_plan! {
     }
 }
 
-/// The OTLP signal an emitter exports, as its connector states it.
-/// The signal an OTEL sink exports, which the entity of its Model names.
+/// The OTLP signal an emitter exports, as its connector states it. The entity of the sink's Model
+/// names the signal, and a metrics entity carries the metric beside it.
 fn otel_signal(sink: &OtelSink) -> OtelSignal {
     match sink {
         OtelSink::Logs(_) => OtelSignal::Logs,

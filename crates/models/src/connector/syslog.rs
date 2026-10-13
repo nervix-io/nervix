@@ -23,8 +23,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Syslog: unpooled CreateClientSyslog => SyslogConfigEntry);
@@ -107,10 +107,10 @@ impl SinkEntity for SyslogCollectorSink {
 
 impl SinkBody for SyslogCollectorSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Syslog,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

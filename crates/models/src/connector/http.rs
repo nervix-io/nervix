@@ -24,8 +24,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, SinkBody, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    IngestSourceCapabilities, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled CreateClientHttp => HttpConfigEntry);
@@ -111,10 +111,10 @@ impl SinkEntity for HttpRequestSink {
 
 impl SinkBody for HttpRequestSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client {
+        SinkReference::Client(SinkClientReference {
             client: &self.client,
             connector: ConnectorKind::Http,
-        }
+        })
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {

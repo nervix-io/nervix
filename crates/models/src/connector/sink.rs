@@ -78,14 +78,18 @@ impl<'a> SinkValueMappings<'a> {
     }
 }
 
+/// A configured client the body of a sink names, and the connector that client must configure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkClientReference<'a> {
+    pub client: &'a ClientName,
+    pub connector: ConnectorKind,
+}
+
 /// The model the body of one sink names to publish to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkReference<'a> {
-    /// A configured client, which must configure `connector`.
-    Client {
-        client: &'a ClientName,
-        connector: ConnectorKind,
-    },
+    /// The configured client the sink publishes through.
+    Client(SinkClientReference<'a>),
     /// The schema of the native batches session consumers receive.
     Schema(&'a SchemaName),
 }
@@ -125,8 +129,9 @@ pub trait SinkBody {
     /// The client the body publishes through, to rebind it. A body that names a schema has none.
     fn client_mut(&mut self) -> Option<&mut ClientName>;
 
-    /// The catalog client the body commits through, for a body that names one beside its own.
-    fn catalog_client(&self) -> Option<&ClientName> {
+    /// The catalog client the body commits through, for a body that names one beside the client
+    /// it publishes through.
+    fn catalog_client(&self) -> Option<SinkClientReference<'_>> {
         None
     }
 
@@ -146,10 +151,10 @@ pub trait SinkBody {
 pub trait SinkEntityKind {
     fn connector(&self) -> ConnectorKind;
 
-    /// How NSPL spells the entity.
+    /// The keyword that names the entity within its connector.
     fn keyword(&self) -> &'static str;
 
-    /// The connector and the entity together, as a statement head names them.
+    /// The name of the pair: the connector's keyword, then the entity's.
     fn phrase(&self) -> &'static str;
 
     fn capabilities(&self) -> EmitSinkCapabilities;
@@ -193,12 +198,12 @@ impl EmitSinkKind {
         self.entity().connector()
     }
 
-    /// How NSPL spells the entity this sink writes.
+    /// The keyword that names the entity this sink writes.
     pub fn entity_keyword(self) -> &'static str {
         self.entity().keyword()
     }
 
-    /// The connector and the entity together, as a statement head names them.
+    /// The name of this pair: its connector's keyword, then its entity's.
     pub fn phrase(self) -> &'static str {
         self.entity().phrase()
     }
@@ -237,7 +242,7 @@ impl EmitSink {
     /// The client this sink publishes through. A sink that serves session consumers has none.
     pub fn client(&self) -> Option<&ClientName> {
         match self.reference() {
-            SinkReference::Client { client, .. } => Some(client),
+            SinkReference::Client(reference) => Some(reference.client),
             SinkReference::Schema(_) => None,
         }
     }
@@ -246,8 +251,9 @@ impl EmitSink {
         self.body_mut().client_mut()
     }
 
-    /// The catalog client this sink commits through, for a sink that names one beside its own.
-    pub fn catalog_client(&self) -> Option<&ClientName> {
+    /// The catalog client this sink commits through, for a sink that names one beside the client
+    /// it publishes through.
+    pub fn catalog_client(&self) -> Option<SinkClientReference<'_>> {
         self.body().catalog_client()
     }
 
@@ -264,7 +270,7 @@ impl EmitSink {
     /// session consumers publishes through no client.
     pub fn client_connector(&self) -> Option<ConnectorKind> {
         match self.reference() {
-            SinkReference::Client { connector, .. } => Some(connector),
+            SinkReference::Client(reference) => Some(reference.connector),
             SinkReference::Schema(_) => None,
         }
     }

@@ -107,3 +107,31 @@ impl IngestMetadataRow<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::SourceMetadataScope;
+
+    use super::{IngestMetadataRow, NoIngestHeaders};
+
+    #[test]
+    fn a_metadata_row_names_the_scope_whose_fields_it_carries() {
+        let kafka = IngestMetadataRow::Kafka {
+            topic: "orders",
+            partition: 3,
+            offset: 42,
+            headers: &NoIngestHeaders,
+        };
+        assert_eq!(kafka.scope(), SourceMetadataScope::Kafka);
+
+        let syslog = IngestMetadataRow::Syslog {
+            peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 514)),
+        };
+        assert_eq!(syslog.scope(), SourceMetadataScope::Syslog);
+
+        let headers = IngestMetadataRow::Headers {
+            headers: &NoIngestHeaders,
+        };
+        assert_eq!(headers.scope(), SourceMetadataScope::Headers);
+    }
+}

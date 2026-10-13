@@ -758,7 +758,7 @@ impl RuntimeSourceHost {
         messages: Vec<SourceIntakeMessage<'_>>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         let mut collector = IngestRouteCollector::new(
-            self.collector.kind,
+            self.collector.scope,
             messages.len().max(1),
             self.metrics.clone(),
         );

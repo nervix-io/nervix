@@ -13,14 +13,13 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::collections::HashSet;
-
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{
-    AckWindow, AlterIngestorError, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
+    AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
+    BatchMessageLimit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
     ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName, ClientSinkEntity,
-    ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind,
+    ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind, EmitterBatchPolicy,
     EmitterBatchRequirement, EmitterPublishingMode, EndpointEndpointSource, EndpointIngestMode,
     EndpointSource, EndpointSourceEntity, Expression, HttpSinkEntity, HttpSourceEntity,
     IcebergCatalog, IcebergSink, IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink,
@@ -35,9 +34,10 @@ use nervix_models::{
     PrometheusSourceEntity, PulsarSinkEntity, PulsarSourceEntity, PulsarTopicSink,
     RabbitMqSinkEntity, RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSink,
     RedisPubSubSource, RedisSink, RedisSinkEntity, RedisSource, RedisSourceEntity, RetryPolicy,
-    SchemaName, SentryEventSink, SentrySink, SentrySinkEntity, SinkReference, SinkValueMapping,
-    SourceMetadataScope, SourceReferenceKind, SqsSinkEntity, SqsSourceEntity, SyslogSinkEntity,
-    SyslogSourceEntity, TableName, WebsocketsSourceEntity, ZeroMqSinkEntity, ZeroMqSourceEntity,
+    SchemaName, SentryEventSink, SentrySink, SentrySinkEntity, SinkClientReference, SinkReference,
+    SinkValueMapping, SourceMetadataScope, SourceReferenceKind, SqsSinkEntity, SqsSourceEntity,
+    SyslogSinkEntity, SyslogSourceEntity, TableName, WebsocketsSourceEntity, ZeroMqSinkEntity,
+    ZeroMqSourceEntity,
 };
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
@@ -146,6 +146,14 @@ fn publishing_modes() -> Vec<(&'static str, EmitterPublishingMode)> {
     ]
 }
 
+/// Fails when two pairs share a phrase, which would make one of them unaddressable.
+fn assert_names_each_once(phrases: &[&'static str]) {
+    let mut distinct = phrases.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), phrases.len(), "{phrases:?}");
+}
+
 #[test]
 fn every_connector_kind_is_spelled_as_nspl_spells_it() {
     let keywords = ConnectorKind::iter()
@@ -210,8 +218,7 @@ fn the_source_kinds_name_every_pair_once_with_its_phrase() {
             "SYSLOG LISTENER",
         ]
     );
-    let distinct = IngestSourceKind::all().collect::<HashSet<_>>();
-    assert_eq!(distinct.len(), phrases.len());
+    assert_names_each_once(&phrases);
 }
 
 #[test]
@@ -244,13 +251,7 @@ fn the_sink_kinds_name_every_pair_once_with_its_phrase() {
             "ICEBERG TABLE",
         ]
     );
-    let distinct = EmitSinkKind::all().collect::<HashSet<_>>();
-    assert_eq!(distinct.len(), phrases.len());
-    assert_eq!(
-        EmitSinkKind::modeled().collect::<Vec<_>>(),
-        EmitSinkKind::all().collect::<Vec<_>>(),
-        "every sink pair has a Model in the union"
-    );
+    assert_names_each_once(&phrases);
 }
 
 #[test]
@@ -710,7 +711,7 @@ fn a_sink_states_what_its_pair_declares() {
                 );
             }
             match sink.reference() {
-                SinkReference::Client { client, connector } => {
+                SinkReference::Client(SinkClientReference { client, connector }) => {
                     assert_eq!(sink.client(), Some(client));
                     assert_eq!(sink.client_connector(), Some(connector));
                 }
@@ -804,7 +805,14 @@ fn an_iceberg_sink_writes_through_the_object_store_its_backend_names(
     assert_eq!(backend.connector(), connector);
     assert_eq!(sink.client_connector(), Some(connector));
     assert_eq!(sink.client(), Some(&named::<ClientName>("lake")));
-    assert_eq!(sink.catalog_client(), Some(&named::<ClientName>("catalog")));
+    let catalog: ClientName = named("catalog");
+    assert_eq!(
+        sink.catalog_client(),
+        Some(SinkClientReference {
+            client: &catalog,
+            connector: ConnectorKind::IcebergRest,
+        })
+    );
     assert_eq!(sink.commit_policy(), Some(("30s", "64MiB")));
     let EmitSink::Iceberg(IcebergSink::Table(table)) = &sink else {
         panic!("an Iceberg table sink was built, found {sink:?}");
@@ -981,6 +989,152 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
     };
     assert!(iceberg("lake", "catalog").same_definition(&iceberg("other_lake", "catalog")));
     assert!(!iceberg("lake", "catalog").same_definition(&iceberg("lake", "other_catalog")));
+}
+
+/// A batching clause every sink's contract admits: small enough for the tightest destination.
+fn admissible_batch() -> EmitterBatchPolicy {
+    EmitterBatchPolicy {
+        max_messages: BatchMessageLimit::try_from(8_u32)
+            .assured("eight messages are within the limit's range"),
+        max_size: "1KiB"
+            .parse()
+            .assured("one kibibyte is a whole number of bytes"),
+    }
+}
+
+#[test]
+fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
+    let other: ClientName = named("rebound");
+    for kind in EmitSinkKind::all() {
+        for seed in 0..4 {
+            let bytes = seeded_bytes(seed);
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+            let mut original = arbitrary.create_emitter_to(kind);
+            // An alteration checks the batching contract again, which is not what this check is
+            // about, so the emitter batches exactly as its sink requires.
+            original.batch = match original.sink.batch_requirement() {
+                EmitterBatchRequirement::Required => Some(admissible_batch()),
+                EmitterBatchRequirement::Optional => None,
+            };
+            let alter = AlterEmitter {
+                emitter: original.name.clone(),
+                operations: vec![AlterEmitterOperation::SetClient {
+                    client: other.clone(),
+                }],
+            };
+            let mut rebound = original.clone();
+            let outcome = rebound.apply_alter(&alter);
+
+            if original.sink.client().is_none() {
+                let error = outcome
+                    .expect_err("a sink that serves session consumers publishes through no client");
+                assert_eq!(
+                    error.current_context(),
+                    &AlterEmitterError::ClientUnsupported,
+                    "{kind:?}"
+                );
+                assert_eq!(rebound, original, "{kind:?}");
+                continue;
+            }
+            outcome.expect("a sink that publishes through a client can name another");
+            assert_eq!(rebound.sink.kind(), kind);
+            assert_eq!(rebound.sink.client(), Some(&other), "{kind:?}");
+            assert!(original.sink.same_definition(&rebound.sink), "{kind:?}");
+            assert!(rebound.sink.same_definition(&original.sink), "{kind:?}");
+        }
+    }
+}
+
+#[test]
+fn a_source_acknowledges_as_its_delivery_mode_states() {
+    let retry = retry_policy();
+    let max = std::num::NonZeroU64::new(8).assured("eight is not zero");
+    let sequential = IngestAcknowledgement::Sequential {
+        timeout: "5s",
+        retry: &retry,
+    };
+    let parallel = IngestAcknowledgement::Parallel {
+        max,
+        batch_timeout: "250ms",
+        timeout: "5s",
+        retry: &retry,
+    };
+
+    let kafka = |mode| {
+        IngestSource::from(KafkaTopicSource {
+            client: named("events"),
+            topic: named("orders"),
+            offset_mode: KafkaOffsetMode::Domain,
+            instances: std::num::NonZeroU64::MIN,
+            mode,
+            quiesce: IngestQuiesceMode::Suspend,
+        })
+    };
+    assert_eq!(
+        kafka(KafkaIngestMode::AckSequential {
+            timeout: "5s".to_owned(),
+            retry_policy: retry.clone(),
+        })
+        .acknowledgement(),
+        sequential
+    );
+    assert_eq!(
+        kafka(KafkaIngestMode::AckParallel {
+            max,
+            batch_timeout: "250ms".to_owned(),
+            timeout: "5s".to_owned(),
+            retry_policy: retry.clone(),
+        })
+        .acknowledgement(),
+        parallel
+    );
+    assert_eq!(
+        kafka(KafkaIngestMode::NoAckParallel).acknowledgement(),
+        IngestAcknowledgement::Unacknowledged
+    );
+
+    let mqtt_modes = [
+        MqttIngestMode::NoAckSequential {
+            session: MqttSession::Clean,
+            qos: MqttQos::AtMostOnce,
+        },
+        MqttIngestMode::NoAckParallel {
+            session: MqttSession::Persistent,
+            qos: MqttQos::AtLeastOnce,
+        },
+        MqttIngestMode::AckSequential {
+            timeout: "5s".to_owned(),
+            retry_policy: retry.clone(),
+        },
+        MqttIngestMode::AckParallel {
+            max,
+            batch_timeout: "250ms".to_owned(),
+            timeout: "5s".to_owned(),
+            retry_policy: retry.clone(),
+        },
+    ];
+    let expected = [
+        IngestAcknowledgement::Unacknowledged,
+        IngestAcknowledgement::Unacknowledged,
+        sequential,
+        parallel,
+    ];
+    for (mode, expected) in mqtt_modes.into_iter().zip(expected) {
+        let acknowledges = mode.is_ack();
+        let source = IngestSource::from(MqttTopicSource {
+            client: named("broker"),
+            topic: "orders/#".to_owned(),
+            instances: std::num::NonZeroU64::MIN,
+            mode,
+            quiesce: IngestQuiesceMode::Drop,
+        });
+        assert_eq!(source.acknowledgement(), expected);
+        assert_eq!(
+            acknowledges,
+            expected != IngestAcknowledgement::Unacknowledged,
+            "{source:?}"
+        );
+    }
 }
 
 #[test]

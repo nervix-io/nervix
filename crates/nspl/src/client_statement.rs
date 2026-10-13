@@ -823,9 +823,10 @@ fn expects_local_path(head: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        ClientSourceEntity, EndpointSourceEntity, KafkaSinkEntity, MqttSourceEntity,
-        SentrySinkEntity,
+        ClientSinkEntity, ClientSourceEntity, CreateStatement, EndpointSourceEntity,
+        KafkaSinkEntity, Model, MqttSourceEntity, RequestedResourceVersion, SentrySinkEntity,
     };
 
     use super::*;
@@ -922,6 +923,68 @@ mod tests {
                 )),
             ))
         ));
+    }
+
+    /// Bytes that differ from seed to seed, so a generated statement takes more than one shape.
+    fn generator_bytes(seed: u8) -> Vec<u8> {
+        (0..1024_u16)
+            .map(|index| {
+                let low = index.to_le_bytes()[0];
+                low.wrapping_mul(29).wrapping_add(seed.wrapping_mul(53))
+            })
+            .collect()
+    }
+
+    /// The tokens of the canonical NSPL that creates `model`.
+    fn canonical_tokens(model: Model<RequestedResourceVersion>) -> Vec<Token> {
+        let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
+        let canonical = statement
+            .to_canonical_nspl()
+            .expect("a generated Model renders as canonical NSPL");
+        completion_tokens(&canonical).assured("canonical NSPL lexes")
+    }
+
+    #[test]
+    fn an_ingestor_s_tokens_name_the_source_pair_it_reads() {
+        for kind in IngestSourceKind::all() {
+            for seed in 0..4 {
+                let bytes = generator_bytes(seed);
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let ingestor = arbitrary.create_ingestor_from(kind);
+                let tokens = canonical_tokens(Model::Ingestor(ingestor));
+                assert_eq!(ingestor_source_kind(&tokens), Some(kind));
+            }
+        }
+    }
+
+    #[test]
+    fn an_emitter_s_tokens_name_the_sink_pair_a_client_serves() {
+        for kind in EmitSinkKind::all() {
+            // A session consumer's sink publishes through no client and writes no header, so an
+            // invocation after it has the ordinary scope: the lookup names every other pair.
+            let expected = match kind {
+                EmitSinkKind::Client(ClientSinkEntity::Consumer) => None,
+                _ => Some(kind),
+            };
+            for seed in 0..4 {
+                let bytes = generator_bytes(seed);
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let emitter = arbitrary.create_emitter_to(kind);
+                let tokens = canonical_tokens(Model::Emitter(emitter));
+                assert_eq!(emitter_sink_kind(&tokens), expected, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_otel_sink_without_its_signal_names_no_pair() {
+        let unfinished = "CREATE EMITTER sink FROM incoming TO OTEL collector";
+        let tokens = completion_tokens(unfinished).assured("the statement prefix lexes");
+        assert_eq!(emitter_sink_kind(&tokens), None);
+
+        let unsignalled = "CREATE EMITTER sink FROM incoming TO OTEL collector VALUES";
+        let tokens = completion_tokens(unsignalled).assured("the statement prefix lexes");
+        assert_eq!(emitter_sink_kind(&tokens), None);
     }
 
     #[test]
