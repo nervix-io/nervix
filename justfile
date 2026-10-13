@@ -2465,7 +2465,7 @@ validate-nspl-docs:
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
 
-test-docs:
+test-docs: typed-ratchet-source-build
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
