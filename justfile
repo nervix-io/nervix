@@ -403,7 +403,7 @@ test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
 
 # Measure the ordinary harness owners without clearing the current workspace profiles.
-coverage-harness-liveness-append output *args: tests-deps
+coverage-harness-liveness-workspace output *args: tests-deps
     cargo llvm-cov --no-clean --features testing --test harness_liveness --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure native consensus transport regressions through the configured compiler cache.
