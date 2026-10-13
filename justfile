@@ -42,6 +42,14 @@ bolero-deps: build-web-console
 prepare-bolero target: bolero-deps
     BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 -m scripts.bolero prepare {{ quote(target) }}
 
+# Prepare the inventory's declared harnesses that one sanitizer shard, NUMBER/COUNT, builds.
+prepare-bolero-shard shard: bolero-deps
+    BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 -m scripts.bolero prepare-shard {{ quote(shard) }}
+
+# Show how COUNT sanitizer shards divide the inventory's harnesses and targets.
+fuzz-plan count="3":
+    python3 -m scripts.bolero plan {{ quote(count) }}
+
 # The registry and window properties share this declared server library and feature set.
 prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 
@@ -57,13 +65,24 @@ fuzz-list: bolero-deps
 fuzz target duration="30": bolero-deps
     python3 -m scripts.bolero fuzz {{ quote(target) }} {{ quote(duration) }}
 
-# Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
-fuzz-all duration="30": bolero-deps
-    python3 -m scripts.bolero fuzz-all {{ quote(duration) }}
+# Run every target, or one shard NUMBER/COUNT of them, through sanitizer-backed libFuzzer.
+# Duration is per target in seconds.
+fuzz-all duration="30" shard="1/1": bolero-deps
+    python3 -m scripts.bolero fuzz-all {{ quote(duration) }} --shard {{ quote(shard) }}
 
 # Replay the exact saved input through its ordinary property assertion.
 fuzz-replay target failure: bolero-deps
     python3 -m scripts.bolero replay {{ quote(target) }} {{ quote(failure) }}
+
+# Replay the exact saved input once through its instrumented sanitizer build, which a sanitizer
+# finding needs: the ordinary build does not detect it.
+fuzz-replay-sanitizer target failure: bolero-deps
+    python3 -m scripts.bolero replay-sanitizer {{ quote(target) }} {{ quote(failure) }}
+
+# Check that the shard campaign records under `evidence` ran every registered target once, then
+# write their combined record and merged Rust source report to `output`.
+combine-bolero-fuzz evidence output:
+    python3 -m scripts.bolero combine {{ quote(evidence) }} {{ quote(output) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
 fuzz-reduce target failure: bolero-deps
@@ -80,13 +99,16 @@ validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 validate-workflows *workflows:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
-# Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
+# Qualify every way a run must fail: a property mismatch, a sanitizer finding, a case timeout, an
+# engine failure, discovery of ignored, unregistered and missing targets, a selection of nothing
+# and a corrupt replay record, with saved inputs, minimization and exact replay.
 qualify-bolero: bolero-deps
     python3 -m scripts.bolero qualify
 
-# Exercise the inventory and runner's validation and failure paths.
+# Exercise the inventory and runner's validation and failure paths, and the runner load recorder
+# the sanitizer shards keep their measurements with.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_record_runner_load
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
@@ -98,14 +120,14 @@ coverage-bolero-runner:
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect distinct Python runner and live Rust source reports, then qualify failure retention.
-# The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
-coverage-bolero duration="2": bolero-deps
+# The duration is per product target; CI passes 30 and its shard NUMBER/COUNT on PRs labeled `fuzz`.
+coverage-bolero duration="2" shard="1/1": bolero-deps
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
     "${coverage[@]}" run --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }} --shard {{ quote(shard) }}
     "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
@@ -228,6 +250,36 @@ test-scenarios *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
+
+# Qualify ten consecutive three-node native metadata restores, retaining every attempt without retries.
+test-native-metadata-restore-repeat: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    evidence_root={{ quote(cargo_target_dir + "/native-metadata-restore") }}
+    mkdir -p "$evidence_root"
+    attempt=$(mktemp -d "$evidence_root/run.XXXXXXXX")
+    git rev-parse HEAD > "$attempt/source-revision.txt"
+    git diff HEAD -- > "$attempt/source.patch"
+    for repetition in {1..10}; do
+        log="$attempt/repetition-$repetition.log"
+        status=0
+        cargo test --features testing --test scenarios -- \
+            --input tests/features/cluster/backup_metadata.feature \
+            --name '^Native lifecycle and Kafka metadata above the bulk budget on 3 nodes restore exactly$' \
+            --concurrency 4 --retry 0 > "$log" 2>&1 || status=$?
+        if [[ -f tests/logs/scenarios.log ]]; then
+            cp tests/logs/scenarios.log "$attempt/repetition-$repetition-scenarios.log"
+        fi
+        if [[ "$status" != 0 ]] || ! rg -q '^1 scenario \(1 passed\)$' "$log"; then
+            cat "$log"
+            printf 'Native metadata restore repetition %s failed; evidence: %s\n' "$repetition" "$attempt" >&2
+            exit 1
+        fi
+        printf 'Native metadata restore repetition %s/10 passed\n' "$repetition"
+    done
+    printf '10 consecutive three-node scenarios passed with concurrency 4 and retry 0\n' > "$attempt/completion.txt"
+    printf 'Native metadata restore qualification complete; evidence: %s\n' "$attempt"
 
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
 test-scenarios-binary binary *args: download-onnxruntime
@@ -512,11 +564,18 @@ test-deloxide-order: tests-deps test-deloxide-order-workloads
 # of its further acquisitions, between 20µs and 200µs, as `StressConfiguration::LANE` records in
 # every process's evidence. Every probe, conformance check and owner test of the active-only
 # selection runs again under that disturbance, together with the probe that proves it is applied,
-# and the lifecycle scenarios tagged `@deloxide_stress` run one at a time, so the transactions,
-# drains, restores, reconnections and shutdowns they drive meet orders of nested acquisitions an
-# idle schedule rarely takes. Deloxide draws its delays from entropy it seeds itself, so a replay repeats the
-# workload and the configuration, not the schedule.
+# and the lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios run one at a
+# time, so the transactions, drains, reconnections, reopens and shutdowns they drive meet orders of
+# nested acquisitions an idle schedule rarely takes. Deloxide draws its delays from entropy it
+# seeds itself, so a replay repeats the workload and the configuration, not the schedule.
 test-deloxide-stress: tests-deps test-deloxide-stress-workloads
+
+# The stressed build's capture, restore and checkpoint-transfer scenarios, tagged
+# `@deloxide_stress_restore`, in the `deloxide-stress-restore` selection: the same build and
+# disturbance as `test-deloxide-stress`, its probes, and these scenarios one at a time, in a lane
+# with a budget of its own, because the stressed scenarios of both selections together would take
+# most of one lane's budget.
+test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
@@ -528,6 +587,9 @@ test-deloxide-order-workloads:
 
 test-deloxide-stress-workloads:
     python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress
+
+test-deloxide-stress-restore-workloads:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress-restore
 
 # Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
 # diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow
@@ -921,8 +983,11 @@ test-runtime-state-capabilities: tests-deps
 test-expiry-map:
     cargo test --package nervix-expiry-map
 
+# Bolero reads its checked-in corpus from the source tree, which Miri's isolation forbids, so the
+# Miri run lifts isolation and bounds the property's random cases beside that corpus.
 test-expiry-map-miri:
-    cargo +nightly miri test --package nervix-expiry-map
+    MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
+        cargo +nightly miri test --package nervix-expiry-map
 
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
@@ -1054,6 +1119,27 @@ coverage-harness-liveness *args: tests-deps
 # Export the current ordinary harness profiles after a replay, without another test invocation.
 coverage-harness-liveness-report output:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }} cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Judge whether a pull request's head revision holds the complete evidence a release needs: every
+# check tests/release-evidence.toml requires passed on that revision and the label of every
+# label-gated method is on the pull request. Writes the register, with every gap an owner of tracked
+# locks declares, under target/release-evidence/<revision>/ and exits 1 when the evidence is
+# incomplete.
+release-evidence pr:
+    python3 -m scripts.release_evidence check --pr {{ quote(pr) }}
+
+# Exercise the release evidence gate on recorded check runs, without GitHub.
+test-release-evidence:
+    python3 -m unittest --quiet scripts.tests.test_release_evidence
+
+# Retain the release evidence gate's own measured line coverage beside the other Python tooling.
+coverage-release-evidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/release-evidence-coverage"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/release-evidence-coverage/python.coverage" --branch --source=scripts.release_evidence,scripts.tests.test_release_evidence -m unittest scripts.tests.test_release_evidence
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/release-evidence-coverage/python.coverage" -o "{{ cargo_target_dir }}/release-evidence-coverage/python.lcov"
 
 # Exercise line accounting, Git source changes and advisory comment publication.
 test-patch-coverage:
@@ -1840,11 +1926,8 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 cargo-fmt:
     cargo +nightly fmt
 
-# Format authored TOML directly; recursive discovery would walk ignored build caches.
 taplo-format:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    git ls-files --cached --others --exclude-standard -z -- '*.toml' | xargs -0 --no-run-if-empty taplo format --
+    git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format
 
 [parallel]
 fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
@@ -1853,9 +1936,7 @@ cargo-fmt-check:
     cargo +nightly fmt --check
 
 taplo-format-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    git ls-files --cached --others --exclude-standard -z -- '*.toml' | xargs -0 --no-run-if-empty taplo format --check --
+    git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format --check
 
 [parallel]
 fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
@@ -2071,7 +2152,7 @@ ratchet *args: typed-ratchet-build
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
 test-ratchet-units:
-    python3 -m unittest scripts.tests.test_ratchet
+    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries
 
 typed-ratchet-build:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -2086,8 +2167,27 @@ test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
     python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
-test-typed-ratchet-contracts: typed-ratchet-build
-    python3 -m unittest scripts.tests.compiler_contract_checks
+test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks": typed-ratchet-build
+    python3 -m unittest {{ tests }}
+
+# Error propagation uses the actual node startup and DNS hooks, plus both simulation drivers.
+test-typed-error-runtime: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --lib --features testing application::startup::tests::
+    cargo test --package nervix-server --lib --features testing application::tracing_setup::tests::
+    just test-paced-simulation
+
+# Append native failure-path coverage to the public scenario collection.
+coverage-typed-error-runtime: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    for owner in application::startup::tests:: application::tracing_setup::tests:: registry::restore_plan::tests:: runtime::state_store::tests::; do
+        cargo llvm-cov --no-report --package nervix-server --lib --features testing -- "$owner"
+    done
+    just coverage-paced-simulation-report target/typed-error-runtime.lcov
 
 test-typed-ratchet: test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
 
@@ -2118,6 +2218,8 @@ test-typed-ratchet-docs:
 test-typed-ratchet-product-docs:
     cargo +1.99 test --package nervix-primitives --doc expect_lint
     cargo +1.99 test --package nervix-vm --doc FunctionInjector
+    cargo +1.99 test --package nervix-dns --doc DnsLookupReport
+    cargo +1.99 test --package nervix-recovery --doc Discarded
     RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
@@ -2127,12 +2229,14 @@ test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
 fmt-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
 
 fmt-check-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
 
 # Tooling packages use the same bounded scheduler and command, with their pinned compiler.
 lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
@@ -2148,7 +2252,7 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2263,10 +2367,10 @@ validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs va
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
 # primitives, shared ownership and the `futures` crates' synchronization included; a manifest that
 # renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; the analysis cfg
-# selecting code or set by a build; a selected atomic held by a static or constructed in a const
-# context; a family Loom does not model in Loom model code; an unmodeled primitive without its
-# permission; a stale or misplaced permission; a `loom` dependency outside its owner and harness;
-# and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
+# selecting code or set by a build; a selected atomic held by a static, the owner's own included,
+# or constructed in a const context; a family Loom does not model in Loom model code; an unmodeled
+# primitive without its permission; a stale or misplaced permission; a `loom` dependency outside
+# its owner and harness; and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
 # the source rules, and so is what a build wrote into a Cargo build directory. The check's own
 # tests run first, so a rule that stopped rejecting its bypass fails here too.
 validate-primitive-boundary:
@@ -2393,7 +2497,7 @@ validate-execution-mode-conflicts:
     echo "every mode conflict, browser-target request, diagnostic mode without its capability and product binary without its form fails with its diagnostic"
 
 validate-clock-boundaries:
-    python3 scripts/check_clock_boundaries.py
+    python3 -m scripts.check_clock_boundaries
 
 # Reject `Result<_, String>` in product code. A typed error is a rule, not a count, so there is no
 # baseline to raise: any occurrence fails and names the rule.
@@ -2402,7 +2506,7 @@ validate-typed-errors:
 
 toolchains-install:
     rustup toolchain install
-    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
+    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools --target wasm32-unknown-unknown
 
 # Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
@@ -2581,6 +2685,41 @@ build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
     COPY nervix-cli /usr/local/bin/nervix-cli
     EOF
     docker build --build-arg BASE={{ quote(base) }} --tag {{ quote(tag) }} "${stage}"
+
+# Overlay a diagnostic server of one Deloxide selection, built in release mode from this checkout,
+# with this checkout's CLI and the evidence report tool, on an already available packaged image, for
+# a local Chaos run of a diagnostic image. Its labels name the selection and this checkout's revision,
+# as `docker-build-diagnostic` does for the image CI runs.
+build-chaos-diagnostic-image tag="nervix:diagnostic-local" base="ghcr.io/nervix-io/nervix:debian-latest" selection="deloxide-order": build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide | deloxide-order | deloxide-stress) ;;
+        *) echo "unknown diagnostic selection: {{ selection }}" >&2; exit 2 ;;
+    esac
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo build --release \
+        --package nervix-server --bin nervix-server --features {{ quote(selection) }}
+    cargo build --release --package nervix-cli --bin nervix-cli
+    cargo build --release --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
+    revision="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        revision="${revision}-dirty"
+    fi
+    stage="$(mktemp -d {{ quote(cargo_target_dir + "/diagnostic-chaos-image.XXXXXX") }})"
+    trap 'rm -rf "${stage}"' EXIT
+    install -m 755 {{ quote(cargo_target_dir + "/deloxide/release/nervix-server") }} "${stage}/nervix-server"
+    install -m 755 {{ quote(cargo_target_dir + "/release/nervix-cli") }} "${stage}/nervix-cli"
+    install -m 755 {{ quote(cargo_target_dir + "/release/nervix-deadlock-report") }} "${stage}/nervix-deadlock-report"
+    llvm-strip-23 "${stage}/nervix-server" "${stage}/nervix-cli" "${stage}/nervix-deadlock-report"
+    cat >"${stage}/Dockerfile" <<'EOF'
+    ARG BASE
+    FROM ${BASE}
+    COPY nervix-server nervix-cli nervix-deadlock-report /usr/local/bin/
+    EOF
+    docker build --build-arg BASE={{ quote(base) }} \
+        --label io.nervix.diagnostic.selection={{ quote(selection) }} \
+        --label "org.opencontainers.image.revision=${revision}" \
+        --tag {{ quote(tag) }} "${stage}"
 
 # Build a diagnostic node: nervix-server in the `deloxide` mode, whose tracked locks report an active
 # deadlock with evidence and end the process. Its own target directory keeps it from replacing the
@@ -2868,17 +3007,39 @@ docker-prepare-qemu platform="linux/amd64":
 # Build the CPU image for amd64 or arm64.
 docker-build-debian llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
     just docker-build-linux cpu {{ quote(llvm_version) }} \
-        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} ""
 
 # Build Debian trixie -> CUDA 13/cuDNN 9 -> Nervix, reusing CUDA across application builds.
 docker-build-cuda llvm_version="23" tag="nervix:cuda" platform="linux/amd64" push="false" cache_from="" cache_to="":
     just docker-build-linux cuda {{ quote(llvm_version) }} \
-        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} ""
+
+# Build the Deloxide diagnostic image of the CPU runtime: the diagnostic server of one selection,
+# deloxide, deloxide-order or deloxide-stress, with the ordinary CLI and formatter and the evidence
+# report tool. Its io.nervix.diagnostic.selection label makes every chaos run judge the deadlock
+# evidence of its nodes; it is a test artifact and never a release.
+docker-build-diagnostic selection="deloxide-order" llvm_version="23" tag="nervix:diagnostic" platform="linux/amd64" push="false" cache_from="" cache_to="":
+    just docker-build-linux diagnostic {{ quote(llvm_version) }} \
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} \
+        {{ quote(selection) }}
 
 [private]
-docker-build-linux image_target llvm_version tag platform push cache_from cache_to:
+docker-build-linux image_target llvm_version tag platform push cache_from cache_to diagnostic_selection:
     #!/usr/bin/env bash
     set -euo pipefail
+    case {{ quote(image_target) }}:{{ quote(diagnostic_selection) }} in
+        cpu: | cuda: | diagnostic:deloxide | diagnostic:deloxide-order | diagnostic:deloxide-stress) ;;
+        *)
+            echo "the {{ image_target }} image cannot be built with diagnostic selection '{{ diagnostic_selection }}'" >&2
+            exit 1
+            ;;
+    esac
+    # Every image names the revision it was built from, so two images of one revision can be told
+    # apart from two of different ones.
+    revision="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        revision="${revision}-dirty"
+    fi
     normalized_platform={{ quote(platform) }}
     if [[ "${normalized_platform}" == "linux/aarch64" ]]; then
         normalized_platform="linux/arm64"
@@ -2917,6 +3078,8 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
+        --build-arg NERVIX_DIAGNOSTIC_SELECTION={{ quote(diagnostic_selection) }} \
+        --label "org.opencontainers.image.revision=${revision}" \
         "${cache_flags[@]}" \
         -t {{ quote(tag) }} \
         "${output_flag}" \

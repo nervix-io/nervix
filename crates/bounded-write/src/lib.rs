@@ -15,6 +15,11 @@
 //! outcome from the buffer rather than from that error, so an encoding that reached the limit is
 //! never mistaken for a malformed value and a malformed value is never mistaken for an oversize one.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{io, num::NonZeroUsize};
 
 use thiserror::Error;
@@ -126,6 +131,10 @@ impl io::Write for BoundedWriter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "properties_tests.rs"]
+mod properties;
 
 #[cfg(test)]
 mod tests {

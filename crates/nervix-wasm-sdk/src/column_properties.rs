@@ -5,6 +5,11 @@
 //! - **Depends on.** Production SDK envelopes, Arrow builders and current message generators.
 //! - **Must not know.** Host scheduling, checkpoint publication or live ACK ownership.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::sync::Arc;
 
 use arrow_array::{

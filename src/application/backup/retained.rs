@@ -19,6 +19,14 @@
 //! its client mid-stream releases only its own hold, the archive stays for the client to download
 //! again, and the staging is released exactly once however downloads and expiry interleave.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, future::Future};
 
 use arch_into::ArchInto as _;

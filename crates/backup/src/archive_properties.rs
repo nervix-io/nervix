@@ -5,6 +5,11 @@
 //! - **Depends on.** Current public archive encoders/readers and bounded synthetic archive values.
 //! - **Must not know.** Runtime ownership assignment, installation generations or cut synchronization.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeMap, fmt::Debug, io::Read as _};
 
 use error_stack::Report;

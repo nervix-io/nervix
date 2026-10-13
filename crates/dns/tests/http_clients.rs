@@ -3,7 +3,8 @@
 //! Outside the layer order: a test harness.
 //!
 //! - **Owns.** Observable DNS, connection, TTL, and timeout evidence for both Reqwest hooks, the
-//!   Hyper connector hook, and the Smithy hook, and the typed lookup failure each hands its library.
+//!   Hyper connector hook, and the Smithy hook, and the typed lookup failure and the whole lookup
+//!   report each hands its library.
 //! - **Depends on.** `nervix-dns`, Reqwest, `hyper-util`, the Smithy DNS trait, Tokio, and the
 //!   in-process DNS authority.
 //! - **Must not know.** Connector plans, graph execution, or control-plane state.
@@ -15,13 +16,16 @@ use std::{
 
 use aws_smithy_runtime_api::client::dns::ResolveDns as _;
 use bytes::Bytes;
+use error_stack::{AttachmentKind, FrameKind};
 use http_body_util::Empty;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use meticulous::ResultExt as _;
-use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_dns::{
+    DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, NameServers,
+};
 use nervix_primitives::time::Instant;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
@@ -388,6 +392,20 @@ async fn redirect_destination_uses_the_configured_resolver() {
         .assured("the destination server finishes");
 }
 
+/// What the failed lookup recorded beneath its failure, found in the error a library returned.
+///
+/// A hook that handed its library only a copy of the lookup's top context would leave nothing here.
+fn recorded_by_the_lookup(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
+    let carried = DnsLookupReport::find_in(error).assured("the lookup's report is a cause");
+    let mut recorded = Vec::new();
+    for frame in carried.report().frames() {
+        if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+            recorded.push(attachment.to_string());
+        }
+    }
+    recorded
+}
+
 impl Fixture {
     fn answer_name_not_found(&self) {
         self.authority.set(
@@ -452,6 +470,9 @@ async fn hyper_connector_failures_keep_the_typed_lookup_failure() {
     let lookup = DnsLookupError::find_in(&error).expect("the lookup failure is a cause");
     assert_eq!(lookup.name(), NAME);
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+    let recorded = recorded_by_the_lookup(&error);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(recorded[0].contains(NAME), "{recorded:?}");
 }
 
 #[nervix_primitives::test]
@@ -485,6 +506,9 @@ async fn smithy_hook_answers_every_address_and_fails_with_the_typed_lookup_failu
     let lookup = DnsLookupError::find_in(&error).expect("the lookup failure is a cause");
     assert_eq!(lookup.name(), MISSING);
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+    let recorded = recorded_by_the_lookup(&error);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(recorded[0].contains(MISSING), "{recorded:?}");
 }
 
 #[nervix_primitives::test]
@@ -505,4 +529,7 @@ async fn reqwest_failures_keep_the_typed_lookup_failure() {
 
     let lookup = DnsLookupError::find_in(&error).expect("the lookup failure is a cause");
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+    let recorded = recorded_by_the_lookup(&error);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert!(recorded[0].contains(NAME), "{recorded:?}");
 }

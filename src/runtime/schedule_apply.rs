@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "schedule publication installs one typed execution revision and its ownership \
@@ -137,7 +141,7 @@ impl Runtime {
             return Ok(());
         }
 
-        self.sync_committed_domains(domains, domain_clock_authorities);
+        self.sync_committed_domains(revision, domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
         let recovery_expansions =
@@ -1796,6 +1800,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 

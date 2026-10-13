@@ -18,17 +18,22 @@ mod metrics_report;
 mod settings;
 
 pub use ab::{AbArm, AbError, AbSummary};
-pub use catalog::{BenchmarkCatalog, BenchmarkError, KafkaRenderInputs, LoadedBenchmark};
+pub use catalog::{
+    BenchmarkCatalog, BenchmarkError, BenchmarkFileError, KafkaRenderInputs, LoadedBenchmark,
+    TemplateDiagnostic,
+};
 pub use comparison::{
     BenchmarkComparison, BenchmarkRunFailure, BenchmarkSuiteReport, ComparisonError,
+    ImageIdentityError, LoadReportError,
 };
 pub use definition::{
     BenchmarkDefinition, BenchmarkDependency, ContainerImplementation, DefinitionError,
     Implementation, LoadConfiguration, LoadDuration, LoadSetting, LoadShape, NervixImplementation,
 };
-pub use kafka::provision_topics;
+pub use kafka::{TopicProvisionError, provision_topics};
 pub use metrics_report::{
-    BatchTargetMetrics, MetricsReportError, NERVIX_METRICS_PROMETHEUS_FILE,
-    NERVIX_METRICS_REPORT_FILE, NervixMetricsReport, RelayBufferMetrics,
+    BatchTargetMetrics, HistogramError, MetricSeries, MetricsReportError,
+    NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE, NervixMetricsReport,
+    PercentileError, PrometheusSampleError, Quantile, RelayBufferMetrics, ReportEntry,
 };
 pub use settings::{ByteSizeError, ParameterValueError, RunSettings, SettingsError};

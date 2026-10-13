@@ -6,6 +6,11 @@
 //! - **Depends on.** Validated schedule Models, names and the pure schema compiler.
 //! - **Must not know.** Runtime tasks, listeners, resource stores or cluster placement.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;

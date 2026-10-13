@@ -1413,7 +1413,11 @@ execution-time snapshot; `Ended` says the attachment is gone. It does not distin
 from removal or a changed contract. A client retaining the desired consumer reports the
 interruption, then checks a fresh open on the current exchange against its pinned generation and
 contract. A large reply uses the normal bounded transfer parts. Reading the reply never
-acknowledges it.
+acknowledges it. The Rust client decodes a batch only when its stream declares exactly the Arrow
+schema of the fields the emitter declared at the open and holds one record batch of the member
+count, and treats any other stream as an unexpected reply. The registered
+`client-emitter-deliveries` property holds that decoder to the stream a client emitter's sink
+writes: the declared schema, every delivered row in order, and every value and null.
 
 `SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or
 `Reject` with a bounded non-sensitive reason. It runs beside the ordered lane and answers with

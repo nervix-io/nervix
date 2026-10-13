@@ -10,6 +10,14 @@
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     fmt::Debug,
     num::{NonZeroU64, NonZeroUsize},

@@ -11,6 +11,11 @@
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
 //!   mapped, or how a failed publish is retried.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -868,6 +873,10 @@ impl Drop for EmitterBatchBuffer {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::{

@@ -8,6 +8,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "sink client setup resolves the configured driver and retained pool"
@@ -110,9 +114,13 @@ impl ClientEmitterSink {
         }
     }
 
+    /// Writes `rows` of `source` as the one canonical Arrow IPC stream a delivery carries: the
+    /// schema message of `output_schema`, one record batch of those rows in the order given, and
+    /// the end-of-stream marker. It reads nothing but its arguments, so the stream a consumer
+    /// decodes is a function of the emitter's output schema and the rows alone.
     fn encode_rows(
-        &self,
-        batch: &EmitterPublishBatch,
+        output_schema: &CompiledSchema,
+        source: &RecordBatch,
         rows: &[usize],
     ) -> EmitterRuntimeResult<Bytes> {
         let indices = UInt64Array::from(
@@ -120,20 +128,18 @@ impl ClientEmitterSink {
                 .map(|row| u64::try_from(*row).assured("an in-memory row index fits in u64"))
                 .collect::<Vec<_>>(),
         );
-        let source = batch.relay_batch().batch.batch();
         let columns = source
             .columns()
             .iter()
             .map(|column| take_arrow_array(column.as_ref(), &indices, None))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| emitter_report(EmitterRuntimeError::EncodeBatch, error))?;
-        let selected = RecordBatch::try_new(self.output_schema.arrow_schema(), columns)
+        let selected = RecordBatch::try_new(output_schema.arrow_schema(), columns)
             .map_err(|error| emitter_report(EmitterRuntimeError::EncodeBatch, error))?;
         let mut body = Vec::new();
         {
-            let mut writer =
-                StreamWriter::try_new(&mut body, &self.output_schema.arrow_schema())
-                    .map_err(|error| emitter_report(EmitterRuntimeError::EncodeBatch, error))?;
+            let mut writer = StreamWriter::try_new(&mut body, &output_schema.arrow_schema())
+                .map_err(|error| emitter_report(EmitterRuntimeError::EncodeBatch, error))?;
             StreamWriter::write(&mut writer, &selected)
                 .map_err(|error| emitter_report(EmitterRuntimeError::EncodeBatch, error))?;
             writer
@@ -177,7 +183,8 @@ impl ClientEmitterSink {
                 }
                 let (rows, body) = loop {
                     let rows = &pending[next..end];
-                    let body = self.encode_rows(batch, rows)?;
+                    let source = batch.relay_batch().batch.batch();
+                    let body = Self::encode_rows(&self.output_schema, source, rows)?;
                     if u64::try_from(body.len())
                         .assured("an in-memory IPC payload length fits in u64")
                         <= max_bytes
@@ -321,3 +328,7 @@ impl EmitterSink for ClientEmitterSink {
             .await
     }
 }
+
+#[cfg(test)]
+#[path = "emitter_client_properties.rs"]
+mod properties;

@@ -147,22 +147,26 @@ offset affects a newly established `START AT NOW`, unpaced observations, and eac
 of a paced mapping; `TIME RATE` multiplies that projection error. `SKEW` is event-admission
 tolerance around logical tick centers, not an allowance for unsynchronized hosts.
 
-The authority begins producing only after every live node reports that it installed the consensus
-runtime revision containing the mapping and fence. Join, restart, owner loss, and membership change
-can select a new authority without changing the clock mapping. A progress report is accepted only
-when its `START` generation, authority revision, node incarnation, and authenticated peer match the
-committed authority. Duplicate, delayed, reordered, or superseded progress is ignored and cannot
-create a domain. `STOP` revokes the authority in the same replicated lifecycle transition; a later
-`START` commits a new generation and mapping. Automatic ALTER quiescing keeps the authority and
-clock running.
+The authority begins producing once its own node installs the mapping and fence of the consensus
+revision that assigns it. Each live peer receives progress once it has installed that fence. A
+node installs a reassigned fence ahead of its graph installation, so neither the authority nor a
+peer waits for its own or another node's graph installation or activation. Join, restart, owner
+loss, and membership change can select a new authority without changing the clock mapping. When
+the authority's node becomes unavailable, the consensus leader commits a replacement and retries a
+proposal its new leadership could not yet accept; if that node also led consensus, the remaining
+voters elect a leader first. A progress report is accepted only when its `START` generation,
+authority revision, node incarnation, and authenticated peer match the committed authority.
+Duplicate, delayed, reordered, or superseded progress is ignored and cannot create a domain. `STOP`
+revokes the authority in the same replicated lifecycle transition; a later `START` commits a new
+generation and mapping. Automatic ALTER quiescing keeps the authority and clock running.
 
 Progress crosses the interconnection as a typed HTTP/2 management request in the reserved progress
-subquota. For each ready remote node and domain, the authority retains one replaceable pending
-report and permits one delivery attempt at a time. A newer frontier replaces an older pending
-frontier while connection capacity or a response is delayed. The interconnection bounds all
-in-flight progress requests independently of the stream and memory reservations for health,
-cancellation, admission, and terminal outcomes. A joining or reconnected node receives the newest
-retained frontier after it installs the required runtime revision.
+subquota. For each domain and each remote node that installed its clock, the authority retains one
+replaceable pending report and permits one delivery attempt at a time. A newer frontier replaces an
+older pending frontier while connection capacity or a response is delayed. The interconnection
+bounds all in-flight progress requests independently of the stream and memory reservations for
+health, cancellation, admission, and terminal outcomes. A joining or reconnected node receives the
+newest retained frontier once it advertises that it installed the required domain clocks.
 
 Each progress attempt has a two-second physical deadline. A failed attempt retries the newest
 frontier after a 200-millisecond physical backoff, and authority shutdown cancels both the request

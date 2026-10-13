@@ -43,6 +43,7 @@ pub struct Flow {
     calls: Vec<Call>,
     acquisitions: Vec<Operation>,
     validated: HashSet<HirId>,
+    diagnostics: Vec<(HirId, &'static Lint)>,
 }
 
 struct Call {
@@ -243,6 +244,19 @@ fn parse_context(
 }
 
 impl Flow {
+    pub fn diagnostic(
+        &mut self,
+        cx: &LateContext<'_>,
+        node: HirId,
+        span: Span,
+        lint: &'static Lint,
+        message: String,
+    ) {
+        self.diagnostics.push((node, lint));
+        cx.tcx
+            .emit_node_span_lint(lint, node, span, Message { message });
+    }
+
     pub fn validate(&mut self, cx: &LateContext<'_>, node: HirId, placement: bool) {
         if !self.validated.insert(node) {
             return;
@@ -252,16 +266,43 @@ impl Flow {
         for attribute in cx.tcx.hir_attrs(node) {
             let path = attribute.path();
             if path.first().is_some_and(|name| name.as_str() == "nervix")
-                && (path.len() != 2 || !matches!(path[1].as_str(), "context" | "dispatch"))
+                && (path.len() != 2
+                    || !matches!(
+                        path[1].as_str(),
+                        "context"
+                            | "dispatch"
+                            | "error_boundary"
+                            | "layer"
+                            | "value"
+                            | "identity"
+                            | "state"
+                            | "input"
+                    ))
             {
                 cx.tcx.emit_node_span_lint(
                     INVALID_CONTRACT,
                     node,
                     attribute.span(),
                     Message {
-                        message: "unknown Nervix source annotation; use context or dispatch".into(),
+                        message: "unknown Nervix source annotation; use an execution, error or \
+                                  architectural contract"
+                            .into(),
                     },
                 );
+            }
+            if path.first().is_some_and(|name| name.as_str() == "nervix")
+                && path.get(1).is_some_and(|name| {
+                    matches!(
+                        name.as_str(),
+                        "layer" | "value" | "identity" | "state" | "input"
+                    )
+                })
+            {
+                crate::architecture::validate(cx, node, attribute);
+            }
+            if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("error_boundary")])
+            {
+                crate::errors::validate_boundary(cx, node, attribute);
             }
             if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("context")]) {
                 contexts += 1;
@@ -488,10 +529,18 @@ impl Flow {
         });
     }
 
-    pub fn finish(&self, cx: &LateContext<'_>, findings: &mut [nervix_lint_report::Finding]) {
+    pub fn nodes(&self) -> impl Iterator<Item = LocalDefId> + '_ {
+        self.nodes.iter().copied()
+    }
+
+    pub fn callees(&self, owner: LocalDefId) -> impl Iterator<Item = LocalDefId> + '_ {
+        self.edges.get(&owner).into_iter().flatten().copied()
+    }
+
+    pub fn recurring_owners(&self, tcx: TyCtxt<'_>) -> HashSet<LocalDefId> {
         let mut recurring = HashSet::new();
         for owner in &self.nodes {
-            if context(cx.tcx, owner.to_def_id()).is_some_and(|value| value.is_recurring()) {
+            if context(tcx, owner.to_def_id()).is_some_and(|value| value.is_recurring()) {
                 recurring.insert(*owner);
             }
         }
@@ -504,7 +553,7 @@ impl Flow {
                     for callee in callees {
                         // A lifecycle contract is an explicit call boundary. Diagnose its caller
                         // below; do not also reclassify the installation's internal operations.
-                        if !lifecycle_boundary(cx.tcx, callee.to_def_id()) {
+                        if !lifecycle_boundary(tcx, callee.to_def_id()) {
                             changed |= recurring.insert(*callee);
                         }
                     }
@@ -514,7 +563,15 @@ impl Flow {
                 break;
             }
         }
+        recurring
+    }
+
+    pub fn finish(&self, cx: &LateContext<'_>, findings: &mut [nervix_lint_report::Finding]) {
+        let recurring = self.recurring_owners(cx.tcx);
         let mut expectations = HashMap::new();
+        for &(node, lint) in &self.diagnostics {
+            self.count_expectation(cx, &mut expectations, node, lint);
+        }
         for operation in &self.acquisitions {
             let declared = context(cx.tcx, operation.owner.to_def_id());
             let actual = if recurring.contains(&operation.owner)

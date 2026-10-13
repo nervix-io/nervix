@@ -55,6 +55,9 @@ def section($heading):
      + (if .image.id then " resolved to " + (.image.id | code) else "" end)
      + (if (.image.repo_digests // "") != "" and .image.repo_digests != .image.requested
         then " (" + (.image.repo_digests | code) + ")" else "" end)
+     + (if .image.diagnostic_selection then ", a Deloxide diagnostic image of the "
+          + (.image.diagnostic_selection | code) + " selection" else "" end)
+     + (if .image.revision then ", built from revision " + (.image.revision | code) else "" end)
      + " · suite " + (.suite_id | code)
      + " · " + (.entries | length | counted("entry"; "entries"))
      + (if .duration_seconds != null then " in \(.duration_seconds | duration)" else "" end)),
@@ -69,6 +72,18 @@ def section($heading):
      | if ($measured | length) == 0 then empty
        else "", "Recovery and resources:", "",
             ($measured[] | "- \(.id | code): \(metrics_line)")
+       end),
+    ([.entries[] | select(.diagnostic != null)] as $diagnosed
+     | if ($diagnosed | length) == 0 then empty
+       else "", "Diagnostic evidence:", "",
+            ($diagnosed[]
+             | .diagnostic as $evidence
+             | "- \(.id | code): \($evidence.verdict), "
+               + "\($evidence.evidence_files // 0 | counted("evidence file"; "evidence files")) for "
+               + "\($evidence.process_starts // 0 | counted("process start"; "process starts")), "
+               + "\($evidence.findings // 0 | counted("finding"; "findings")): "
+               + "\($evidence.active // 0) active, \($evidence.potential // 0) potential, \($evidence.lost // 0) lost"
+               + (if ($evidence.problems | length) > 0 then "; " + ($evidence.problems | join("; ")) else "" end))
        end),
     ([.entries[] | select(.status != "passed")] as $failed
      | if ($failed | length) == 0 then empty

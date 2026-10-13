@@ -6,6 +6,11 @@
 //! - **Depends on.** URL parsing and standard socket-address primitives.
 //! - **Must not know.** Gossip, consensus membership, name resolution or any transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use error_stack::Report;
@@ -104,6 +109,13 @@ impl FromStr for NodeEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "advertised endpoint parsing returns a pure validation refusal"
+    )
+)]
 pub enum NodeEndpointParseError {
     #[error("advertised endpoint '{advertised}' has no ':port' suffix")]
     MissingPort { advertised: String },
@@ -168,6 +180,13 @@ impl FromStr for NodeServiceUrl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "advertised service URL parsing returns a pure validation refusal"
+    )
+)]
 pub enum NodeServiceUrlParseError {
     #[error("advertised service url '{advertised}' is not a url")]
     Malformed { advertised: String },

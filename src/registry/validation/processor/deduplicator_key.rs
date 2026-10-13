@@ -8,6 +8,11 @@
 //!   registry's schema bindings.
 //! - **Must not know.** Runtime keyspaces, archive encodings or transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     Assignment, AssignmentTarget, CreateDeduplicator, CreateSchema, DomainName, FieldName,

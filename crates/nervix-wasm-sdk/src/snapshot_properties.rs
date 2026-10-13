@@ -5,6 +5,11 @@
 //! - **Depends on.** Production branch contexts, guest snapshot codecs and bounded generators.
 //! - **Must not know.** Host checkpoint generations, live ACKs or guest ABI global state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_arbitrary::WasmValues;

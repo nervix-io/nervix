@@ -20,6 +20,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "the server session adapter owns its permitted parser dependency"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "session, transaction, authentication and resource operations belong to the \
@@ -40,8 +47,9 @@ use authentication::{DEFAULT_USER, user_credentials};
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
 };
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
+pub use cli_values::InternalTransportMode;
 use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
@@ -552,26 +560,6 @@ pub enum Command {
         /// Target shell
         shell: Shell,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[clap(rename_all = "lower")]
-pub enum InternalTransportMode {
-    Http,
-    Https,
-}
-
-impl InternalTransportMode {
-    fn scheme(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Https => "https",
-        }
-    }
-
-    fn is_tls(self) -> bool {
-        matches!(self, Self::Https)
-    }
 }
 
 /// One live peer whose advertised interconnect endpoint this health round can reach.
@@ -2559,14 +2547,22 @@ impl Application {
         let clock_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
+            // The clock owner installs committed authority fences ahead of graph installation and
+            // advertises each runtime revision its domain clocks match, so it follows committed
+            // domain and schedule changes itself.
+            let mut committed_domains_rx = clock_service.inner.consensus.subscribe_domains();
+            let mut committed_schedule_rx = clock_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
             let mut retirements = DomainClockRetirements::default();
 
             loop {
                 nervix_primitives::task::consume_budget().await;
+                let state = clock_service.inner.consensus.current_runtime_state().await;
+                clock_service.install_committed_domain_clocks(&state).await;
                 reconcile_domain_clock_tasks(
                     &clock_service,
                     &clock_shutdown,
+                    &state,
                     &mut tasks,
                     &mut retirements,
                 )
@@ -2574,6 +2570,16 @@ impl Application {
                 nervix_primitives::select! {
                     _ = clock_shutdown.cancelled() => break,
                     changed = domain_state_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    changed = committed_domains_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    changed = committed_schedule_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }

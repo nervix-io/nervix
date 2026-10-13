@@ -8,6 +8,18 @@
 //!   entries, `error-stack`, Tokio and `redis`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::io;
 
 use async_trait::async_trait;
@@ -336,6 +348,10 @@ impl BrokerSourceConnector for RedisPubSubSource {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{
         net::{IpAddr, Ipv4Addr},

@@ -6,6 +6,11 @@
 //! - **Depends on.** Nothing but the messages its variants carry.
 //! - **Must not know.** Any failure a running node recovers from on its own.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use nervix_models::DomainName;
 use thiserror::Error;
 

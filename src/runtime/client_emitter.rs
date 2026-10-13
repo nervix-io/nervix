@@ -9,6 +9,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "client emitter attachment installation resolves the concrete consumer lifetime"
@@ -199,7 +203,7 @@ pub(crate) struct ClientEmitterEndpoint {
     series: ClientEmitterSeries,
 }
 
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(crate) struct ClientEmitterDescription {
     pub(crate) fields: Vec<SchemaField>,
     pub(crate) maximum_payload_bytes: u64,
@@ -962,6 +966,10 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroU64;
 

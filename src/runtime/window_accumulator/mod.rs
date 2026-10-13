@@ -35,6 +35,11 @@
 //!   values. Restoring re-admits those rows in order, which rebuilds every structure; only what the
 //!   retained rows cannot reproduce, the histogram's delayed removals, is carried beside them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 mod arguments;
 mod counts;
 mod extremes;

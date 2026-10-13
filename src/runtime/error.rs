@@ -6,6 +6,11 @@
 //! - **Depends on.** The vocabulary its variants quote and typed engine failures it retains.
 //! - **Must not know.** How a caller reports or recovers from a failure.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 /// Why a runtime entry point failed. Each variant is a context of an `error_stack` report, and the
@@ -69,11 +74,11 @@ pub enum RuntimeError {
         node_unavailability_timeout: Duration,
         readiness_propagation_bound: Duration,
     },
-    #[error("could not own remote acknowledgements in domain '{domain}': {report:#}")]
-    RemoteAckAdmission {
-        domain: DomainName,
-        report: Report<nervix_execution::AdmissionError>,
-    },
+    /// The relay budget refused the acknowledgement watches of a batch another node delivered: they
+    /// exceed the whole budget, or it had no room for them within the sender's admission bound. The
+    /// execution admission refusal is beneath.
+    #[error("could not own remote acknowledgements in domain '{domain}'")]
+    RemoteAckAdmission { domain: DomainName },
     /// A relay payload another node sent did not decode into a batch of its relay. The
     /// `RemoteRelayDecodeError` beneath it names what the payload got wrong and keeps the
     /// decoder's own failure beneath that.

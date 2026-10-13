@@ -7,6 +7,11 @@
 //! - **Depends on.** The production header check and structured-data parser.
 //! - **Must not know.** Codecs, Arrow builders or connector transports.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 
 /// A structured-data verdict: the parsed length, or the failing byte and its reason.

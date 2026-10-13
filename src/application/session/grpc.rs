@@ -17,6 +17,11 @@
 //! reply to the request it names, except a frame without a request identity, which breaks the
 //! protocol itself and ends the session with a `SessionEnding` that says so.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     convert::Infallible,
     pin::Pin,

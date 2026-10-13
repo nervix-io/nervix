@@ -267,10 +267,12 @@ jobs:
           if-no-files-found: warn
 
   # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
-  # tests/deloxide-inventory.toml registers, in each selection's own build under the native
-  # coverage collector, then the qualification of the lane's supervision on deliberately failing
-  # processes. The selections share no compilation, so they run side by side. Diagnostic coverage
-  # stays in this job's artifact, apart from ordinary coverage and the CRAP gate.
+  # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
+  # instrumented build of the feature it compiles under the native coverage collector, then the
+  # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
+  # its own budget, so the stressed restore scenarios, which share the stress selection's build,
+  # run beside it rather than after it. Diagnostic coverage stays in this job's artifact, apart
+  # from ordinary coverage and the CRAP gate.
   deloxide:
     name: deloxide (${{ matrix.selection }})
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
@@ -282,7 +284,7 @@ jobs:
       # Each selection's verdict and evidence stand on their own.
       fail-fast: false
       matrix:
-        selection: [deloxide, deloxide-order, deloxide-stress]
+        selection: [deloxide, deloxide-order, deloxide-stress, deloxide-stress-restore]
     permissions:
       contents: read
     env:
@@ -402,7 +404,7 @@ jobs:
             target/native-coverage/test-${{ matrix.selection }}/**/executions.jsonl
             target/native-coverage/test-${{ matrix.selection }}/**/export.log
             target/native-coverage/test-${{ matrix.selection }}/**/lane.json
-            target/native-coverage-build-${{ matrix.selection }}/test-deloxide/
+            target/native-coverage-build-deloxide*/test-deloxide/${{ matrix.selection }}/
             target/deloxide/test-deloxide/
           if-no-files-found: warn
 
@@ -1161,6 +1163,9 @@ jobs:
       - name: Paced simulation Python open policy
         run: just coverage-paced-simulation-python
 
+      - name: Release evidence gate
+        run: just coverage-release-evidence
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1213,6 +1218,7 @@ jobs:
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
             target/paced-simulation/python.lcov
+            target/release-evidence-coverage/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn

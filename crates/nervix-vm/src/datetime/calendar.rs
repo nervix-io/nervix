@@ -14,6 +14,14 @@
 //! These kernels compute lane by lane, because the length of a local day, month or year depends on
 //! the lane's own date and, under the rules of an IANA zone, on the transitions near it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::cmp::Ordering;
 
 use arrow_array::{

@@ -12,6 +12,18 @@
 //! - **Must not know.** How request fields or bodies were prepared, runtime batches, relays,
 //!   branches, acknowledgements, registry state or when the host retries.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 mod response;
 
 use std::{net::SocketAddr, time::Duration};
@@ -329,6 +341,10 @@ impl HttpRequestSink for HttpSink {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use error_stack::{AttachmentKind, FrameKind};
     use meticulous::{OptionExt as _, ResultExt as _};

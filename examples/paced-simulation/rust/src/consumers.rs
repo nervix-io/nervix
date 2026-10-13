@@ -165,7 +165,10 @@ pub(crate) struct Shared {
 
 impl Shared {
     pub(crate) fn fail(&self, failure: error_stack::Report<ConsumerError>) {
-        self.refused.send_replace(Some(failure));
+        nervix_recovery::Discarded::discarded(
+            self.refused.send_replace(Some(failure)),
+            "the latest consumer refusal supersedes the previous refusal in the same run",
+        );
         self.planning.cancel();
     }
 

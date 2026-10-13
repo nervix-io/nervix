@@ -12,6 +12,11 @@
 //! - **Must not know.** Runtime-state placements, what a checkpoint holds, how it is announced,
 //!   fetched, installed or persisted, schedules, the interconnect, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 mod progress;
 mod replication;
 

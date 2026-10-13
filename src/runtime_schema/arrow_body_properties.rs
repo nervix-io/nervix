@@ -9,6 +9,11 @@
 //!   executor that charges them.
 //! - **Must not know.** Relays, peers or the interconnect that carries a body.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;

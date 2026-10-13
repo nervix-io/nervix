@@ -6,6 +6,11 @@
 //! branches a lifecycle names.
 //! Must not know: the interconnect, storage, or how a checkpoint is installed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,

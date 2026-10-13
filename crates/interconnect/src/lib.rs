@@ -7,6 +7,14 @@
 //! - **Depends on.** Execution admission and the vocabulary carried by internal operations.
 //! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, io, net::SocketAddr, time::Duration};
 
 use error_stack::Report;
@@ -46,8 +54,8 @@ mod wire;
 
 pub use authentication::TransportClock;
 pub use connection::{
-    ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
-    IncomingByteStream, RelayAdmission, RelayCancellationGuard,
+    ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
+    DuplexSender, EncodedMessage, IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
 pub use entropy::TransportEntropy;
 pub use identity::{TlsConfigBundle, TransportIdentity};
@@ -74,9 +82,10 @@ use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
     BranchCheckpointCursor, BranchCheckpointListing, BranchCheckpointListingRequest,
     BranchCheckpointListingResponse, BranchCheckpointPage, BranchCheckpointRevision,
-    DescribeKafkaOffsets, KafkaOffsetRevision, OwnershipHandoffCheckpoint, RuntimeState,
-    RuntimeStateKind, StateCheckpointAvailable, StatePlacementEnvelope, StateReplicationAck,
-    StateSchema, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
+    DescribeKafkaOffsets, FetchStateCheckpoint, KafkaOffsetRevision, OwnershipHandoffCheckpoint,
+    RuntimeState, RuntimeStateKind, StateCheckpointAvailable, StateCheckpointRead,
+    StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
+    StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -373,6 +382,13 @@ pub struct ForcedOwnershipRecoveryPreparation {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed handoff wire response carries its remote rejection outcome"
+    )
+)]
 pub enum OwnershipHandoffFailure {
     #[error("{reason}")]
     Rejected { reason: String },

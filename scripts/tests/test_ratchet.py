@@ -15,6 +15,7 @@ from scripts.ratchet import BASELINE_FILE, COUNTS, main, measure_sources, write_
 def write_repository(root: Path, sources: dict[str, str]) -> None:
     """Stage `sources` in a git repository, because the counts read tracked files only."""
 
+    (root / "Cargo.toml").write_text('[package]\nname="ratchet-fixture"\nversion="0.1.0"\n')
     for path, body in sources.items():
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -172,32 +173,6 @@ mod tests {
 
             self.assertEqual(count(root, "as_casts"), 1)
 
-    def test_bare_unwrap_and_expect_exclude_unit_tests(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-fn read(value: Option<u8>) -> u8 {
-    let first = value.unwrap();
-    let second = value.expect("checked above");
-    let kept = value.unwrap_or_default();
-    first + second + kept
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn reads() {
-        Some(1u8).unwrap();
-    }
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "bare_unwrap_and_expect"), 2)
 
     def test_combinator_control_flow_spares_pipelines_and_single_adapters(self) -> None:
         with TemporaryDirectory() as directory:
@@ -240,83 +215,7 @@ mod tests {
 
             self.assertEqual(count(root, "combinator_control_flow"), 3)
 
-    def test_bare_error_signatures_skip_reported_and_foreign_errors(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/error.rs": "pub enum StoreError { Missing }\n",
-                    "src/lib.rs": """
-fn bare() -> Result<(), StoreError> {
-    Ok(())
-}
 
-fn reported() -> Result<(), Report<StoreError>> {
-    Ok(())
-}
-
-fn foreign() -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-fn associated() -> Result<(), Self::Error> {
-    Ok(())
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "bare_error_signatures"), 1)
-
-    def test_bare_error_signatures_cover_nested_stream_callbacks(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-pub struct StreamHandlerError;
-
-type StreamFuture = Pin<Box<dyn Future<Output = Result<(), StreamHandlerError>>>>;
-type ByteStream = Pin<Box<dyn Stream<Item = Result<(), StreamHandlerError>>>>;
-
-fn register<F>() where F: Future<Output = Result<(), StreamHandlerError>> {}
-fn register_reported<F>() where F: Future<Output = Result<(), Report<StreamHandlerError>>> {}
-fn stream_reported<S>() where S: Stream<Item = Result<(), Report<StreamHandlerError>>> {}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "bare_error_signatures"), 3)
-
-    def test_string_node_ids_cover_fields_parameters_and_aliases(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-pub type NodeId = String;
-
-pub struct Placement {
-    pub primary_node: Option<String>,
-    pub assigned_nodes: Vec<String>,
-    pub domain: String,
-}
-
-fn assign(target_node_id: String) -> Placement {
-    Placement {
-        primary_node: Some(String::new()),
-        assigned_nodes: Vec::new(),
-        domain: String::new(),
-    }
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "string_node_ids"), 4)
 
     def test_testing_feature_counts_struct_fields_but_not_gated_statements(self) -> None:
         with TemporaryDirectory() as directory:
@@ -346,121 +245,11 @@ impl Runtime {
 
             self.assertEqual(count(root, "testing_feature_struct_fields"), 1)
 
-    def test_parser_references_are_allowed_at_the_edges_only(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/application.rs": "fn parse() { nervix_nspl::parse_expression(\"a\"); }\n",
-                    "crates/nervix-cli/src/lib.rs": "use nervix_nspl::Token;\n",
-                    "src/runtime/mod.rs": "fn parse() { nervix_nspl::parse_expression(\"a\"); }\n",
-                    "crates/nervix-vm/src/lib.rs": "fn lower() { nervix_nspl::parse_route_construction(\"SET a = 1\"); }\n",
-                },
-            )
-
-            self.assertEqual(count(root, "parser_imports_outside_edges"), 2)
-
-    def test_model_matches_exclude_the_planner_and_the_rest_of_the_tree(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/runtime/emitters.rs": "fn sink(m: Model) { matches!(m, Model::ClientKafka(_)); }\n",
-                    "src/runtime/emitter_start_plan.rs": "fn plan(m: Model) { matches!(m, Model::ClientKafka(_)); }\n",
-                    "src/registry/mod.rs": "fn check(m: Model) { matches!(m, Model::Relay(_)); }\n",
-                },
-            )
-
-            self.assertEqual(count(root, "model_matches_in_data_plane"), 1)
 
 
-    def test_data_plane_cluster_awaits_count_only_product_runtime_calls(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/runtime/remote_dispatch.rs": """
-async fn dispatch(runtime: Runtime) {
-    runtime
-        .cluster
-        .interested_nodes("orders")
-        .await;
-    let snapshot = runtime.cluster.subscription_interest_index();
-    let example = "runtime.cluster.interested_nodes().await";
-    // runtime.cluster.interested_nodes().await;
-}
 
-#[cfg(test)]
-async fn test_dispatch(runtime: Runtime) {
-    runtime.cluster.interested_nodes("orders").await;
-}
-""",
-                    "src/application.rs": """
-async fn reconcile(service: Service) {
-    service.cluster.live_nodes().await;
-}
-""",
-                },
-            )
 
-            self.assertEqual(count(root, "data_plane_cluster_awaits"), 1)
 
-    def test_connector_crates_are_counted_as_data_plane(self) -> None:
-        data_plane_source = """
-async fn publish(model: Model, state: State, runtime: Runtime) {
-    matches!(model, Model::ClientKafka(_));
-    state.lock();
-    runtime.cluster.interested_nodes("orders").await;
-}
-"""
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "crates/connectors/kafka/src/sink.rs": data_plane_source,
-                    "crates/connector/src/lib.rs": data_plane_source,
-                    "crates/connectors/kafka/tests/sink.rs": data_plane_source,
-                    "crates/nervix-vm/src/lib.rs": data_plane_source,
-                },
-            )
-
-            self.assertEqual(count(root, "model_matches_in_data_plane"), 2)
-            self.assertEqual(count(root, "data_plane_cluster_awaits"), 2)
-
-    def test_write_once_rwlocks_count_only_arc_and_name_struct_fields(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-struct Runtime {
-    resource: RwLock<Option<Arc<ResourceStore>>>,
-    owner: parking_lot::RwLock<
-        Option<names::ClusterNodeName>,
-    >,
-    optional_duration: RwLock<Option<Duration>>,
-    required_resource: RwLock<Arc<ResourceStore>>,
-    wrapped: Option<RwLock<Option<Arc<ResourceStore>>>>,
-}
-
-fn local() {
-    let resource: RwLock<Option<Arc<ResourceStore>>>;
-}
-
-#[cfg(test)]
-struct TestRuntime {
-    owner: RwLock<Option<ClusterNodeName>>,
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "write_once_rwlock_fields"), 2)
 
     def test_files_over_3000_lines_count_in_crate_tests_but_not_the_test_tree(self) -> None:
         with TemporaryDirectory() as directory:

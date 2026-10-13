@@ -277,6 +277,17 @@ impl Executor {
         }
     }
 
+    /// What one memory class holds now.
+    ///
+    /// An owner that must not take a place in the class's queue reads this to tell whether its
+    /// charge fits before it asks for one. A place in the queue takes every byte the class releases
+    /// until that place is satisfied, so an owner whose room is released by other work of the same
+    /// class would hold that work up behind itself. While another charge waits in the queue, the
+    /// class reports no room, so reading it never overtakes that charge.
+    pub fn memory(&self, class: MemoryClass) -> MemoryBudgetSnapshot {
+        self.budget(class).snapshot()
+    }
+
     fn budget(&self, class: MemoryClass) -> &MemoryBudget {
         match class {
             MemoryClass::Management => &self.inner.management_memory,

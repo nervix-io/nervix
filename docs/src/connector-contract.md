@@ -34,6 +34,13 @@ through their sessions; it has no connector crate, because the session protocol 
 and its host is the client ingestor endpoint described under
 [Integration-specific boundaries](#integration-specific-boundaries).
 
+The contract and integration engines declare `nervix::input(plans, reason = "...")` alongside their
+source-owned `nervix::layer(engine, ...)` contracts. Resolved configuration Model types, constructors
+and matches are rejected in their interfaces and bodies even though other infrastructure engines
+may own persisted Models. Module contracts travel with source moves. The compiler and independent
+language import/dependency checks run through `just ratchet`; these classifications introduce no
+runtime policy or connector lifecycle change.
+
 The contract and every integration crate take their execution-sensitive primitives from
 `nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
 backoff are measured with, and every socket a connector opens itself. A modeled build therefore
@@ -346,7 +353,14 @@ message it unfolded into has completed its own route or error delivery.
 Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
 row outcomes and an exact generation identity. Admission refusal or cancellation before admission
 returns the share negatively; admitted records remain pending through keepalives and required
-waits until their terminal outcome or the silence bound. Relay construction retains the domain's
+waits until their terminal outcome or the silence bound. A relay owner whose relay memory has no
+room for the acknowledgement watches of a delivery holds the delivery back unadmitted instead of
+refusing it, and the host's dispatch waits for that admission within its five-minute bound. A
+source in a `NO_ACK` mode therefore stops reading while its delivery is held, as under any relay
+backpressure, and its output is delivered once the relay owner has room rather than lost. In an
+acknowledged mode the held rows' shares stay pending without keepalives, so a hold longer than the
+source's `ACK TIMEOUT` rejects their positions and the source delivers them again, possibly after the
+held delivery was admitted. Relay construction retains the domain's
 ACK-root tracker, so intake does not resolve a mutable domain registry for each row. Receiver
 watchers retain the sender's full process identity and charge their memory to the relay budget;
 sender replacement or shutdown ends them. These correlations remain volatile and are never a
@@ -640,6 +654,15 @@ time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` ref
 carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
 isolation pass.
 
+Registered Bolero properties hold these rules against their owners, with measures that grow and
+shrink with a candidate: `connector-row-request-division` the division rule and both limits,
+`emitter-batch-subdivision` and `emitter-batch-packing` the candidates, seals, relay, branch and
+envelope grouping and the exact container bytes, `codec-bounded-encodings` and
+`bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
+`emitter-retained-payloads` the membership and byte-for-byte retry, and `sqs-batch-requests`,
+`mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures. See
+[Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
+
 Iceberg is a row sink that stages each carrier of the run as its own file, which its commit
 publishes.
 
@@ -894,6 +917,12 @@ sequenceDiagram
   decoding, routing, flush cadence, and error reporting.
 
 ## Failure and observation
+
+The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
+SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
+record rejections with the record position and safe field path. Infrastructure and batch failures
+return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+classification contract; these annotations do not change acknowledgement or retry policy.
 
 An ingestor opens all source instances before registration, so a failed source start leaves no
 running ingestor. An invalid emitter declaration or expression fails planning before its new

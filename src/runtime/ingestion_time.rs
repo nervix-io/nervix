@@ -5,6 +5,11 @@
 //! - **Depends on.** Installed domain clocks, vocabulary and Arrow row views.
 //! - **Must not know.** NSPL parsing, transport intake or progress notification history.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use arrow_array::{Array, TimestampNanosecondArray};
 use arrow_buffer::BooleanBuffer;
 use error_stack::{Report, ResultExt as _};
@@ -183,6 +188,10 @@ impl DomainClockLifecycle {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 

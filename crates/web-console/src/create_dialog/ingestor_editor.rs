@@ -6,6 +6,11 @@
 //! - **Depends on.** The ingestor draft, typed choices, and the route editor.
 //! - **Must not know.** Source connectors, registry snapshots, or command dispatch internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_models::{IngestQuiesceOverflow, IngestSourceKind, MqttQos, MqttSession};
 

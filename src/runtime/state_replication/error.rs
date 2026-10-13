@@ -5,6 +5,11 @@
 //! - **Depends on.** Runtime-state placements and typed interconnect failure envelopes.
 //! - **Must not know.** Scheduling policy, NSPL parsing, or connector lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 #[derive(Debug, Error)]

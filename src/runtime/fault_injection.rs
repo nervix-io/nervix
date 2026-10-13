@@ -7,6 +7,11 @@
 //! - **Depends on.** The marker the crate root stores in product structs.
 //! - **Must not know.** The harness that replaces it in a test build.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 #[cfg(not(feature = "testing"))]
 use std::time::Duration;
 
@@ -77,6 +82,14 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    pub(in crate::runtime) fn guest_save_capture_interruption(
+        &self,
+        _domain: &DomainName,
+        _entity: &ModelName,
+    ) -> Option<u64> {
+        None
+    }
+
     pub(in crate::runtime) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
         None
     }
@@ -108,6 +121,13 @@ impl ConfiguredFaultInjection {
         _registrar: &ClusterNodeName,
     ) -> bool {
         false
+    }
+
+    pub(in crate::runtime) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
+        _executor: &nervix_execution::Executor,
+    ) {
     }
 
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {

@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [dev-dependencies]
+bolero = { workspace = true }
 nervix-test-environment = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [

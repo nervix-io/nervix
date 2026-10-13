@@ -17,6 +17,11 @@
 //! [`EmitterStartPlan::resolve_clients`] binds the resolved paths into the plan that the emitter
 //! task and its sink constructors receive. Neither of them sees a Model.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
@@ -1516,6 +1521,10 @@ fn decide_sqs_publishing_mode(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         AckMode, BatchMessageLimit, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,

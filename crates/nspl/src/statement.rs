@@ -5,6 +5,11 @@
 //! - **Depends on.** Statement grammars, shared tokens and vocabulary models.
 //! - **Must not know.** Validation, persistence or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{Model, Statement};

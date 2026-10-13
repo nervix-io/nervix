@@ -9,6 +9,11 @@
 //! - **Must not know.** Which sink or codec a policy is declared on, how a batch is packed, encoded
 //!   or measured, or how a connector publishes it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{
     fmt,
     num::{NonZeroU32, NonZeroU64},
@@ -25,6 +30,13 @@ use thiserror::Error;
 
 /// Why a batching limit is not a value an emitter can declare.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "batch-limit construction returns pure range and literal validation refusals"
+    )
+)]
 pub enum EmitterBatchLimitError {
     #[error(
         "BATCH MAX MESSAGES must be between 1 and {max}, found {value}",

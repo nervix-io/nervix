@@ -10,6 +10,18 @@
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
 //!   schedules outside the typed Kafka partition schedule, or registry state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
@@ -1025,6 +1037,10 @@ impl TopicPartitionInspector {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
 

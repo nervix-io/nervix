@@ -388,6 +388,17 @@ impl Runtime {
             .native_metadata_capture_interruption(domain, entity)
     }
 
+    /// After how many chunks a test interrupts the next guest save of `entity` in `domain`.
+    pub(crate) fn guest_save_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        self.inner
+            .fault_injection
+            .guest_save_capture_interruption(domain, entity)
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
         self.inner
@@ -425,6 +436,14 @@ impl Runtime {
         self.inner
             .fault_injection
             .mark_restore_state_publication_refused(domain, coordinator);
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_runtime_installation_if_armed(node_id)
+            .await;
     }
 
     #[cfg(feature = "testing")]

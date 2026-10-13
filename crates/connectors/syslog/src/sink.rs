@@ -9,6 +9,18 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
@@ -354,6 +366,10 @@ async fn write_stream_frame(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::net::Ipv6Addr;
 
@@ -470,7 +486,7 @@ mod tests {
             let hosts_file = files.path().join("hosts");
             std::fs::write(
                 &resolver_configuration,
-                "options ndots:1 timeout:1 attempts:1\n",
+                "search --\noptions ndots:1 timeout:1 attempts:1\n",
             )
             .assured("the fixture resolver configuration can be written");
             std::fs::write(&hosts_file, hosts).assured("the fixture hosts file can be written");

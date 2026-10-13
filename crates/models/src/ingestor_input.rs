@@ -13,6 +13,11 @@
 //! The codec belongs to the transport contract, so a client ingestor cannot name one and a
 //! transport ingestor cannot lack one: neither contradiction is representable.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

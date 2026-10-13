@@ -9,6 +9,11 @@
 //! - **Must not know.** Browser draft state, parser expectations, registry snapshots, or how a
 //!   server resolves a choice.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{

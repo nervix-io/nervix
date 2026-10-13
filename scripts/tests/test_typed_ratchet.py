@@ -146,13 +146,26 @@ class RunnerIdentityTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_diagnostic_configurations_include_the_lanes_testing_capability(self) -> None:
+        diagnostic_features = {"deloxide", "deloxide-order", "deloxide-stress"}
+        diagnostic_configurations = 0
+        for configuration in typed_ratchet.load_configurations(ROOT):
+            if diagnostic_features.intersection(configuration.features):
+                diagnostic_configurations += 1
+                with self.subTest(configuration=configuration.name):
+                    self.assertIn("testing", configuration.features)
+        self.assertEqual(diagnostic_configurations, 6)
+
     def test_arguments_keep_modes_targets_and_selected_packages_explicit(self) -> None:
         self.assertEqual(Configuration("selected", "Cargo.toml", ("one", "two"), ("lib", "bin"), ("native", "shuttle"), "native-target").cargo_arguments(), ["--manifest-path", "Cargo.toml", "--package", "one", "--package", "two", "--lib", "--bins", "--features", "native shuttle", "--target", "native-target"])
         self.assertIn("--workspace", Configuration("ordinary", "Cargo.toml", ()).cargo_arguments())
 
     def test_declared_modes_and_malformed_configuration(self) -> None:
         configurations = typed_ratchet.load_configurations(ROOT)
-        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-stress", "deloxide-binaries", "deloxide-order-binaries", "deloxide-stress-binaries"})
+        self.assertEqual({item.name for item in configurations}, {"ordinary", "browser", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-stress", "deloxide-binaries", "deloxide-order-binaries", "deloxide-stress-binaries"})
+        browser = next(item for item in configurations if item.name == "browser")
+        self.assertEqual(browser.target, "wasm32-unknown-unknown")
+        self.assertEqual(browser.kinds, ("lib", "bin"))
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             path = root / TOOLING / "configurations.toml"
@@ -265,6 +278,16 @@ class RunnerExecutionTests(CompletionTests):
             Runner.clean_authored_artifacts(self.runner, self.configuration, self.expected, self.root / "isolated")
         self.assertIn(str(self.root / "isolated"), command.call_args.args[0])
         self.assertIn("example", command.call_args.args[0])
+        self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
+
+    def test_cross_target_reanalysis_cleans_the_analyzed_target(self) -> None:
+        configuration = Configuration("browser", "Cargo.toml", ("example",), target="wasm32-unknown-unknown")
+        with mock.patch("scripts.typed_ratchet.command") as command:
+            Runner.clean_authored_artifacts(self.runner, configuration, self.expected, self.root / "isolated")
+        arguments = command.call_args.args[0]
+        self.assertIn("--target", arguments)
+        self.assertEqual(arguments[arguments.index("--target") + 1], configuration.target)
+        self.assertEqual(arguments[arguments.index("--target-dir") + 1], str(self.root / "isolated"))
         self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
 
     def test_required_gate_rejects_warnings_and_inventory_records_them(self) -> None:

@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
+use error_stack::Report;
 use nervix_benchmark::{
-    BenchmarkCatalog, BenchmarkError, ContainerImplementation, Implementation, KafkaRenderInputs,
-    LoadDuration, LoadShape,
+    BenchmarkCatalog, BenchmarkError, BenchmarkFileError, ContainerImplementation, DefinitionError,
+    Implementation, KafkaRenderInputs, LoadDuration, LoadShape, TemplateDiagnostic,
 };
 
 fn write(path: &Path, contents: &str) {
@@ -10,6 +11,13 @@ fn write(path: &Path, contents: &str) {
         fs::create_dir_all(parent).expect("fixture parent should be created");
     }
     fs::write(path, contents).expect("fixture should be written");
+}
+
+fn load_failure(catalog: &BenchmarkCatalog, slug: &str) -> Report<BenchmarkError> {
+    let Err(report) = catalog.load(slug) else {
+        panic!("benchmark '{slug}' should be rejected");
+    };
+    report
 }
 
 fn write_benchmark(repository: &Path, slug: &str, duration: &str) {
@@ -214,8 +222,8 @@ fn rejects_invalid_slugs_bounds_missing_implementations_and_escaping_templates()
     let repository = tempfile::tempdir().expect("temporary repository should be created");
     let catalog = BenchmarkCatalog::from_repository_root(repository.path());
     assert!(matches!(
-        catalog.load("../escape"),
-        Err(BenchmarkError::InvalidSlug { .. })
+        load_failure(&catalog, "../escape").current_context(),
+        BenchmarkError::InvalidSlug { .. }
     ));
 
     for (slug, dependencies) in [
@@ -249,8 +257,8 @@ template = "graph.nspl.upon"
         );
         write(&directory.join("graph.nspl.upon"), "BEGIN; COMMIT;");
         assert!(matches!(
-            catalog.load(slug),
-            Err(BenchmarkError::InvalidDefinition { .. })
+            load_failure(&catalog, slug).current_context(),
+            BenchmarkError::InvalidDefinition { .. }
         ));
     }
 
@@ -284,8 +292,8 @@ template = "graph.nspl.upon"
         "BEGIN; COMMIT;",
     );
     assert!(matches!(
-        catalog.load("unsupported-dependency"),
-        Err(BenchmarkError::ParseManifest { .. })
+        load_failure(&catalog, "unsupported-dependency").current_context(),
+        BenchmarkError::ParseManifest { .. }
     ));
 
     let invalid_directory = repository.path().join("benches/benchmarks/invalid-bounds");
@@ -311,7 +319,11 @@ kind = "uniform-passthrough"
     let error = catalog
         .load("invalid-bounds")
         .expect_err("invalid benchmark should fail");
-    assert!(matches!(error, BenchmarkError::InvalidDefinition { .. }));
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::InvalidDefinition { .. }
+    ));
+    assert!(error.contains::<DefinitionError>());
 
     let invalid_duration_directory = repository
         .path()
@@ -343,8 +355,8 @@ template = "graph.nspl.upon"
         "BEGIN; COMMIT;",
     );
     assert!(matches!(
-        catalog.load("invalid-duration"),
-        Err(BenchmarkError::ParseManifest { .. })
+        load_failure(&catalog, "invalid-duration").current_context(),
+        BenchmarkError::ParseManifest { .. }
     ));
 
     let invalid_partition_directory = repository
@@ -377,8 +389,8 @@ template = "graph.nspl.upon"
         "BEGIN; COMMIT;",
     );
     assert!(matches!(
-        catalog.load("invalid-partitions"),
-        Err(BenchmarkError::InvalidDefinition { .. })
+        load_failure(&catalog, "invalid-partitions").current_context(),
+        BenchmarkError::InvalidDefinition { .. }
     ));
 
     for (slug, config_path, readiness_port) in [
@@ -417,8 +429,8 @@ readiness_path = "/health"
         );
         write(&directory.join("vector.yaml"), "data_dir: /tmp/vector");
         assert!(matches!(
-            catalog.load(slug),
-            Err(BenchmarkError::InvalidDefinition { .. })
+            load_failure(&catalog, slug).current_context(),
+            BenchmarkError::InvalidDefinition { .. }
         ));
     }
 
@@ -457,7 +469,10 @@ template = "../outside.nspl"
     let error = catalog
         .load("escaping-template")
         .expect_err("escaping template should fail");
-    assert!(matches!(error, BenchmarkError::InvalidTemplatePath { .. }));
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::InvalidTemplatePath { .. }
+    ));
 }
 
 fn write_keyed_benchmark(repository: &Path, slug: &str, shape: &str) {
@@ -591,10 +606,325 @@ fn rejects_keyed_shapes_that_cannot_state_an_exact_drop_rate() {
         write_keyed_benchmark(repository.path(), slug, shape);
         assert!(
             matches!(
-                catalog.load(slug),
-                Err(BenchmarkError::InvalidDefinition { .. })
+                load_failure(&catalog, slug).current_context(),
+                BenchmarkError::InvalidDefinition { .. }
             ),
             "benchmark '{slug}' should be rejected"
         );
     }
+}
+
+#[test]
+fn locates_a_template_syntax_error_once_beneath_the_template_it_belongs_to() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "broken-template", "\"auto\"");
+    write(
+        &repository
+            .path()
+            .join("benches/benchmarks/broken-template/graph.nspl.upon"),
+        "bootstrap={{ kafka_bootstrap_servers }}\ninput={{ input_topic \n",
+    );
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = load_failure(&catalog, "broken-template");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::CompileTemplate { slug, implementation, path }
+            if slug == "broken-template"
+                && implementation == "nervix"
+                && path == Path::new("graph.nspl.upon")
+    ));
+    assert!(error.contains::<TemplateDiagnostic>());
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.starts_with(
+            "benchmark 'broken-template' implementation 'nervix' template 'graph.nspl.upon' is \
+             invalid: invalid syntax"
+        ),
+        "{rendered}"
+    );
+    assert_eq!(
+        rendered.matches("--> <anonymous>:").count(),
+        1,
+        "{rendered}"
+    );
+    assert_eq!(
+        rendered.matches("| input={{ input_topic").count(),
+        1,
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("reason:").count(), 1, "{rendered}");
+}
+
+#[test]
+fn names_a_missing_template_and_keeps_the_file_system_cause() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "missing-template", "\"auto\"");
+    fs::remove_file(
+        repository
+            .path()
+            .join("benches/benchmarks/missing-template/graph.nspl.upon"),
+    )
+    .expect("the fixture template should be removable");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = load_failure(&catalog, "missing-template");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::ReadTemplate { slug, implementation, path }
+            if slug == "missing-template"
+                && implementation == "nervix"
+                && path == Path::new("graph.nspl.upon")
+    ));
+    assert!(matches!(
+        error.downcast_ref::<BenchmarkFileError>(),
+        Some(BenchmarkFileError::Resolve)
+    ));
+    let cause = error
+        .downcast_ref::<std::io::Error>()
+        .expect("the canonicalization failure should stay beneath the template context");
+    assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.starts_with(
+            "failed to read benchmark 'missing-template' implementation 'nervix' template \
+             'graph.nspl.upon': the path does not resolve: "
+        ),
+        "{rendered}"
+    );
+    assert_eq!(
+        rendered.matches(&cause.to_string()).count(),
+        1,
+        "{rendered}"
+    );
+}
+
+#[test]
+fn keeps_the_manifest_decoder_failure_beneath_the_manifest_path() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "zero-duration", "0");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = load_failure(&catalog, "zero-duration");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::ParseManifest { path } if path.ends_with("zero-duration/benchmark.toml")
+    ));
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.starts_with("failed to parse benchmark manifest '"),
+        "{rendered}"
+    );
+    assert!(error.contains::<toml::de::Error>(), "{rendered}");
+}
+
+fn render_inputs(dependency_endpoints: &BTreeMap<String, String>) -> KafkaRenderInputs<'_> {
+    KafkaRenderInputs {
+        kafka_bootstrap_servers: "kafka:9092",
+        input_topic: "bench-input",
+        output_topic: "bench-output",
+        consumer_group: "bench-consumer",
+        lane_count: 1,
+        dependency_endpoints,
+    }
+}
+
+/// Why the `nervix` template of benchmark `slug` could not be read, as its report renders it.
+fn template_failure(catalog: &BenchmarkCatalog, slug: &str) -> String {
+    let error = load_failure(catalog, slug);
+    assert!(
+        matches!(
+            error.current_context(),
+            BenchmarkError::ReadTemplate { slug: failed, implementation, path }
+                if failed == slug
+                    && implementation == "nervix"
+                    && path == Path::new("graph.nspl.upon")
+        ),
+        "{error:?}"
+    );
+    error
+        .downcast_ref::<BenchmarkFileError>()
+        .expect("the file issue should be beneath the template")
+        .to_string()
+}
+
+#[test]
+fn names_a_catalog_that_does_not_exist() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = catalog
+        .discover()
+        .expect_err("a repository without a catalog has nothing to discover");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::OpenCatalog { path } if path.ends_with("benches/benchmarks")
+    ));
+    assert!(error.contains::<std::io::Error>());
+}
+
+#[test]
+fn refuses_a_catalog_entry_whose_name_is_not_text() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    let catalog_root = repository.path().join("benches/benchmarks");
+    fs::create_dir_all(catalog_root.join(std::ffi::OsStr::from_bytes(b"bench\xff")))
+        .expect("a directory with a non-UTF-8 name should be created");
+
+    let error = BenchmarkCatalog::from_repository_root(repository.path())
+        .discover()
+        .expect_err("a directory name that is not UTF-8 is not a slug");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::InvalidSlug { slug } if slug == "bench\u{fffd}"
+    ));
+}
+
+#[test]
+fn names_a_benchmark_directory_that_does_not_exist() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "present", "\"auto\"");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = load_failure(&catalog, "absent");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::OpenBenchmark { path } if path.ends_with("benches/benchmarks/absent")
+    ));
+}
+
+#[test]
+fn refuses_a_benchmark_directory_that_resolves_outside_the_catalog() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "present", "\"auto\"");
+    let outside = repository.path().join("outside");
+    fs::create_dir_all(&outside).expect("the outside directory should be created");
+    std::os::unix::fs::symlink(
+        &outside,
+        repository.path().join("benches/benchmarks/escape"),
+    )
+    .expect("the escaping link should be created");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = load_failure(&catalog, "escape");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::EscapingDirectory { slug } if slug == "escape"
+    ));
+}
+
+#[test]
+fn names_a_benchmark_without_a_manifest() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    fs::create_dir_all(repository.path().join("benches/benchmarks/unfinished"))
+        .expect("the benchmark directory should be created");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    let error = load_failure(&catalog, "unfinished");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::ReadManifest { slug, path }
+            if slug == "unfinished" && path.ends_with("unfinished/benchmark.toml")
+    ));
+    assert!(matches!(
+        error.downcast_ref::<BenchmarkFileError>(),
+        Some(BenchmarkFileError::Resolve)
+    ));
+}
+
+#[test]
+fn refuses_templates_outside_the_benchmark_and_templates_that_are_not_files() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    let catalog = BenchmarkCatalog::from_repository_root(repository.path());
+
+    write_benchmark(repository.path(), "linked-template", "\"auto\"");
+    let outside = repository.path().join("outside.nspl.upon");
+    write(&outside, "BEGIN; COMMIT;");
+    let template = repository
+        .path()
+        .join("benches/benchmarks/linked-template/graph.nspl.upon");
+    fs::remove_file(&template).expect("the fixture template should be removable");
+    std::os::unix::fs::symlink(&outside, &template).expect("the template link should be created");
+    assert_eq!(
+        template_failure(&catalog, "linked-template"),
+        "the path resolves outside the benchmark directory"
+    );
+
+    write_benchmark(repository.path(), "directory-template", "\"auto\"");
+    let template = repository
+        .path()
+        .join("benches/benchmarks/directory-template/graph.nspl.upon");
+    fs::remove_file(&template).expect("the fixture template should be removable");
+    fs::create_dir(&template).expect("a directory should take the template's place");
+    assert_eq!(
+        template_failure(&catalog, "directory-template"),
+        "the path is not a regular file"
+    );
+}
+
+#[test]
+fn names_an_implementation_a_benchmark_does_not_declare() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "kafka-forward", "\"auto\"");
+    let benchmark = BenchmarkCatalog::from_repository_root(repository.path())
+        .load("kafka-forward")
+        .expect("benchmark should load");
+    let dependency_endpoints = BTreeMap::new();
+
+    let error = benchmark
+        .render_implementation("spark", render_inputs(&dependency_endpoints))
+        .expect_err("an undeclared implementation cannot render");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::UnknownImplementation { slug, implementation }
+            if slug == "kafka-forward" && implementation == "spark"
+    ));
+}
+
+#[test]
+fn locates_a_value_a_template_renders_but_the_run_does_not_provide() {
+    let repository = tempfile::tempdir().expect("temporary repository should be created");
+    write_benchmark(repository.path(), "missing-value", "\"auto\"");
+    write(
+        &repository
+            .path()
+            .join("benches/benchmarks/missing-value/graph.nspl.upon"),
+        "bootstrap={{ kafka_bootstrap_servers }}\nwindow={{ parameters.window_seconds }}\n",
+    );
+    let benchmark = BenchmarkCatalog::from_repository_root(repository.path())
+        .load("missing-value")
+        .expect("a template that compiles should load");
+    let dependency_endpoints = BTreeMap::new();
+
+    let error = benchmark
+        .render_implementation("nervix", render_inputs(&dependency_endpoints))
+        .expect_err("a value the run does not provide cannot render");
+
+    assert!(matches!(
+        error.current_context(),
+        BenchmarkError::RenderTemplate { slug, implementation, path }
+            if slug == "missing-value"
+                && implementation == "nervix"
+                && path == Path::new("graph.nspl.upon")
+    ));
+    assert!(error.contains::<TemplateDiagnostic>());
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.starts_with(
+            "failed to render benchmark 'missing-value' implementation 'nervix' template \
+             'graph.nspl.upon': render error"
+        ),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("| window={{").count(), 1, "{rendered}");
 }

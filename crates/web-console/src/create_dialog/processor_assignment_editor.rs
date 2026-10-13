@@ -6,6 +6,11 @@
 //! - **Depends on.** Processor drafts and the shared typed assignment draft.
 //! - **Must not know.** Expression execution or output routing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

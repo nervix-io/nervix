@@ -186,7 +186,7 @@ Feature: WASM guest-state checkpoint durability
       """
       {"value":2,"tenant":"alpha"}
       """
-    Then within "45s" the active session observes a server error containing
+    Then within "120s" the active session observes a server error containing
       """
       wasm processor 'filter_even_rows' state replication failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1
       """

@@ -5,6 +5,11 @@
 //! - **Depends on.** Current semantic Model generators, canonical rendering and public archives.
 //! - **Must not know.** Node storage, graph execution or capture/install synchronization.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeMap, io::Write as _};
 
 use error_stack::Report;

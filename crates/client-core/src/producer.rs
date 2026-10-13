@@ -21,6 +21,11 @@
 //! loses an outcome or the batch: [`Producer::pending_submissions`] lists it, and a producer whose
 //! application stops reading outcomes stops being granted credit for new batches.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::BTreeMap, fmt, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;

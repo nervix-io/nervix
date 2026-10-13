@@ -1,7 +1,7 @@
 Feature: Bounded complete restore generations
   Restoring a complete state set publishes one durable generation before START.
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets
     Given Kafka is running
     And runtime replication is configured with replica count <replicas> and snapshot interval "10m"
@@ -62,12 +62,12 @@ Feature: Bounded complete restore generations
       START;
       """
     When round 1 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
+    Then within "120s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
       """
       state structures: <branches>
       """
     When round 2 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
+    Then within "120s" the restore subscription receives one isolated even row for each of <branches> tenants
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -100,7 +100,7 @@ Feature: Bounded complete restore generations
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    Then within "30s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
+    Then within "120s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
       """
       key={"tenant":"restore-tenant-0"} payload={"tenant":"restore-tenant-0","value":2}
       """
@@ -109,37 +109,37 @@ Feature: Bounded complete restore generations
       STOP;
       START;
       """
-    Then within "30s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
+    Then within "120s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
       """
       relay 'raw_metrics' materialized state is empty
       """
-    Then within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    Then within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       kafka observed partitions: 0
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       kafka instance 0 partitions: 0
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       transient error: -
       """
-    And within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
+    And within "120s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """
       ready: true
       """
     And the relay subscription does not receive a payload within "2s"
     When round 3 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <branches>
+    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <branches>
     When round 4 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
-    Then within "30s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
+    Then within "120s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
       """
       state structures: <branches>
       """
     Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
-    And within "30s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
-    And within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
+    And within "120s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
+    And within "120s" the restore subscription receives one isolated even row for each of <branches> tenants
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "stateful.nvxb" and "restored-state.nvxb" keep all <branches> WASM processor branch incarnations

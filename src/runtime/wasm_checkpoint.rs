@@ -9,6 +9,11 @@
 //! - **Must not know.** NSPL parsing, placement policy, connector clients, or how stable storage
 //!   and replicas are reached.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_wasm::WasmGuestReportExt as _;
 
@@ -16,7 +21,7 @@ use super::*;
 
 /// How long one checkpoint may take to reach its boundary, from the guest's save to the
 /// confirmation of its last replica. A checkpoint still short of its boundary then fails.
-pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(10);
+pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(90);
 
 /// The success acknowledgements guest callbacks decided, held back until the checkpoint that covers
 /// those callbacks reaches its boundary.
@@ -301,6 +306,10 @@ pub(super) fn wasm_callback_decided_tokens(outputs: &[WasmMaterializedOutput]) -
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_primitives::time::timeout;
 

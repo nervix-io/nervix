@@ -15,6 +15,14 @@
 //! seals the section's exact length and digest. The record's serializer scratch, one resolver per
 //! entry, is charged to `restore_metadata` beside the checkpoint.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{cell::Cell, io::Write, mem::MaybeUninit};
 
 use arch_into::ArchInto as _;
@@ -31,7 +39,7 @@ use nervix_models::{DomainName, DomainSchedule, ModelKind, ModelName, SchemaFing
 use thiserror::Error;
 
 use super::{
-    CaptureSectionKey,
+    CaptureSectionKey, CapturedSection,
     interconnect::{CaptureDomainStateRequest, failed},
     state_sections::archived_node,
 };
@@ -111,8 +119,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedNativeMetadata>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<(CaptureSectionKey, SectionContent, StagedArtifact)>, RemoteOperationFailure>
-    {
+    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let local_node = self.inner.consensus.local_node_id();
         let mut staged = Vec::new();
         for captured in captured {
@@ -144,7 +151,11 @@ impl SessionServiceImpl {
             };
             let content = SectionContent::Record(section.record.kind());
             let artifact = self.stage_native_section(section, &request.domain).await?;
-            staged.push((key, content, artifact));
+            staged.push(CapturedSection {
+                key,
+                content,
+                artifact,
+            });
         }
         Ok(staged)
     }

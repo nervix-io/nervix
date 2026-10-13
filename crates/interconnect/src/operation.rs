@@ -6,6 +6,14 @@
 //! - **Depends on.** The vocabulary the subjects quote and the runtime state kinds they address.
 //! - **Must not know.** Which operation asked, or what the asking node does about the answer.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use nervix_models::{ClusterNodeIdentity, DomainName, ModelKind, ModelName, NodeRef, RelayName};
@@ -119,6 +127,13 @@ impl fmt::Display for RemoteOperationSubject {
 /// description, because a failure inside another node's subsystem is opaque to the caller and the
 /// text is for the operator reading it; every other class is fully described by its typed fields.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed wire response classifies remote control operation outcomes"
+    )
+)]
 pub enum RemoteOperationFailure {
     #[error("{subject} is not served by the node that answered")]
     Rejected { subject: RemoteOperationSubject },

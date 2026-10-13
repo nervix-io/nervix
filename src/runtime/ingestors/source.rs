@@ -13,6 +13,11 @@
 //! - **Must not know.** A broker driver, connector-specific configuration, NSPL parsing, registry
 //!   validation, or placement computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{future, time::Duration};
 
 use async_trait::async_trait;
@@ -1924,6 +1929,10 @@ async fn wait_for_flush(deadline: Option<Instant>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{collections::VecDeque, future};
 

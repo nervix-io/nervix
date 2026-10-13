@@ -8,6 +8,11 @@
 //! - **Must not know.** Where a snapshot is stored, how replicas synchronize it, or which operation
 //!   publishes a transition.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{collections::BTreeMap, fmt, fmt::Write as _, num::NonZeroU64};
 
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -485,6 +490,13 @@ pub struct WasmStateGeneration(NonZeroU64);
 /// A stored or transferred generation number that no lifetime can carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("WASM state generation {0} is not a valid generation number")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "generation construction returns a pure nonzero validation refusal"
+    )
+)]
 pub struct InvalidWasmStateGeneration(pub u64);
 
 impl WasmStateGeneration {

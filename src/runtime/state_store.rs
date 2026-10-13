@@ -5,6 +5,11 @@
 //! - **Depends on.** Typed vocabulary and state envelopes, Fjall, and the bounded executor.
 //! - **Must not know.** Models, graph decisions or how consensus admits a restore.
 //!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use ahash::HashMap;
@@ -35,14 +40,34 @@ pub(super) mod generation;
 mod maintenance;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod identity_properties;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod key_properties;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod snapshot_properties;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod store_properties;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod wasm_properties;
 
 use durability::DurabilityBarrier;
@@ -1739,9 +1764,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -1886,9 +1912,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -2085,9 +2112,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );

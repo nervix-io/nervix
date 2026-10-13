@@ -11,8 +11,24 @@
 //!   connector implementation. The pool it borrows from is leased by the host, which owns the
 //!   interest that keeps it open and the wait it records while a connection is handed over.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 mod source;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod test_fixture;
 
 use std::{io, net::SocketAddr, time::Duration};
@@ -24,7 +40,9 @@ use nervix_connector::{
     SinkRecord, SinkRecordId, SinkStartResult, client_tls_paths, optional_client_config_value,
     read_tls_file,
 };
-use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsResolver, HOOK_LOOKUP_BUDGET};
+use nervix_dns::{
+    DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
+};
 use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
 use nervix_primitives::sync::Arc;
 use redis::{
@@ -58,7 +76,7 @@ impl AsyncDNSResolver for RedisDns {
                         Box::new(addresses.into_iter());
                     Ok(iter)
                 }
-                Err(error) => Err(io::Error::other(error.current_context().clone()).into()),
+                Err(error) => Err(io::Error::other(DnsLookupReport::from(error)).into()),
             }
         })
     }
@@ -389,6 +407,10 @@ impl RecordSink for RedisSink {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

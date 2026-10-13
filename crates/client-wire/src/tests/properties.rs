@@ -5,6 +5,11 @@
 //! - **Depends on.** The production wire API and vocabulary generators.
 //! - **Must not know.** Runtime Arrow columns, session dispatch, or live services.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{num::NonZeroU32, time::Duration};
 
 use bytes::Bytes;

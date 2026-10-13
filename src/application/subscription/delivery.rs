@@ -21,6 +21,14 @@
 //! - its relay closes, because the relay was redefined or removed, and it sends a
 //!   `SubscriptionEnded` naming why as the last frame of the generation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::num::NonZeroU64;
 
 use error_stack::Report;

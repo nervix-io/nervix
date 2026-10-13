@@ -8,6 +8,11 @@
 //!   database, and the vocabulary generators.
 //! - **Must not know.** Replication, assignment authority, or what a payload encodes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::io::{Cursor, Read as _};
 
 use nervix_arbitrary::{Arbitrary, Domain};

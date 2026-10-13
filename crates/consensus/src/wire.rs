@@ -6,6 +6,14 @@
 //! - **Depends on.** OpenRaft, shared Raft records, and the interconnect request primitive.
 //! - **Must not know.** HTTP/2 framing, durable storage, peer addresses, or control-plane policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io, time::Duration};
 
 use nervix_interconnect::{
@@ -29,6 +37,14 @@ type SnapshotMetaOf =
     SnapshotMeta<super::CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, BasicNode>;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed consensus wire response carries a projection of the answering node's \
+                  failure"
+    )
+)]
 pub(crate) enum ConsensusRequestError {
     #[error("the authenticated request origin is invalid: {0}")]
     InvalidOrigin(String),

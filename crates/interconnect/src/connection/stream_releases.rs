@@ -7,6 +7,14 @@
 //! - **Depends on.** The pool classes and request subquotas, and the primitive boundary's `Notify`.
 //! - **Must not know.** Connections, slots, deadlines, or what an operation sends.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use nervix_primitives::sync::Notify;
 use strum::EnumCount as _;
 

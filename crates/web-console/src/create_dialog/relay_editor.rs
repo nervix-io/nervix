@@ -8,6 +8,11 @@
 //!   shared choice UI.
 //! - **Must not know.** Registry internals, statement parsing, or how a command is dispatched.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_models::MaterializedRelayState;
 use strum::IntoEnumIterator as _;

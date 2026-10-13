@@ -7,6 +7,14 @@
 //! - **Depends on.** The interconnect to drive each step and the entity gate to hold the entity.
 //! - **Must not know.** Which schedule change asked for the move.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,

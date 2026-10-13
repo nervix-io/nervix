@@ -13,6 +13,14 @@
 //! never be given capacity the connection does not have and the shared remainder is always what
 //! the reservations leave behind.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;

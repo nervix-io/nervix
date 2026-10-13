@@ -5,6 +5,14 @@
 //! - **Depends on.** Vocabulary identities and timestamps.
 //! - **Must not know.** NSPL parsing, sessions, runtime activation, or transport responses.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, io, time::Duration};
 
 use error_stack::Report;

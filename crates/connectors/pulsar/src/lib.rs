@@ -12,6 +12,18 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 mod source;
 
 use std::{collections::VecDeque, time::Duration};
@@ -486,6 +498,10 @@ impl RecordSink for PulsarSink {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 

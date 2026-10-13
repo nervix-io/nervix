@@ -76,6 +76,11 @@
 //!   admitted, and which clock a deadline is measured on stay with the resolver, the bounded
 //!   executor and the clock owners.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 #[cfg(all(feature = "loom", feature = "shuttle"))]
 compile_error!(
     "nervix-primitives: the `loom` and `shuttle` execution modes cannot be enabled together. \

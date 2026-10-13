@@ -6,6 +6,11 @@
 //! - **Depends on.** Current signaling Models and resource binding draft controls.
 //! - **Must not know.** WebSocket transport, peer frames, or resource installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     CreateSignalingProtocol, RequestedResourceVersion, SignalingProtobufConfig,
@@ -352,6 +357,10 @@ pub(super) enum SignalingDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{

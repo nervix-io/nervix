@@ -24,6 +24,40 @@ what has already been established. Runtime code executes the plan; it does not r
 or infer a state from a display label. Shared identities live in the vocabulary so every layer
 uses the same meaning for a domain, branch, node, timestamp, or schema fingerprint.
 
+### Source-owned identity and installation contracts
+
+Gate these reviewable contracts with `cfg_attr(nervix_lint, ...)`:
+
+```rust,ignore
+#[cfg_attr(nervix_lint, nervix::identity(node, reason = "destination cluster member"))]
+destination: ClusterNodeName,
+
+#[cfg_attr(nervix_lint, nervix::state(installed, reason = "constructed before branch admission"))]
+branches: OnceLock<NamedBranches>,
+```
+
+`identity(node, ...)` marks shared vocabulary identity types, and declares an identity requirement
+on an exact field, parameter, type alias or function return. The compiler resolves aliases and
+normalizes types. References, arrays/slices, Option, Vec, Box and shared Arc wrappers carry their
+typed identity; Result checks its success type. A tuple or unrelated container containing a typed
+node does not make another string member an identity. Identity types must belong to the vocabulary.
+The current vocabulary includes cluster node names, process-incarnation identities, graph node
+references and domain node references. Ordinary labels and external pass-through strings carry no
+identity requirement merely because their identifier contains `node`.
+
+`state(installed, ...)` describes a field's installation lifetime and forbids a resolved RwLock
+anywhere in its normalized representation, including aliases and outer wrappers. Immutable
+construction, one-time initialization or an appropriate publication primitive preserves the owning
+lifetime. A field containing `RwLock<Option<name or shared handle>>` without a state contract emits
+`nervix::state_contract` for review. Its type cannot establish whether the value is installed once
+or replaced repeatedly. A genuinely replaceable field declares `state(mutable, ...)` with the
+replacement's actual owner and reason. The annotation proves neither a runtime lifetime nor a
+publication ordering; affected runtime corrections still need their owner tests and models.
+
+These are ordinary compiler diagnostics in the complete architecture gate, without numeric
+allowances or a filename-based identity policy. The [developer guide](./developing-nervix.md#compiler-architecture-gate)
+describes qualification and evidence.
+
 The representation depends on the question being asked:
 
 | Question | Representation | Boundary obligation |
@@ -32,6 +66,12 @@ The representation depends on the question being asked:
 | Which semantic state exists? | An enum variant with the data of that state | Match the variant; do not reconstruct the state from a string, count, or collection shape. |
 | Is a present value valid? | A validated type or a fallible conversion | Reject invalid input where the owner has enough context to explain it. |
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
+
+A pure conversion refusal is an ordinary typed outcome, even when it implements
+`std::error::Error` for a parsing trait. Its owner states that contract at the exact error type
+with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextual operation failure
+returns a report; a missing value does not silently turn one into a success. The resolved compiler
+gate and report-carrier obligations are described in [Errors And Diagnostics](errors-and-diagnostics.md).
 
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
@@ -46,6 +86,14 @@ distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed
 identifier access and verifies offsets and counts before constructing owned values.
 
 ## Absence And Distinct States
+
+**Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
+requester already holds the owner's current revision. `Some` carries a typed revision, byte length
+and digest; zero-length checkpoint bytes remain a present checkpoint. The subsequent bulk request
+names that exact revision. The receiver verifies the declared and received lengths and digest
+before it constructs an installable state entry, so a partial stream is a transfer failure rather
+than a different absence or an empty checkpoint. A handoff carries the same descriptions beside
+their typed placements and prepares state only after each selected stream verifies.
 
 **Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
 publication together. The publication carries `Option<DnsResolver>`: absence means startup has not
@@ -490,6 +538,11 @@ fingerprint binds once to the archived start generation for native storage, inde
 installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
 watermark ordering, counts and framing are validated before those values reach the runtime, and
 each record identity's branch must be a key of the restored relay's branching.
+
+A captured archive section carries its publication key, content kind and staged artifact as named fields.
+Guest capture retains a selected checkpoint handle until its scheduled generation is checked;
+its admitted storage job records the size for later admission, and opening that handle returns
+the checkpoint revision with the reader for those exact bytes.
 
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader

@@ -5,6 +5,14 @@
 //! - **Depends on.** Transaction-impact vocabulary and consensus keyed records.
 //! - **Must not know.** Parsing, planning, sessions, runtime execution or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,

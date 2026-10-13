@@ -6,6 +6,11 @@
 //! - **Depends on.** The VM runtime and Arrow arrays.
 //! - **Must not know.** Server graph ownership or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     Array, ArrayRef, Float64Array, Int64Array, ListArray,
     types::{

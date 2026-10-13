@@ -6,6 +6,11 @@
 //! - **Depends on.** Current codec Models and the create dialog's selected references.
 //! - **Must not know.** Codec compilation, registry contents, or resource installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;
@@ -427,6 +432,10 @@ pub(super) enum CodecDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{

@@ -10,6 +10,11 @@
 //!   vocabulary's expression Models.
 //! - **Must not know.** Statement grammars, VM programs, registry state or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::num::NonZeroU32;
 
 use ahash_compile_time::{HashSet, HashSetExt};

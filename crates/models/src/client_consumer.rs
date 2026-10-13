@@ -5,6 +5,11 @@
 //! - **Depends on.** Serialization.
 //! - **Must not know.** Sessions, the interconnect, Arrow encoding, or delivery ownership.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::num::{NonZeroU32, NonZeroU64};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

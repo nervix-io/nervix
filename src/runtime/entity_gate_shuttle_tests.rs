@@ -7,6 +7,11 @@
 //!   Shuttle runner.
 //! - **Must not know.** What an entity is, what a relay carries, or what a work item does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records. The counters under test are Shuttle's atomics, so a
 // check reads them while another task is between two of its own adjustments.

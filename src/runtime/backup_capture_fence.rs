@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         bounded,
         key = "one domain capture generation",
@@ -102,6 +106,10 @@ impl Drop for BackupCut {
 }
 
 #[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
     use nervix_model_harness::shuttle::check_interleavings;
@@ -146,6 +154,10 @@ mod shuttle_tests {
 }
 
 #[cfg(all(test, feature = "loom"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod loom_models {
     use meticulous::ResultExt as _;
     use nervix_model_harness::{

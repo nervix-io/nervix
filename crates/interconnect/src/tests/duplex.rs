@@ -7,6 +7,11 @@
 //! - **Depends on.** The interconnect test fixture and typed test messages.
 //! - **Must not know.** Product runtime graphs or consensus behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 
 #[derive(Debug, Archive, Serialize, Deserialize)]

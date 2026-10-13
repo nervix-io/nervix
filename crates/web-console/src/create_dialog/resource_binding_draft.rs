@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary resource names, requested versions, and connector config entries.
 //! - **Must not know.** Resource catalog storage, upload transport, or version pinning at apply time.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{ClientConfigEntry, RequestedResourceVersion, ResourceName};
 use thiserror::Error;

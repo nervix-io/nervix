@@ -5,6 +5,11 @@
 //! - **Depends on.** The test allocator installed by the server and a decoder supplied by its owner.
 //! - **Must not know.** Registry, runtime, or interconnect record shapes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::OptionExt as _;
 
 pub(crate) fn assert_decode_frees_allocations<F, T>(decode: F)

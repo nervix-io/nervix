@@ -7,6 +7,11 @@
 //!   domain time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use ahash::{HashSet, HashSetExt as _};
 use error_stack::{Report, ResultExt as _};
 
@@ -1281,6 +1286,10 @@ fn evaluate_window_value<'a>(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{Float64Array, Int64Array, TimestampNanosecondArray};
     use nervix_models::{ParseAsType, Timestamp};

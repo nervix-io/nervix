@@ -40,7 +40,8 @@ installers a single winner, replacement, teardown, and observers.
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
 terminal resolution with actual ACK roots at one and 64 rows per delivery, reports delivery tail
-latency and relay-memory reclamation, and measures the full fixed-position empty sweep. Its
+latency and relay-memory reclamation, and measures an empty sweep of the positions its deliveries
+claimed beside the fixed position count. Its
 authenticated frame probe sends three current Arrow rows, admits them, returns the exact terminal
 reply and checks retired attempt counts. A separate 5,000-frame peer-owner probe completes while
 another peer's protocol guard is continuously held and checks returned permits and memory. These
@@ -52,10 +53,29 @@ Each delivery generation owns its mutable rows under one short synchronous guard
 is independent of the other rows. Each side claims unused positions on demand and returns retired
 positions to its own bounded free queue, preserving admission room when delivery positions fill.
 Shutdown seals first claims before closing the queues and visits only positions that were claimed.
+The silence sweep, which runs once a second on every node, has the same bound: it reads each side's
+first-claim count and takes a guard only for the positions below it, so a node that forwards
+nothing takes none and a sweep's cost follows the positions its deliveries have used, not the
+16,384 positions a node is built with. The counts bound the scan and order nothing: a position's
+guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share
+whose first claim races a sweep is counted from that sweep or from the first one after its
+registration, so it still fails between the silence timeout and one sweep interval later. Runtime
+shutdown cancels the sweep task and waits for it, and the task observes the cancellation between
+sweeps, so a sweep's guard count also bounds how long a stopping node waits for it. A diagnostic
+build pays for every one of those guards: the acquisition-order selection enters Deloxide's
+process-wide detector on each tracked acquisition and release, and the nodes of every scenario in
+one process share that detector, which is why a recurring pass takes guards in proportion to its
+live work and never to a fixed capacity.
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
 retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
-source ACK timeout while task cardinality stays bounded by admitted batches.
+source ACK timeout while task cardinality stays bounded by admitted batches. A receiver whose relay
+budget has no room for a batch's watches holds the unadmitted batch on its own channel lane and
+reads the budget again every 10 milliseconds; it registers for no release notification and never
+queues in the budget's semaphore, whose released permits would otherwise go to the held charge
+ahead of the relay work that frees it. The batch task returns each watch's share as that watch
+ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
+budget's own atomic permit count.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
@@ -77,7 +97,8 @@ owns the capacities, grace periods and reconciliation deadlines.
 
 Production-owner Shuttle checks cover delayed events against a reused position, registration
 against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
-Alive reports, body claim against cancellation, admission against peer ending, and another peer's
+Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
+guard is held, body claim against cancellation, admission against peer ending, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
@@ -200,13 +221,18 @@ writer.
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
 `just test-deloxide-order` and `just test-deloxide-stress`, plus the public one-node and three-node `@restore_installation`
-workloads for large saves, many checkpoints, native lifecycle and Kafka records above the default
+workloads, which `just test-deloxide-stress-restore` also runs under the bounded scheduling
+disturbance, for large saves, many checkpoints, native lifecycle and Kafka records above the default
 32 MiB bulk budget, active chunk replacement and purge, durable publication failure, restart and
 delayed coordinators. The many-checkpoint three-node case includes one replica per state; its
 one-MiB saves fit the replication operation's limit. Deloxide tracks the installation barrier and other
 boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
+The registered large-WASM-handoff diagnostic scenario reaches replica installation and planned
+handoff with two branch saves above that message limit. It exercises the state store's tracked
+installation locks in both Deloxide selections; the bulk stream's async waits and transport faults
+remain outside the detector and have their own Turmoil and Cucumber evidence.
 
 Materialized capture shares row carriers under the existing assignment barrier, together with the
 revision, ownership fence and branch generation. Membership insertion and eviction use that same
@@ -298,6 +324,19 @@ read its generation; generators, processors, materialized relay tasks and subscr
 clock or lifecycle handle bound at startup. Each WASM state retains its entity assignment slot,
 which publishes state identity and checkpoint execution/replica owners together. A generation
 replacement or removal therefore fences a callback without a runtime registry lookup.
+
+Clock authority reconciliation binds a producer to its locally installed mapping, generation and
+authority fence before starting it. Each node's domain clock owner installs a committed
+authority-only reassignment ahead of graph installation. Each installed domain records the
+committed revision of its lifecycle, which keeps an older graph installation from restoring a
+superseded fence. A graph installation held on a departed node therefore stalls neither the
+replacement authority nor a receiver. Each remote delivery loop starts after its receiver
+advertises installation of that revision's domain clocks. An obsolete producer still retires
+before its successor starts, and a leader proposes an authority that did not commit again on a
+fixed interval instead of waiting for the next state change. The takeover Cucumber scenarios in
+`domain_clock_contract.feature` exercise this ownership path in the active, order and lifecycle
+stress Deloxide selections; their async installation, watch and transport waits remain outside
+tracked-lock detection.
 
 Force-flush participants retain a private idle, available or closed scalar. Idle and already-claimed
 polls acquire no coordinator mutex. An available indication enters the mutex, which remains the
@@ -485,6 +524,13 @@ replica set from the assignment slot.
 Branch-aggregate byte capture keeps the existing narrow `lifecycle_call` expectation for
 scanning the metrics inventory at an explicit snapshot boundary. State-route selection uses the
 installed state handle and retained assignment slot.
+Checkpoint synchronization sends a bounded revision, length and digest description through that
+selected route. The replica fetches the exact revision through the bulk pool, admits the whole
+allocation and verifies every byte before installation. A handoff destination follows the same
+sequence from the source's captured checkpoint while its entity gate remains held. Neither
+path adds a shared hot-path lock or a new
+wait-and-notify protocol; Deloxide sees the existing state-store installation lock but cannot see
+stream scheduling or async memory admission.
 
 A replica's progress only rises. Acknowledgements travel independently, and a replica acknowledges
 what it holds again whenever it is offered a checkpoint, so an acknowledgement of an older revision
@@ -1108,12 +1154,58 @@ inside external libraries, opaque external future implementations and unsupporte
 relationships remain outside the recognizer's claim. The checker supplies no universal ownership
 or effect proof.
 
+### Resolved architecture boundaries
+
+`nervix::layer(kind, reason = "...")` states the exact documented crate/module, type, trait, impl
+or callable owner: primitives, vocabulary, language, engine, decisions, data_plane, control_plane,
+edge or harness. The narrowest contract wins; associated implementations inherit explicit trait metadata
+and impl-self contracts. Contracts survive compiler metadata and move with their source owner.
+An unrelated trait module default cannot replace an implementation body's lexical owner.
+An engine that receives validated plans also declares `nervix::input(plans, ...)`; general
+infrastructure is not presumed to execute graph plans.
+
+`nervix::value(model|name|cluster_access, ...)` classifies exact semantic ADTs or traits. The current
+configuration Model union, shared name vocabulary and cluster observation capability carry those
+roles. `nervix::model_in_data_plane` rejects the configuration union in data-plane and plan-consuming
+interfaces or bodies, including normalized generic containers, aliases, constructors and patterns.
+An ordinary user type called Model has its own meaning. These checks do not treat every vocabulary
+field or schema descriptor as a configuration Model.
+
+`nervix::parser_dependency` diagnoses resolved language definitions outside the language, edges and
+harnesses, including imports, type/trait references, qualified calls and methods. A separate
+source/manifest validator retains the owning crate's import path before cfg selection, including
+renamed dependencies, inactive module imports and authored macro tokens. It derives language
+packages and consumer ownership from source contracts and Cargo/module declarations. Approved plain
+primitive and vocabulary re-exports keep their actual semantic owner; importing from a language
+crate still requires an allowed provenance owner even if resolution reaches a plain value.
+
+`nervix::cluster_await` diagnoses future-returning access on the classified cluster capability or
+trait when awaited from recurring data-plane execution. It follows the existing supported local
+helper/callback graph, selected concrete methods, UFCS, async closures, awaited expression wrappers
+and simple local future-binding chains. A local I/O await has no cluster role. A lifecycle cluster
+read remains lifecycle work. Dynamic/generic application dispatch needs its existing source effect
+contract; opaque external future implementations, arbitrary stored-future relationships and
+whole-program effects are not inferred. Execution graphs and recurring reachability are conservative
+within the declared local graph; annotations are reviewed architectural assertions.
+
+`nervix::node_identity`, `nervix::installed_state` and `nervix::state_contract` implement the exact
+identity and representation contracts in [Typed States](./typed-states.md#source-owned-identity-and-installation-contracts).
+All six architecture diagnostics use the same normal lint levels, exact-operation expectations and
+complete current configuration evidence as synchronization and failure rules. No count, product
+owner catalog or source-review hash grants permission.
+
 ### Diagnostics and reviewed exceptions
 
 `nervix::sync_acquisition` diagnoses an acquisition on ordinary recurring execution.
 `nervix::unknown_effect` diagnoses an acquisition without a context or an unresolved application
 call reached from recurring execution. `nervix::invalid_contract` rejects contract and exception
 errors. The lints use ordinary Rust warn/deny/expect levels; the required gate also rejects unresolved Nervix warnings.
+
+The driver also emits the resolved failure-contract, outcome-discard and panic diagnostics
+described in [Errors And Diagnostics](errors-and-diagnostics.md). Their exact error/return
+classifications use `nervix::error_boundary`; execution-context inheritance does not classify
+an error or exempt a failure. All diagnostics share the same one-operation expectation checks
+and complete configuration evidence.
 
 Retained repair debt names its owning task at the exact operation:
 
@@ -1151,13 +1243,13 @@ records the runtime ownership review; source contracts and expectations are the 
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The matrix
-analyzes ordinary workspace libraries/binaries, the server's testing capability,
+analyzes ordinary workspace libraries/binaries, the browser's wasm32 library and binary, the server's testing capability,
 server/interconnect/primitives under Shuttle, server/consensus/primitives under Loom,
 interconnect/primitives under Turmoil, and the server's library and binary, the deadlock
 diagnostics and primitives under Deloxide, where every blocking acquisition resolves to a tracked
 adapter that the rules recognize as the lock it wraps. Turmoil's runtime cfg comes only from its just recipe,
 which preserves the parent's diagnostic mode. Compilation supplies no concurrency execution
-evidence. Test targets, browser analysis and undeclared feature combinations are not claimed.
+evidence. Test targets and undeclared feature combinations are not claimed.
 Mandatory source/manifest checks retain import provenance, inactive cfg and authored macro checks.
 
 Cargo artifacts, complete side reports and declared roots must agree, including when there are
@@ -1215,10 +1307,10 @@ establishes all of the following:
 7. **Inventory.** Record a new concurrent map, or a changed frequency or disposition of an existing
    one, in the concurrent map inventory in the same change.
 
-The companion `write_once_rwlock_fields` count rejects names and shared references stored as
-`RwLock<Option<...>>`. Such a field states that readers should coordinate forever around a value
-whose actual lifecycle is publication. The current shape uses an atomic optional reference and
-deletes the lock-backed form.
+Installation-only fields declare their lifetime at the owner. The resolved installed-state rule
+rejects replaceable read-write locks in that representation, while an optional name/shared handle
+with an unstated lifetime requires explicit review. The current publication or one-time primitive
+must express the actual owner; type shape alone cannot establish a write-once lifetime.
 
 ## Execution-Sensitive Primitives
 
@@ -1370,6 +1462,17 @@ identities of the snapshot transfers it sends. A count a unit test reads is kept
 state that must outlive every test and model is a real atomic under a permission, which may live in
 a `static`.
 
+The rule binds the boundary itself. The boundary names every backend, so the import rules do not
+read its sources, but a `static` it declares holds only real atomics, named through
+`crate::unmodeled::sync::atomic` or the standard library, and the state it builds lazily for the
+life of the process is real too. The deadlock detector's process-wide state is that kind: whether
+this process claimed its installation, whether order checking is on, and the order history its
+registry keeps are real atomics. One mechanism the detector reaches is shared rather than owned: its
+report queue is the `ReportHandoff` that Shuttle checks, whose refusal counter must stay a selected
+atomic for the check to explore it. The detector holds that queue in a `static` only in a `deloxide`
+build, which selects the standard library's atomics and compiles no model, so no model execution
+ever constructs or outlives it.
+
 `just validate-primitive-boundary` rejects every other path to a governed family however it is
 spelled: a direct, renamed, grouped or glob import, a fully qualified path, an attribute, a renamed
 crate, an imported `sync`, `time` or `net` module, or a path in a macro body or an inactive `cfg`
@@ -1411,8 +1514,10 @@ path is rejected in the code an annotation gates as it is anywhere else.
 The check rejects a `static`, including one a `thread_local!` declares, whose declared type names a
 selected atomic, directly or through a wrapper, an array, a reference, a module path or a local type
 alias, and a `static` or `const` initializer, `const fn` or `const` block that constructs one. It
-reads declared types and constructions, so a struct holding an atomic that a static builds lazily is
-left to review.
+applies this rule, and only this one, to the boundary's own sources as well, where
+`crate::sync::atomic` names a selected atomic and `crate::unmodeled::sync::atomic` and the standard
+library's and `core`'s atomics name real ones. It reads declared types and constructions, so a
+struct holding an atomic that a static builds lazily is left to review.
 
 Guest code is outside the source rules: the WASM guest SDK and every guest library built on it are
 compiled into a user's WASM guest, a single-threaded program in the host's sandbox where no mode
@@ -1435,7 +1540,7 @@ one invocation:
 | Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, `just test-primitives-shuttle` | `just coverage-native-extras test-shuttle test-primitives-shuttle`; `just coverage-shuttle <output> [filter]` |
 | Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, `just test-primitives-loom` | `just coverage-native-extras test-loom test-primitives-loom`; `just coverage-loom <output> [filter]` |
 | Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | `just coverage-turmoil`; native conformance through `just coverage-native-extras test-primitives-turmoil` |
-| Deloxide | `just cargo-clippy-deloxide`: every diagnostic selection of the boundary, reporting owner, paced driver and server, including probes and scenarios | `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress`, `just test-primitives-deloxide` and diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; `just coverage-deadlock` collects the `test-deadlock-evidence-order` and ordinary `test-deadlock-report` producers in separate builds with canonical completion records and separately flagged diagnostic-evidence coverage; full diagnostic workloads retain separate evidence |
+| Deloxide | `just cargo-clippy-deloxide`: every diagnostic selection of the boundary, reporting owner, paced driver and server, including probes and scenarios | `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress`, `just test-deloxide-stress-restore`, `just test-primitives-deloxide` and diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; `just coverage-deadlock` collects the `test-deadlock-evidence-order` and ordinary `test-deadlock-report` producers in separate builds with canonical completion records and separately flagged diagnostic-evidence coverage; full diagnostic workloads retain separate evidence |
 
 Model coverage uses the canonical inventories and runners, including per-test process isolation,
 Shuttle random/PCT exploration and nondeterminism checking, and Loom InvariantIds and exhaustive
@@ -1531,9 +1636,14 @@ cost per acquisition grow with the life of the process. The random strategy keep
 counter per lock it delayed, which grows with the locks a process constructs and is bounded by the
 process's life within its invocation bound.
 
-The stress selection runs every active-only probe, conformance check and owner test again, and
-the lifecycle scenarios tagged `@deloxide_stress`, and the `probe.stress-disturbance` probe proves
-the disturbance is applied: twenty thousand nested acquisitions must wait at least the shortest
+The stress selections run every active-only probe, conformance check and owner test again, and
+between them every scenario of the active-only selection but the report tool's triage, which drives
+no lifecycle path. `deloxide-stress` runs the lifecycle scenarios tagged `@deloxide_stress` and the
+paced-driver scenarios with the stressed Rust driver; `deloxide-stress-restore` compiles the same
+build under its own name and runs its probes and the capture, restore and checkpoint-transfer
+scenarios tagged `@deloxide_stress_restore`, in a lane of its own because the stressed scenarios of
+both, one at a time, would take most of one lane's budget. The `probe.stress-disturbance` probe proves the
+disturbance is applied in each: twenty thousand nested acquisitions must wait at least the shortest
 delay for half the preemptions the configuration expects, and record the lane's configuration. Its first run found that the adapters'
 immediate try bypassed the disturbance entirely, and that a self wait went unreported once
 Deloxide's held set was populated; both are fixed in the adapters, and the probe and the stress
@@ -1664,21 +1774,32 @@ checks, the run selection, pending-callback limit, revision and declared coverag
 copies separate from files a live recorder replaces. The operator's workload is not ended merely
 because an unreviewed historical cycle exists.
 
-**The diagnostic lane.** `just test-deloxide`, `just test-deloxide-order` and
-`just test-deloxide-stress` run the lane of each selection, and CI's `deloxide` job runs all three
-side by side for every pull request labeled `deloxide`, the label each change the Deloxide rule
-applies to carries. An invocation runs in every selection unless the inventory names the
-selections that run it. The stress selection runs every probe, conformance check and owner test of
-the active-only selection, and its own `stress-scenarios` invocation: the one- and three-node
-lifecycle scenarios tagged `@deloxide_stress`, one at a time, which drive client contract
-transactions and their rejected rollbacks, the drain of buffered branches before an alteration,
-a quiesce expiry across two domains, backup capture and restore of WASM branches, Kafka offsets,
-deduplicator keys and windows, a delayed restore coordinator, interleaved branches with remote
-acknowledgement owners, session restarts that resume a producer and consumer, a domain restart that
-replaces its consumer, a memory-pressure pause of scheduled ingestors, and graceful shutdown with a
-slow cordon release and diagnostic server processes that stop gracefully. Each stressed scenario is
-registered under its own `stress.` identity; the full tagged suite and the paced-driver scenarios
-stay in the active-only and order selections.
+**The diagnostic lane.** `just test-deloxide`, `just test-deloxide-order`,
+`just test-deloxide-stress` and `just test-deloxide-stress-restore` run the lane of each selection,
+and CI's `deloxide` job runs all four side by side for every pull request labeled `deloxide`, the
+label each change the Deloxide rule applies to carries. A selection is named after the diagnostic
+build feature it compiles, or extends that name and declares the feature when it runs workloads of
+the same build in a lane, budget and CI runner of their own; a
+build records one diagnostic selection in its evidence whichever selection runs it. An invocation
+runs in every selection unless the inventory names the selections that run it. The stress selection
+runs every probe, conformance check and owner test of the active-only selection, its
+`stress-scenarios` invocation of the one- and three-node lifecycle scenarios tagged
+`@deloxide_stress`, which drive client contract transactions and their rejected rollbacks, the
+drain of buffered branches before an alteration, interleaved branches with remote acknowledgement
+owners, a lost acknowledgement and a producer restart, session restarts that resume a producer and
+consumer, a domain restart that replaces its consumer, a memory-pressure pause of scheduled
+ingestors, a Roto function's column builder, TLS rebinding of every HTTPS listener, batched
+inference over interleaved branches, a restarted voter's ownership, and graceful shutdown with a
+slow cordon release and diagnostic server processes that stop gracefully, and its
+`stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
+scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
+offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore
+generations, staging quota and reclamation, delayed restore coordinators, bounded multi-domain
+backup waits and their recovery, and the drain of a large-state WASM owner through bulk checkpoint
+streams. Every stressed scenario runs one at a time under its own `stress.` identity, with the
+scenario, examples and invariant of its active-only counterpart and the owners that counterpart
+reaches.
 `tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
 selection runs, each with a stable identity, the invariant it owns, the selections that must run it
 and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the tracked
@@ -1705,8 +1826,9 @@ analysis starts a fresh process per feature and gives the six large materialized
 complete-generation restore examples their own processes. These restores each start several nodes
 and carry large state payloads, so per-example order histories stay within the detector and host
 budgets. Their `order_tags` in the inventory select and account for every example. Every diagnostic
-server and paced driver process installs its own detector. The selections are separate builds,
-apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
+server and paced driver process installs its own detector. Each selection compiles one diagnostic
+build, `deloxide-stress-restore` the stress selection's under its own name, and the diagnostic
+builds stay apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
 
 The conformance checks are the tracked adapters' own: which locks a diagnostic build selects, that
 `Debug` formatting tries a lock and never waits for it, that a value moves in and out of a lock, the
@@ -1722,8 +1844,12 @@ Stress widens timing windows; it does not make untracked waits visible. A Tokio 
 `Notify` wait, a DashMap shard, dependency locks, an atomic publication and a wait on another node
 are invisible to the detector with or without disturbance, and a workload that stalls on one of them
 ends as `timed-out`, not as an active cycle. Those owners keep their Shuttle, Loom, Turmoil and
-Chaos evidence. A stressed workload that fails is reproduced first as a focused failing test
-against its owner before the owner changes.
+Chaos evidence. A dependency's own channels are invisible in the same way: closing a database waits
+for the storage engine's background workers through the engine's worker channel and active-worker
+count, with no tracked lock involved, so that close is held by the pinned engine's own worker-stop
+tests and the store-close regression beside `ApplicationStartup::close_stores`, not by the lane. A
+stressed workload that fails is reproduced first as a focused failing test against its owner before
+the owner changes.
 
 Every process the lane starts runs in a session of its own. A process that outlives its bound
 receives `SIGTERM` and, after the stop grace period, `SIGKILL` with its whole group. The lane is a
@@ -1775,8 +1901,9 @@ its own class and status, keep their output and the evidence they could write, a
 behind. A consistent-order control must pass, and the recorded deadlock must replay to the same
 class.
 
-Under `just coverage-native-extras test-deloxide`, `test-deloxide-order` or `test-deloxide-stress`, the lane builds in the
-collector's instrumented target, with instrumentation on workspace crates only, so dependencies such
+Under `just coverage-native-extras test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` or
+`test-deloxide-stress-restore`, the lane builds in the collector's instrumented target of the
+feature its selection compiles, with instrumentation on workspace crates only, so dependencies such
 as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
 and shared client binding from the target its prerequisites built, starts every test executable
 through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
@@ -1794,8 +1921,12 @@ why, or both. `just validate-deloxide-applicability`, part of `just validate` an
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
 on a record whose file no longer acquires a tracked lock. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
-resolution of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
-declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
+resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
+library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
+in testing-only fault controls require owner records too. This includes the server's scheduling,
+drain and executor-occupancy controls and the consensus storage fault controls. Ordinary and
+modeled configurations retain their own feature selections. A record is a reviewed declaration:
+the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 
@@ -1876,6 +2007,28 @@ reads only the processes' exits and the evidence files they wrote. Deloxide mode
 channels, `Notify`, DashMap shards, dependency locks, atomic protocols, missing notifications and
 cross-node waits remain outside its detection claims and retain Shuttle/Loom/Turmoil/Chaos checks.
 No diagnostic check proves safety for an untracked path or an order the workload did not take.
+
+**Diagnostic images under external chaos.** The lane runs diagnostic nodes in a scenario binary or
+as local processes; the external chaos suite runs them as packaged containers under real process,
+pause and network faults. The `diagnostic` target of `Dockerfile.debian` builds the server of one
+selection, `NERVIX_DIAGNOSTIC_SELECTION`, with the ordinary CLI and formatter and the
+`nervix-deadlock-report` tool, on the release image's CPU runtime. It declares the selection in its
+`io.nervix.diagnostic.selection` label, and every image, release or diagnostic, declares the revision
+it was built from in `org.opencontainers.image.revision`. The release targets copy their binaries
+from the builder's release artifacts and the diagnostic target from its diagnostic ones, so a build
+of one kind cannot produce an image of the other, and the diagnostic image never enters a published
+manifest. `just docker-build-diagnostic` builds it; CI's `build-diagnostic` job builds the
+`deloxide-order` image beside the release images whenever a chaos suite runs, and the suites run
+against both. The chaos runner reads the label: every node records its evidence in a directory of
+the run, the run freezes the nodes once its Docker event recording is closed, and the image's own
+report tool qualifies every file before cleanup. A run fails unless each node holds one complete,
+qualifying evidence file of the declared selection for every process start the recording shows,
+and no node ended with status `3` or `4`; an unreviewed potential cycle fails it as in the lane.
+The suite refuses an image whose labels name another kind or revision than its caller asks for.
+`scripts/chaos/README.md` owns the runner's contract and artifacts. The evidence observes each
+process up to its kill, pause, stop or the freeze, without an upstream flush barrier, and only its
+tracked thread-blocking locks; recovery, ledger and timing verdicts stay the scenarios' own, with
+the product's deadlines and the suite's budgets unchanged.
 
 ### Blocking work outside the executor
 

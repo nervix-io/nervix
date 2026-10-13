@@ -1459,6 +1459,10 @@ pub(super) fn relay_batch_from_wasm_output(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

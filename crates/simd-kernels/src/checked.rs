@@ -21,6 +21,11 @@
 //! Every level, the scalar fallback included, computes the same value and the same failure bit for
 //! every lane.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::iter;
 
 use fearless_simd::{Level, dispatch, prelude::*};

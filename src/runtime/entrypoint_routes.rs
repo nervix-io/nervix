@@ -12,6 +12,11 @@
 //!   input-collection cadences and materialized-state dependencies still arrive as their declared
 //!   Model values, which the decisions layer does not yet type.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -487,6 +492,10 @@ struct RouteBranchSchemas {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         AckMode, CreateClientZeroMq, CreateIngestor, CreateReingestor, FlushPolicy,

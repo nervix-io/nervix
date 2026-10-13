@@ -9,6 +9,11 @@
 //! - **Must not know.** Subscription lifecycle, sampling, delivery, branch values, materialized
 //!   state, output construction, or side effects.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -52,10 +57,13 @@ pub(crate) enum SubscriptionPredicateCompileError {
 
 #[derive(Debug, Error)]
 pub(crate) enum SubscriptionPredicateExecutionError {
-    #[error("failed to project the subscribed record into predicate inputs: {reason}")]
-    InputProjection { reason: String },
-    #[error("predicate VM execution failed: {reason}")]
-    VmExecution { reason: String },
+    /// The record could not be projected into the predicate's inputs; the projection's report is
+    /// beneath.
+    #[error("failed to project the subscribed record into predicate inputs")]
+    InputProjection,
+    /// The predicate's program failed; the VM's report is beneath.
+    #[error("predicate VM execution failed")]
+    VmExecution,
     #[error("predicate evaluation error {}: {reason} at {span}", reason.code().as_str())]
     Evaluation {
         reason: nervix_vm::SideErrorReason,
@@ -119,18 +127,12 @@ pub(crate) async fn execute_subscription_predicate_on_record(
         },
         None,
     )
-    .map_err(|error| {
-        let reason = error.current_context().to_string();
-        error.change_context(SubscriptionPredicateExecutionError::InputProjection { reason })
-    })?;
+    .change_context(SubscriptionPredicateExecutionError::InputProjection)?;
     let execution_context = VmExecutionContext::new(execution_now);
     let result =
         execute_vm_predicate_in_context(executor, &predicate.predicate, &input, &execution_context)
             .await
-            .map_err(|error| {
-                let reason = error.current_context().to_string();
-                error.change_context(SubscriptionPredicateExecutionError::VmExecution { reason })
-            })?;
+            .change_context(SubscriptionPredicateExecutionError::VmExecution)?;
     if let Some(error) = result.errors().first() {
         return Err(Report::new(
             SubscriptionPredicateExecutionError::Evaluation {
@@ -143,6 +145,10 @@ pub(crate) async fn execute_subscription_predicate_on_record(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_fixtures::{expression, named, test_schema};
@@ -196,9 +202,19 @@ mod tests {
         .expect_err("the record lacks the predicate's required input field");
         assert!(matches!(
             report.current_context(),
-            SubscriptionPredicateExecutionError::InputProjection { reason }
-                if reason.contains("value")
+            SubscriptionPredicateExecutionError::InputProjection
         ));
         assert!(report.contains::<RuntimeSchemaError>());
+        let rendered = format!("{report:#}");
+        let projection = report
+            .downcast_ref::<RuntimeSchemaError>()
+            .expect("the projection's own failure is beneath the predicate's context")
+            .to_string();
+        assert!(
+            rendered.starts_with("failed to project the subscribed record into predicate inputs: "),
+            "{rendered}"
+        );
+        assert!(projection.contains("value"), "{projection}");
+        assert_eq!(rendered.matches(&projection).count(), 1, "{rendered}");
     }
 }

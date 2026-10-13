@@ -5,6 +5,11 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use fjall::Database;

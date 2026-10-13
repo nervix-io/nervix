@@ -7,6 +7,14 @@
 //!   DNS setup budget, and the socket seam.
 //! - **Must not know.** TLS, HTTP/2, or the operations a connection will carry.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::net::SocketAddr;
 
 use error_stack::Report;

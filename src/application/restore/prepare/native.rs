@@ -5,6 +5,14 @@
 //! - **Depends on.** The verified description's retained charge, native codecs, and file staging.
 //! - **Must not know.** Publication authority, state-store keys, or remote transfer framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_backup::DescribedRuntimeState;
 use nervix_execution::MemoryClass;

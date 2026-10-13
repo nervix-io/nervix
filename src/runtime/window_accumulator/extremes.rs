@@ -13,6 +13,11 @@
 //! before it does and can never be the extreme again. The front candidate is always the extreme,
 //! and it leaves only when its row leaves.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::cmp::Ordering;
 
 use super::*;

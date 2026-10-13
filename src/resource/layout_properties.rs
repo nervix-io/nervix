@@ -10,6 +10,11 @@
 //!   vocabulary generators.
 //! - **Must not know.** How a version was uploaded, replicated or bound.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeSet, path::Path};
 
 use meticulous::ResultExt as _;

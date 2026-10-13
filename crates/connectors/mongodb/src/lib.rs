@@ -12,6 +12,18 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 use std::{ops::Range, path::PathBuf};
 
 use ahash::HashMap;
@@ -564,6 +576,13 @@ struct StorableDocument {
 
 /// Why a row's document can never be stored.
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "unstorable documents produce definitive semantic record rejections"
+    )
+)]
 enum UnstorableDocument {
     #[error(
         "MongoDB document of one row measures {stored_bytes} bytes, above the \
@@ -785,6 +804,13 @@ impl RowSink for MongoDbSink {
 
 /// A mapped value this sink has no BSON representation for, named with the field that carries it.
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "unencodable mapped values produce definitive semantic record rejections"
+    )
+)]
 enum UnencodableMappedValue {
     #[error("MongoDB VALUES field '{field}' has unsupported exact type {data_type}")]
     UnsupportedColumn {
@@ -1069,6 +1095,10 @@ impl<'a> MappedBsonColumn<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::types::UInt64Type;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};

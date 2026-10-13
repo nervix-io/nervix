@@ -5,6 +5,11 @@
 //! - **Depends on.** Shared NSPL tokens and vocabulary Models.
 //! - **Must not know.** Processor schedules, branch instances, or checkpoint storage.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use chumsky::prelude::*;

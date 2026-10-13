@@ -6,6 +6,11 @@
 //! - **Depends on.** The production stream-slot quotas and the interconnect Shuttle runner.
 //! - **Must not know.** Connections, sockets, or what a leased stream carries.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // step as the lease or drain operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};

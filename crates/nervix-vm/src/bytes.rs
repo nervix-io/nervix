@@ -7,6 +7,14 @@
 //! - **Depends on.** Arrow columns, VM row errors and SIMD-backed encoding kernels.
 //! - **Must not know.** NSPL syntax, routes, schemas or connectors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use arrow_array::{

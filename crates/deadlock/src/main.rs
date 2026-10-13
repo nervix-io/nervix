@@ -6,6 +6,11 @@
 //! - **Depends on.** The diagnostic evidence owner and Clap.
 //! - **Must not know.** Application state, detector internals or a running node.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

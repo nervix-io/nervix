@@ -5,6 +5,11 @@
 //! - **Depends on.** Integer conversions and serialization primitives.
 //! - **Must not know.** Parsing, storage keys, consensus, or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};

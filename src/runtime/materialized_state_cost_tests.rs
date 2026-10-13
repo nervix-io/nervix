@@ -3,6 +3,11 @@
 //! May depend on: the production materialized owner, jemalloc counters and monotonic instants.
 //! Must not know: model-checker scheduling or publication backend internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, Timestamp};
 use nervix_primitives::{sync::blocking::Barrier, thread, time::Instant};

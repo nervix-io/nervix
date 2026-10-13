@@ -7,6 +7,14 @@
 //! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
 //! - **Must not know.** The runtime meaning of a request or response.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, time::Duration};
 
 use ahash::HashMap;
@@ -41,8 +49,8 @@ use super::{
 };
 use crate::{
     connection::{
-        DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender, FrameReader,
-        OutboundByteStreamRequest, RawDuplexRequest,
+        ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender,
+        EncodedMessage, FrameReader, OutboundByteStreamRequest, RawDuplexRequest,
     },
     observation::{ConnectionDirection, RequestOutcome, TransportObservations},
 };
@@ -65,6 +73,14 @@ pub struct ResponseEnvelope {
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed wire response classifies remote request outcomes; local failures \
+                  retain reports"
+    )
+)]
 pub enum RemoteRequestFailure {
     #[error("no handler is registered")]
     HandlerNotRegistered,
@@ -904,24 +920,24 @@ where
     ) -> DuplexHandlerFuture {
         let handler = self.handler.clone();
         Box::pin(async move {
-            let (request, _request_reservation) =
-                M::decode_rkyv(executor.clone(), M::CLASS, payload)
-                    .await
-                    .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
-            let items = DuplexItems::new(frames, executor.clone(), M::CLASS, M::NAME);
+            let codec = DuplexCodec::of::<M>(&executor);
+            let ChargedItem {
+                item: request,
+                charge: _request_charge,
+            } = codec
+                .decode::<M>(payload)
+                .await
+                .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+            let items = DuplexItems::new(frames, codec.clone(), M::NAME);
             let responses = (handler)(context, request, items)
                 .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))?;
-            let limit = M::CLASS.payload_limit(&executor);
             let frames = responses.into_stream().then(move |response| {
-                let executor = executor.clone();
+                // The encoding starts here, so the answer keeps no borrow of the codec.
+                let encoding = response.map(|response| codec.encode(response));
                 async move {
-                    let response = response?;
-                    let (payload, reservation) = response
-                        .encode_rkyv(executor, M::CLASS, limit)
-                        .await
-                        .map_err(StreamHandlerError::with_cause)?;
-                    Ok(ChargedBytes::from_owned(payload, reservation))
+                    let encoded = encoding?.await.map_err(StreamHandlerError::with_cause)?;
+                    Ok(ChargedBytes::from_owned(encoded.bytes, encoded.charge))
                 }
             });
             let frames: OutgoingFrameStream = Box::pin(frames);
@@ -1408,12 +1424,11 @@ impl Transport {
                     subquota: M::SUBQUOTA,
                 })
             })?;
-        let (payload, _payload_reservation) = message
-            .encode_rkyv(
-                self.inner.executor().clone(),
-                M::CLASS,
-                M::CLASS.payload_limit(self.inner.executor()),
-            )
+        let EncodedMessage {
+            bytes: payload,
+            charge: _payload_charge,
+        } = DuplexCodec::of::<M>(self.inner.executor())
+            .encode(message)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let opening = RequestEnvelope {

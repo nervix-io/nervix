@@ -20,6 +20,11 @@
 //! signal registry keeps its own handler installed, so a later signal would simply be ignored.
 //! Supervision therefore lasts until the process exits, and the first signal does not end it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{ffi::c_int, time::Duration};
 
 use error_stack::{Report, ResultExt as _};

@@ -7,6 +7,11 @@
 //! - **Depends on.** The transport and its test certificates.
 //! - **Must not know.** The runtime or control plane that uses the transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
 
 use futures_util::FutureExt as _;

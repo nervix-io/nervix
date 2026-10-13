@@ -8,6 +8,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "backup views and bounded restore storage jobs run as admitted lifecycle work"
@@ -22,8 +26,8 @@ use nervix_models::RestoreStateAuthority;
 use super::{generation::*, *};
 
 /// One domain's stored checkpoints of the selected kinds, listed from one database snapshot. The
-/// listing reads no payload: a checkpoint is read through the same snapshot when its owner opens
-/// it, and one the cut does not archive is never read.
+/// listing requests only keys and lengths: a checkpoint value is requested through the same
+/// snapshot when its owner opens it, and one the cut does not archive is never requested.
 pub(in crate::runtime) struct BackupCheckpointView {
     pub(in crate::runtime) checkpoints: Vec<checkpoint_reader::ListedCheckpoint>,
 }
@@ -396,29 +400,42 @@ impl RuntimeStateStore {
         let view = self.db.snapshot();
         let namespace = active_namespace(&view, &self.restore_publications, domain)?;
         let mut checkpoints = Vec::new();
-        for item in view.prefix(&self.latest, namespace.prefix(domain)) {
-            let (key, raw) = item
-                .into_inner()
+        let prefix = namespace.prefix(domain);
+        // Both iterators traverse the same immutable view in key order. The first requests only
+        // keys, and the second requests each stored size without requesting its value.
+        for (key_item, size_item) in view
+            .prefix(&self.latest, &prefix)
+            .zip(view.prefix(&self.latest, &prefix))
+        {
+            let key = key_item
+                .key()
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
             let (_, stored) = physical_placement(&key)?;
             // The runtime supplies the fixed backup selection of at most six kinds.
             if !kinds.contains(&stored.state.kind()) {
                 continue;
             }
+            let raw_bytes = size_item
+                .size()
+                .map_err(|_| RuntimePersistenceError::ReadValue)?;
             checkpoints.push(checkpoint_reader::ListedCheckpoint::new(
                 stored,
                 view.clone(),
                 self.latest.clone(),
                 self.checkpoint_chunks.clone(),
                 key.to_vec(),
-                &raw,
-            )?);
+                raw_bytes,
+            ));
         }
         Ok(BackupCheckpointView { checkpoints })
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

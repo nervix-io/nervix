@@ -615,6 +615,10 @@ pub(in crate::runtime) fn assert_key_payload_decodes_typed(payload: &[u8]) {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 
@@ -715,6 +719,31 @@ mod tests {
             keyspace.recent_keys.oldest(),
             Some((&second, &Timestamp::from_unix_nanos(20)))
         );
+    }
+
+    #[test]
+    fn restored_key_expires_at_its_original_three_minute_deadline() {
+        let original = key("payment");
+        let seen_at = Timestamp::from_unix_nanos(1_000_000_000);
+        let mut keys = ExpiryMap::new();
+        assert!(keys.insert(original.clone(), seen_at));
+        let encoded =
+            encode_deduplicator_snapshot(&ReplicatedDeduplicatorState::published_keys(&keys))
+                .assured("the live keyspace encodes");
+        let restored = decode_deduplicator_snapshot(&encoded).assured("the keyspace restores");
+        assert_eq!(restored.get(&original), Some(&seen_at));
+
+        let mut keyspace = super::DeduplicatorKeyspace {
+            state: empty_state(),
+            recent_keys: restored,
+        };
+        let max_time = Duration::from_secs(180);
+        let before_deadline = Timestamp::from_unix_nanos(180_999_999_999);
+        let at_deadline = Timestamp::from_unix_nanos(181_000_000_000);
+        assert!(!keyspace.reserve_new_key(original.clone(), before_deadline, max_time));
+        assert_eq!(keyspace.recent_keys.get(&original), Some(&seen_at));
+        assert!(keyspace.reserve_new_key(original.clone(), at_deadline, max_time));
+        assert_eq!(keyspace.recent_keys.get(&original), Some(&at_deadline));
     }
 
     /// The snapshot task, replicas and ownership handoff read the keys a branch published for as

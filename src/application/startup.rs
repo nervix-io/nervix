@@ -7,6 +7,11 @@
 //! - **Depends on.** The argument definition and the stores it opens.
 //! - **Must not know.** What the configured node goes on to run.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -40,8 +45,8 @@ const DATABASE_RESERVATION_BYTES: u64 = 4096;
 
 #[derive(Debug, Error)]
 enum NodeDatabaseOpenError {
-    #[error("failed to open the node database: {0}")]
-    Open(#[source] fjall::Error),
+    #[error("failed to open the node database")]
+    Open,
     #[error("consensus keyspaces are present in the node database")]
     ConsensusNotDedicated,
 }
@@ -75,13 +80,13 @@ impl ApplicationStartup {
             .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
                 let db = Database::builder(opened_path)
                     .open()
-                    .map_err(NodeDatabaseOpenError::Open)?;
+                    .change_context(NodeDatabaseOpenError::Open)?;
                 if db
                     .list_keyspace_names()
                     .iter()
                     .any(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX))
                 {
-                    return Err(NodeDatabaseOpenError::ConsensusNotDedicated);
+                    return Err(Report::new(NodeDatabaseOpenError::ConsensusNotDedicated));
                 }
                 Ok(db)
             })
@@ -89,13 +94,18 @@ impl ApplicationStartup {
             .change_context(AppError::OpenRegistry)?;
         match opened {
             Ok(db) => Ok(db),
-            Err(NodeDatabaseOpenError::Open(error)) => {
-                error!(db_path = %path.display(), error = %error, "failed to open node fjall database");
-                Err(Report::new(AppError::OpenRegistry).attach_printable(error))
-            }
-            Err(NodeDatabaseOpenError::ConsensusNotDedicated) => {
-                error!(db_path = %path.display(), "consensus keyspaces found in node fjall database");
-                Err(Report::new(AppError::ConsensusStorageLayout))
+            Err(report) => {
+                let context = match report.current_context() {
+                    NodeDatabaseOpenError::Open => {
+                        error!(db_path = %path.display(), error = ?report, "failed to open node fjall database");
+                        AppError::OpenRegistry
+                    }
+                    NodeDatabaseOpenError::ConsensusNotDedicated => {
+                        error!(db_path = %path.display(), "consensus keyspaces found in node fjall database");
+                        AppError::ConsensusStorageLayout
+                    }
+                };
+                Err(report.change_context(context))
             }
         }
     }
@@ -386,6 +396,189 @@ mod tests {
         Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX, DATABASE_RESERVATION_BYTES,
     };
     use crate::application::test_fixtures::{test_addr, test_tls_files};
+
+    /// Closing the node's stores while one of their databases' background workers fails. Shuttle
+    /// builds take their channels from the model, and the database's workers are threads no model
+    /// runs, so these tests are built only outside Shuttle.
+    #[cfg(not(feature = "shuttle"))]
+    mod failing_database_worker {
+        use std::time::Duration;
+
+        use fjall::{
+            Database, KeyspaceCreateOptions,
+            compaction::{
+                Leveled,
+                filter::{
+                    CompactionFilter, CompactionFilterResult, Context, Factory, ItemAccessor,
+                },
+            },
+        };
+        use meticulous::ResultExt as _;
+        use nervix_execution::Executor;
+        use nervix_primitives::sync::{StdArc, blocking::mpsc, oneshot};
+        use nervix_recovery::{Discarded as _, NoReceiver as _};
+
+        use super::ApplicationStartup;
+
+        /// How long the test below waits for a database's own work: a compaction reaching its
+        /// filter, or a close returning once the database's last background worker has left.
+        const DATABASE_WORK_BOUND: Duration = Duration::from_secs(60);
+
+        /// How many writes flood the worker channel of the database the test below closes. Each
+        /// write queues a memtable rotation that no worker takes, and there are many times more of
+        /// them than the channel holds, so the channel stays full for far longer than a close takes
+        /// between two of its attempts to hand a worker its stop message.
+        const FLOODING_WRITES: u32 = 20_000;
+
+        /// The compaction filters of the keyspace the test below compacts. Every compaction stops
+        /// at its first item, hands the test the sender that lets it go, waits for it, and then
+        /// fails, which ends the database worker running it by error and without taking anything
+        /// from the worker channel.
+        struct FailingCompactions {
+            held: mpsc::Sender<mpsc::Sender<()>>,
+        }
+
+        impl Factory for FailingCompactions {
+            fn name(&self) -> &str {
+                "failing_compactions"
+            }
+
+            fn make_filter(&self, _: &Context) -> Box<dyn CompactionFilter> {
+                Box::new(FailingCompaction {
+                    held: Some(self.held.clone()),
+                })
+            }
+        }
+
+        /// One compaction of [`FailingCompactions`]. It keeps the sender it reports that it is
+        /// held through until its first item.
+        struct FailingCompaction {
+            held: Option<mpsc::Sender<mpsc::Sender<()>>>,
+        }
+
+        impl CompactionFilter for FailingCompaction {
+            fn filter_item(&mut self, _: ItemAccessor<'_>, _: &Context) -> CompactionFilterResult {
+                if let Some(held) = self.held.take() {
+                    let (release, released) = mpsc::channel();
+                    held.send(release)
+                        .means_peer_left("the test waiting for the compaction to be held");
+                    released.recv().discarded(
+                        "a test that drops the release instead of sending it lets the compaction \
+                         fail all the same",
+                    );
+                }
+                Err(fjall::LsmError::Io(std::io::Error::other(
+                    "the test fails every compaction of this keyspace",
+                )))
+            }
+        }
+
+        /// The node's stores close when the last background worker of one of their databases
+        /// fails while the close waits for it with the worker channel full: such a worker leaves
+        /// without taking its stop message, and nothing will receive from that channel again.
+        ///
+        /// The database has one worker, which a compaction holds until the close has begun and
+        /// the test has flooded the channel. The compaction then fails. Closing a fjall 3.1.10
+        /// database blocks in a send on the full channel at this point and never returns.
+        #[nervix_primitives::test]
+        async fn stores_close_when_the_last_database_worker_fails_while_the_close_waits_for_it() {
+            let directory = tempfile::tempdir().assured("the fixture can create a directory");
+            let (held, compaction_held) = mpsc::channel();
+            let failing_compactions: StdArc<dyn Factory> = StdArc::new(FailingCompactions { held });
+            let db = Database::builder(directory.path())
+                .worker_threads(1)
+                .with_compaction_filter_factories(StdArc::new(move |keyspace| {
+                    if keyspace == "compacted" {
+                        Some(StdArc::clone(&failing_compactions))
+                    } else {
+                        None
+                    }
+                }))
+                .open()
+                .assured("a new directory opens as a database");
+            let compacted = db
+                .keyspace("compacted", || {
+                    KeyspaceCreateOptions::default()
+                        .compaction_strategy(StdArc::new(Leveled::default().with_l0_threshold(1)))
+                })
+                .assured("the new database creates a keyspace");
+            let flooded = db
+                .keyspace("flooded", || {
+                    KeyspaceCreateOptions::default().max_memtable_size(1)
+                })
+                .assured("the new database creates a keyspace");
+
+            // The first table moves down a level whole. The second overlaps it, so the only
+            // worker merges the two and stops at the filter.
+            for _ in 0..2 {
+                compacted
+                    .insert("key", "value")
+                    .assured("the open keyspace accepts a write");
+                compacted
+                    .rotate_memtable_and_wait()
+                    .assured("the idle worker flushes the memtable");
+            }
+            let release = compaction_held
+                .recv_timeout(DATABASE_WORK_BOUND)
+                .assured("merging the two tables reaches the compaction filter");
+
+            let executor = Executor::default();
+            let (closing, close_started) = oneshot::channel();
+            let close = nervix_primitives::task::spawn({
+                let executor = executor.clone();
+                async move {
+                    ApplicationStartup::close_stores(&executor, move || {
+                        closing
+                            .send(())
+                            .means_peer_left("the test waiting for the close to begin");
+                        drop(db);
+                    })
+                    .await
+                }
+            });
+            close_started
+                .await
+                .assured("the filesystem workers begin closing the stores");
+
+            // Every write overflows its tiny memtable and queues a rotation the held worker never
+            // takes, so the close finds the channel full while its only worker still runs.
+            for write in 0..FLOODING_WRITES {
+                flooded
+                    .insert(write.to_be_bytes(), "value")
+                    .assured("an open keyspace accepts writes while its database closes");
+            }
+            release
+                .send(())
+                .discarded("the held compaction fails whether it receives the release or not");
+
+            let closed = nervix_primitives::time::timeout(DATABASE_WORK_BOUND, close)
+                .await
+                .assured("closing the stores returns once the database's last worker has left");
+            closed
+                .assured("the close task does not panic")
+                .assured("the filesystem workers close the stores");
+            drop(flooded);
+            drop(compacted);
+            let snapshot = executor.snapshot();
+            assert_eq!(snapshot.filesystem_storage.completed, 1);
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn opening_the_node_database_retains_the_typed_storage_cause() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        let file = tempfile::NamedTempFile::new().assured("the fixture can create a file");
+        let executor = Executor::default();
+        let failure = ApplicationStartup::open_node_database(file.path().to_path_buf(), &executor)
+            .await
+            .err()
+            .assured("a file cannot be opened as a database directory");
+        assert!(matches!(
+            failure.current_context(),
+            crate::application::error::AppError::OpenRegistry
+        ));
+        assert!(failure.contains::<fjall::Error>());
+    }
 
     #[nervix_primitives::test]
     async fn startup_failure_releases_the_split_databases_before_returning() {

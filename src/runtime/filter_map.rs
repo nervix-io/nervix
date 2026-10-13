@@ -5,6 +5,11 @@
 //! - **Depends on.** Compiled programs, Arrow batches and explicit execution timestamps.
 //! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use arrow_buffer::BooleanBufferBuilder;
 use error_stack::ResultExt as _;
 
@@ -1469,6 +1474,10 @@ pub(super) fn append_filter_map_nested_value(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::{

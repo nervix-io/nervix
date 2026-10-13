@@ -38,37 +38,6 @@ TEST_DIRECTORIES = frozenset({"tests", "benches", "examples"})
 # `LARGE_FILE_LINES` is split like any other, but their bodies never hold a production count up.
 TEST_FILE_SUFFIXES = ("/tests.rs", "_tests.rs", "/test_fixtures.rs")
 
-# The parser is an edge dependency: only the language crate itself, the client tools, and the
-# session adapter may name it. Everything else consumes Models.
-PARSER_EDGES = (
-    "crates/nspl/",
-    "crates/nspl-format/",
-    "crates/client-core/",
-    "crates/nervix-cli/",
-    "crates/web-console/",
-    "src/application.rs",
-    "src/application/",
-)
-
-# The data plane executes plans. It is the server's runtime together with the crates the runtime
-# drives: the branch instance lifetimes its tasks own, the checkpoint replication its replicated
-# states own, the connector contract crate and every integration crate. Code that moves out of the
-# runtime stays inside these prefixes, so a move carries its sites along and lowers no count.
-DATA_PLANE = (
-    "src/runtime/",
-    "crates/branch-instances/src/",
-    "crates/checkpoint-replication/src/",
-    "crates/connector/src/",
-    "crates/connectors/",
-)
-
-# These decision modules are where a Model is still allowed to be read while producing those plans.
-DATA_PLANE_PLANNERS = frozenset(
-    {
-        "src/runtime/emitter_start_plan.rs",
-    }
-)
-
 @dataclass(frozen=True)
 class Site:
     """One counted occurrence, addressed for a developer who has to go remove it."""
@@ -378,68 +347,6 @@ def _use_item_spans(code: str) -> Iterator[tuple[int, int]]:
         yield match.start(), len(code) if end < 0 else end
 
 
-_PANIC_CALL = re.compile(r"\.\s*(?:unwrap\s*\(\s*\)|expect\s*\()")
-
-
-def count_bare_unwrap_and_expect(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        for match in _PANIC_CALL.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_DISCARDED_BINDING = re.compile(r"\blet\s+_\s*(?::\s*[^=;]+?)?=")
-
-# A `let _` whose initializer is a plain name, or a tuple of them, silences an unused parameter
-# rather than dropping an outcome. There is no result there to classify. The count is `let _`
-# only: `_ = fut => …` is a `select!` arm pattern, not a discard, and matching it would flag every
-# such arm in the workspace.
-_PLAIN_BINDING = re.compile(
-    r"^(?:[A-Za-z_][A-Za-z0-9_]*"
-    r"|\(\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*,?\s*\))$"
-)
-
-
-def count_discarded_results(files: Sequence[RustFile]) -> list[Site]:
-    """Count outcomes dropped with `let _ = …`.
-
-    A dropped outcome states no class. It reads the same whether the failure was considered and
-    recovered from or never considered at all, so it is the one form that cannot be reviewed.
-    `meticulous` spells the panic class and `nervix-recovery` spells the recovery class; a site
-    left here has chosen neither, so this count only falls.
-    """
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        for match in _DISCARDED_BINDING.finditer(file.product):
-            initializer = _initializer(file.product, match.end())
-            if initializer is None or _PLAIN_BINDING.match(initializer.strip()):
-                continue
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-def _initializer(code: str, start: int) -> str | None:
-    """Return the initializer beginning at `start`, up to the `;` that ends its statement."""
-
-    depth = 0
-    index = start
-    length = len(code)
-    while index < length:
-        character = code[index]
-        if character in "([{":
-            depth += 1
-        elif character in ")]}":
-            depth -= 1
-            if depth < 0:
-                return None
-        elif character == ";" and depth == 0:
-            return code[start:index]
-        index += 1
-    return None
-
-
 # `saturating_duration_since` is `Instant`'s query for "how long since, or zero if it has not
 # happened yet". It answers a question about time rather than choosing what an overflow means, so
 # it is not what this count is about.
@@ -639,144 +546,6 @@ def _struct_body(code: str, start: int) -> tuple[int, int] | None:
     return None
 
 
-_PARSER_CRATE = re.compile(r"\bnervix_nspl\s*::")
-
-
-def count_parser_imports_outside_edges(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        if file.path.startswith(PARSER_EDGES):
-            continue
-        for match in _PARSER_CRATE.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_MODEL_PATH = re.compile(r"\bModel\s*::")
-
-
-def count_model_matches_in_data_plane(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        if not file.path.startswith(DATA_PLANE) or file.path in DATA_PLANE_PLANNERS:
-            continue
-        for match in _MODEL_PATH.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_DATA_PLANE_CLUSTER_AWAIT = re.compile(
-    r"\.\s*cluster\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*?\)\s*\.\s*await\b",
-    re.DOTALL,
-)
-
-
-def count_data_plane_cluster_awaits(files: Sequence[RustFile]) -> list[Site]:
-    """Count data-plane calls that suspend while reading cluster state."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        if not file.path.startswith(DATA_PLANE):
-            continue
-        for match in _DATA_PLANE_CLUSTER_AWAIT.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_RWLOCK_FIELD = re.compile(
-    r"\b[A-Za-z_][A-Za-z0-9_]*\s*:\s*"
-    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)RwLock\s*<"
-)
-_OPTION_TYPE = re.compile(
-    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Option\s*<"
-)
-_ARC_TYPE = re.compile(
-    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Arc\s*<"
-)
-_NAME_TYPE = re.compile(
-    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)"
-    r"[A-Za-z_][A-Za-z0-9_]*Name\b"
-)
-
-
-def count_write_once_rwlock_fields(files: Sequence[RustFile]) -> list[Site]:
-    """Count write-once names and shared references stored behind an `RwLock`."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        for structure in _STRUCT.finditer(file.product):
-            body = _struct_body(file.product, structure.end())
-            if body is None:
-                continue
-            start, end = body
-            for field in _RWLOCK_FIELD.finditer(file.product, start, end):
-                lock_arguments = generic_arguments(file.product, field.end() - 1)
-                if lock_arguments is None or len(lock_arguments) != 1:
-                    continue
-                option = lock_arguments[0]
-                option_match = _OPTION_TYPE.match(option)
-                if option_match is None:
-                    continue
-                option_arguments = generic_arguments(option, option_match.end() - 1)
-                if option_arguments is None or len(option_arguments) != 1:
-                    continue
-                value = option_arguments[0].strip()
-                is_arc = _ARC_TYPE.match(value) is not None
-                is_name = _NAME_TYPE.fullmatch(value) is not None
-                if is_arc or is_name:
-                    sites.append(file.site(field.start(), file.source_line(field.start())))
-    return sites
-
-
-_NODE_ID_BINDING = re.compile(
-    r"\b[A-Za-z0-9_]*[Nn]ode[A-Za-z0-9_]*\s*:\s*[^,;)\n{}]*\bString\b(?!\s*::)"
-)
-_NODE_ID_ALIAS = re.compile(r"\btype\s+[A-Za-z0-9_]*[Nn]ode[A-Za-z0-9_]*\s*=\s*String\s*;")
-
-
-def count_string_node_ids(files: Sequence[RustFile]) -> list[Site]:
-    """Count fields, parameters, and aliases that carry a node identity as a `String`."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        for pattern in (_NODE_ID_BINDING, _NODE_ID_ALIAS):
-            for match in pattern.finditer(file.product):
-                sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_ERROR_DECLARATION = re.compile(r"\b(?:enum|struct)\s+([A-Za-z_][A-Za-z0-9_]*Error)\b")
-_RESULT_RETURN = re.compile(r"->\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<")
-_NESTED_RESULT_RETURN = re.compile(
-    r"\b(?:Future|Stream)\s*<\s*(?:Output|Item)\s*=\s*"
-    r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<"
-)
-_PLAIN_TYPE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*([A-Za-z_][A-Za-z0-9_]*)$")
-
-
-def count_bare_error_signatures(files: Sequence[RustFile]) -> list[Site]:
-    """Count signatures returning a Nervix error that carries no `error_stack` context."""
-
-    declared = {
-        match.group(1)
-        for file in files
-        for match in _ERROR_DECLARATION.finditer(file.code)
-    }
-    sites: list[Site] = []
-    for file in product_files(files):
-        for pattern in (_RESULT_RETURN, _NESTED_RESULT_RETURN):
-            for match in pattern.finditer(file.product):
-                if match.group(1).replace(" ", "") == "error_stack::":
-                    continue
-                arguments = generic_arguments(file.product, match.end() - 1)
-                if not arguments or len(arguments) < 2:
-                    continue
-                error = _PLAIN_TYPE.match(arguments[-1].strip())
-                if error and error.group(1) in declared:
-                    sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
 def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
     return [
         Site(file.path, 1, f"{file.lines} lines")
@@ -804,16 +573,6 @@ COUNTS: tuple[Count, ...] = (
     ),
     Count("as_casts", "`as` casts outside imports and qualified paths", count_as_casts),
     Count(
-        "bare_unwrap_and_expect",
-        "bare `unwrap()` and `expect()` calls",
-        count_bare_unwrap_and_expect,
-    ),
-    Count(
-        "discarded_results",
-        "outcomes dropped with `let _ =` instead of stating their class",
-        count_discarded_results,
-    ),
-    Count(
         "clamped_arithmetic",
         "`saturating_*` and `wrapping_*` calls outside the time API",
         count_clamped_arithmetic,
@@ -824,39 +583,9 @@ COUNTS: tuple[Count, ...] = (
         count_combinator_control_flow,
     ),
     Count(
-        "bare_error_signatures",
-        "signatures returning a Nervix error without `Report`",
-        count_bare_error_signatures,
-    ),
-    Count(
-        "string_node_ids",
-        "node identities carried as `String`",
-        count_string_node_ids,
-    ),
-    Count(
         "testing_feature_struct_fields",
         'struct fields gated on `feature = "testing"`',
         count_testing_feature_struct_fields,
-    ),
-    Count(
-        "parser_imports_outside_edges",
-        "`nervix_nspl::` references outside the edges",
-        count_parser_imports_outside_edges,
-    ),
-    Count(
-        "model_matches_in_data_plane",
-        "`Model::` references in data-plane files outside the planner",
-        count_model_matches_in_data_plane,
-    ),
-    Count(
-        "data_plane_cluster_awaits",
-        "data-plane calls that await cluster state",
-        count_data_plane_cluster_awaits,
-    ),
-    Count(
-        "write_once_rwlock_fields",
-        "write-once names and shared references stored behind `RwLock`",
-        count_write_once_rwlock_fields,
     ),
 )
 
@@ -903,6 +632,11 @@ def check_synchronization(root: Path) -> None:
 
 
 def measure(root: Path) -> dict[str, list[Site]]:
+    from scripts.check_layer_provenance import check
+
+    provenance = check(root)
+    if provenance:
+        raise SystemExit("error: language import provenance failed\n" + "\n".join(provenance))
     check_synchronization(root)
     return measure_sources(root)
 

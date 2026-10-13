@@ -6,6 +6,11 @@
 //! - **Depends on.** The committed emitter schedule, node-local delivery owner and session wire.
 //! - **Must not know.** Arrow batch encoding, graph execution, or transport framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use ahash::HashMap;
 use nervix_client_wire::{
     CloseEmitterOutcome, CloseEmitterRequest, ConsumerId, EmitterBatchDecision,

@@ -8,6 +8,11 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How an operation traverses its Arrow buffers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fmt;
 
 use arrow_array::{

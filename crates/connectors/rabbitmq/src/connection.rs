@@ -30,6 +30,18 @@
 //! silently takes `localhost` for an IPv6 literal host, so the host is read with the URL grammar
 //! instead: a literal IPv4 or IPv6 address is dialled as written, and a name is resolved.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io, net::SocketAddr, str::FromStr as _, time::Duration};
 
 use async_rs::{Tokio, TokioRuntime, traits::Reactor};
@@ -318,4 +330,8 @@ impl RabbitMqBroker {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;

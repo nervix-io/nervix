@@ -9,6 +9,14 @@
 //!   handoff to move state the schedule moves.
 //! - **Must not know.** How a scheduled node executes once it is placed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};

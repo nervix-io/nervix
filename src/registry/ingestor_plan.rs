@@ -10,6 +10,11 @@
 //! - **Must not know.** Tokio, locks, shared maps, connector I/O, node-local resources, or task
 //!   spawning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,

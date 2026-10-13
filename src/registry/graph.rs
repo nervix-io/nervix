@@ -7,6 +7,11 @@
 //!   drop and cycle checks the graph answers.
 //! - **Depends on.** The vocabulary and the dataflow-graph description.
 //! - **Must not know.** How a node is placed or executed.
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -1105,6 +1110,10 @@ pub(in crate::registry) fn ensure_drop_targets_are_not_in_use(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{collections::BTreeSet, fs};
 

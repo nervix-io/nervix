@@ -5,6 +5,11 @@
 //! - **Depends on.** Domain and processor names, schema field names, and scalar literals.
 //! - **Must not know.** Parsing, branch instances, coordination, or checkpoint storage.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::Report;

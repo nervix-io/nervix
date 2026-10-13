@@ -26,7 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass};
+use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
@@ -35,7 +35,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     sync::{
-        Arc, CancellationToken,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::{Mutex, RwLock},
         broadcast, mpsc, oneshot, watch,
@@ -45,8 +45,10 @@ use nervix_recovery::{Discarded as _, NoReceiver as _};
 
 use crate::registry::SchedulerMode;
 
+mod domain_clock;
 mod restarted_voter;
 
+use domain_clock::DomainClockProgressPausePoint;
 use restarted_voter::StartupVoterGossip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,9 +81,9 @@ enum NodeDatabaseFlush {
     Flushed,
 }
 
-/// The entity of one domain whose native metadata a backup captures.
+/// The entity of one domain whose state a backup captures.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct NativeMetadataOwner {
+struct CapturedStateOwner {
     domain: DomainName,
     entity: ModelName,
 }
@@ -124,7 +126,9 @@ struct FaultInjectionState {
     failed_restore_state_installations: DashMap<DomainName, RestoreStateFailure, RandomState>,
     /// One-shot interruptions of a backup's next native metadata section of an entity, after
     /// this many of its entries.
-    native_metadata_interruptions: DashMap<NativeMetadataOwner, u64, RandomState>,
+    native_metadata_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
+    /// One-shot interruptions of a backup's next guest save after this many transfer chunks.
+    guest_save_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
     /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
     failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
@@ -160,6 +164,9 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// Nodes whose relay memory a scenario fills just before they charge the acknowledgement
+    /// watches of the next delivery another node sends them, and the memory each fill holds.
+    relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
@@ -175,6 +182,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
+    /// One-shot, node-scoped refusals of the next domain-clock authority reconciliation the node
+    /// proposes as leader, consumed before the proposal reaches Raft.
+    domain_clock_authority_proposal_rejections: DashMap<ClusterNodeName, (), RandomState>,
     /// A WASM processor branch holds its next guest-state checkpoint at one window, so a scenario
     /// can end the node while the checkpoint is exactly that far.
     wasm_checkpoint_pauses: DashMap<WasmCheckpointPausePoint, Arc<TestPause>, RandomState>,
@@ -243,6 +253,19 @@ impl std::fmt::Debug for ConsensusProbe {
     }
 }
 
+/// The relay memory a scenario fills on one node as the node charges acknowledgement watches.
+#[derive(Debug)]
+enum RelayMemoryFill {
+    /// The node's next charge of acknowledgement watches first takes all of its free relay memory.
+    Armed,
+    /// The relay memory the fill took, held until the scenario releases it.
+    Holding {
+        // Held for as long as the fill lasts and never read: the charge is the reservation's
+        // existence, not its value.
+        _memory: Reservation,
+    },
+}
+
 #[derive(Debug)]
 struct NodeExecution {
     executor: Executor,
@@ -308,6 +331,7 @@ enum RemoteAcknowledgementLoss {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    RuntimeInstallation(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
@@ -359,12 +383,6 @@ struct WasmCheckpointPausePoint {
     window: WasmCheckpointWindow,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DomainClockProgressPausePoint {
-    domain: String,
-    node: Option<ClusterNodeName>,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct LeadershipTransferRequest {
     pub from_node_id: ClusterNodeName,
@@ -391,6 +409,7 @@ impl Default for FaultInjection {
                 failed_resource_installations: DashMap::default(),
                 failed_restore_state_installations: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
+                guest_save_interruptions: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
@@ -407,12 +426,14 @@ impl Default for FaultInjection {
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
+                relay_memory_fills: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                domain_clock_authority_proposal_rejections: DashMap::default(),
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
@@ -469,7 +490,15 @@ impl FaultInjection {
     ) {
         self.inner
             .native_metadata_interruptions
-            .insert(NativeMetadataOwner { domain, entity }, entries);
+            .insert(CapturedStateOwner { domain, entity }, entries);
+    }
+
+    /// Interrupt the next guest save of `entity` that a backup of `domain` streams, once, after
+    /// writing `chunks` of its bytes.
+    pub fn interrupt_guest_save_capture(&self, domain: DomainName, entity: ModelName, chunks: u64) {
+        self.inner
+            .guest_save_interruptions
+            .insert(CapturedStateOwner { domain, entity }, chunks);
     }
 
     pub fn fail_after_durable_restore_publication(&self, domain: DomainName) {
@@ -604,12 +633,25 @@ impl FaultInjection {
         domain: &DomainName,
         entity: &ModelName,
     ) -> Option<u64> {
-        let owner = NativeMetadataOwner {
+        let owner = CapturedStateOwner {
             domain: domain.clone(),
             entity: entity.clone(),
         };
         let (_, entries) = self.inner.native_metadata_interruptions.remove(&owner)?;
         Some(entries)
+    }
+
+    pub(crate) fn guest_save_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        let owner = CapturedStateOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        let (_, chunks) = self.inner.guest_save_interruptions.remove(&owner)?;
+        Some(chunks)
     }
 
     pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
@@ -1281,6 +1323,21 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    /// Holds the next runtime installation the node begins, inside its installation sequence and
+    /// before it synchronizes any domain lifecycle or schedule of the admitted revision.
+    pub fn pause_runtime_installation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::RuntimeInstallation(node_id));
+    }
+
+    pub async fn wait_for_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
     }
@@ -1739,40 +1796,6 @@ impl FaultInjection {
         pause.release();
     }
 
-    pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
-        self.inner.domain_clock_progress_pauses.insert(
-            DomainClockProgressPausePoint {
-                domain: domain.into().to_ascii_lowercase(),
-                node: None,
-            },
-            Arc::new(TestPause::default()),
-        );
-    }
-
-    pub fn set_domain_clock_initial_elapsed(&self, domain: DomainName, elapsed: Duration) {
-        self.inner
-            .domain_clock_initial_elapsed
-            .insert(domain, elapsed);
-    }
-
-    pub(crate) fn take_domain_clock_initial_elapsed(
-        &self,
-        domain: &DomainName,
-    ) -> Option<Duration> {
-        let (_, elapsed) = self.inner.domain_clock_initial_elapsed.remove(domain)?;
-        Some(elapsed)
-    }
-
-    pub fn pause_domain_clock_progress_on(&self, domain: impl Into<String>, node: ClusterNodeName) {
-        self.inner.domain_clock_progress_pauses.insert(
-            DomainClockProgressPausePoint {
-                domain: domain.into().to_ascii_lowercase(),
-                node: Some(node),
-            },
-            Arc::new(TestPause::default()),
-        );
-    }
-
     /// Hold the next guest-state checkpoint of `processor` at `window`, on whichever node and branch
     /// reaches it first. The pause is one-shot: every later checkpoint passes the window, including
     /// the checkpoints of a node that restarted while the first one was held.
@@ -1868,57 +1891,6 @@ impl FaultInjection {
         self.inner
             .state_replica_installation_failing
             .store(false, Ordering::Release);
-    }
-
-    pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.wait_until_reached().await;
-    }
-
-    pub async fn wait_for_domain_clock_progress_pause_on(
-        &self,
-        domain: &str,
-        node: &ClusterNodeName,
-    ) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.wait_until_reached().await;
-    }
-
-    pub async fn release_domain_clock_progress(&self, domain: &str) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.release();
-        pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&point);
-    }
-
-    pub async fn release_domain_clock_progress_on(&self, domain: &str, node: &ClusterNodeName) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.release();
-        pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&point);
-    }
-
-    pub fn release_all_domain_clock_progress(&self) {
-        for pause in &self.inner.domain_clock_progress_pauses {
-            pause.release();
-        }
-        self.inner.domain_clock_progress_pauses.clear();
     }
 
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
@@ -2159,6 +2131,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::RuntimeInstallation(node_id.clone()))
             .await;
     }
 
@@ -2418,6 +2395,71 @@ impl FaultInjection {
         pause.wait_until_released().await;
     }
 
+    /// Arms `node_id` to take all of its free relay memory just before it charges the
+    /// acknowledgement watches of the next delivery another node sends it, and to hold that memory
+    /// until the scenario releases it.
+    pub fn fill_relay_memory_before_next_acknowledgement_watches_on(
+        &self,
+        node_id: ClusterNodeName,
+    ) {
+        self.inner
+            .relay_memory_fills
+            .insert(node_id, RelayMemoryFill::Armed);
+    }
+
+    /// Returns the relay memory an armed fill took on `node_id`, and disarms a fill that has not
+    /// taken any yet.
+    pub fn release_relay_memory_fill_on(&self, node_id: &ClusterNodeName) {
+        self.inner.relay_memory_fills.remove(node_id);
+    }
+
+    /// Whether the fill armed on `node_id` holds its relay memory.
+    pub fn relay_memory_fill_holds_on(&self, node_id: &ClusterNodeName) -> bool {
+        let Some(fill) = self.inner.relay_memory_fills.get(node_id) else {
+            return false;
+        };
+        matches!(fill.value(), RelayMemoryFill::Holding { .. })
+    }
+
+    /// Takes all of `node_id`'s free relay memory, once, when a scenario armed the fill.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario fills a node's relay memory only before the first watches the \
+                      node charges after the fill was armed",
+            key = "one test node's armed relay memory fill",
+            bound = "one keyed entry and one charge of the free room; no guard across await"
+        )
+    )]
+    pub(crate) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        executor: &Executor,
+    ) {
+        let Some(mut fill) = self.inner.relay_memory_fills.get_mut(node_id) else {
+            return;
+        };
+        if let RelayMemoryFill::Holding { .. } = fill.value() {
+            return;
+        }
+        // The relay work running beside the fill can take memory between the read and the
+        // charge, so the fill charges again what is free then.
+        let reservation = loop {
+            let memory = executor.memory(MemoryClass::Relay);
+            let room = memory
+                .capacity_bytes
+                .checked_sub(memory.reserved_bytes)
+                .assured("a budget never reserves more than its capacity");
+            if let Ok(reservation) = executor.try_reserve(MemoryClass::Relay, room) {
+                break reservation;
+            }
+        };
+        *fill.value_mut() = RelayMemoryFill::Holding {
+            _memory: reservation,
+        };
+    }
+
     /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
     /// lost on the way. Only the first acknowledgement on an armed link is lost.
     #[cfg_attr(
@@ -2566,57 +2608,6 @@ impl FaultInjection {
         self.inner
             .ownership_handoff_prepare_response_pauses
             .remove(&key);
-    }
-
-    pub(crate) async fn pause_domain_clock_progress_if_armed(
-        &self,
-        domain: &DomainName,
-        node: &ClusterNodeName,
-        shutdown: &CancellationToken,
-    ) -> bool {
-        let exact = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let any_node = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&exact) {
-            pause.value().clone()
-        } else if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&any_node) {
-            pause.value().clone()
-        } else {
-            return false;
-        };
-        pause.reach();
-        nervix_primitives::select! {
-            _ = shutdown.cancelled() => false,
-            _ = pause.wait_until_released() => true,
-        }
-    }
-
-    pub(crate) fn mark_domain_clock_progress_delivered(
-        &self,
-        domain: &DomainName,
-        node: &ClusterNodeName,
-    ) {
-        let exact = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let any_node = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: None,
-        };
-        if let Some(pause) = self
-            .inner
-            .domain_clock_progress_pauses
-            .get(&exact)
-            .or_else(|| self.inner.domain_clock_progress_pauses.get(&any_node))
-        {
-            pause.mark_delivered();
-        }
     }
 
     pub(crate) fn syslog_ingestor_bind_addr(
@@ -2831,13 +2822,6 @@ impl FaultInjection {
     fn wasm_checkpoint_pause(&self, point: &WasmCheckpointPausePoint) -> Arc<TestPause> {
         let Some(pause) = self.inner.wasm_checkpoint_pauses.get(point) else {
             panic!("WASM checkpoint pause at {point:?} is not armed");
-        };
-        pause.value().clone()
-    }
-
-    fn domain_clock_progress_pause(&self, point: &DomainClockProgressPausePoint) -> Arc<TestPause> {
-        let Some(pause) = self.inner.domain_clock_progress_pauses.get(point) else {
-            panic!("domain clock progress pause for '{point:?}' is not armed");
         };
         pause.value().clone()
     }

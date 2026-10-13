@@ -5,6 +5,11 @@
 //! - **Depends on.** The shared run-local identities and bounded source sites.
 //! - **Must not know.** The application, review policy, recording or process exit.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -289,6 +294,14 @@ impl PotentialCycle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "lock-order configuration and evidence construction return pure validation \
+                  refusals"
+    )
+)]
 pub enum OrderOutOfBounds {
     Empty,
     TooManyEdges,

@@ -10,6 +10,11 @@
 //! - **Must not know.** How the configuration snapshot was read or queued, sessions, transports,
 //!   or paging.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use meticulous::ResultExt as _;

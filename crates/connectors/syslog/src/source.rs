@@ -8,6 +8,18 @@
 //!   sockets, `memchr`, and rustls.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{net::SocketAddr, num::NonZeroUsize};
 
 use async_trait::async_trait;
@@ -127,19 +139,19 @@ pub struct SyslogSource {
 
 #[derive(Debug, Error)]
 enum SyslogListenerError {
-    #[error("Syslog {transport} bind '{addr}' failed: {source}")]
+    #[error("Syslog {transport} bind '{addr}' failed")]
     Bind {
         transport: &'static str,
         addr: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("Syslog UDP listener receive failed: {source}")]
+    #[error("Syslog UDP listener receive failed")]
     UdpReceive {
         #[source]
         source: std::io::Error,
     },
-    #[error("Syslog stream listener accept failed: {source}")]
+    #[error("Syslog stream listener accept failed")]
     StreamAccept {
         #[source]
         source: std::io::Error,
@@ -150,12 +162,12 @@ enum SyslogListenerError {
 
 #[derive(Debug, Error)]
 enum SyslogConnectionError {
-    #[error("TLS handshake failed: {source}")]
+    #[error("TLS handshake failed")]
     TlsHandshake {
         #[source]
         source: std::io::Error,
     },
-    #[error("stream read failed: {source}")]
+    #[error("stream read failed")]
     StreamRead {
         #[source]
         source: std::io::Error,
@@ -171,7 +183,7 @@ enum SyslogConnectionError {
 pub enum SyslogFrameError {
     #[error("malformed Syslog octet-counting length prefix")]
     MalformedOctetCount,
-    #[error("malformed Syslog octet count: {source}")]
+    #[error("malformed Syslog octet count")]
     InvalidOctetCount {
         #[source]
         source: std::num::ParseIntError,

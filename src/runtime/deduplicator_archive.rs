@@ -8,6 +8,11 @@
 //!   Arrow.
 //! - **Must not know.** Archive records or paths, capture fencing, or restore placement.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{io::Write, ops::Range};
 
 use arrow_array::{
@@ -509,6 +514,10 @@ impl ArchivedDeduplicatorKeys {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{
         BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,

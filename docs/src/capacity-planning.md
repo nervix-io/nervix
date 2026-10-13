@@ -74,6 +74,15 @@ Transient memory is 275 MiB per node, divided into ceilings that cannot borrow f
 bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
 and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
 once so one blocked channel cannot exhaust the capacity another needs.
+The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
+delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
+4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
+beside the 56 MiB its body and decoding reserve. When rows arrive faster than the owner reports
+them, their watches fill the budget and the owner holds further deliveries back until reported
+rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
+fast acknowledgements return to the sending node, not by the budget's size, and a source that sends
+there waits instead of failing. The budgets are fixed defaults and do not follow the node's own
+memory.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one

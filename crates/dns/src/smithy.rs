@@ -11,11 +11,19 @@
 //! Smithy hands the hook to `hyper-util`'s `HttpConnector`, which dials a literal IPv4 or IPv6 host
 //! without asking it and applies the URL's port to every address it answers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::net::IpAddr;
 
 use aws_smithy_runtime_api::client::dns::{DnsFuture, ResolveDns, ResolveDnsError};
 
-use crate::DnsResolver;
+use crate::{DnsLookupReport, DnsResolver};
 
 impl ResolveDns for DnsResolver {
     fn resolve_dns<'a>(&'a self, name: &'a str) -> DnsFuture<'a> {
@@ -28,7 +36,7 @@ impl DnsResolver {
         let addresses = self
             .hook_addresses(name)
             .await
-            .map_err(|report| ResolveDnsError::new(report.current_context().clone()))?;
+            .map_err(|report| ResolveDnsError::new(DnsLookupReport::from(report)))?;
         Ok(addresses.into_iter().collect())
     }
 }

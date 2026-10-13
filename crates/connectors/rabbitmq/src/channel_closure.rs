@@ -32,6 +32,18 @@
 //! `PRECONDITION_FAILED - message size <size> is larger than configured max size <limit>`, or
 //! `... larger than max size <limit>` when the limit is the broker's own 512 MiB ceiling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{pin::Pin, time::Duration};
 
 use futures_util::{Stream, StreamExt as _};
@@ -140,6 +152,10 @@ impl ChannelClosures {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use lapin::protocol::{AMQPError, AMQPHardError};
 

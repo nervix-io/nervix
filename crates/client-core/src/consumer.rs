@@ -12,6 +12,11 @@
 //! attachment takes it over instead of asking for another batch, so a cancelled wait never strands
 //! an assigned attempt until its ACK timeout.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,
@@ -1070,10 +1075,23 @@ impl EmitterDelivery {
     /// Decodes the canonical Arrow stream and checks every field against the emitter's declared
     /// output schema before yielding it to the application.
     pub fn record_batch(&self) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
+        Self::decode_record_batch(&self.inner.description.fields, &self.batch, self.members)
+    }
+
+    /// Decodes the canonical Arrow stream one delivery carried: `batch` must declare exactly the
+    /// Arrow schema of `fields`, the output schema its emitter declares, and hold one record batch
+    /// of `members` rows. [`Self::record_batch`] decodes a delivery through this, and an
+    /// application that kept a delivery's bytes and row count beside its consumer's description
+    /// decodes them the same way.
+    pub fn decode_record_batch(
+        fields: &[SchemaField],
+        batch: &Bytes,
+        members: u32,
+    ) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
         use arrow_ipc::reader::StreamReader;
-        let expected = SchemaField::arrow_schema(&self.inner.description.fields);
+        let expected = SchemaField::arrow_schema(fields);
         let mut reader =
-            StreamReader::try_new(std::io::Cursor::new(&self.batch), None).map_err(|_| {
+            StreamReader::try_new(std::io::Cursor::new(batch), None).map_err(|_| {
                 Report::new(ClientError::UnexpectedReply {
                     request: RequestKind::ReadEmitterBatch,
                 })
@@ -1083,20 +1101,20 @@ impl EmitterDelivery {
                 request: RequestKind::ReadEmitterBatch,
             }));
         }
-        let Some(batch) = reader.next() else {
+        let Some(rows) = reader.next() else {
             return Err(Report::new(ClientError::UnexpectedReply {
                 request: RequestKind::ReadEmitterBatch,
             }));
         };
-        let batch = batch.map_err(|_| {
+        let rows = rows.map_err(|_| {
             Report::new(ClientError::UnexpectedReply {
                 request: RequestKind::ReadEmitterBatch,
             })
         })?;
         if reader.next().is_some()
-            || batch.num_rows()
+            || rows.num_rows()
                 != meticulous::ResultExt::assured(
-                    usize::try_from(self.members),
+                    usize::try_from(members),
                     "a u32 row count fits in supported client targets",
                 )
         {
@@ -1104,6 +1122,6 @@ impl EmitterDelivery {
                 request: RequestKind::ReadEmitterBatch,
             }));
         }
-        Ok(batch)
+        Ok(rows)
     }
 }

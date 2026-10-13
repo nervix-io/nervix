@@ -3,6 +3,11 @@
 //! May depend on: tracing subscribers and the primitive boundary's channels.
 //! Must not know: global tracing configuration, task scheduling or connector drivers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeMap, fmt, future::Future};
 
 use meticulous::ResultExt as _;

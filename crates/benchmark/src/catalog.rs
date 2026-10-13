@@ -1,15 +1,15 @@
 use std::{
     collections::BTreeMap,
-    fs, io,
+    fmt, fs,
     path::{Component, Path, PathBuf},
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::definition::{BenchmarkDefinition, DefinitionError, is_slug};
+use crate::definition::{BenchmarkDefinition, is_slug};
 
 const BENCHMARKS_DIRECTORY: &str = "benches/benchmarks";
 const BENCHMARK_MANIFEST: &str = "benchmark.toml";
@@ -58,51 +58,68 @@ pub enum BenchmarkError {
     )]
     InvalidSlug { slug: String },
 
-    #[error("failed to {operation} '{}': {source}", path.display())]
-    Io {
-        operation: &'static str,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    /// The I/O failure is beneath.
+    #[error("failed to open benchmark catalog '{}'", path.display())]
+    OpenCatalog { path: PathBuf },
 
-    #[error("failed to parse benchmark manifest '{}': {source}", path.display())]
-    ParseManifest {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    /// The I/O failure is beneath.
+    #[error("failed to read benchmark catalog '{}'", path.display())]
+    ReadCatalog { path: PathBuf },
+
+    /// The I/O failure is beneath.
+    #[error("failed to inspect benchmark catalog entry '{}'", path.display())]
+    InspectCatalogEntry { path: PathBuf },
+
+    /// The I/O failure is beneath.
+    #[error("failed to open benchmark directory '{}'", path.display())]
+    OpenBenchmark { path: PathBuf },
 
     #[error("benchmark '{slug}' directory escapes the benchmark catalog")]
     EscapingDirectory { slug: String },
 
-    #[error("benchmark '{slug}' is invalid: {error:#}")]
-    InvalidDefinition {
-        slug: String,
-        error: Report<DefinitionError>,
-    },
+    /// The [`BenchmarkFileError`] beneath says why the manifest could not be read.
+    #[error("failed to read benchmark '{slug}' manifest '{}'", path.display())]
+    ReadManifest { slug: String, path: PathBuf },
+
+    /// The TOML decoder's failure is beneath.
+    #[error("failed to parse benchmark manifest '{}'", path.display())]
+    ParseManifest { path: PathBuf },
+
+    /// The [`crate::DefinitionError`] beneath names the declaration that is invalid.
+    #[error("benchmark '{slug}' is invalid")]
+    InvalidDefinition { slug: String },
 
     #[error(
-        "benchmark '{slug}' implementation '{implementation}' has invalid template path '{}': {reason}",
+        "benchmark '{slug}' implementation '{implementation}' has invalid template path '{}': a \
+         template must be a non-empty contained relative path",
         path.display()
     )]
     InvalidTemplatePath {
         slug: String,
         implementation: String,
         path: PathBuf,
-        reason: String,
     },
 
+    /// The [`BenchmarkFileError`] beneath says why the template could not be read.
     #[error(
-        "benchmark '{slug}' implementation '{implementation}' template '{}' is invalid: {source:#}",
+        "failed to read benchmark '{slug}' implementation '{implementation}' template '{}'",
+        path.display()
+    )]
+    ReadTemplate {
+        slug: String,
+        implementation: String,
+        path: PathBuf,
+    },
+
+    /// The [`TemplateDiagnostic`] beneath locates the failure in the template.
+    #[error(
+        "benchmark '{slug}' implementation '{implementation}' template '{}' is invalid",
         path.display()
     )]
     CompileTemplate {
         slug: String,
         implementation: String,
         path: PathBuf,
-        #[source]
-        source: Box<upon::Error>,
     },
 
     #[error("benchmark '{slug}' has no implementation named '{implementation}'")]
@@ -111,13 +128,64 @@ pub enum BenchmarkError {
         implementation: String,
     },
 
-    #[error("failed to render benchmark '{slug}' implementation '{implementation}': {source:#}")]
+    /// The [`TemplateDiagnostic`] beneath locates the failure in the template.
+    #[error(
+        "failed to render benchmark '{slug}' implementation '{implementation}' template '{}'",
+        path.display()
+    )]
     RenderTemplate {
         slug: String,
         implementation: String,
-        #[source]
-        source: Box<upon::Error>,
+        path: PathBuf,
     },
+}
+
+/// Why a file a benchmark declares could not be read from inside the benchmark's directory,
+/// beneath the [`BenchmarkError`] that names the file.
+#[derive(Debug, Error)]
+pub enum BenchmarkFileError {
+    /// The I/O failure is beneath.
+    #[error("the path does not resolve")]
+    Resolve,
+
+    #[error("the path resolves outside the benchmark directory")]
+    OutsideDirectory,
+
+    /// The I/O failure is beneath.
+    #[error("the file's metadata cannot be read")]
+    Inspect,
+
+    #[error("the path is not a regular file")]
+    NotAFile,
+
+    /// The I/O failure is beneath.
+    #[error("the file cannot be read as UTF-8 text")]
+    Read,
+}
+
+/// A template engine failure, shown with the line of the template it points at.
+#[derive(Debug)]
+pub struct TemplateDiagnostic(upon::Error);
+
+impl fmt::Display for TemplateDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The engine's alternate form adds the failing template line and marks the span in it,
+        // which its plain form leaves out.
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for TemplateDiagnostic {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// One benchmark's canonical directory, which every file the benchmark declares must stay
+/// inside.
+struct BenchmarkDirectory<'a> {
+    slug: &'a str,
+    path: PathBuf,
 }
 
 impl BenchmarkCatalog {
@@ -131,35 +199,31 @@ impl BenchmarkCatalog {
         Self { root: root.into() }
     }
 
-    pub fn discover(&self) -> Result<Vec<LoadedBenchmark>, BenchmarkError> {
-        let root = canonicalize(&self.root, "open benchmark catalog")?;
-        let entries = fs::read_dir(&root).map_err(|source| BenchmarkError::Io {
-            operation: "read benchmark catalog",
-            path: root.clone(),
-            source,
-        })?;
+    pub fn discover(&self) -> error_stack::Result<Vec<LoadedBenchmark>, BenchmarkError> {
+        let root = self.canonical_root()?;
+        let entries = fs::read_dir(&root)
+            .change_context_lazy(|| BenchmarkError::ReadCatalog { path: root.clone() })?;
         let mut slugs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|source| BenchmarkError::Io {
-                operation: "read benchmark catalog entry",
-                path: root.clone(),
-                source,
-            })?;
-            let file_type = entry.file_type().map_err(|source| BenchmarkError::Io {
-                operation: "inspect benchmark catalog entry",
-                path: entry.path(),
-                source,
-            })?;
+            let entry =
+                entry.change_context_lazy(|| BenchmarkError::ReadCatalog { path: root.clone() })?;
+            let file_type =
+                entry
+                    .file_type()
+                    .change_context_lazy(|| BenchmarkError::InspectCatalogEntry {
+                        path: entry.path(),
+                    })?;
             if !file_type.is_dir() {
                 continue;
             }
-            let slug =
-                entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|value| BenchmarkError::InvalidSlug {
-                        slug: value.to_string_lossy().into_owned(),
-                    })?;
+            let slug = match entry.file_name().into_string() {
+                Ok(slug) => slug,
+                Err(name) => {
+                    return Err(Report::new(BenchmarkError::InvalidSlug {
+                        slug: name.to_string_lossy().into_owned(),
+                    }));
+                }
+            };
             validate_slug(&slug)?;
             slugs.push(slug);
         }
@@ -170,99 +234,134 @@ impl BenchmarkCatalog {
             .collect()
     }
 
-    pub fn load(&self, slug: &str) -> Result<LoadedBenchmark, BenchmarkError> {
+    pub fn load(&self, slug: &str) -> error_stack::Result<LoadedBenchmark, BenchmarkError> {
         validate_slug(slug)?;
-        let root = canonicalize(&self.root, "open benchmark catalog")?;
+        let root = self.canonical_root()?;
         self.load_from_root(&root, slug)
+    }
+
+    fn canonical_root(&self) -> error_stack::Result<PathBuf, BenchmarkError> {
+        self.root
+            .canonicalize()
+            .change_context_lazy(|| BenchmarkError::OpenCatalog {
+                path: self.root.clone(),
+            })
     }
 
     fn load_from_root(
         &self,
         canonical_root: &Path,
         slug: &str,
-    ) -> Result<LoadedBenchmark, BenchmarkError> {
+    ) -> error_stack::Result<LoadedBenchmark, BenchmarkError> {
         let directory_path = canonical_root.join(slug);
-        let directory = canonicalize(&directory_path, "open benchmark directory")?;
-        if !directory.starts_with(canonical_root) {
-            return Err(BenchmarkError::EscapingDirectory {
-                slug: slug.to_string(),
-            });
-        }
-
-        let manifest_path = directory.join(BENCHMARK_MANIFEST);
-        let manifest = read_contained_utf8(
-            slug,
-            "manifest",
-            &directory,
-            Path::new(BENCHMARK_MANIFEST),
-            &manifest_path,
-        )?;
-        let definition = toml::from_str::<BenchmarkDefinition>(&manifest).map_err(|source| {
-            BenchmarkError::ParseManifest {
-                path: manifest_path.clone(),
-                source,
+        let canonical_directory = directory_path.canonicalize().change_context_lazy(|| {
+            BenchmarkError::OpenBenchmark {
+                path: directory_path.clone(),
             }
         })?;
+        if !canonical_directory.starts_with(canonical_root) {
+            return Err(Report::new(BenchmarkError::EscapingDirectory {
+                slug: slug.to_string(),
+            }));
+        }
+        let directory = BenchmarkDirectory {
+            slug,
+            path: canonical_directory,
+        };
+
+        let manifest_path = directory.path.join(BENCHMARK_MANIFEST);
+        let manifest = directory
+            .read_contained(Path::new(BENCHMARK_MANIFEST))
+            .change_context_lazy(|| BenchmarkError::ReadManifest {
+                slug: slug.to_string(),
+                path: manifest_path.clone(),
+            })?;
+        let definition = toml::from_str::<BenchmarkDefinition>(&manifest).change_context(
+            BenchmarkError::ParseManifest {
+                path: manifest_path,
+            },
+        )?;
         definition
             .validate(slug)
-            .map_err(|error| BenchmarkError::InvalidDefinition {
+            .change_context_lazy(|| BenchmarkError::InvalidDefinition {
                 slug: slug.to_string(),
-                error,
             })?;
 
         let engine = upon::Engine::new();
         let mut templates = BTreeMap::new();
         let mut after_start_templates = BTreeMap::new();
         for (implementation, configuration) in &definition.implementations {
-            let relative_path = configuration.template();
-            validate_relative_path(slug, implementation, relative_path)?;
-            let source_path = directory.join(relative_path);
-            let source = read_contained_utf8(
-                slug,
-                implementation,
-                &directory,
-                relative_path,
-                &source_path,
-            )?;
-            engine
-                .compile(source.as_str())
-                .map_err(|source| BenchmarkError::CompileTemplate {
-                    slug: slug.to_string(),
-                    implementation: implementation.clone(),
-                    path: relative_path.to_path_buf(),
-                    source: Box::new(source),
-                })?;
+            let source =
+                directory.load_template(&engine, implementation, configuration.template())?;
             templates.insert(implementation.clone(), source);
 
             if let Some(relative_path) = configuration.after_start_template() {
-                validate_relative_path(slug, implementation, relative_path)?;
-                let source_path = directory.join(relative_path);
-                let source = read_contained_utf8(
-                    slug,
-                    implementation,
-                    &directory,
-                    relative_path,
-                    &source_path,
-                )?;
-                engine.compile(source.as_str()).map_err(|source| {
-                    BenchmarkError::CompileTemplate {
-                        slug: slug.to_string(),
-                        implementation: implementation.clone(),
-                        path: relative_path.to_path_buf(),
-                        source: Box::new(source),
-                    }
-                })?;
+                let source = directory.load_template(&engine, implementation, relative_path)?;
                 after_start_templates.insert(implementation.clone(), source);
             }
         }
 
         Ok(LoadedBenchmark {
             slug: slug.to_string(),
-            directory,
+            directory: directory.path,
             definition,
             templates,
             after_start_templates,
         })
+    }
+}
+
+impl BenchmarkDirectory<'_> {
+    /// Reads and compiles one implementation template, so a template that cannot render is
+    /// refused when the benchmark loads rather than when a run starts.
+    fn load_template(
+        &self,
+        engine: &upon::Engine<'_>,
+        implementation: &str,
+        relative_path: &Path,
+    ) -> error_stack::Result<String, BenchmarkError> {
+        if !is_contained_relative_path(relative_path) {
+            return Err(Report::new(BenchmarkError::InvalidTemplatePath {
+                slug: self.slug.to_string(),
+                implementation: implementation.to_string(),
+                path: relative_path.to_path_buf(),
+            }));
+        }
+        let source = self.read_contained(relative_path).change_context_lazy(|| {
+            BenchmarkError::ReadTemplate {
+                slug: self.slug.to_string(),
+                implementation: implementation.to_string(),
+                path: relative_path.to_path_buf(),
+            }
+        })?;
+        engine
+            .compile(source.as_str())
+            .map_err(TemplateDiagnostic)
+            .change_context_lazy(|| BenchmarkError::CompileTemplate {
+                slug: self.slug.to_string(),
+                implementation: implementation.to_string(),
+                path: relative_path.to_path_buf(),
+            })?;
+        Ok(source)
+    }
+
+    fn read_contained(
+        &self,
+        relative_path: &Path,
+    ) -> error_stack::Result<String, BenchmarkFileError> {
+        let canonical_path = self
+            .path
+            .join(relative_path)
+            .canonicalize()
+            .change_context(BenchmarkFileError::Resolve)?;
+        if !canonical_path.starts_with(&self.path) {
+            return Err(Report::new(BenchmarkFileError::OutsideDirectory));
+        }
+        let metadata = fs::metadata(&canonical_path).change_context(BenchmarkFileError::Inspect)?;
+        if !metadata.is_file() {
+            return Err(Report::new(BenchmarkFileError::NotAFile));
+        }
+        fs::read_to_string(&canonical_path).change_context(BenchmarkFileError::Read)
     }
 }
 
@@ -297,12 +396,12 @@ impl LoadedBenchmark {
         inputs: KafkaRenderInputs<'_>,
         parameters: &toml::Table,
     ) -> error_stack::Result<String, BenchmarkError> {
-        let source = self.templates.get(implementation).ok_or_else(|| {
-            BenchmarkError::UnknownImplementation {
+        let Some(source) = self.templates.get(implementation) else {
+            return Err(Report::new(BenchmarkError::UnknownImplementation {
                 slug: self.slug.clone(),
                 implementation: implementation.to_string(),
-            }
-        })?;
+            }));
+        };
         self.render_template(
             implementation,
             source,
@@ -324,8 +423,8 @@ impl LoadedBenchmark {
         let path = self.definition.implementations[implementation]
             .after_start_template()
             .verified("the source map is populated only from an implementation template");
-        self.render_template(implementation, source, path, inputs, parameters)
-            .map(Some)
+        let rendered = self.render_template(implementation, source, path, inputs, parameters)?;
+        Ok(Some(rendered))
     }
 
     fn render_template(
@@ -347,98 +446,43 @@ impl LoadedBenchmark {
             dependencies: inputs.dependency_endpoints,
         };
         let engine = upon::Engine::new();
-        let template =
-            engine
-                .compile(source)
-                .map_err(|source| BenchmarkError::CompileTemplate {
-                    slug: self.slug.clone(),
-                    implementation: implementation.to_string(),
-                    path: path.to_path_buf(),
-                    source: Box::new(source),
-                })?;
+        let template = engine
+            .compile(source)
+            .map_err(TemplateDiagnostic)
+            .change_context_lazy(|| BenchmarkError::CompileTemplate {
+                slug: self.slug.clone(),
+                implementation: implementation.to_string(),
+                path: path.to_path_buf(),
+            })?;
         let rendered = template
             .render(&engine, &context)
             .to_string()
-            .map_err(|source| BenchmarkError::RenderTemplate {
+            .map_err(TemplateDiagnostic)
+            .change_context_lazy(|| BenchmarkError::RenderTemplate {
                 slug: self.slug.clone(),
                 implementation: implementation.to_string(),
-                source: Box::new(source),
+                path: path.to_path_buf(),
             })?;
         Ok(rendered)
     }
 }
 
-fn validate_slug(slug: &str) -> Result<(), BenchmarkError> {
+fn validate_slug(slug: &str) -> error_stack::Result<(), BenchmarkError> {
     if is_slug(slug) {
         Ok(())
     } else {
-        Err(BenchmarkError::InvalidSlug {
+        Err(Report::new(BenchmarkError::InvalidSlug {
             slug: slug.to_string(),
-        })
+        }))
     }
 }
 
-fn validate_relative_path(
-    slug: &str,
-    implementation: &str,
-    path: &Path,
-) -> Result<(), BenchmarkError> {
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
+/// Whether `path` names a file below a directory without leaving it: non-empty, relative, and
+/// made of plain components only.
+fn is_contained_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
             .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(BenchmarkError::InvalidTemplatePath {
-            slug: slug.to_string(),
-            implementation: implementation.to_string(),
-            path: path.to_path_buf(),
-            reason: "template must be a non-empty contained relative path".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn read_contained_utf8(
-    slug: &str,
-    implementation: &str,
-    directory: &Path,
-    relative_path: &Path,
-    source_path: &Path,
-) -> Result<String, BenchmarkError> {
-    let canonical_path = canonicalize(source_path, "open benchmark template")?;
-    if !canonical_path.starts_with(directory) {
-        return Err(BenchmarkError::InvalidTemplatePath {
-            slug: slug.to_string(),
-            implementation: implementation.to_string(),
-            path: relative_path.to_path_buf(),
-            reason: "resolved path escapes the benchmark directory".to_string(),
-        });
-    }
-    let metadata = fs::metadata(&canonical_path).map_err(|source| BenchmarkError::Io {
-        operation: "inspect benchmark template",
-        path: canonical_path.clone(),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(BenchmarkError::InvalidTemplatePath {
-            slug: slug.to_string(),
-            implementation: implementation.to_string(),
-            path: relative_path.to_path_buf(),
-            reason: "resolved path is not a regular file".to_string(),
-        });
-    }
-    fs::read_to_string(&canonical_path).map_err(|source| BenchmarkError::Io {
-        operation: "read benchmark template",
-        path: canonical_path,
-        source,
-    })
-}
-
-fn canonicalize(path: &Path, operation: &'static str) -> Result<PathBuf, BenchmarkError> {
-    path.canonicalize().map_err(|source| BenchmarkError::Io {
-        operation,
-        path: path.to_path_buf(),
-        source,
-    })
+            .all(|component| matches!(component, Component::Normal(_)))
 }

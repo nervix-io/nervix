@@ -67,7 +67,7 @@ fn then_measured_backup_kept_the_bulk_budget(world: &mut ScenarioWorld) {
         .take()
         .assured("a preceding step measured a CLI backup");
     sampled.assert_bulk_within_budget();
-    sampled.assert_no_bulk_refusal("native metadata above the bulk budget is captured within it");
+    sampled.assert_no_bulk_refusal("backup capture is admitted within the bulk budget");
 }
 
 /// The branch lifecycle of one entity as an archive records it, apart from the domain and the

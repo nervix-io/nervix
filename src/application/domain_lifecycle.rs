@@ -8,6 +8,14 @@
 //!   gate to hold the domain while it changes.
 //! - **Must not know.** How the domain's graph is scheduled or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};

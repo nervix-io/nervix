@@ -8,6 +8,11 @@
 //!   decision, and the expression VM frontend.
 //! - **Must not know.** Tokio, locks, connector I/O, node-local resources, or task spawning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
@@ -424,6 +429,10 @@ impl EmitterExecutionPlans {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         AckMode, ClientName, EmitSink, EmitterBody, EmitterPublishingMode, ErrorPolicies,

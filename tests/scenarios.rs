@@ -8709,6 +8709,32 @@ async fn given_node_has_state_counting_wasm_processor_fixture_resource_directory
 }
 
 #[given(
+    expr = "node {string} has state-counting WASM reset fixture with {int} MiB saves in resource \
+            directory {string}"
+)]
+async fn given_node_has_large_state_counting_wasm_reset_fixture(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    mebibytes: usize,
+    placeholder: String,
+) {
+    assert!(
+        (1..=48).contains(&mebibytes),
+        "the fixture fits the guest memory limit"
+    );
+    let bytes = mebibytes
+        .checked_mul(1024 * 1024)
+        .assured("the fixture size is bounded");
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        state_counting_wasm_fixture_with_size("counted_events", bytes),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has guest-requested-reset WASM processor fixture resource directory \
             {string}"
 )]
@@ -10322,6 +10348,35 @@ async fn when_directed_health_probes_fail(
         .fail_health_responses_between(&probing_node_id, &responding_node_id);
 }
 
+#[when(expr = "runtime installation on node {string} is paused")]
+async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its runtime installation pause")]
+async fn then_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_runtime_installation_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("runtime installation did not reach its pause");
+}
+
+#[when(expr = "runtime installation on node {string} is released")]
+async fn when_runtime_installation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[when(expr = "runtime preparation on node {string} is paused")]
 async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -11143,6 +11198,56 @@ async fn then_remote_acknowledgement_was_lost(
     });
 }
 
+/// Arms a node to take all of its free relay memory just before it charges the acknowledgement
+/// watches of the next delivery another node sends it, so that delivery finds the relay budget
+/// full exactly when it needs room for its watches.
+#[when(
+    expr = "node {string} fills its relay memory before it charges its next acknowledgement \
+            watches"
+)]
+async fn when_node_fills_relay_memory_before_acknowledgement_watches(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_before_next_acknowledgement_watches_on(
+            crate::common::cluster::node_name(&node_id),
+        );
+}
+
+#[then(expr = "within {string} node {string} has filled its relay memory")]
+async fn then_node_has_filled_relay_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if world.fault_injection.relay_memory_fill_holds_on(&node) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not fill its relay memory within {duration}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[when(expr = "node {string} releases its filled relay memory")]
+async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_relay_memory_fill_on(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -11481,6 +11586,22 @@ async fn given_domain_clock_progress_is_paused_on_node(
     world
         .fault_injection
         .pause_domain_clock_progress_on(domain, crate::common::cluster::node_name(&node_id));
+}
+
+#[given(
+    expr = "the next domain clock authority proposal of node {string} is rejected for lost \
+            leadership"
+)]
+async fn given_next_domain_clock_authority_proposal_is_rejected(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .reject_next_domain_clock_authority_proposal_on(crate::common::cluster::node_name(
+            &node_id,
+        ));
 }
 
 #[then(
@@ -16611,6 +16732,34 @@ async fn then_last_command_error_contains(world: &mut ScenarioWorld, #[step] ste
     );
 }
 
+/// The message a failed command returned, without the diagnostics the harness appends after it,
+/// whose messages repeat it.
+fn command_error_message(error: &str) -> &str {
+    let message = error.strip_prefix("command failed: ").unwrap_or(error);
+    match message.split_once("\ndiagnostics: ") {
+        Some((message, _diagnostics)) => message,
+        None => message,
+    }
+}
+
+#[then(expr = "the last command error message contains {string} exactly once")]
+async fn then_last_command_error_message_contains_exactly_once(
+    world: &mut ScenarioWorld,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let error = world
+        .last_command_error
+        .as_deref()
+        .expect("a command error must exist before assertion");
+    let message = command_error_message(error);
+    assert_eq!(
+        message.matches(&expected).count(),
+        1,
+        "expected command error message fragment {expected:?} exactly once, got: {message}"
+    );
+}
+
 #[then(expr = "selector {string} contains {string} exactly {int} times")]
 async fn then_selector_contains_text_exactly_times(
     world: &mut ScenarioWorld,
@@ -20784,6 +20933,59 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
             "timed out waiting for DESCRIBE WASM PROCESSOR {processor} to contain {}. last \
              output: {output}",
             expected.trim()
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "within {string} the {int} branches of WASM PROCESSOR {string} have committed revision \
+            {int} with {int} confirmed replicas"
+)]
+async fn then_all_wasm_branches_have_confirmed_checkpoint(
+    world: &mut ScenarioWorld,
+    duration: String,
+    branch_count: usize,
+    processor: String,
+    revision: u64,
+    replicas: usize,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let deadline = Instant::now() + duration;
+    // The scenario reconnects its subscription to a live node after owner loss. Inspect through
+    // that same node: the cluster-wide leader helper waits on stopped nodes as well as live ones.
+    let node = match world.active_session_node.clone() {
+        Some(node) => node,
+        None => current_leader_node(world).await,
+    };
+    let expected = format!(
+        "committed_revision={revision} latest_revision={revision} stage=REPLICA_CONFIRMED \
+         required_replicas={replicas} confirmed_replicas={replicas}"
+    );
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let output = run_nspl_commands_on_node(
+            world,
+            &node,
+            &format!("DESCRIBE WASM PROCESSOR {processor};"),
+        )
+        .await
+        .expect("describe wasm processor command must succeed");
+        let checkpoints = output
+            .lines()
+            .filter(|line| line.trim_start().starts_with("checkpoint branch="))
+            .collect::<Vec<_>>();
+        if output.contains(&format!("state structures: {branch_count}"))
+            && output.contains("failed checkpoints: 0")
+            && checkpoints.len() == branch_count
+            && checkpoints.iter().all(|line| line.contains(&expected))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {branch_count} branch checkpoints at revision {revision} with \
+             {replicas} replicas. last output: {output}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
@@ -28748,19 +28950,22 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                                 "scenario teardown failed: {panicked}"
                             ));
                         }
-                        for forced in teardown.forced() {
-                            append_cucumber_log_line(&format!("scenario cleanup forced: {forced}"));
+                        for unfinished in teardown.still_stopping() {
+                            append_cucumber_log_line(&format!(
+                                "scenario cleanup unfinished: {unfinished}"
+                            ));
                         }
-                        if teardown.was_forced() {
-                            // Cleanup that has to take a node apart is usually cleanup that ran
-                            // beside work heavy enough to starve it, so name what else was live.
+                        if teardown.left_nodes_stopping() {
+                            // A node that outlasts its cleanup is usually one that stopped beside
+                            // work heavy enough to starve it, so name what else was live.
                             for active in ActiveScenario::active() {
                                 append_cucumber_log_line(&format!(
-                                    "scenario live during forced cleanup: {active}"
+                                    "scenario live during unfinished cleanup: {active}"
                                 ));
                             }
                         }
-                        // Dropping the cluster gives back the temporary storage its nodes wrote to.
+                        // Dropping the cluster gives back the temporary storage its nodes wrote
+                        // to, once the last node that was left stopping has ended.
                         drop(cluster);
                         format!("teardown={teardown}")
                     }
@@ -28808,8 +29013,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 append_cucumber_log_line(line);
             }
             if timeout.cleanup.was_forced() {
-                // A node the watchdog could not stop is aborted with the run, so the record of
-                // what it was is this line and nothing else.
+                // A node the watchdog could not stop ends with the run's runtime, so the record
+                // of what it was is this line and nothing else.
                 append_cucumber_log_line(
                     "suite timeout cleanup forced: the run was dropped with nodes still running",
                 );

@@ -78,9 +78,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"${bundle}/tests/suite-self-test.sh"
 
 cat >"${bundle}/bin/docker" <<EOF
 #!/usr/bin/env bash
-# Knows one local tag and one digest reference, both of the same image, and can pull nothing.
+# Knows one local tag and one digest reference, both of the same ordinary image, and a diagnostic
+# tag of the deloxide-order selection; it can pull nothing.
 known() {
-    [[ "\$1" == nervix:local || "\$1" == "${digest_reference}" || "\$1" == "${image_id}" ]]
+    [[ "\$1" == nervix:local || "\$1" == nervix:diagnostic || "\$1" == "${digest_reference}" \
+        || "\$1" == "${image_id}" ]]
 }
 case "\$1" in
     image)
@@ -95,6 +97,13 @@ case "\$1" in
         case "\${format}" in
             '{{.Id}}') printf '%s\n' "${image_id}" ;;
             *RepoDigests*) printf '%s\n' "${digest_reference}" ;;
+            *Labels*)
+                if [[ "\$1" == nervix:diagnostic ]]; then
+                    printf '%s\n' '{"io.nervix.diagnostic.selection":"deloxide-order","org.opencontainers.image.revision":"0123abcd"}'
+                else
+                    printf 'null\n'
+                fi
+                ;;
             *) printf '[{}]\n' ;;
         esac
         ;;
@@ -160,6 +169,36 @@ case "\${scenario}" in
         exit 2
         ;;
     silent) rm -rf "\${run_dir}" ;;
+    diagnostic-pass | diagnostic-finding | diagnostic-unjudged | diagnostic-ordinary)
+        if [[ "\${scenario}" == diagnostic-finding ]]; then
+            manifest failed 1 'diagnostic evidence'
+            jq -n '{category: "diagnostic", phase: "diagnostic evidence", reproducer: "just chaos run diagnostic-finding"}' \
+                >"\${run_dir}/results/finding.json"
+        else
+            manifest passed 0 complete
+        fi
+        if [[ "\${scenario}" != diagnostic-ordinary ]]; then
+            jq '.diagnostic = {selection: "deloxide-order", evidence: "deadlock"}' "\${run_dir}/manifest.json" \
+                >"\${run_dir}/m.json"
+            mv "\${run_dir}/m.json" "\${run_dir}/manifest.json"
+        fi
+        case "\${scenario}" in
+            diagnostic-pass)
+                jq -n '{verdict: "passed", category: null, selection: "deloxide-order",
+                        totals: {process_starts: 4, evidence_files: 4, bytes: 4096, findings: 0, active: 0,
+                                 potential: 0, unreviewed: 0, lost: 0}, problems: []}' \
+                    >"\${run_dir}/results/diagnostic-evidence.json"
+                ;;
+            diagnostic-finding)
+                jq -n '{verdict: "failed", category: "diagnostic", selection: "deloxide-order",
+                        totals: {process_starts: 3, evidence_files: 3, bytes: 3072, findings: 1, active: 0,
+                                 potential: 1, unreviewed: 1, lost: 0},
+                        problems: [{category: "diagnostic", reason: "deadlock/node-2/deadlock-7-1.rkyv does not qualify"}]}' \
+                    >"\${run_dir}/results/diagnostic-evidence.json"
+                exit 1
+                ;;
+        esac
+        ;;
     liar) manifest passed 0 complete; exit 1 ;;
     other-image) manifest passed 0 complete "sha256:\$(printf 'c%.0s' {1..64})" ;;
     unclassified) manifest failed 1 'external ledger verification'; exit 1 ;;
@@ -288,7 +327,12 @@ write_definitions '{ci_reserve_minutes: 10, suites: {
         {id: "slow", shard: 1, budget_minutes: 2, run: ["slow"]},
         {id: "after", shard: 1, budget_minutes: 2, run: ["pass"]}]},
     stubborn: {description: "a run that ignores its TERM", entries: [
-        {id: "stubborn", shard: 1, budget_minutes: 2, run: ["stubborn"]}]}}}'
+        {id: "stubborn", shard: 1, budget_minutes: 2, run: ["stubborn"]}]},
+    diagnostic: {description: "runs on a diagnostic image", entries: [
+        {id: "evidence", shard: 1, budget_minutes: 2, run: ["diagnostic-pass"]},
+        {id: "finding", shard: 1, budget_minutes: 2, run: ["diagnostic-finding"]},
+        {id: "unjudged", shard: 1, budget_minutes: 2, run: ["diagnostic-unjudged"]},
+        {id: "ordinary-nodes", shard: 1, budget_minutes: 2, run: ["diagnostic-ordinary"]}]}}}'
 
 suite shards outcomes >"${tmp_dir}/shards.json"
 expect_json "${tmp_dir}/shards.json" '
@@ -310,7 +354,8 @@ expect_json "${record}" '.status == "failed" and .self_check == "passed"
     and .worker.docker == "29.0.0" and .worker.compose == "5.0.0" and .worker.cpus > 0
     and .worker.memory_bytes > 0' 'the suite did not record its self-check and worker'
 jq -e --arg digest "${digest_reference}" --arg id "${image_id}" '
-    .image == {requested: $digest, id: $id, repo_digests: $digest, run_reference: $digest}' "${record}" >/dev/null \
+    .image == {requested: $digest, id: $id, repo_digests: $digest, run_reference: $digest,
+               revision: null, diagnostic_selection: null}' "${record}" >/dev/null \
     || fail 'the suite did not keep the digest reference it was given as the run image'
 expect_json "${record}" '[.entries[] | {id, status, category, exit_code}] == [
         {id: "pass", status: "passed", category: null, exit_code: 0},
@@ -381,6 +426,68 @@ expect_summary "--timeout 300\`; console log \`logs/refused.log\`"
 expect_summary "- \`stopped\` interrupted in phase \`signal-term\`: a signal ended the run."
 grep -Fq 'chaos suite outcomes failed' "${tmp_dir}/outcomes.txt" \
     || fail 'the suite did not print its verdict'
+
+# On a diagnostic image an entry passes only with a passing evidence verdict of that selection, and
+# the suite records the image's selection, its revision and every entry's evidence counts.
+status=0
+suite diagnostic --image nervix:diagnostic --image-kind deloxide-order --artifacts "${tmp_dir}/runs" \
+    --suite-id diagnostic-1 >"${tmp_dir}/diagnostic.txt" 2>&1 || status=$?
+[[ "${status}" -eq 1 ]] || fail "a diagnostic suite with failed entries returned ${status}, expected 1"
+diagnostic_record="${tmp_dir}/runs/diagnostic-1/suite.json"
+expect_json "${diagnostic_record}" '.image.diagnostic_selection == "deloxide-order" and .image.revision == "0123abcd"
+    and [.entries[] | {id, status, category}] == [
+        {id: "evidence", status: "passed", category: null},
+        {id: "finding", status: "failed", category: "diagnostic"},
+        {id: "unjudged", status: "failed", category: "controller"},
+        {id: "ordinary-nodes", status: "failed", category: "controller"}]
+    and (.entries[0].diagnostic == {verdict: "passed", category: null, selection: "deloxide-order",
+                                    process_starts: 4, evidence_files: 4, bytes: 4096, findings: 0,
+                                    active: 0, potential: 0, unreviewed: 0, lost: 0, problems: []})
+    and (.entries[1].diagnostic.problems == ["deadlock/node-2/deadlock-7-1.rkyv does not qualify"])
+    and ((.entries[2].reason) | test("without a passing diagnostic evidence verdict"))
+    and ((.entries[3].reason) | test("did not record its nodes as diagnostic nodes"))' \
+    'a diagnostic suite did not judge each entry by its evidence verdict'
+summary="${tmp_dir}/runs/diagnostic-1/summary.md"
+grep -Fq "a Deloxide diagnostic image of the \`deloxide-order\` selection, built from revision \`0123abcd\`" \
+    "${summary}" || fail 'the summary did not name the diagnostic selection and revision'
+grep -Fq -- "- \`evidence\`: passed, 4 evidence files for 4 process starts, 0 findings: 0 active, 0 potential, 0 lost" \
+    "${summary}" || fail 'the summary did not list the evidence of a diagnostic entry'
+# A requested kind the image does not declare stops the suite before any run.
+for case in 'nervix:diagnostic ordinary' 'nervix:local deloxide-order' 'nervix:diagnostic deloxide'; do
+    reference="${case% *}"
+    kind="${case#* }"
+    status=0
+    suite green --image "${reference}" --image-kind "${kind}" --artifacts "${tmp_dir}/runs" \
+        --suite-id "kind-${kind}" >"${tmp_dir}/kind.txt" 2>&1 || status=$?
+    [[ "${status}" -eq 2 ]] || fail "a ${kind} suite on ${reference} returned ${status}, expected 2"
+    expect_json "${tmp_dir}/runs/kind-${kind}/suite.json" '.status == "failed" and .error.category == "setup"
+        and (.error.message | test("asked for a")) and all(.entries[]; .status == "not-started")' \
+        "a ${kind} suite on ${reference} was not refused as a setup error"
+    [[ ! -e "${tmp_dir}/runs/kind-${kind}/stub-calls.txt" ]] || fail "a ${kind} suite on ${reference} started a run"
+done
+suite green --image nervix:local --image-kind ordinary --artifacts "${tmp_dir}/runs" --suite-id kind-ordinary-1 \
+    >"${tmp_dir}/kind.txt" 2>&1 || fail 'an ordinary suite on an ordinary image failed'
+# A requested revision the image does not declare, or a missing revision label, stops it too.
+for case in 'nervix:diagnostic 4567cdef' 'nervix:local 0123abcd'; do
+    reference="${case% *}"
+    wanted="${case#* }"
+    status=0
+    suite green --image "${reference}" --image-revision "${wanted}" --artifacts "${tmp_dir}/runs" \
+        --suite-id "revision-${wanted}" >"${tmp_dir}/revision.txt" 2>&1 || status=$?
+    [[ "${status}" -eq 2 ]] || fail "a suite asking ${reference} for revision ${wanted} returned ${status}, expected 2"
+    expect_json "${tmp_dir}/runs/revision-${wanted}/suite.json" '.status == "failed" and .error.category == "setup"
+        and (.error.message | test("asked for an image of revision"))' \
+        "a suite asking ${reference} for revision ${wanted} was not refused as a setup error"
+done
+suite green --image nervix:diagnostic --image-kind deloxide-order --image-revision 0123abcd \
+    --artifacts "${tmp_dir}/runs" --suite-id revision-match-1 >"${tmp_dir}/revision.txt" 2>&1 || status=$?
+expect_json "${tmp_dir}/runs/revision-match-1/suite.json" '.image.revision == "0123abcd"
+    and all(.entries[]; .status != "not-started")' 'a suite on an image of the requested revision did not run'
+
+status=0
+suite green --image nervix:local --image-kind release --artifacts "${tmp_dir}/runs" >"${tmp_dir}/kind.txt" 2>&1 \
+    || status=$?
+[[ "${status}" -eq 2 ]] || fail "an unknown image kind returned ${status}, expected 2"
 
 # A shard and named entries select part of a suite; a tag runs as the image ID it resolves to.
 suite outcomes --image nervix:local --artifacts "${tmp_dir}/runs" --suite-id shard-3 --shard 3 \

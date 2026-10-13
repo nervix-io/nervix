@@ -1,9 +1,10 @@
 use std::{
     collections::BTreeMap,
-    fs, io,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_models::ClusterNodeName;
@@ -60,14 +61,21 @@ impl BatchTargetMetrics {
         self.messages_total.approx_into::<f64>() / self.batches_total.approx_into::<f64>()
     }
 
-    fn validate(&self) -> Result<(), MetricsReportError> {
-        let target = format!("{} '{}'", self.target_kind, self.target);
+    fn validate(&self) -> error_stack::Result<(), MetricsReportError> {
         if self.batches_total == 0 {
-            return Err(MetricsReportError::InvalidReport {
-                reason: format!("{target} has no observed batches"),
-            });
+            return Err(Report::new(MetricsReportError::TargetWithoutBatches {
+                target_kind: self.target_kind.clone(),
+                target: self.target.clone(),
+            }));
         }
-        validate_percentiles(&target, self.p50, self.p90, self.p99)
+        validate_percentiles(self.p50, self.p90, self.p99).change_context_lazy(|| {
+            MetricsReportError::InvalidPercentiles {
+                entry: ReportEntry::BatchTarget {
+                    target_kind: self.target_kind.clone(),
+                    target: self.target.clone(),
+                },
+            }
+        })
     }
 }
 
@@ -84,49 +92,55 @@ pub struct RelayBufferMetrics {
 }
 
 impl RelayBufferMetrics {
-    fn validate(&self) -> Result<(), MetricsReportError> {
-        let target = format!("relay '{}'", self.relay);
+    fn validate(&self) -> error_stack::Result<(), MetricsReportError> {
         if self.observations == 0 {
-            return Err(MetricsReportError::InvalidReport {
-                reason: format!("{target} has no buffer observations"),
-            });
+            return Err(Report::new(MetricsReportError::RelayWithoutObservations {
+                relay: self.relay.clone(),
+            }));
         }
-        validate_percentiles(&target, self.p50, self.p90, self.p99)
+        validate_percentiles(self.p50, self.p90, self.p99).change_context_lazy(|| {
+            MetricsReportError::InvalidPercentiles {
+                entry: ReportEntry::RelayBuffer {
+                    relay: self.relay.clone(),
+                },
+            }
+        })
     }
 }
 
 #[derive(Debug, Error)]
 pub enum MetricsReportError {
-    #[error("invalid Prometheus sample on line {line}: {reason}")]
-    InvalidPrometheusSample { line: usize, reason: String },
+    /// The [`PrometheusSampleError`] beneath says what is wrong with the line.
+    #[error("invalid Prometheus sample on line {line}")]
+    InvalidPrometheusSample { line: usize },
 
-    #[error("Prometheus metric '{metric}' has a duplicate series for {target}")]
+    #[error("Prometheus metric '{metric}' has a duplicate series for {series}")]
     DuplicateSeries {
         metric: &'static str,
-        target: String,
+        series: MetricSeries,
     },
 
-    #[error("target {target} is missing Prometheus metric '{metric}'")]
+    #[error("target {series} is missing Prometheus metric '{metric}'")]
     MissingTargetMetric {
         metric: &'static str,
-        target: String,
+        series: MetricSeries,
     },
 
-    #[error("invalid Prometheus histogram '{metric}' for {target}: {reason}")]
+    /// The [`HistogramError`] beneath says which property of the histogram does not hold.
+    #[error("invalid Prometheus histogram '{metric}' for {series}")]
     InvalidHistogram {
         metric: &'static str,
-        target: String,
-        reason: String,
+        series: MetricSeries,
     },
 
     #[error(
-        "{quantile} for Prometheus histogram '{metric}' on {target} exceeds its largest finite \
+        "{quantile} for Prometheus histogram '{metric}' on {series} exceeds its largest finite \
          bucket {largest_finite}"
     )]
     HistogramQuantileOverflow {
         metric: &'static str,
-        target: String,
-        quantile: &'static str,
+        series: MetricSeries,
+        quantile: Quantile,
         largest_finite: f64,
     },
 
@@ -136,32 +150,195 @@ pub enum MetricsReportError {
     #[error("scraped metrics contain no relay buffer observations")]
     NoRelayBuffers,
 
-    #[error("invalid Nervix metrics report: {reason}")]
-    InvalidReport { reason: String },
+    #[error("{target_kind} '{target}' has no observed batches")]
+    TargetWithoutBatches { target_kind: String, target: String },
+
+    #[error("relay '{relay}' has no buffer observations")]
+    RelayWithoutObservations { relay: String },
+
+    /// The [`PercentileError`] beneath says which property of the percentiles does not hold.
+    #[error("{entry} has invalid percentiles")]
+    InvalidPercentiles { entry: ReportEntry },
 
     #[error("failed to read Nervix metrics report {path}")]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    Read { path: PathBuf },
 
     #[error("failed to parse Nervix metrics report {path}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    Parse { path: PathBuf },
+
+    #[error("Nervix metrics report {path} is invalid")]
+    Invalid { path: PathBuf },
 
     #[error("failed to serialize Nervix metrics report")]
-    Serialize(#[source] toml::ser::Error),
+    Serialize,
 
     #[error("failed to write Nervix metrics report {path}")]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
+    Write { path: PathBuf },
+}
+
+/// What is wrong with one Prometheus sample line, beneath the
+/// [`MetricsReportError::InvalidPrometheusSample`] that names the line.
+#[derive(Debug, Error)]
+pub enum PrometheusSampleError {
+    #[error("sample has no value")]
+    MissingValue,
+
+    #[error("metric label set is not closed")]
+    UnclosedLabelSet,
+
+    #[error("invalid label name or missing '='")]
+    InvalidLabelName,
+
+    #[error("label '{label}' value is not quoted")]
+    UnquotedLabelValue { label: String },
+
+    #[error("label '{label}' value is not closed")]
+    UnclosedLabelValue { label: String },
+
+    /// The JSON string decoder's failure is beneath.
+    #[error("label '{label}' has invalid escaping")]
+    InvalidLabelEscaping { label: String },
+
+    #[error("label '{label}' is duplicated")]
+    DuplicateLabel { label: String },
+
+    #[error("label '{label}' is not followed by ','")]
+    MissingLabelSeparator { label: String },
+
+    #[error("missing required label '{label}'")]
+    MissingLabel { label: &'static str },
+
+    #[error("unexpected labels: {}", .labels.join(", "))]
+    UnexpectedLabels { labels: Vec<String> },
+
+    /// The cluster node name's validation failure is beneath.
+    #[error("label 'physical_node_id' value '{value}' is not a cluster node name")]
+    InvalidPhysicalNode { value: String },
+
+    #[error("metric '{metric}' is missing label 'le'")]
+    MissingBucketBound { metric: &'static str },
+
+    /// The number parser's failure is beneath.
+    #[error("invalid sample value '{value}'")]
+    InvalidValue { value: String },
+
+    #[error("invalid histogram bucket bound '{value}'")]
+    InvalidBucketBound { value: String },
+
+    #[error("metric '{metric}' value '{value}' is not a non-negative integer count")]
+    NotACount { metric: String, value: f64 },
+}
+
+/// Which property of a scraped histogram does not hold, beneath the
+/// [`MetricsReportError::InvalidHistogram`] that names the histogram.
+#[derive(Debug, Error)]
+pub enum HistogramError {
+    #[error("histogram count is zero")]
+    ZeroCount,
+
+    #[error("missing +Inf bucket")]
+    MissingInfiniteBucket,
+
+    #[error("+Inf bucket count {infinite_count} does not equal _count {count}")]
+    InfiniteBucketMismatch { infinite_count: u64, count: u64 },
+
+    #[error(
+        "bucket {upper_bound} count {cumulative} is below the preceding cumulative count \
+         {previous}"
+    )]
+    DecreasingBucket {
+        upper_bound: f64,
+        cumulative: u64,
+        previous: u64,
     },
+
+    #[error("histogram has no finite buckets")]
+    NoFiniteBuckets,
+
+    #[error("no bucket contains {quantile} rank {rank}")]
+    MissingRank { quantile: Quantile, rank: u64 },
+
+    #[error("histogram count {histogram_count} does not equal batches_total {batches_total}")]
+    BatchCountMismatch {
+        histogram_count: u64,
+        batches_total: u64,
+    },
+}
+
+/// Which property of an entry's percentiles does not hold, beneath the
+/// [`MetricsReportError::InvalidPercentiles`] that names the entry.
+#[derive(Debug, Error)]
+pub enum PercentileError {
+    #[error("a percentile is non-finite or negative")]
+    NonFinite,
+
+    #[error("p50, p90 and p99 are not monotonic")]
+    NotMonotonic,
+}
+
+/// A percentile the metrics report derives from a histogram.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
+pub enum Quantile {
+    #[strum(serialize = "p50")]
+    P50,
+    #[strum(serialize = "p90")]
+    P90,
+    #[strum(serialize = "p99")]
+    P99,
+}
+
+impl Quantile {
+    fn fraction(self) -> f64 {
+        match self {
+            Self::P50 => 0.50,
+            Self::P90 => 0.90,
+            Self::P99 => 0.99,
+        }
+    }
+}
+
+/// The Nervix runtime target one scraped series describes, by the labels that tell it apart
+/// within its domain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetricSeries {
+    pub target_kind: String,
+    pub target: String,
+    pub direction: String,
+    pub relay: String,
+    pub physical_node_id: Option<ClusterNodeName>,
+}
+
+impl fmt::Display for MetricSeries {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let physical_node = match &self.physical_node_id {
+            Some(physical_node) => physical_node.as_str(),
+            None => ABSENT_LABEL,
+        };
+        write!(
+            formatter,
+            "{} '{}' direction '{}' relay '{}' on '{physical_node}'",
+            self.target_kind, self.target, self.direction, self.relay,
+        )
+    }
+}
+
+/// One entry of a metrics report, as its validation names it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReportEntry {
+    BatchTarget { target_kind: String, target: String },
+    RelayBuffer { relay: String },
+}
+
+impl fmt::Display for ReportEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BatchTarget {
+                target_kind,
+                target,
+            } => write!(formatter, "{target_kind} '{target}'"),
+            Self::RelayBuffer { relay } => write!(formatter, "relay '{relay}'"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -179,59 +356,58 @@ struct SeriesKey {
 impl SeriesKey {
     fn from_labels(
         mut labels: BTreeMap<String, String>,
-        line: usize,
-    ) -> Result<Self, MetricsReportError> {
-        let mut take = |name: &'static str| {
+    ) -> error_stack::Result<Self, PrometheusSampleError> {
+        let mut take = |label: &'static str| {
             labels
-                .remove(name)
-                .ok_or_else(|| MetricsReportError::InvalidPrometheusSample {
-                    line,
-                    reason: format!("missing required label '{name}'"),
-                })
+                .remove(label)
+                .ok_or_else(|| Report::new(PrometheusSampleError::MissingLabel { label }))
         };
-        let key = Self {
-            domain: take(REQUIRED_LABELS[0])?,
-            target_kind: take(REQUIRED_LABELS[1])?,
-            target: take(REQUIRED_LABELS[2])?,
-            // Nervix writes `-` for a series it observed without a placed owner; any other
-            // value names a cluster node.
-            physical_node_id: match take(REQUIRED_LABELS[3])? {
-                node if node == ABSENT_LABEL => None,
-                node => Some(ClusterNodeName::parse(&node).map_err(|report| {
-                    MetricsReportError::InvalidPrometheusSample {
-                        line,
-                        reason: format!(
-                            "label 'physical_node_id' is not a cluster node name: {report}"
-                        ),
-                    }
-                })?),
+        let domain = take(REQUIRED_LABELS[0])?;
+        let target_kind = take(REQUIRED_LABELS[1])?;
+        let target = take(REQUIRED_LABELS[2])?;
+        // Nervix writes `-` for a series it observed without a placed owner; any other value names
+        // a cluster node.
+        let physical_node_id = match take(REQUIRED_LABELS[3])? {
+            node if node == ABSENT_LABEL => None,
+            node => match ClusterNodeName::parse(&node) {
+                Ok(name) => Some(name),
+                Err(report) => {
+                    return Err(report.change_context(
+                        PrometheusSampleError::InvalidPhysicalNode { value: node },
+                    ));
+                }
             },
-            direction: take(REQUIRED_LABELS[4])?,
-            relay: take(REQUIRED_LABELS[5])?,
-            peer_kind: take(REQUIRED_LABELS[6])?,
-            peer: take(REQUIRED_LABELS[7])?,
         };
+        let direction = take(REQUIRED_LABELS[4])?;
+        let relay = take(REQUIRED_LABELS[5])?;
+        let peer_kind = take(REQUIRED_LABELS[6])?;
+        let peer = take(REQUIRED_LABELS[7])?;
         if !labels.is_empty() {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!(
-                    "unexpected labels: {}",
-                    labels.keys().cloned().collect::<Vec<_>>().join(", ")
-                ),
-            });
+            let unexpected = labels.into_keys().collect();
+            return Err(Report::new(PrometheusSampleError::UnexpectedLabels {
+                labels: unexpected,
+            }));
         }
-        Ok(key)
+        Ok(Self {
+            domain,
+            target_kind,
+            target,
+            physical_node_id,
+            direction,
+            relay,
+            peer_kind,
+            peer,
+        })
     }
 
-    fn description(&self) -> String {
-        let physical_node = match &self.physical_node_id {
-            Some(physical_node) => physical_node.as_str(),
-            None => ABSENT_LABEL,
-        };
-        format!(
-            "{} '{}' direction '{}' relay '{}' on '{physical_node}'",
-            self.target_kind, self.target, self.direction, self.relay,
-        )
+    fn series(&self) -> MetricSeries {
+        MetricSeries {
+            target_kind: self.target_kind.clone(),
+            target: self.target.clone(),
+            direction: self.direction.clone(),
+            relay: self.relay.clone(),
+            physical_node_id: self.physical_node_id.clone(),
+        }
     }
 
     fn into_batch_target(
@@ -298,16 +474,16 @@ impl Histogram {
         key: &SeriesKey,
         upper_bound: f64,
         count: u64,
-    ) -> Result<(), MetricsReportError> {
+    ) -> error_stack::Result<(), MetricsReportError> {
         if self
             .buckets
             .insert(OrderedFloat(upper_bound), count)
             .is_some()
         {
-            return Err(MetricsReportError::DuplicateSeries {
+            return Err(Report::new(MetricsReportError::DuplicateSeries {
                 metric,
-                target: key.description(),
-            });
+                series: key.series(),
+            }));
         }
         Ok(())
     }
@@ -317,12 +493,12 @@ impl Histogram {
         metric: &'static str,
         key: &SeriesKey,
         count: u64,
-    ) -> Result<(), MetricsReportError> {
+    ) -> error_stack::Result<(), MetricsReportError> {
         if self.count.replace(count).is_some() {
-            return Err(MetricsReportError::DuplicateSeries {
+            return Err(Report::new(MetricsReportError::DuplicateSeries {
                 metric,
-                target: key.description(),
-            });
+                series: key.series(),
+            }));
         }
         Ok(())
     }
@@ -332,47 +508,42 @@ impl Histogram {
         bucket_metric: &'static str,
         count_metric: &'static str,
         key: &SeriesKey,
-    ) -> Result<(u64, HistogramPercentiles), MetricsReportError> {
-        let target = key.description();
-        let count = self
-            .count
-            .ok_or_else(|| MetricsReportError::MissingTargetMetric {
+    ) -> error_stack::Result<(u64, HistogramPercentiles), MetricsReportError> {
+        let Some(count) = self.count else {
+            return Err(Report::new(MetricsReportError::MissingTargetMetric {
                 metric: count_metric,
-                target: target.clone(),
-            })?;
+                series: key.series(),
+            }));
+        };
+        let invalid = || MetricsReportError::InvalidHistogram {
+            metric: bucket_metric,
+            series: key.series(),
+        };
         if count == 0 {
-            return Err(MetricsReportError::InvalidHistogram {
-                metric: bucket_metric,
-                target,
-                reason: "histogram count is zero".to_string(),
-            });
+            return Err(Report::new(HistogramError::ZeroCount).change_context(invalid()));
         }
         let Some(infinite_count) = self.buckets.get(&OrderedFloat(f64::INFINITY)).copied() else {
-            return Err(MetricsReportError::InvalidHistogram {
-                metric: bucket_metric,
-                target,
-                reason: "missing +Inf bucket".to_string(),
-            });
+            return Err(
+                Report::new(HistogramError::MissingInfiniteBucket).change_context(invalid())
+            );
         };
         if infinite_count != count {
-            return Err(MetricsReportError::InvalidHistogram {
-                metric: bucket_metric,
-                target,
-                reason: format!("+Inf bucket count {infinite_count} does not equal _count {count}"),
-            });
+            return Err(Report::new(HistogramError::InfiniteBucketMismatch {
+                infinite_count,
+                count,
+            })
+            .change_context(invalid()));
         }
         let mut previous = 0;
         let mut largest_finite = None;
         for (upper_bound, cumulative) in &self.buckets {
             if *cumulative < previous {
-                return Err(MetricsReportError::InvalidHistogram {
-                    metric: bucket_metric,
-                    target,
-                    reason: format!(
-                        "bucket {} count {} is below the preceding cumulative count {previous}",
-                        upper_bound.0, cumulative
-                    ),
-                });
+                return Err(Report::new(HistogramError::DecreasingBucket {
+                    upper_bound: upper_bound.0,
+                    cumulative: *cumulative,
+                    previous,
+                })
+                .change_context(invalid()));
             }
             previous = *cumulative;
             if upper_bound.is_finite() {
@@ -380,23 +551,15 @@ impl Histogram {
             }
         }
         let Some(largest_finite) = largest_finite else {
-            return Err(MetricsReportError::InvalidHistogram {
-                metric: bucket_metric,
-                target,
-                reason: "histogram has no finite buckets".to_string(),
-            });
+            return Err(Report::new(HistogramError::NoFiniteBuckets).change_context(invalid()));
         };
-        let percentile = |quantile, name| {
-            self.quantile_upper_bound(bucket_metric, key, count, quantile, name, largest_finite)
-        };
-        Ok((
-            count,
-            HistogramPercentiles {
-                p50: percentile(0.50, "p50")?,
-                p90: percentile(0.90, "p90")?,
-                p99: percentile(0.99, "p99")?,
-            },
-        ))
+        let p50 =
+            self.quantile_upper_bound(bucket_metric, key, count, Quantile::P50, largest_finite)?;
+        let p90 =
+            self.quantile_upper_bound(bucket_metric, key, count, Quantile::P90, largest_finite)?;
+        let p99 =
+            self.quantile_upper_bound(bucket_metric, key, count, Quantile::P99, largest_finite)?;
+        Ok((count, HistogramPercentiles { p50, p90, p99 }))
     }
 
     fn quantile_upper_bound(
@@ -404,11 +567,10 @@ impl Histogram {
         metric: &'static str,
         key: &SeriesKey,
         count: u64,
-        quantile: f64,
-        quantile_name: &'static str,
+        quantile: Quantile,
         largest_finite: f64,
-    ) -> Result<f64, MetricsReportError> {
-        let rank: u64 = (count.approx_into::<f64>() * quantile)
+    ) -> error_stack::Result<f64, MetricsReportError> {
+        let rank: u64 = (count.approx_into::<f64>() * quantile.fraction())
             .ceil()
             .checked_approx_into()
             .unwrap_or(u64::MAX);
@@ -417,19 +579,22 @@ impl Histogram {
                 if upper_bound.is_finite() {
                     return Ok(upper_bound.0);
                 }
-                return Err(MetricsReportError::HistogramQuantileOverflow {
+                return Err(Report::new(MetricsReportError::HistogramQuantileOverflow {
                     metric,
-                    target: key.description(),
-                    quantile: quantile_name,
+                    series: key.series(),
+                    quantile,
                     largest_finite,
-                });
+                }));
             }
         }
-        Err(MetricsReportError::InvalidHistogram {
-            metric,
-            target: key.description(),
-            reason: format!("no bucket contains {quantile_name} rank {rank}"),
-        })
+        Err(
+            Report::new(HistogramError::MissingRank { quantile, rank }).change_context(
+                MetricsReportError::InvalidHistogram {
+                    metric,
+                    series: key.series(),
+                },
+            ),
+        )
     }
 }
 
@@ -448,7 +613,7 @@ struct ScrapedMetrics {
 }
 
 impl ScrapedMetrics {
-    fn parse(input: &str, domain: &str) -> Result<Self, MetricsReportError> {
+    fn parse(input: &str, domain: &str) -> error_stack::Result<Self, MetricsReportError> {
         let mut metrics = Self::default();
         for (index, raw_line) in input.lines().enumerate() {
             let line_number = index + 1;
@@ -460,7 +625,9 @@ impl ScrapedMetrics {
             if !is_report_metric(name) {
                 continue;
             }
-            let sample = PrometheusSample::parse(line, line_number)?;
+            let sample = PrometheusSample::parse(line).change_context(
+                MetricsReportError::InvalidPrometheusSample { line: line_number },
+            )?;
             if sample.labels.get("domain").map(String::as_str) != Some(domain) {
                 continue;
             }
@@ -473,7 +640,8 @@ impl ScrapedMetrics {
         &mut self,
         mut sample: PrometheusSample,
         line: usize,
-    ) -> Result<(), MetricsReportError> {
+    ) -> error_stack::Result<(), MetricsReportError> {
+        let invalid = || MetricsReportError::InvalidPrometheusSample { line };
         let metric = match sample.name.as_str() {
             MESSAGES_TOTAL => MESSAGES_TOTAL,
             BATCHES_TOTAL => BATCHES_TOTAL,
@@ -485,18 +653,18 @@ impl ScrapedMetrics {
         };
         let upper_bound =
             if metric == MESSAGES_PER_BATCH_BUCKET || metric == RELAY_BUFFER_LEN_BUCKET {
-                let value = sample.labels.remove("le").ok_or_else(|| {
-                    MetricsReportError::InvalidPrometheusSample {
-                        line,
-                        reason: format!("metric '{metric}' is missing label 'le'"),
-                    }
-                })?;
-                Some(parse_bucket_bound(&value, line)?)
+                let Some(value) = sample.labels.remove("le") else {
+                    return Err(
+                        Report::new(PrometheusSampleError::MissingBucketBound { metric })
+                            .change_context(invalid()),
+                    );
+                };
+                Some(parse_bucket_bound(&value).change_context_lazy(invalid)?)
             } else {
                 None
             };
-        let value = sample.count(line)?;
-        let key = SeriesKey::from_labels(sample.labels, line)?;
+        let value = sample.count().change_context_lazy(invalid)?;
+        let key = SeriesKey::from_labels(sample.labels).change_context_lazy(invalid)?;
         match metric {
             MESSAGES_TOTAL => insert_counter(&mut self.messages_total, metric, key, value),
             BATCHES_TOTAL => insert_counter(&mut self.batches_total, metric, key, value),
@@ -547,16 +715,16 @@ impl ScrapedMetrics {
         merge_histogram_max(&mut self.relay_buffer_len, other.relay_buffer_len);
     }
 
-    fn into_report(self) -> Result<NervixMetricsReport, MetricsReportError> {
+    fn into_report(self) -> error_stack::Result<NervixMetricsReport, MetricsReportError> {
         for (key, batches) in &self.batches_total {
             if *batches > 0
                 && key.target_kind != "RELAY"
                 && !self.messages_per_batch.contains_key(key)
             {
-                return Err(MetricsReportError::MissingTargetMetric {
+                return Err(Report::new(MetricsReportError::MissingTargetMetric {
                     metric: MESSAGES_PER_BATCH_BUCKET,
-                    target: key.description(),
-                });
+                    series: key.series(),
+                }));
             }
         }
 
@@ -565,30 +733,29 @@ impl ScrapedMetrics {
             if key.target_kind == "RELAY" {
                 continue;
             }
-            let target = key.description();
-            let messages_total = self.messages_total.get(&key).copied().ok_or_else(|| {
-                MetricsReportError::MissingTargetMetric {
+            let Some(messages_total) = self.messages_total.get(&key).copied() else {
+                return Err(Report::new(MetricsReportError::MissingTargetMetric {
                     metric: MESSAGES_TOTAL,
-                    target: target.clone(),
-                }
-            })?;
-            let batches_total = self.batches_total.get(&key).copied().ok_or_else(|| {
-                MetricsReportError::MissingTargetMetric {
+                    series: key.series(),
+                }));
+            };
+            let Some(batches_total) = self.batches_total.get(&key).copied() else {
+                return Err(Report::new(MetricsReportError::MissingTargetMetric {
                     metric: BATCHES_TOTAL,
-                    target: target.clone(),
-                }
-            })?;
+                    series: key.series(),
+                }));
+            };
             let (histogram_count, percentiles) =
                 histogram.summarize(MESSAGES_PER_BATCH_BUCKET, MESSAGES_PER_BATCH_COUNT, &key)?;
             if histogram_count != batches_total {
-                return Err(MetricsReportError::InvalidHistogram {
+                return Err(Report::new(HistogramError::BatchCountMismatch {
+                    histogram_count,
+                    batches_total,
+                })
+                .change_context(MetricsReportError::InvalidHistogram {
                     metric: MESSAGES_PER_BATCH_BUCKET,
-                    target,
-                    reason: format!(
-                        "histogram count {histogram_count} does not equal batches_total \
-                         {batches_total}"
-                    ),
-                });
+                    series: key.series(),
+                }));
             }
             batch_targets.push(key.into_batch_target(messages_total, batches_total, percentiles));
         }
@@ -600,10 +767,10 @@ impl ScrapedMetrics {
             relay_buffers.push(key.into_relay_buffer(observations, percentiles));
         }
         if batch_targets.is_empty() {
-            return Err(MetricsReportError::NoBatchTargets);
+            return Err(Report::new(MetricsReportError::NoBatchTargets));
         }
         if relay_buffers.is_empty() {
-            return Err(MetricsReportError::NoRelayBuffers);
+            return Err(Report::new(MetricsReportError::NoRelayBuffers));
         }
         let report = NervixMetricsReport {
             batch_targets,
@@ -621,10 +788,10 @@ struct PrometheusSample {
 }
 
 impl PrometheusSample {
-    fn parse(line: &str, line_number: usize) -> Result<Self, MetricsReportError> {
-        let (metric, value) = split_metric_and_value(line, line_number)?;
-        let (name, labels) = parse_metric(metric, line_number)?;
-        let value = parse_prometheus_number(value, line_number)?;
+    fn parse(line: &str) -> error_stack::Result<Self, PrometheusSampleError> {
+        let (metric, value) = split_metric_and_value(line)?;
+        let (name, labels) = parse_metric(metric)?;
+        let value = parse_prometheus_number(value)?;
         Ok(Self {
             name: name.to_string(),
             labels,
@@ -632,28 +799,28 @@ impl PrometheusSample {
         })
     }
 
-    fn count(&self, line: usize) -> Result<u64, MetricsReportError> {
+    fn count(&self) -> error_stack::Result<u64, PrometheusSampleError> {
         if self.value.fract() != 0.0 {
-            return Err(self.not_a_count(line));
+            return Err(self.not_a_count());
         }
         self.value
             .checked_approx_into()
-            .ok_or_else(|| self.not_a_count(line))
+            .ok_or_else(|| self.not_a_count())
     }
 
-    fn not_a_count(&self, line: usize) -> MetricsReportError {
-        MetricsReportError::InvalidPrometheusSample {
-            line,
-            reason: format!(
-                "metric '{}' value '{}' is not a non-negative integer count",
-                self.name, self.value
-            ),
-        }
+    fn not_a_count(&self) -> Report<PrometheusSampleError> {
+        Report::new(PrometheusSampleError::NotACount {
+            metric: self.name.clone(),
+            value: self.value,
+        })
     }
 }
 
 impl NervixMetricsReport {
-    pub fn from_prometheus(input: &str, domain: &str) -> Result<Self, MetricsReportError> {
+    pub fn from_prometheus(
+        input: &str,
+        domain: &str,
+    ) -> error_stack::Result<Self, MetricsReportError> {
         ScrapedMetrics::parse(input, domain)?.into_report()
     }
 
@@ -669,40 +836,47 @@ impl NervixMetricsReport {
             // so a cluster scrape neither loses the owner nor counts its replicas more than once.
             combined.merge_max(scrape);
         }
-        Ok(combined.into_report()?)
+        combined.into_report()
     }
 
-    pub fn read(path: impl AsRef<Path>) -> Result<Self, MetricsReportError> {
+    pub fn read(path: impl AsRef<Path>) -> error_stack::Result<Self, MetricsReportError> {
         let path = path.as_ref();
-        let contents = fs::read_to_string(path).map_err(|source| MetricsReportError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let report =
-            toml::from_str::<Self>(&contents).map_err(|source| MetricsReportError::Parse {
+        let contents =
+            fs::read_to_string(path).change_context_lazy(|| MetricsReportError::Read {
                 path: path.to_path_buf(),
-                source,
             })?;
-        report.validate()?;
+        let report = toml::from_str::<Self>(&contents).change_context_lazy(|| {
+            MetricsReportError::Parse {
+                path: path.to_path_buf(),
+            }
+        })?;
+        report
+            .validate()
+            .change_context_lazy(|| MetricsReportError::Invalid {
+                path: path.to_path_buf(),
+            })?;
         Ok(report)
     }
 
-    pub fn write(&self, path: impl AsRef<Path>) -> Result<(), MetricsReportError> {
-        self.validate()?;
-        let contents = toml::to_string_pretty(self).map_err(MetricsReportError::Serialize)?;
+    pub fn write(&self, path: impl AsRef<Path>) -> error_stack::Result<(), MetricsReportError> {
         let path = path.as_ref();
-        fs::write(path, contents).map_err(|source| MetricsReportError::Write {
+        self.validate()
+            .change_context_lazy(|| MetricsReportError::Invalid {
+                path: path.to_path_buf(),
+            })?;
+        let contents =
+            toml::to_string_pretty(self).change_context(MetricsReportError::Serialize)?;
+        fs::write(path, contents).change_context_lazy(|| MetricsReportError::Write {
             path: path.to_path_buf(),
-            source,
         })
     }
 
-    fn validate(&self) -> Result<(), MetricsReportError> {
+    fn validate(&self) -> error_stack::Result<(), MetricsReportError> {
         if self.batch_targets.is_empty() {
-            return Err(MetricsReportError::NoBatchTargets);
+            return Err(Report::new(MetricsReportError::NoBatchTargets));
         }
         if self.relay_buffers.is_empty() {
-            return Err(MetricsReportError::NoRelayBuffers);
+            return Err(Report::new(MetricsReportError::NoRelayBuffers));
         }
         for target in &self.batch_targets {
             target.validate()?;
@@ -714,24 +888,15 @@ impl NervixMetricsReport {
     }
 }
 
-fn validate_percentiles(
-    target: &str,
-    p50: f64,
-    p90: f64,
-    p99: f64,
-) -> Result<(), MetricsReportError> {
+fn validate_percentiles(p50: f64, p90: f64, p99: f64) -> error_stack::Result<(), PercentileError> {
     if [p50, p90, p99]
         .iter()
         .any(|value| !value.is_finite() || *value < 0.0)
     {
-        return Err(MetricsReportError::InvalidReport {
-            reason: format!("{target} has non-finite or negative percentiles"),
-        });
+        return Err(Report::new(PercentileError::NonFinite));
     }
     if p50 > p90 || p90 > p99 {
-        return Err(MetricsReportError::InvalidReport {
-            reason: format!("{target} percentiles are not monotonic"),
-        });
+        return Err(Report::new(PercentileError::NotMonotonic));
     }
     Ok(())
 }
@@ -741,10 +906,13 @@ fn insert_counter(
     metric: &'static str,
     key: SeriesKey,
     value: u64,
-) -> Result<(), MetricsReportError> {
-    let target = key.description();
+) -> error_stack::Result<(), MetricsReportError> {
+    let series = key.series();
     if counters.insert(key, value).is_some() {
-        return Err(MetricsReportError::DuplicateSeries { metric, target });
+        return Err(Report::new(MetricsReportError::DuplicateSeries {
+            metric,
+            series,
+        }));
     }
     Ok(())
 }
@@ -785,10 +953,7 @@ fn is_report_metric(name: &str) -> bool {
     )
 }
 
-fn split_metric_and_value(
-    line: &str,
-    line_number: usize,
-) -> Result<(&str, &str), MetricsReportError> {
+fn split_metric_and_value(line: &str) -> error_stack::Result<(&str, &str), PrometheusSampleError> {
     let mut braces = 0_u8;
     let mut quoted = false;
     let mut escaped = false;
@@ -822,31 +987,26 @@ fn split_metric_and_value(
             _ => {}
         }
     }
-    Err(MetricsReportError::InvalidPrometheusSample {
-        line: line_number,
-        reason: "sample has no value".to_string(),
-    })
+    Err(Report::new(PrometheusSampleError::MissingValue))
 }
 
 fn parse_metric(
     metric: &str,
-    line: usize,
-) -> Result<(&str, BTreeMap<String, String>), MetricsReportError> {
+) -> error_stack::Result<(&str, BTreeMap<String, String>), PrometheusSampleError> {
     let Some(open) = metric.find('{') else {
         return Ok((metric, BTreeMap::new()));
     };
     if !metric.ends_with('}') {
-        return Err(MetricsReportError::InvalidPrometheusSample {
-            line,
-            reason: "metric label set is not closed".to_string(),
-        });
+        return Err(Report::new(PrometheusSampleError::UnclosedLabelSet));
     }
     let name = &metric[..open];
-    let labels = parse_labels(&metric[open + 1..metric.len() - 1], line)?;
+    let labels = parse_labels(&metric[open + 1..metric.len() - 1])?;
     Ok((name, labels))
 }
 
-fn parse_labels(input: &str, line: usize) -> Result<BTreeMap<String, String>, MetricsReportError> {
+fn parse_labels(
+    input: &str,
+) -> error_stack::Result<BTreeMap<String, String>, PrometheusSampleError> {
     let bytes = input.as_bytes();
     let mut labels = BTreeMap::new();
     let mut cursor = 0;
@@ -861,18 +1021,14 @@ fn parse_labels(input: &str, line: usize) -> Result<BTreeMap<String, String>, Me
             cursor += 1;
         }
         if cursor == name_start || bytes.get(cursor) != Some(&b'=') {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: "invalid label name or missing '='".to_string(),
-            });
+            return Err(Report::new(PrometheusSampleError::InvalidLabelName));
         }
         let name = &input[name_start..cursor];
         cursor += 1;
         if bytes.get(cursor) != Some(&b'"') {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!("label '{name}' value is not quoted"),
-            });
+            return Err(Report::new(PrometheusSampleError::UnquotedLabelValue {
+                label: name.to_string(),
+            }));
         }
         let value_start = cursor;
         cursor += 1;
@@ -890,23 +1046,18 @@ fn parse_labels(input: &str, line: usize) -> Result<BTreeMap<String, String>, Me
             cursor += 1;
         }
         let Some(value_end) = value_end else {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!("label '{name}' value is not closed"),
-            });
+            return Err(Report::new(PrometheusSampleError::UnclosedLabelValue {
+                label: name.to_string(),
+            }));
         };
-        let value =
-            serde_json::from_str::<String>(&input[value_start..value_end]).map_err(|error| {
-                MetricsReportError::InvalidPrometheusSample {
-                    line,
-                    reason: format!("label '{name}' has invalid escaping: {error}"),
-                }
+        let value = serde_json::from_str::<String>(&input[value_start..value_end])
+            .change_context_lazy(|| PrometheusSampleError::InvalidLabelEscaping {
+                label: name.to_string(),
             })?;
         if labels.insert(name.to_string(), value).is_some() {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!("label '{name}' is duplicated"),
-            });
+            return Err(Report::new(PrometheusSampleError::DuplicateLabel {
+                label: name.to_string(),
+            }));
         }
         cursor = value_end;
         while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
@@ -916,37 +1067,34 @@ fn parse_labels(input: &str, line: usize) -> Result<BTreeMap<String, String>, Me
             break;
         }
         if bytes[cursor] != b',' {
-            return Err(MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!("label '{name}' is not followed by ','"),
-            });
+            return Err(Report::new(PrometheusSampleError::MissingLabelSeparator {
+                label: name.to_string(),
+            }));
         }
         cursor += 1;
     }
     Ok(labels)
 }
 
-fn parse_prometheus_number(value: &str, line: usize) -> Result<f64, MetricsReportError> {
+fn parse_prometheus_number(value: &str) -> error_stack::Result<f64, PrometheusSampleError> {
     match value {
         "+Inf" | "Inf" => Ok(f64::INFINITY),
         "-Inf" => Ok(f64::NEG_INFINITY),
         "NaN" => Ok(f64::NAN),
         value => value
-            .parse()
-            .map_err(|error| MetricsReportError::InvalidPrometheusSample {
-                line,
-                reason: format!("invalid sample value '{value}': {error}"),
+            .parse::<f64>()
+            .change_context_lazy(|| PrometheusSampleError::InvalidValue {
+                value: value.to_string(),
             }),
     }
 }
 
-fn parse_bucket_bound(value: &str, line: usize) -> Result<f64, MetricsReportError> {
-    let bound = parse_prometheus_number(value, line)?;
+fn parse_bucket_bound(value: &str) -> error_stack::Result<f64, PrometheusSampleError> {
+    let bound = parse_prometheus_number(value)?;
     if bound.is_nan() || bound < 0.0 {
-        return Err(MetricsReportError::InvalidPrometheusSample {
-            line,
-            reason: format!("invalid histogram bucket bound '{value}'"),
-        });
+        return Err(Report::new(PrometheusSampleError::InvalidBucketBound {
+            value: value.to_string(),
+        }));
     }
     Ok(bound)
 }

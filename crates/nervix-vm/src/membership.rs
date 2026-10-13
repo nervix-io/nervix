@@ -17,6 +17,14 @@
 //! is the equality `=` decides: floats compare by IEEE 754, so NaN is a member of no set and no
 //! NaN operand is a member of one, and `0.0` and `-0.0` are the same element.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{borrow::Borrow, hash::Hash};
 
 use ahash::{HashSet, HashSetExt};

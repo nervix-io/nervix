@@ -14,6 +14,13 @@ The replicated transaction report and its content-addressed topology use this du
 and actual facts that report retains. This chapter owns log reading, snapshot transfer, and the
 storage bounds that carry large reports.
 
+Consensus request and append-stream responses carry the fixed `ConsensusRequestError` wire
+outcome, classified at its source owner for the compiler failure-contract gate. Local storage and
+Raft failures retain their contextual reports before this projection. Opening the node database
+also preserves the typed storage cause below startup context; a consensus keyspace in that
+database returns the separate layout context. [Errors And Diagnostics](errors-and-diagnostics.md)
+owns the compiler and propagation rules.
+
 ## Durable Write Path
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist
@@ -372,8 +379,10 @@ log read checks that a log record is stored under its own entry's index.
 Consensus remains available throughout stop admission and graph drain. During terminal teardown,
 the node stops Raft, which ends its append stream generations, then submits an idle barrier to the
 ordered storage worker. Reaching that barrier proves every earlier submitted durable write returned
-and released the consensus store before its database handle is dropped. The interconnect is stopped
-after consensus, so peers first observe the append protocol ending and later the transport closing.
+and released the consensus store before its database handle is dropped. Dropping it closes the
+dedicated database, which finishes even when one of its background workers failed during the close;
+see [Shutdown And Recovery](./shutdown.md#terminal-teardown). The interconnect is stopped after
+consensus, so peers first observe the append protocol ending and later the transport closing.
 
 A repeated signal, an expired shutdown deadline, or `SIGKILL` skips that barrier. Recovery then sees
 the last complete atomic storage boundaries: an append batch is present or absent; an applied range

@@ -13,6 +13,11 @@
 //! moments and one non-negative correction for the distance between their means, so a variance is
 //! never the small difference of two large sums of squares.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::ops::Range;
 
 use arrow_array::Float64Array;
@@ -356,6 +361,10 @@ impl CoMoments {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::{super::two_stacks::TwoStacks, *};
 

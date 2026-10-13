@@ -27,6 +27,14 @@
 //!   signals: the process that starts a run decides where its evidence goes, and nothing here waits
 //!   for a lock a blocked thread could hold, writes a log, or reads application state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 #[cfg(test)]
 #[global_allocator]
 static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);

@@ -1,9 +1,18 @@
 //! Admission and retained outcomes for persistent session commands.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //! - **Owns.** Binding a command reference to one semantic request and publishing its final result.
 //! - **Depends on.** Consensus command records and the authoritative visibility barrier.
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session command admission translates parsed client operations into durable \
+                  requests"
+    )
+)]
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -1223,6 +1232,10 @@ fn statement_result(result: CommandExecutionStatementResult) -> CommandResult {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         CreateStatement, CreateUser, ImpactPlanningBasis, TransactionLifecycle,

@@ -5,6 +5,11 @@
 //! `error-stack` reports, which keep a runtime state persistence failure beneath them.
 //! Must not know: schedules, consensus transactions, NSPL, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
 use nervix_models::{ModelKind, ModelName};

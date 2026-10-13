@@ -24,7 +24,8 @@ Usage:
       [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
   just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--keep]
   just chaos suite list
-  just chaos suite smoke|soak --image IMAGE [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]
+  just chaos suite smoke|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N]
+      [--entry ID]... [--artifacts DIR] [--suite-id ID]
   just chaos suite shards SUITE
   just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
@@ -39,6 +40,10 @@ Run `just chaos run degraded-links --help` for degradation profiles and threshol
 Run `just chaos run stateful --help` for stateful and domain-time faults.
 Run `just chaos run mixed-instability --help` for seeded plans, quorum policies and coverage.
 Run `just chaos suite --help` for the smoke and soak suites that CI runs.
+
+An image whose io.nervix.diagnostic.selection label declares a Deloxide selection runs every node as
+a diagnostic node, and every run fails unless the deadlock evidence of each process it started
+qualifies; see the README's section on diagnostic images.
 EOF
 }
 

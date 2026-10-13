@@ -24,6 +24,11 @@
 //!
 //! [`Client`]: nervix_client_core::Client
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 mod abi;
 mod batch;
 mod batch_builder;

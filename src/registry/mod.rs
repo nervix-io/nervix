@@ -10,6 +10,11 @@
 //! - **Must not know.** How a validated node runs. No Tokio task, no Arrow batch, no connector and
 //!   no branch-local state belongs here, and a decision must be computable without a cluster.
 //!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 mod branch_state_schemas;
 mod creation_order;
 mod domain_activation_plan;

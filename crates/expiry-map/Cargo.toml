@@ -13,3 +13,7 @@ ahash = { workspace = true }
 intrusive-collections = { workspace = true }
 meticulous = { workspace = true }
 nervix-primitives = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
+indexmap = { workspace = true }

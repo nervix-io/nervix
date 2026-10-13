@@ -25,6 +25,11 @@
 //! - **Must not know.** Anything in Nervix. It names no Model, no name type and no runtime concept,
 //!   which is what keeps it usable from the innermost layer outward.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 /// A conversion into floating point that rounds to the nearest representable value.
 pub trait ApproxFrom<T>: Sized {
     /// Converts from `T`, rounding to the nearest representable value.
@@ -181,6 +186,10 @@ checked_approx_from_float_pointer_width! {
     usize => u64;
     isize => i64;
 }
+
+#[cfg(test)]
+#[path = "properties_tests.rs"]
+mod properties;
 
 #[cfg(test)]
 mod tests {

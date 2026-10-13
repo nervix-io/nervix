@@ -7,6 +7,11 @@
 //! - **Depends on.** The relay Models and the expressions that reference them.
 //! - **Must not know.** How state is stored, snapshotted or evicted.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::Report;

@@ -8,6 +8,11 @@
 //! - **Depends on.** The endpoint task, its admission-worker protocol, and ACK roots.
 //! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "tests client endpoint execution and admission")
+)]
+
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use nervix_models::{

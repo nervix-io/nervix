@@ -11,6 +11,18 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
 
 use arrow_array::{
@@ -114,7 +126,7 @@ enum MySqlWriteError {
     Pool { reason: String },
     #[error("MySQL insert failed with SQLSTATE {state} and code {code}")]
     Server { state: String, code: u16 },
-    #[error("MySQL insert failed: {0}")]
+    #[error("MySQL insert failed")]
     Execute(#[source] mysql_async::Error),
 }
 
@@ -661,6 +673,13 @@ impl BoundValues {
 /// A mapped column this sink cannot bind, named with the exact type it carries.
 #[derive(Debug, thiserror::Error)]
 #[error("MySQL VALUES column '{column}' has unsupported exact type {data_type}")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "unsupported mapped columns produce definitive semantic record rejections"
+    )
+)]
 struct UnsupportedMappedColumn {
     column: String,
     data_type: arrow_schema::DataType,
@@ -917,6 +936,10 @@ impl<'a> MappedMySqlColumn<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -930,6 +953,20 @@ mod tests {
             .expect_err("an update needs mapped values");
         let report = MySqlWriteError::into_report(failure);
         assert!(report.contains::<MySqlWriteError>());
+    }
+
+    #[test]
+    fn a_driver_failure_names_its_cause_once() {
+        let failure = mysql_async::Error::Driver(mysql_async::DriverError::PoolDisconnected);
+        let cause = failure.to_string();
+        let report = MySqlWriteError::report_execute(failure);
+        let rendered = format!("{report:#}");
+
+        assert!(
+            rendered.starts_with(&format!("MySQL insert failed: {cause}")),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches(&cause).count(), 1, "{rendered}");
     }
 
     #[test]

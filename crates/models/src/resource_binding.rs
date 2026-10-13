@@ -7,6 +7,11 @@
 //! - **Depends on.** The binding Models and [`RequestedResourceVersion`].
 //! - **Must not know.** Which versions a domain has completed, or how planning resolves `LATEST`.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::convert::Infallible;
 
 use crate::{

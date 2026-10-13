@@ -5,6 +5,11 @@
 //! - **Depends on.** Vocabulary generators and the production guest protocol.
 //! - **Must not know.** Arrow payload interpretation, live ACK guards or checkpoint durability.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_wasm_protocol::{
     AckSidecar, AckToken, AckTokenSet, BranchInit, Envelope, GuestSnapshot, MessageErrorSet,

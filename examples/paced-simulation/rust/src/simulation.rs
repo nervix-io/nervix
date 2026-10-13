@@ -14,7 +14,7 @@
 
 use std::{collections::BTreeMap, process::ExitCode, time::Duration};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     Client, ClientError, ClientProducerAdmission, ClientProducerGrant, ClientProducerLimits,
@@ -32,11 +32,9 @@ use thiserror::Error;
 
 use crate::{
     clock::{self, Clock, ClockError, Pace, Reached, TickGrid},
-    consumers::{
-        self, ConsumerError, ConsumerLoop, OPEN_RETRY_BUDGET, OPEN_RETRY_DELAY, Output, Shared,
-    },
-    effects::{EffectError, EffectStore},
-    ledger::{Ledger, LedgerError, OutcomeKind},
+    consumers::{self, ConsumerLoop, OPEN_RETRY_BUDGET, OPEN_RETRY_DELAY, Output, Shared},
+    effects::EffectStore,
+    ledger::{Ledger, OutcomeKind},
     options::{OptionsError, Settings, TimestampSource},
     readings::{self, Reading, ReadingSlot, Stamp, reading_fields},
     refusal::Refusal,
@@ -102,21 +100,18 @@ pub(crate) enum ProducerOpenError {
 enum RunError {
     #[error("{0}")]
     Options(OptionsError),
-    #[error("cannot connect to '{server}': {report:#}")]
-    Connect {
-        server: String,
-        report: Report<ClientError>,
-    },
-    #[error("{}", .0.current_context())]
-    Clock(Report<ClockError>),
-    #[error("{}", .0.current_context())]
-    Consumer(Report<ConsumerError>),
-    #[error("{}", .0.current_context())]
-    Producer(Report<ProducerOpenError>),
-    #[error("{0}")]
-    Ledger(#[from] LedgerError),
-    #[error("{0}")]
-    Effects(#[from] EffectError),
+    #[error("cannot connect to '{server}'")]
+    Connect { server: String },
+    #[error("simulation clock operation failed")]
+    Clock,
+    #[error("simulation consumer operation failed")]
+    Consumer,
+    #[error("simulation producer operation failed")]
+    Producer,
+    #[error("simulation ledger operation failed")]
+    Ledger,
+    #[error("simulation effect store operation failed")]
+    Effects,
     #[error("cannot submit the readings of tick {tick}: {reason}")]
     Batch { tick: u64, reason: String },
     #[error(
@@ -130,20 +125,15 @@ enum RunError {
 }
 
 impl RunError {
-    /// How a run that failed this way ends.
+    /// How a run that failed this way ends; arithmetic is classified from its typed cause.
     fn finish(&self) -> Finish {
         match self {
-            Self::Clock(report)
-                if matches!(report.current_context(), ClockError::Arithmetic { .. }) =>
-            {
-                Finish::Failed
-            }
             Self::Options(_)
             | Self::Connect { .. }
-            | Self::Clock(_)
-            | Self::Consumer(_)
-            | Self::Producer(_) => Finish::Configuration,
-            Self::Ledger(_) | Self::Effects(_) | Self::Batch { .. } | Self::Deadline { .. } => {
+            | Self::Clock
+            | Self::Consumer
+            | Self::Producer => Finish::Configuration,
+            Self::Ledger | Self::Effects | Self::Batch { .. } | Self::Deadline { .. } => {
                 Finish::Failed
             }
         }
@@ -154,7 +144,7 @@ impl RunError {
 pub async fn run(options: crate::options::Options) -> Finish {
     let settings = match Settings::try_from(options) {
         Ok(settings) => settings,
-        Err(error) => return failed(&RunError::Options(error)),
+        Err(error) => return failed(&Report::new(RunError::Options(error))),
     };
     match simulate(settings).await {
         Ok(finish) => finish,
@@ -162,12 +152,18 @@ pub async fn run(options: crate::options::Options) -> Finish {
     }
 }
 
-fn failed(error: &RunError) -> Finish {
-    report::error(error.to_string());
-    error.finish()
+fn failed(error: &Report<RunError>) -> Finish {
+    report::error(format!("{error:#}"));
+    if matches!(
+        error.downcast_ref::<ClockError>(),
+        Some(ClockError::Arithmetic { .. })
+    ) {
+        return Finish::Failed;
+    }
+    error.current_context().finish()
 }
 
-async fn connect(settings: &Settings) -> Result<Client, RunError> {
+async fn connect(settings: &Settings) -> Result<Client, Report<RunError>> {
     let options = ConnectOptions {
         username: settings.username.clone(),
         password: settings.password.clone(),
@@ -178,10 +174,9 @@ async fn connect(settings: &Settings) -> Result<Client, RunError> {
             .await;
     match connected {
         Ok(client) => Ok(client),
-        Err(report) => Err(RunError::Connect {
+        Err(report) => Err(report.change_context(RunError::Connect {
             server: settings.server.clone(),
-            report,
-        }),
+        })),
     }
 }
 
@@ -268,7 +263,7 @@ async fn starting_generation(
     clock: &mut Clock,
     domain: &DomainName,
     stop: &CancellationToken,
-) -> Result<u64, RunError> {
+) -> Result<u64, Report<RunError>> {
     let deadline = Instant::now() + INSTALL_BUDGET;
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -298,7 +293,7 @@ async fn starting_generation(
                 }
             }
         };
-        return Err(RunError::Clock(Report::new(failure)));
+        return Err(Report::new(failure).change_context(RunError::Clock));
     }
 }
 
@@ -463,7 +458,7 @@ impl Planner {
 
     /// Accepts a changed endpoint with a fresh producer and its own fresh credit. Outcome tasks
     /// retain the producer and credit that accepted their submissions; none is resubmitted here.
-    async fn reopen(&mut self) -> Result<bool, RunError> {
+    async fn reopen(&mut self) -> Result<bool, Report<RunError>> {
         let Some(ProducerEnd::ReopenRequired(reason)) = self.producer.end() else {
             return Ok(true);
         };
@@ -479,7 +474,7 @@ impl Planner {
         }
         let producer = open_producer(&self.client, &self.settings, OpenIntent::CurrentGeneration)
             .await
-            .map_err(RunError::Producer)?;
+            .change_context(RunError::Producer)?;
         let opened = producer.description().generation;
         if opened != self.generation {
             // START raced the open. The clock and --follow-generations still decide whether
@@ -498,7 +493,7 @@ impl Planner {
         Ok(true)
     }
 
-    async fn simulate(&mut self) -> Result<(), RunError> {
+    async fn simulate(&mut self) -> Result<(), Report<RunError>> {
         let mut tick = self.first_tick();
         let mut planned: u64 = 0;
         while planned < self.settings.ticks {
@@ -511,9 +506,10 @@ impl Planner {
                 tick = self.first_tick();
             }
             let Some(center) = self.grid.center(tick) else {
-                return Err(RunError::Clock(Report::new(ClockError::Arithmetic {
+                return Err(Report::new(ClockError::Arithmetic {
                     domain: self.settings.domain.clone(),
-                })));
+                })
+                .change_context(RunError::Clock));
             };
             // Even a very slow domain clock must let the application accept an endpoint change.
             let reached = nervix_primitives::time::timeout(
@@ -522,7 +518,7 @@ impl Planner {
             )
             .await;
             let reached = match reached {
-                Ok(reached) => reached.map_err(RunError::Clock)?,
+                Ok(reached) => reached.change_context(RunError::Clock)?,
                 Err(_) => continue,
             };
             let window = match reached {
@@ -629,29 +625,26 @@ impl Planner {
     }
 
     /// Encodes the readings of one tick as the producer's batch.
-    fn prepare(&self, tick: u64, readings: Vec<Reading>) -> Result<Prepared, RunError> {
+    fn prepare(&self, tick: u64, readings: Vec<Reading>) -> Result<Prepared, Report<RunError>> {
         let record_batch = readings::record_batch(self.producer.arrow_schema(), &readings)
-            .map_err(|error| RunError::Batch {
-                tick,
-                reason: error.to_string(),
+            .map_err(|error| {
+                let reason = error.to_string();
+                Report::new(error).change_context(RunError::Batch { tick, reason })
             })?;
-        let batch = self
-            .producer
-            .batch(&record_batch)
-            .map_err(|failure| RunError::Batch {
-                tick,
-                reason: failure.current_context().to_string(),
-            })?;
+        let batch = self.producer.batch(&record_batch).map_err(|failure| {
+            let reason = failure.current_context().to_string();
+            failure.change_context(RunError::Batch { tick, reason })
+        })?;
         let bytes = u64::try_from(batch.len()).assured("a batch's length fits u64");
         let grant = self.producer.description().grant;
         if bytes > grant.max_batch_bytes.get() {
-            return Err(RunError::Batch {
+            return Err(Report::new(RunError::Batch {
                 tick,
                 reason: format!(
                     "its {bytes} bytes exceed the {} bytes one submission may carry",
                     grant.max_batch_bytes
                 ),
-            });
+            }));
         }
         Ok(Prepared {
             tick,
@@ -700,7 +693,7 @@ impl Planner {
 
     /// Records the readings in the ledger, submits them as one batch, and starts awaiting its
     /// outcome.
-    async fn send(&mut self, prepared: Prepared) -> Result<(), RunError> {
+    async fn send(&mut self, prepared: Prepared) -> Result<(), Report<RunError>> {
         let Prepared {
             tick,
             readings,
@@ -724,7 +717,8 @@ impl Planner {
                 self.settings.ingestor.as_str(),
                 self.settings.timestamps,
             )
-            .await?;
+            .await
+            .change_context(RunError::Ledger)?;
         self.counters.submitted(count);
         let id = loop {
             nervix_primitives::task::consume_budget().await;
@@ -760,10 +754,10 @@ impl Planner {
                         .await;
                 }
                 other => {
-                    return Err(RunError::Batch {
+                    return Err(Report::new(RunError::Batch {
                         tick,
                         reason: other.to_string(),
-                    });
+                    }));
                 }
             }
         };
@@ -800,10 +794,11 @@ impl Planner {
         reading_ids: Vec<String>,
         count: u64,
         cause: &str,
-    ) -> Result<(), RunError> {
+    ) -> Result<(), Report<RunError>> {
         self.ledger
             .outcome(reading_ids, OutcomeKind::NotAdmitted, cause)
-            .await?;
+            .await
+            .change_context(RunError::Ledger)?;
         self.counters.outcome(OutcomeKind::NotAdmitted, count);
         report::line(outcome_line(tick, count, OutcomeKind::NotAdmitted, cause));
         Ok(())
@@ -811,7 +806,7 @@ impl Planner {
 
     /// Follows the domain into a later START generation, when the run is asked to. Returns
     /// whether the simulation continues.
-    async fn follow(&mut self, pace: Pace) -> Result<bool, RunError> {
+    async fn follow(&mut self, pace: Pace) -> Result<bool, Report<RunError>> {
         if !self.settings.follow_generations {
             report::line(format!(
                 "STOPPING generation={} reason=generation_ended",
@@ -847,7 +842,7 @@ impl Planner {
         }
         let producer = open_producer(&self.client, &self.settings, OpenIntent::FollowingStart)
             .await
-            .map_err(RunError::Producer)?;
+            .change_context(RunError::Producer)?;
         let opened = producer.description().generation;
         // The producer opens under the generation the domain runs now, and the clock must have
         // been observed in that same generation before anything is planned against it.
@@ -873,7 +868,10 @@ impl Planner {
         self.generation = opened;
         self.grid = TickGrid::of(opened, &paced);
         self.generations.send_replace(opened);
-        self.ledger.generation(opened).await?;
+        self.ledger
+            .generation(opened)
+            .await
+            .change_context(RunError::Ledger)?;
         self.counters.generation(opened);
         report::line(format!(
             "REOPENED generation={opened} ingestor={} after={target}",
@@ -885,7 +883,7 @@ impl Planner {
     /// Resubmits the readings the ledger holds without a completed outcome, when they belong to
     /// the generation the run is in and the window still admits them. A reading of another
     /// generation is never submitted against this one.
-    async fn replay(&mut self, unresolved: Vec<Reading>) -> Result<(), RunError> {
+    async fn replay(&mut self, unresolved: Vec<Reading>) -> Result<(), Report<RunError>> {
         let generation = self.generation;
         let mut by_tick: BTreeMap<u64, Vec<Reading>> = BTreeMap::new();
         for reading in unresolved {
@@ -1153,7 +1151,7 @@ impl OutputConsumers {
     }
 
     /// Opens every output consumer now, failing the run when one is refused.
-    async fn open_now(settings: &Settings, shared: &Shared) -> Result<Self, RunError> {
+    async fn open_now(settings: &Settings, shared: &Shared) -> Result<Self, Report<RunError>> {
         let mut tasks = Vec::new();
         for consumer_loop in Self::loops(settings, shared) {
             let consumer = consumers::open(
@@ -1163,7 +1161,7 @@ impl OutputConsumers {
                 Output::Readings,
             )
             .await
-            .map_err(RunError::Consumer)?;
+            .change_context(RunError::Consumer)?;
             report::line(consumers::opened_line(
                 &consumer_loop.name,
                 &consumer_loop.emitter,
@@ -1222,7 +1220,7 @@ impl OutputConsumers {
 }
 
 /// Runs the simulation, from connecting to the summary.
-async fn simulate(settings: Settings) -> Result<Finish, RunError> {
+async fn simulate(settings: Settings) -> Result<Finish, Report<RunError>> {
     let client = connect(&settings).await?;
     report::line(format!(
         "CONNECTED server={} domain={}",
@@ -1230,7 +1228,7 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
     ));
     let attached = clock::attach(&client, &settings.domain)
         .await
-        .map_err(RunError::Clock)?;
+        .change_context(RunError::Clock)?;
     report::line(clock::describe(&attached));
     let counters = Arc::new(Counters::default());
     // Ends the consumers, the clock follower and the inspector once the run finished.
@@ -1255,13 +1253,23 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
             return Err(error);
         }
     };
-    let effects = Arc::new(Mutex::new(EffectStore::open(&settings.effects).await?));
+    let effects = Arc::new(Mutex::new(
+        EffectStore::open(&settings.effects)
+            .await
+            .change_context(RunError::Effects)?,
+    ));
     let unresolved = if settings.replay {
-        Ledger::unresolved(&settings.ledger).await?
+        Ledger::unresolved(&settings.ledger)
+            .await
+            .change_context(RunError::Ledger)?
     } else {
         Vec::new()
     };
-    let ledger = Arc::new(Ledger::open(&settings.ledger).await?);
+    let ledger = Arc::new(
+        Ledger::open(&settings.ledger)
+            .await
+            .change_context(RunError::Ledger)?,
+    );
     let (generations, following) = watch::channel(generation);
     let (refused, _) = watch::channel(None);
     let shared = Shared {
@@ -1284,7 +1292,7 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
         Output::Rejections,
     )
     .await
-    .map_err(RunError::Consumer)?;
+    .change_context(RunError::Consumer)?;
     report::line(consumers::opened_line(
         "rejections",
         &settings.rejections,
@@ -1315,12 +1323,13 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
 
     let producer = open_producer(&client, &settings, OpenIntent::CurrentGeneration)
         .await
-        .map_err(RunError::Producer)?;
+        .change_context(RunError::Producer)?;
     report::line(producer_line(&settings, &producer));
     let Some(paced) = clock.paced(generation) else {
-        return Err(RunError::Clock(Report::new(ClockError::Changed {
+        return Err(Report::new(ClockError::Changed {
             domain: settings.domain.clone(),
-        })));
+        })
+        .change_context(RunError::Clock));
     };
     let inspector = settings.inspect_every.map(|every| {
         nervix_primitives::task::spawn(
@@ -1368,7 +1377,11 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
     if opened != generation {
         continuing = planner.follow(Pace::Paced { generation: opened }).await?;
     }
-    planner.ledger.generation(planner.generation).await?;
+    planner
+        .ledger
+        .generation(planner.generation)
+        .await
+        .change_context(RunError::Ledger)?;
     counters.generation(planner.generation);
     report::line(format!("READY generation={}", planner.generation));
     if continuing {
@@ -1381,7 +1394,7 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
             // A refused output cannot finish the held batches, even if planning already ended.
             stop.cancel();
             interrupt.abort();
-            return Err(RunError::Consumer(error));
+            return Err(error.change_context(RunError::Consumer));
         }
         missing = async {
             let missing = planner.settle(planner.settings.deadline).await;
@@ -1423,13 +1436,13 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
     report::line(counters.summary());
     let refusal = shared.refused.send_replace(None);
     if let Some(error) = refusal {
-        return Err(RunError::Consumer(error));
+        return Err(error.change_context(RunError::Consumer));
     }
     if missing > 0 {
-        return Err(RunError::Deadline {
+        return Err(Report::new(RunError::Deadline {
             outstanding: missing,
             deadline: planner.settings.deadline,
-        });
+        }));
     }
     if counters.all_completed() {
         return Ok(Finish::Completed);
@@ -1525,16 +1538,20 @@ mod tests {
         assert_eq!(Finish::Unresolved.exit_code(), ExitCode::from(3));
         assert_eq!(Finish::Configuration.exit_code(), ExitCode::from(2));
         assert_eq!(Finish::Failed.exit_code(), ExitCode::from(1));
-        let stopped = RunError::Clock(Report::new(ClockError::Stopped {
+        let stopped = Report::new(ClockError::Stopped {
             domain: DomainName::parse("paced_simulation").assured("the name is valid"),
             generation: 0,
-        }));
-        assert_eq!(stopped.finish(), Finish::Configuration);
-        assert_eq!(
-            stopped.to_string(),
+        })
+        .change_context(RunError::Clock);
+        assert_eq!(stopped.current_context().finish(), Finish::Configuration);
+        assert!(matches!(
+            stopped.downcast_ref::<ClockError>(),
+            Some(ClockError::Stopped { generation: 0, .. })
+        ));
+        assert!(format!("{stopped:#}").contains(
             "the clock of domain 'paced_simulation' is stopped at generation 0; START the domain \
              before running the simulation"
-        );
+        ));
         let deadline = RunError::Deadline {
             outstanding: 2,
             deadline: Duration::from_secs(1),

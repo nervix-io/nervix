@@ -8,6 +8,11 @@
 //!   consensus and vocabulary generators.
 //! - **Must not know.** Raft scheduling, transport, or how commands are applied.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::ClusterNodeName;
 

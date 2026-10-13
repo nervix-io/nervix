@@ -8,6 +8,11 @@
 //!   boundary's channels and the server Shuttle runner.
 //! - **Must not know.** Archive encodings, stable storage or the interconnect.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};

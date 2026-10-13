@@ -104,10 +104,12 @@ used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-dr
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
 because stopping them is what releases the node's tasks, connections, and storage. The interconnect
-applies its own ten-second transport drain. Closing the node's databases flushes and joins their
-background work synchronously, so the services that own them are dropped last, as one job on the
-node's filesystem storage workers; a node that cannot take that job reports teardown `Abandoned`.
-The deadline supervisor, not those bounds, is what guarantees the process ends.
+applies its own ten-second transport drain. Closing the node's databases synchronizes their journals
+and blocks until their background workers have left, so the services that own them are dropped
+last, as one job on the node's filesystem storage workers; a node that cannot take that job reports
+teardown `Abandoned`. A background worker whose flush or compaction failed never holds that close
+open; see [Terminal Teardown](#terminal-teardown). The deadline supervisor, not those bounds, is what
+guarantees the process ends.
 
 ### Exit Status
 
@@ -387,9 +389,9 @@ Each domain therefore advances independently through three states:
 
 A WASM processor branch keeps the acknowledgements of its latest guest callback open until that
 callback's checkpoint reaches stable storage and every assigned replica, so a drain waits for the
-checkpoint as it waits for any other outstanding acknowledgement. The checkpoint's ten-second
-deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
-it held.
+checkpoint as it waits for any other outstanding acknowledgement. The checkpoint has a
+ninety-second completion deadline, while the drain timeout may end the node's wait sooner. A
+checkpoint that cannot complete fails and negatively acknowledges what it held.
 
 Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
 branch tasks one of its own. A processor task still stopping its branches when its grace ends is
@@ -704,17 +706,38 @@ publication; the replica's assignment token still fences installation if ownersh
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
-handles. Terminal teardown does not finish until both database locks have been released. See
+handles. Terminal teardown does not finish until both database locks have been released. A build
+with the `testing` feature is the exception: its fault injection keeps an observer of each running
+node's consensus state, so an in-process test node's consensus database closes only once the
+scenario harness gives that registration back, after the node has stopped; see
+[Integration Test Lifecycle](./integration-test-lifecycle.md#cluster-teardown). See
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
+
+Releasing a database stops its background workers, which flush memtables into tables and compact
+them, and waits until none is left. A worker normally leaves when it takes its stop request, but a
+flush or compaction that fails, for example on a full or failing disk, ends its worker at once,
+without taking one. The close never waits for such a worker to answer. It keeps checking whether
+any worker is left, discards the flushes and compactions still queued, and finishes once the last
+worker is gone, so a storage failure during the close cannot hold terminal teardown open. Discarding
+that work loses nothing: every write it would have moved into a table is in the database's journal,
+which the close synchronizes and the next start replays. The storage engine logs each failed worker
+at `error` as `Worker #N crashed` with its cause, and a journal it cannot synchronize as
+`Flush error on drop`. Either failure reaches the node's log, while teardown goes on to release the
+lock.
 
 The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
 and peer protocol owners. An ending peer owner cancels unadmitted records and releases item and
 terminal-outcome permits even if the runtime retains an intake already admitted; that intake's
-verdict remains admitted. Decoded metadata stays charged while a borrower keeps it. Runtime
+verdict remains admitted. A batch the runtime holds back for room for its acknowledgement watches
+is unadmitted, so that cancellation ends its hold, and so does the end of the relay intake lane
+when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
-queues, and negatively resolves remaining volatile correlations exactly once. No ACK owner state
-is stored for restart. The interconnect also retires the pool
+queues, and negatively resolves remaining volatile correlations exactly once. The once-a-second
+silence sweep is one of the joined tasks and observes the cancellation between sweeps, so the join
+waits for at most the sweep in progress; that sweep, like the resolution that follows, visits only
+the correlation positions the node's deliveries and admissions have claimed, never its fixed
+capacity. No ACK owner state is stored for restart. The interconnect also retires the pool
 connections the node opened, giving their leased streams up to ten seconds before closing whatever
 remains. Connections that peers opened to the node close at once, together with the handlers still
 serving their streams, so a peer's request the node has not answered fails instead of completing.

@@ -9,6 +9,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "connection and peer registration install or retire concrete transport \
@@ -95,7 +102,8 @@ use body::{read_body, read_body_into, send_body, send_response, send_static_erro
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
-    ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
+    ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
+    DuplexSender, EncodedMessage,
 };
 use relay_owner::{RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;
@@ -661,6 +669,14 @@ impl std::fmt::Debug for RelayAdmission {
 }
 
 impl RelayAdmission {
+    /// Resolves once this attempt can no longer be admitted: its sender cancelled it, its peer
+    /// ended or changed process, or the transport rejected it. An application that holds the
+    /// received batch back before it decides admission stops holding it then; [`Self::admit`]
+    /// reports the same verdict.
+    pub async fn cancelled(&self) {
+        self.record.cancellation.cancelled().await;
+    }
+
     pub fn admit(&self) -> RelayAdmissionDecision {
         self.record.mark_admitted();
         match self.record.choice.current() {

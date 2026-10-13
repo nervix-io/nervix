@@ -5,6 +5,11 @@
 //! - **Depends on.** The production binding, wire views and vocabulary test generators.
 //! - **Must not know.** Runtime Arrow arrays or session transport scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{ptr, slice};
 
 use meticulous::{OptionExt as _, ResultExt as _};

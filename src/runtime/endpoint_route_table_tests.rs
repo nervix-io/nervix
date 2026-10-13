@@ -5,6 +5,11 @@
 //! - **Depends on.** The production endpoint table and typed domain identities.
 //! - **Must not know.** HTTP transport, decoding, or graph scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use meticulous::ResultExt as _;

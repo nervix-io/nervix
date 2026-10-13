@@ -6,9 +6,17 @@
 //! - **Depends on.** The node resolver and Reqwest's public DNS traits.
 //! - **Must not know.** Connector configuration, HTTP requests, Iceberg tables, or retry policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{error::Error, net::SocketAddr};
 
-use crate::DnsResolver;
+use crate::{DnsLookupReport, DnsResolver};
 
 type ResolveError = Box<dyn Error + Send + Sync>;
 type Addresses = Box<dyn Iterator<Item = SocketAddr> + Send>;
@@ -18,7 +26,7 @@ impl DnsResolver {
         let addresses = self
             .hook_addresses(&name)
             .await
-            .map_err(|report| -> ResolveError { Box::new(report.current_context().clone()) })?;
+            .map_err(|report| -> ResolveError { Box::new(DnsLookupReport::from(report)) })?;
         let mut sockets = Vec::with_capacity(addresses.len());
         for ip in addresses {
             // Reqwest gives an address whose port is zero the URL's port, or its scheme's default.

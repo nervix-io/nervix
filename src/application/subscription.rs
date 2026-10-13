@@ -1,6 +1,6 @@
 //! Read-only filtered views a session attaches to a relay.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Subscription creation and deletion, the per-session subscription set and the
 //!   generation each subscription is opened with, the lifecycle every subscription moves through,
@@ -31,6 +31,14 @@
 //!
 //! A name reused after deletion opens a new generation, so frames about an earlier generation can
 //! never be taken for a later one.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session subscription adapter owns parsed requests and client lane results"
+    )
+)]
 
 mod delivery;
 mod interest;
@@ -665,7 +673,7 @@ async fn select_subscription_rows(
                 Ok(record) => {
                     execute_subscription_predicate_on_record(executor, predicate, &record, now)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| format!("{error:#}"))
                 }
                 Err(error) => Err(error.to_string()),
             };
@@ -995,7 +1003,9 @@ impl SessionServiceImpl {
         while let Some((node_id, result)) = checks.next().await {
             nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
-                errors.insert(node_id.clone(), error);
+                errors.insert(node_id.clone(), error).discarded(
+                    "the latest check for this node supersedes its previous observation failure",
+                );
             }
         }
         let nodes = errors.keys().cloned().collect();
@@ -1629,6 +1639,10 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

@@ -7,6 +7,11 @@
 //! - **Depends on.** The codec and wire-schema Models and the schema rules.
 //! - **Must not know.** How a codec is instantiated at runtime.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashSet, HashSetExt};
 use error_stack::Report;
 use nervix_jaq::CompiledJaqProgram;

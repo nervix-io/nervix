@@ -31,6 +31,11 @@
 //! - **Must not know.** What a finding means for the process that reports it: whether it is
 //!   rendered, recorded as evidence, or ends the process belongs to the sink the installer supplies.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64, panic::Location, time::SystemTime};
 
 use meticulous::ResultExt as _;
@@ -250,6 +255,13 @@ fn byte_count(length: usize) -> u64 {
 
 /// Why a kept text is not one [`BoundedText::new`] could have produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "bounded diagnostic text construction returns a pure validation refusal"
+    )
+)]
 pub enum TextOutOfBounds {
     /// The kept text is longer than the bound.
     Kept { bytes: u64 },
@@ -434,6 +446,13 @@ impl ActiveCycle {
 
 /// Why a cycle is not one the detector reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "bounded cycle construction returns a pure validation refusal"
+    )
+)]
 pub enum CycleOutOfBounds {
     /// A cycle has at least one thread.
     Empty,

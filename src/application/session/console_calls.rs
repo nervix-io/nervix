@@ -25,6 +25,11 @@
 //! that says so, as a native gRPC call is cut when admission closes, so no client holds the drain
 //! or the process open. A restore admitted with its whole archive goes on without its call.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     fmt::Display,
     future::ready,

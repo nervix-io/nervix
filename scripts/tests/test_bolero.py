@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 import contextlib
+import hashlib
 import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -94,6 +96,7 @@ class InventoryTests(unittest.TestCase):
             "endpoint-route-table",
             "relay-channel-lifetimes",
             "interconnect-slot-lifetimes",
+            "runtime-checkpoint-description-wire",
             "remote-correlation-lifetimes",
             "relay-admission-owners",
             "client-emitter-wire",
@@ -221,8 +224,34 @@ class InventoryTests(unittest.TestCase):
             "remote-relay-rows-malformed",
             "relay-wire-messages",
             "relay-wire-messages-malformed",
+            "client-producer-link-frames",
+            "client-producer-link-frames-malformed",
+            "client-consumer-stream-frames",
+            "client-consumer-stream-frames-malformed",
+            "client-emitter-deliveries",
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
+            "expiry-map-operations",
+            "vm-decimal-rounding-floats",
+            "vm-decimal-rounding-integers",
+            "approx-into-rounding",
+            "approx-into-exact",
+            "simd-json-escapes",
+            "simd-paced-admission",
+            "simd-elapsed-histograms",
+            "simd-flag-packing",
+            "simd-window-runs",
+            "columnar-json-rows",
+            "bounded-write-limits",
+            "connector-row-request-division",
+            "emitter-batch-subdivision",
+            "emitter-batch-packing",
+            "codec-bounded-encodings",
+            "emitter-row-preparations",
+            "emitter-retained-payloads",
+            "sqs-batch-requests",
+            "mqtt-publish-packets",
+            "postgres-insert-measures",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -246,6 +275,15 @@ class InventoryTests(unittest.TestCase):
             "nervix-wasm",
             "nervix-wasm-sdk",
             "nervix-jaq",
+            "nervix-expiry-map",
+            "nervix-vm",
+            "nervix-approx-into",
+            "nervix-columnar-json",
+            "nervix-bounded-write",
+            "nervix-connector",
+            "nervix-connector-sqs",
+            "nervix-connector-mqtt",
+            "nervix-connector-postgres",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
@@ -324,10 +362,29 @@ class InventoryTests(unittest.TestCase):
         self.assert_invalid_inventory(text + '\n[extra]\nvalue = 1\n',
                                       "only tool and target")
         self.assert_invalid_inventory(
-            text.replace('campaign_fuzz_seconds = 300',
-                         'campaign_fuzz_seconds = 300\nextra = 1', 1),
+            text.replace('pr_fuzz_seconds = 30', 'pr_fuzz_seconds = 30\nextra = 1', 1),
             "tool section",
         )
+
+    def test_prepared_targets_name_distinct_registered_harnesses(self) -> None:
+        inventory = bolero.load_inventory()
+        self.assertEqual(inventory.prepared_targets, ("registry-archived-models", "client-arrow-rows"))
+        self.assertEqual(
+            {harness.describe() for harness in inventory.prepared_harnesses()},
+            {"nervix-server lib (no features)", "nervix-server lib (testing)"},
+        )
+        text = bolero.INVENTORY.read_text()
+        prepared = 'prepared_targets = ["registry-archived-models", "client-arrow-rows"]'
+        for value, message in (
+            ('"registry-archived-models"', "must list registered target ids"),
+            ('["registry-archived-models", 1]', "must list registered target ids"),
+            ('["absent"]', "unregistered targets"),
+            ('["registry-archived-models", "relay-channel-lifetimes"]', "one harness more than once"),
+        ):
+            with self.subTest(value=value):
+                self.assert_invalid_inventory(
+                    text.replace(prepared, f"prepared_targets = {value}", 1), message
+                )
         self.assert_invalid_inventory(
             text.replace('domain_version = 1', 'unknown = 1', 1),
             "missing or unknown fields",
@@ -1076,38 +1133,232 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(report["command"][0],
                              "BOLERO_LIBFUZZER_ARGS=" + observed["BOLERO_LIBFUZZER_ARGS"])
 
-    def test_qualification_uses_bounded_engine_calls_without_function_progress(self) -> None:
+    def qualification_world(self, root: pathlib.Path):
+        """Run directories under a temporary repository root, with numbered attempts."""
+        runs = root / "target/bolero/runs"
+        attempts = iter(range(1000))
+
+        def run_dir(target: bolero.Target) -> pathlib.Path:
+            path = runs / target.id / str(next(attempts))
+            path.mkdir(parents=True)
+            return path
+
+        return runs, run_dir
+
+    def qualification_cargo(self, sanitizer_report: str):
+        """Plays cargo-bolero for the qualification package and cargo's test listing."""
+
+        def execute(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "--crashes-dir" in args:
+                crashes = pathlib.Path(args[args.index("--crashes-dir") + 1])
+                if args[-1].endswith("fails_on_marker"):
+                    (crashes / "crash-input").write_bytes(b"\x42\x00")
+                if args[-1].endswith("memory_error_on_marker"):
+                    (crashes / "crash-input").write_bytes(b"\x33")
+                    pathlib.Path(kwargs["log"]).write_text(sanitizer_report)
+            return subprocess.CompletedProcess(args, 1, "timeout or intentional failure", "")
+
+        def functions(manifest: pathlib.Path) -> list[tuple[str, bool]]:
+            source = (manifest.parent / "src/lib.rs").read_text()
+            found = []
+            for name in re.findall(r"fn (bolero_\w+)\(", source):
+                found.append((name, f"#[ignore]\n    fn {name}(" in source))
+            return found
+
+        def listed(package, test_target, *, ignored, features, manifest=None):
+            return [f"tests::{name}" for name, skipped in functions(manifest) if skipped == ignored]
+
+        def compiled(package, test_target, *, features, manifest=None):
+            return [
+                {"package_name": package, "test_name": f"tests::{name}",
+                 "work_dir": str(manifest.parent / "src/__fuzz__" / f"tests__{name}")}
+                for name, skipped in functions(manifest) if not skipped
+            ]
+
+        return execute, listed, compiled
+
+    def test_qualification_records_every_way_a_run_must_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            minimized = root / "minimized"
-            minimized.write_bytes(b"\x42")
+            runs, run_dir = self.qualification_world(root)
+            execute, listed, compiled = self.qualification_cargo(
+                "==7==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+            )
 
-            def run_dir(target: bolero.Target) -> pathlib.Path:
-                path = root / target.id
-                path.mkdir()
-                return path
-
-            def execute(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if args[-1].endswith("fails_on_marker") and "--crashes-dir" in args:
-                    crashes = pathlib.Path(args[args.index("--crashes-dir") + 1])
-                    (crashes / "crash-input").write_bytes(b"\x42\x00")
-                return subprocess.CompletedProcess(args, 1, "timeout or intentional failure", "")
+            def reduce(inventory, target, failure):
+                path = run_dir(target)
+                minimized = path / "minimized"
+                minimized.write_bytes(b"\x42")
+                record = {"target": target.id, "saved_inputs": {
+                    str(minimized.relative_to(root)): hashlib.sha256(b"\x42").hexdigest()}}
+                (path / "metadata.json").write_text(json.dumps(record))
+                return minimized
 
             with (
+                mock.patch.object(bolero, "ROOT", root),
+                mock.patch.object(bolero, "RUNS", runs),
                 mock.patch.object(bolero, "run_dir", side_effect=run_dir),
                 mock.patch.object(bolero, "verify_tool"),
                 mock.patch.object(bolero, "command", side_effect=execute) as commands,
-                mock.patch.object(bolero, "reduce_failure", return_value=minimized),
+                mock.patch.object(bolero, "listed_tests", side_effect=listed),
+                mock.patch.object(bolero, "compiled_targets", side_effect=compiled),
+                mock.patch.object(bolero, "reduce_failure", side_effect=reduce),
                 mock.patch.object(bolero, "replay", return_value=101),
+                mock.patch.object(bolero, "replay_sanitizer", return_value=1) as sanitizer_replay,
                 mock.patch.object(bolero, "metadata"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 bolero.qualify(self.inventory)
-            self.assertEqual(len(commands.call_args_list), 4)
+            record = json.loads(next(runs.glob("qualification-assertion/0/qualification.json")).read_text())
+            self.assertEqual(record["verdict"], "qualified")
+            self.assertEqual([case["case"] for case in record["cases"]], [
+                "property-mismatch", "minimization-and-replay", "corrupt-replay-input",
+                "unreadable-replay-record", "sanitizer-finding", "sanitizer-replay", "timeout",
+                "engine-failure", "missing-engine-target", "discovery-control", "discovery-ignored",
+                "discovery-unregistered", "discovery-missing", "empty-selection", "empty-shard",
+                "empty-campaign",
+            ])
+            cases = {case["case"]: case for case in record["cases"]}
+            self.assertIn("AddressSanitizer: heap-buffer-overflow", cases["sanitizer-finding"]["observed"])
+            self.assertIn("ignored Bolero targets", cases["discovery-ignored"]["observed"])
+            self.assertIn("has digest", cases["corrupt-replay-input"]["observed"])
+            self.assertTrue(all(case["requirement"] for case in record["cases"]))
+            self.assertEqual(sanitizer_replay.call_args.args[1].id, "qualification-sanitizer")
+            self.assertEqual(len(commands.call_args_list), 5)
             for call in commands.call_args_list:
                 self.assertIn("--engine-args=-print_funcs=0", call.args[0])
                 expected_timeout = 10 if call.args[0][-1].endswith("times_out_on_marker") else 1800
                 self.assertEqual(call.kwargs["timeout"], expected_timeout)
+            generated = runs / "qualification-assertion/0/discovery-ignored/src/lib.rs"
+            self.assertIn("#[ignore]\n    fn bolero_ignored()", generated.read_text())
+            self.assertTrue((generated.parent.parent / "Cargo.lock").is_file())
+
+    def test_qualification_fails_when_a_memory_error_goes_unreported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            runs, run_dir = self.qualification_world(root)
+            execute, listed, compiled = self.qualification_cargo("no report\n")
+
+            def reduce(inventory, target, failure):
+                path = run_dir(target)
+                minimized = path / "minimized"
+                minimized.write_bytes(b"\x42")
+                (path / "metadata.json").write_text(json.dumps({"target": target.id, "saved_inputs": {
+                    str(minimized.relative_to(root)): hashlib.sha256(b"\x42").hexdigest()}}))
+                return minimized
+
+            with (
+                mock.patch.object(bolero, "ROOT", root),
+                mock.patch.object(bolero, "RUNS", runs),
+                mock.patch.object(bolero, "run_dir", side_effect=run_dir),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "command", side_effect=execute),
+                mock.patch.object(bolero, "reduce_failure", side_effect=reduce),
+                mock.patch.object(bolero, "replay", return_value=101),
+                mock.patch.object(bolero, "metadata") as metadata,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "memory error did not fail"):
+                    bolero.qualify(self.inventory)
+            record = json.loads(next(runs.glob("qualification-assertion/0/qualification.json")).read_text())
+            self.assertEqual(record["verdict"], "failed")
+            results = [call.args[3] for call in metadata.call_args_list]
+            self.assertIn("missing sanitizer finding", results)
+            self.assertEqual(results[-1], "failed qualification")
+
+    def test_a_qualification_case_must_fail_for_its_own_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            qualification = bolero.Qualification(pathlib.Path(directory))
+            with self.assertRaisesRegex(bolero.BoleroError, "but it succeeded"):
+                qualification.expect_refusal("case", "it must fail", "reason", lambda: None)
+
+            def other() -> None:
+                raise bolero.BoleroError("another failure")
+
+            with self.assertRaisesRegex(bolero.BoleroError, "failed for another reason"):
+                qualification.expect_refusal("case", "it must fail", "reason", other)
+            qualification.record("kept", "a requirement", "observed", pathlib.Path("/outside"))
+            qualification.write("failed")
+            record = json.loads((pathlib.Path(directory) / "qualification.json").read_text())
+            self.assertEqual(record["cases"], [{"case": "kept", "requirement": "a requirement",
+                                                "observed": "observed", "evidence": ["/outside"]}])
+
+    def test_sanitizer_replay_runs_the_exact_input_once_in_the_instrumented_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            failure = temporary / "failure"
+            failure.write_bytes(b"\x33")
+            for status, outcome in ((1, "instrumented replay reproduced"), (0, "instrumented replay not reproduced")):
+                run = temporary / f"run-{status}"
+                run.mkdir()
+                result = subprocess.CompletedProcess([], status, "ERROR: AddressSanitizer", "")
+                with (
+                    self.subTest(status=status),
+                    mock.patch.object(bolero, "verify_tool"),
+                    mock.patch.object(bolero, "run_dir", return_value=run),
+                    mock.patch.object(bolero, "build_instrumented", return_value=bolero.ROOT / "fake-binary"),
+                    mock.patch.object(bolero, "run_instrumented", return_value=result) as instrumented,
+                    mock.patch.object(bolero, "metadata") as metadata,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(bolero.replay_sanitizer(self.inventory, self.target, failure), status)
+                flags = instrumented.call_args.args[2]
+                self.assertEqual(flags[0], str(run / "input"))
+                self.assertIn(f"-artifact_prefix={run}/", flags)
+                self.assertIn("-print_funcs=0", flags)
+                self.assertEqual((run / "input").read_bytes(), b"\x33")
+                self.assertEqual(metadata.call_args.args[3], outcome)
+                self.assertEqual(metadata.call_args.args[5]["replayed_input_sha256"],
+                                 hashlib.sha256(b"\x33").hexdigest())
+            run = temporary / "run-failed-build"
+            run.mkdir()
+            with (
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "build_instrumented", side_effect=bolero.BoleroError("build")),
+                mock.patch.object(bolero, "metadata") as metadata,
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "build"):
+                    bolero.replay_sanitizer(self.inventory, self.target, failure)
+            self.assertEqual(metadata.call_args.args[3], "failed")
+
+    def test_a_saved_input_must_match_the_record_of_its_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            runs = root / "target/bolero/runs"
+            run = runs / self.target.id / "1"
+            (run / "crashes").mkdir(parents=True)
+            saved = run / "crashes" / "crash-1"
+            saved.write_bytes(b"\x01\x02")
+            name = str(saved.relative_to(root))
+            record = run / "metadata.json"
+            outside = root / "elsewhere"
+            outside.write_bytes(b"\x01")
+            with mock.patch.object(bolero, "ROOT", root), mock.patch.object(bolero, "RUNS", runs):
+                bolero.verify_replay_record(self.target, outside)
+                for content, reason in (
+                    (None, "cannot be read"),
+                    ("{", "cannot be read"),
+                    (json.dumps({"target": "another"}), "not a record of"),
+                    (json.dumps({"target": self.target.id, "saved_inputs": {}}), "does not hold"),
+                    (json.dumps({"target": self.target.id, "saved_inputs": {name: "0" * 64}}), "has digest"),
+                ):
+                    with self.subTest(reason=reason):
+                        if content is None:
+                            record.unlink(missing_ok=True)
+                        else:
+                            record.write_text(content)
+                        with self.assertRaisesRegex(bolero.BoleroError, "corrupt replay record: .*" + reason):
+                            bolero.verify_replay_record(self.target, saved)
+                record.write_text(json.dumps({"target": self.target.id, "saved_inputs": {
+                    name: hashlib.sha256(b"\x01\x02").hexdigest()}}))
+                bolero.verify_replay_record(self.target, saved)
+                with self.assertRaisesRegex(bolero.BoleroError, "was saved by"):
+                    bolero.verify_replay_record(self.inventory.targets[1], saved)
+                loose = runs / self.target.id / "loose"
+                loose.write_bytes(b"\x01")
+                with self.assertRaisesRegex(bolero.BoleroError, "not inside a run directory"):
+                    bolero.verify_replay_record(self.target, loose)
 
     def test_replay_stages_exact_bytes_and_disables_random_cases(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1193,20 +1444,111 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("-print_funcs=0", reduce.call_args.args[2])
                 self.assertEqual(reduce.call_args.kwargs["timeout"], 1800)
 
-            def save_minimum(*args: object, **kwargs: object) -> None:
-                (run / "minimized").write_bytes(b"\x42")
+            def minimizing(verified_status: int):
+                def run(binary, target, flags, **kwargs):
+                    if "-minimize_crash=1" in flags:
+                        (run_path / "minimized").write_bytes(b"\x42")
+                        return subprocess.CompletedProcess([], 0, "", "")
+                    self.assertEqual(flags[0], str(run_path / "minimized"))
+                    self.assertIn(f"-artifact_prefix={run_path}/", flags)
+                    return subprocess.CompletedProcess([], verified_status, "", "")
+                return run
 
+            run_path = run
             with (
                 mock.patch.object(bolero, "verify_tool"),
                 mock.patch.object(bolero, "run_dir", return_value=run),
                 mock.patch.object(bolero, "build_instrumented",
                                   return_value=bolero.ROOT / "fake-binary"),
-                mock.patch.object(bolero, "run_instrumented", side_effect=save_minimum),
-                mock.patch.object(bolero, "replay", return_value=0),
-                mock.patch.object(bolero, "metadata"),
+                mock.patch.object(bolero, "run_instrumented", side_effect=minimizing(0)),
+                mock.patch.object(bolero, "replay", return_value=101),
+                mock.patch.object(bolero, "metadata") as metadata,
             ):
-                with self.assertRaisesRegex(bolero.BoleroError, "no longer fails"):
+                with self.assertRaisesRegex(bolero.BoleroError, "no longer fails the instrumented target"):
                     bolero.reduce_failure(self.inventory, self.target, failure)
+            self.assertEqual(metadata.call_args.args[3], "failed")
+            # A sanitizer finding still fails the instrumented target while ordinary replay passes;
+            # an assertion failure fails both. Either way the minimum is kept, with the ordinary result.
+            for ordinary, recorded in ((0, "passes"), (101, "fails")):
+                with (
+                    self.subTest(ordinary=ordinary),
+                    mock.patch.object(bolero, "verify_tool"),
+                    mock.patch.object(bolero, "run_dir", return_value=run),
+                    mock.patch.object(bolero, "build_instrumented",
+                                      return_value=bolero.ROOT / "fake-binary"),
+                    mock.patch.object(bolero, "run_instrumented", side_effect=minimizing(1)),
+                    mock.patch.object(bolero, "replay", return_value=ordinary),
+                    mock.patch.object(bolero, "metadata") as metadata,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(bolero.reduce_failure(self.inventory, self.target, failure),
+                                     run / "minimized")
+                self.assertEqual(metadata.call_args.args[3], "minimized")
+                self.assertEqual(metadata.call_args.args[5], {"ordinary_replay": recorded})
+
+
+class ShardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.inventory = bolero.load_inventory()
+        self.harnesses = len(bolero.harness_estimates(self.inventory))
+
+    def test_shard_numbers_name_one_part_of_a_count(self) -> None:
+        self.assertEqual(bolero.Shard.parse("2/3"), bolero.Shard(2, 3))
+        self.assertEqual(bolero.Shard(2, 3).describe(), {"number": 2, "count": 3})
+        for text in ("3", "a/b", "0/3", "4/3", "1/0", "-1/3", "1/3/4"):
+            with self.subTest(text=text), self.assertRaises(bolero.BoleroError):
+                bolero.Shard.parse(text)
+
+    def test_every_plan_runs_each_target_once_and_keeps_each_harness_whole(self) -> None:
+        identities = [target.id for target in self.inventory.targets]
+        for count in range(1, self.harnesses + 1):
+            with self.subTest(count=count):
+                plan = bolero.shard_plan(self.inventory, count)
+                self.assertEqual(len(plan), count)
+                self.assertTrue(all(plan))
+                selected = [target.id for shard in plan for target in shard]
+                self.assertEqual(sorted(selected), sorted(identities))
+                owners: dict[bolero.Harness, int] = {}
+                for number, shard in enumerate(plan):
+                    for target in shard:
+                        self.assertEqual(owners.setdefault(target.harness, number), number)
+                    # Each shard keeps the inventory's order, so its records list targets stably.
+                    self.assertEqual([target.id for target in shard],
+                                     [target_id for target_id in identities if target_id in {t.id for t in shard}])
+                self.assertEqual(bolero.shard_plan(self.inventory, count), plan)
+                self.assertEqual(bolero.plan_digest(bolero.shard_plan(self.inventory, count)), bolero.plan_digest(plan))
+
+    def test_prepared_server_harnesses_lead_separate_shards(self) -> None:
+        plan = bolero.shard_plan(self.inventory, 3)
+        described = bolero.describe_plan(self.inventory, 3)
+        self.assertEqual(described["plan_sha256"], bolero.plan_digest(plan))
+        self.assertEqual([shard["prepared_targets"] for shard in described["shards"]],
+                         [["registry-archived-models"], ["client-arrow-rows"], []])
+        self.assertEqual([shard["targets"] for shard in described["shards"]],
+                         [[target.id for target in shard] for shard in plan])
+        estimates = [shard["estimated_seconds"] for shard in described["shards"]]
+        # Longest-first dealing keeps every shard within one harness of the others.
+        largest = max(estimate.seconds for estimate in bolero.harness_estimates(self.inventory))
+        self.assertLessEqual(max(estimates) - min(estimates), largest)
+        self.assertNotEqual(bolero.plan_digest(plan), bolero.plan_digest(tuple(reversed(plan))))
+
+    def test_a_plan_that_would_leave_a_shard_empty_is_refused(self) -> None:
+        with self.assertRaisesRegex(bolero.BoleroError, "would select no target"):
+            bolero.shard_plan(self.inventory, self.harnesses + 1)
+        with self.assertRaisesRegex(bolero.BoleroError, "positive integer"):
+            bolero.shard_plan(self.inventory, 0)
+
+    def test_shard_preparation_builds_only_its_own_prepared_harnesses(self) -> None:
+        for number, expected in ((1, ["registry-archived-models"]), (2, ["client-arrow-rows"]), (3, [])):
+            with (
+                self.subTest(number=number),
+                mock.patch.object(bolero, "prepare_target") as prepare,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                bolero.prepare_shard(self.inventory, bolero.Shard(number, 3))
+            self.assertEqual([call.args[1].id for call in prepare.call_args_list], expected)
+            if not expected:
+                self.assertIn("builds no prepared harness", output.getvalue())
 
 
 class CliTests(unittest.TestCase):
@@ -1270,6 +1612,60 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(bolero, "reduce_failure") as reduce:
             self.assertEqual(self.invoke("reduce", "nspl-expression", "failure"), 0)
             reduce.assert_called_once()
+
+    def test_planning_and_combining_need_no_compiled_discovery(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["bolero.py", "plan", "3"]),
+            mock.patch.object(bolero, "discover") as discover,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(bolero.main(), 0)
+        discover.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["count"], 3)
+        with (
+            mock.patch.object(sys, "argv", ["bolero.py", "combine", "shards", "combined"]),
+            mock.patch.object(bolero, "discover") as discover,
+            mock.patch.object(bolero.coverage, "combine", return_value=pathlib.Path("combined")) as combine,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(bolero.main(), 0)
+        discover.assert_not_called()
+        root, inventory, evidence, output_path, plan_for, digest = combine.call_args.args
+        self.assertEqual((root, evidence, output_path), (bolero.ROOT, pathlib.Path("shards"), pathlib.Path("combined")))
+        self.assertEqual(plan_for(3), bolero.shard_plan(inventory, 3))
+        self.assertIs(digest, bolero.plan_digest)
+
+    def test_shard_routes_prepare_and_run_exactly_their_part(self) -> None:
+        with mock.patch.object(bolero, "prepare_shard") as prepare:
+            self.assertEqual(self.invoke("prepare-shard", "2/3"), 0)
+            prepare.assert_called_once_with(self.inventory, bolero.Shard(2, 3))
+        with mock.patch.object(bolero, "fuzz_targets") as fuzz:
+            self.assertEqual(self.invoke("fuzz-all", "5", "--shard", "2/3"), 0)
+            self.assertEqual(fuzz.call_args.args, (self.inventory, bolero.shard_plan(self.inventory, 3)[1],
+                                                   5, bolero.Shard(2, 3)))
+            self.assertEqual(self.invoke("fuzz-all"), 0)
+            self.assertEqual(fuzz.call_args.args, (self.inventory, self.inventory.targets, 30, bolero.Shard(1, 1)))
+            with self.assertRaisesRegex(bolero.BoleroError, "NUMBER/COUNT"):
+                self.invoke("fuzz-all", "5", "--shard", "two")
+
+    def test_sanitizer_replay_route_and_corrupt_records(self) -> None:
+        with mock.patch.object(bolero, "replay_sanitizer", return_value=1) as replay_sanitizer:
+            self.assertEqual(self.invoke("replay-sanitizer", "nspl-expression", "failure"), 1)
+            self.assertEqual(replay_sanitizer.call_args.args[1].id, "nspl-expression")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            runs = root / "target/bolero/runs"
+            saved = runs / "nspl-expression/1/crashes/crash-1"
+            saved.parent.mkdir(parents=True)
+            saved.write_bytes(b"\x01")
+            with (
+                mock.patch.object(bolero, "ROOT", root),
+                mock.patch.object(bolero, "RUNS", runs),
+                mock.patch.object(bolero, "replay") as replay,
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "corrupt replay record"):
+                    self.invoke("replay", "nspl-expression", str(saved))
+                replay.assert_not_called()
 
 
 if __name__ == "__main__":

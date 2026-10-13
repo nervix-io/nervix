@@ -153,6 +153,8 @@ checks = [
   "runtime::remote_dispatch::shuttle_tests::shuttle_delayed_events_cannot_resolve_a_reused_delivery_position",
   "runtime::remote_dispatch::shuttle_tests::shuttle_registration_racing_shutdown_leaves_no_unresolved_accepted_share",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_departed_admission_waiter_racing_its_reply_returns_one_position",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_a_first_claim_racing_a_sweep_is_counted_by_that_sweep_or_the_next",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_a_sweep_waits_for_no_position_a_side_has_not_claimed",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_a_retired_replication_ends_its_announcer",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_announcement_racing_the_replica_wait_is_never_missed",

@@ -15,6 +15,14 @@
 //! resumes and releases the lease before transferring that domain's staged sections into the
 //! final archive. Configuration-only and live captures have their own explicit cut semantics.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 mod assembly;
 mod branch_state_sections;
 pub(in crate::application) mod interconnect;
@@ -73,6 +81,13 @@ pub(in crate::application) struct CaptureSectionKey {
     pub(in crate::application) coordination: CoordinationIdentity,
     pub(in crate::application) domain: DomainName,
     pub(in crate::application) path: String,
+}
+
+/// One captured section's publication key, content kind, and quota-owned staged bytes.
+pub(super) struct CapturedSection {
+    key: CaptureSectionKey,
+    content: SectionContent,
+    artifact: StagedArtifact,
 }
 
 pub(in crate::application) struct CapturedSectionStage {

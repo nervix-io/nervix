@@ -6,6 +6,11 @@
 //! - **Depends on.** The state store's namespace fence, installation barrier and chunk encoding.
 //! - **Must not know.** Archive layouts, graph plans or restore consensus authority.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+
 use std::io::Read;
 
 use super::{generation::*, *};
@@ -172,6 +177,10 @@ impl CheckpointStreamWriter {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 pub(super) mod tests {
     use std::io::Cursor;
 

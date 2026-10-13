@@ -5,6 +5,11 @@
 //! - **Depends on.** Processor decisions, public Models, and test fixtures.
 //! - **Must not know.** Runtime payload execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{MessageErrorPolicy, OutputBranch, ParseAsType};
 
 use super::*;

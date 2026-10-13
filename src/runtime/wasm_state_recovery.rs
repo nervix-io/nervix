@@ -8,6 +8,11 @@
 //! - **Must not know.** Consensus, schedules, entity gates, or how a reset is coordinated. Whether
 //!   a refused lifetime still has an attempt left is decided from committed state, not here.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 /// How many refused lifetimes may be waiting for the control plane to decide at once.

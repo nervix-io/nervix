@@ -7,6 +7,14 @@
 //! - **Depends on.** The registry's active graph, the resource store and the VM's type inference.
 //! - **Must not know.** How a validated model is scheduled or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
@@ -127,12 +135,12 @@ enum InferencerBindingValidationError {
     InspectionTask { node: InferencerName, file: String },
     #[error("failed to inspect ONNX model '{file}' for inferencer '{node}': inspection panicked")]
     InspectionPanic { node: InferencerName, file: String },
-    #[error("failed to initialize ONNX session builder for inferencer '{node}': {source}")]
+    #[error("failed to initialize ONNX session builder for inferencer '{node}'")]
     SessionBuilder {
         node: InferencerName,
         source: ort::Error,
     },
-    #[error("failed to inspect ONNX model '{file}' for inferencer '{node}': {source}")]
+    #[error("failed to inspect ONNX model '{file}' for inferencer '{node}'")]
     SessionModel {
         node: InferencerName,
         file: String,
@@ -776,6 +784,21 @@ mod tests {
         assert!(
             matches!(error.current_context(), InferencerBindingValidationError::SessionModel { node, file, .. } if node == &processor.name && file == "model.onnx")
         );
+        let InferencerBindingValidationError::SessionModel { source: cause, .. } =
+            error.current_context()
+        else {
+            panic!("the inspection failure is the current context: {error:?}");
+        };
+        let cause = cause.to_string();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.starts_with(&format!(
+                "failed to inspect ONNX model 'model.onnx' for inferencer '{}': {cause}",
+                processor.name
+            )),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches(&cause).count(), 1, "{rendered}");
     }
 
     #[nervix_primitives::test]

@@ -11,6 +11,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "gossip membership and management health coordinate topology outside record \
@@ -72,6 +79,8 @@ const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
 const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
+/// The runtime revision through which every domain clock the node holds is the committed one.
+const KEY_DOMAIN_CLOCK_REVISION_INSTALLED: &str = "domain_clock_revision_installed";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 const GOSSIP_QUEUE_CAPACITY: usize = 1024;
@@ -80,6 +89,10 @@ const GOSSIP_OUTGOING_QUEUE_CAPACITY: usize = 4;
 /// Leaves room for the typed request fields inside the 64-KiB management-event limit.
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::value(cluster_access, reason = "gossip membership and cluster observations")
+)]
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
     chitchat: StdArc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
@@ -804,6 +817,10 @@ impl ClusterStateWatcher {
 #[derive(Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "configured cluster member identity")
+    )]
     pub node_id: ClusterNodeName,
     pub grpc_listen_addr: SocketAddr,
     pub client_advertise_url: NodeServiceUrl,
@@ -827,6 +844,13 @@ struct GossipExchange {
 /// The refusal is the exchange's answer on the wire, so the sending node learns why its message was
 /// not taken without parsing text.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed gossip wire answer carries a typed exchange refusal"
+    )
+)]
 enum GossipExchangeRefusal {
     #[error("a gossip message of {size} bytes exceeds the {limit}-byte bound")]
     Oversized { size: u64, limit: u64 },
@@ -1633,6 +1657,22 @@ impl ClusterHandle {
         revision: u64,
     ) -> BTreeSet<ClusterNodeIdentity> {
         self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await
+    }
+
+    /// Advertises that every domain clock this node holds, authority fence included, is the
+    /// committed one of runtime `revision`.
+    pub async fn set_local_domain_clock_revision_installed(&self, revision: u64) {
+        self.set_local_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
+            .await;
+    }
+
+    /// The incarnations whose domain clocks match runtime `revision` or a later one.
+    pub async fn nodes_with_domain_clocks_installed(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
             .await
     }
 

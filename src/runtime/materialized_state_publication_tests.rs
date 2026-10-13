@@ -3,6 +3,11 @@
 //! May depend on: the production materialized owner, Arrow carriers and shared model harness.
 //! Must not know: control-plane transactions or publication backend internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use ahash::HashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{

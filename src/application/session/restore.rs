@@ -12,6 +12,11 @@
 //! otherwise with the outcome of the restore as the persistent command it is. Only a failure of
 //! the transport itself ends the stream with the transport's own error.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use futures_util::{Stream, StreamExt as _};
 use nervix_client_wire::{
     RequestId, RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply,

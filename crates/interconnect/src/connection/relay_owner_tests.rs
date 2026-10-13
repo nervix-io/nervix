@@ -5,6 +5,11 @@
 //! - **Depends on.** Current relay metadata, bounded permits and the primitive boundary.
 //! - **Must not know.** Runtime graphs, serialized live ACKs or external connectors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation};
 
 use super::*;
@@ -143,6 +148,33 @@ fn ending_a_peer_releases_capacity_even_when_an_intake_keeps_the_record() {
     );
     assert!(!fixture.owner.bind_epoch(202, 2, true));
     assert_eq!(fixture.executor.snapshot().relay_memory.reserved_bytes, 0);
+}
+
+/// An intake that holds its received batch back before deciding admission learns when the attempt
+/// can no longer be admitted: its sender cancels it, or its peer ends.
+#[test]
+fn a_held_intake_observes_the_cancellation_of_its_attempt() {
+    use futures_util::FutureExt as _;
+
+    let fixture = PeerFixture::new(2);
+    let withdrawn = fixture.register(1, 1);
+    let held = RelayAdmission {
+        record: fixture.register(2, 2),
+    };
+    let withdrawn_intake = RelayAdmission {
+        record: withdrawn.clone(),
+    };
+    assert!(withdrawn_intake.cancelled().now_or_never().is_none());
+    assert!(held.cancelled().now_or_never().is_none());
+
+    assert_eq!(withdrawn.cancel(), RelayAdmissionStatus::Cancelled);
+    assert!(withdrawn_intake.cancelled().now_or_never().is_some());
+    assert!(held.cancelled().now_or_never().is_none());
+
+    fixture.owner.end();
+    assert!(held.cancelled().now_or_never().is_some());
+    assert_eq!(withdrawn_intake.admit(), RelayAdmissionDecision::Cancelled);
+    assert_eq!(held.admit(), RelayAdmissionDecision::Cancelled);
 }
 
 #[test]

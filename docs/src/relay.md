@@ -141,7 +141,10 @@ state, when enabled, is the only replicated part of the relay; it is not a secon
 `CAPACITY <n>` controls the single buffer on the relay owner. It is one cluster-wide
 backpressure boundary, not a per-producer, per-consumer, or per-branch capacity. If downstream
 runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
-buffer and the fixed dispatch slots leading to it are occupied.
+buffer and the fixed dispatch slots leading to it are occupied. A producer on another node also
+waits while the owner has no relay memory left for the acknowledgement watches of the rows it
+sends, until the owner has reported enough earlier rows; see
+[Capacity Planning](./capacity-planning.md).
 
 The capacity is a positive integer, through `18446744073709551615` on native 64-bit targets.
 Creation and `ALTER RELAY ... SET CAPACITY` retain the exact accepted value in storage, replicated

@@ -9,6 +9,11 @@
 //! - **Must not know.** The NATS driver, subscription lifecycle, NSPL parsing, registry
 //!   validation, or placement computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_connector_nats::{NatsSource, NatsSourcePlan};
 
