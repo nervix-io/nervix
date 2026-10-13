@@ -650,6 +650,88 @@ async fn publish_sends_each_prepared_request_unchanged_over_grpc_and_answers_for
     }
 }
 
+#[nervix_primitives::test]
+async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer_expires() {
+    use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+
+    let (endpoint, received) = grpc_receiver(Vec::new()).await;
+    let name = "otel-recovery.nervix.test";
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("a loopback DNS port is available");
+    authority.set(
+        name,
+        DnsAnswer::NameNotFound {
+            negative_ttl: Duration::from_secs(1),
+        },
+    );
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:1 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = nervix_dns::DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let named_endpoint = endpoint.replacen("127.0.0.1", name, 1);
+    let mut sink = logs_sink(&endpoint, "grpc", None, None).await;
+    sink.client.transport = OtelSink::transport_from_config(
+        &config(&[
+            ("endpoint", &named_endpoint),
+            ("protocol", "grpc"),
+            ("timeout_ms", "5000"),
+        ]),
+        &dns,
+    )
+    .assured("a named endpoint constructs a lazy gRPC channel");
+    let batch = mapped_logs(&[Some("dns-recovery-record")]);
+    let preparation = prepare_all(&mut sink, &batch).await;
+
+    let failed = sink.publish(handed_over(&preparation)).await.into_parts();
+    assert!(failed.infrastructure_error.is_some());
+    assert!(failed.delivered.is_empty());
+    assert!(failed.rejected.is_empty());
+    assert!(received.lock().is_empty());
+    let questions_before_publication = authority.questions_for(name);
+    assert!(questions_before_publication > 0);
+
+    authority.set(
+        name,
+        DnsAnswer::Addresses {
+            addresses: vec![std::net::Ipv4Addr::LOCALHOST.into()],
+            ttl: Duration::from_secs(1),
+        },
+    );
+    let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let outcome =
+            nervix_primitives::time::timeout_at(deadline, sink.publish(handed_over(&preparation)))
+                .await
+                .assured("the prepared export recovers within the existing public ten-second bound")
+                .into_parts();
+        assert!(outcome.rejected.is_empty());
+        if outcome.infrastructure_error.is_none() {
+            assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+            break;
+        }
+        assert!(outcome.delivered.is_empty());
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(authority.questions_for(name) > questions_before_publication);
+    let received = received.lock();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].encode_to_vec(), preparation.requests[0].body);
+}
+
 #[test]
 fn a_grpc_export_without_an_answer_is_retried_whatever_code_tonic_reports() {
     let lost_connection =

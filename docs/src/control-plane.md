@@ -15,6 +15,12 @@ The most important property is that control-plane state is authoritative. A runt
 
 Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
 
+Schedule planning captures live voter incarnations separately from destination candidates, which
+exclude both terminating incarnations and the captured consensus cordons. Revalidation uses the
+same composed candidate set. A cordoned former owner beginning to terminate leaves that set
+unchanged, while its loss or replacement incarnation still invalidates the plan. The consensus
+publication fence independently checks the captured membership and cordons.
+
 In practice, the control plane covers:
 
 - domain creation and selection
@@ -605,6 +611,14 @@ admission stop. The drain includes relay rings, processor work, moved-ingestor A
 buffers and active publishing, and an Iceberg emitter's staged commit. Internal relays whose every
 producer moves with the same hard group remain open so admitted work can reach the group's output
 boundary.
+
+Before publishing the ownership freeze, each participant requests a force flush and drains its
+local affected work with the intake and boundary gates already closed. Routes and processors can
+therefore finish the obligations that make their state ready to capture. A held handoff denotes
+that completed drain and the installed freeze; frozen owners retain their state until capture and
+activation finish. Preparation retains its original deadline, distinct from the gate lease that
+protects activation. Repeated engagement requests use the same coordination identity and scope;
+a bounded reply timeout does not create another flush or restart the lease.
 
 Nervix writes the new schedule only after that drain succeeds. A drain writes and activates one hard
 group or independent node at a time. Placement consolidation gates all of its moved groups together

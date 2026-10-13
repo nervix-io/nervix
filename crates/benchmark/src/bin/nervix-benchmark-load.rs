@@ -839,14 +839,12 @@ impl BenchmarkRunner {
             "input and output topics have different partition sets: {input_partitions:?} != \
              {output_partitions:?}"
         );
-        ensure!(
-            self.topic_message_count(&self.args.input_topic, &input_partitions)? == 0,
-            "input topic is not empty"
-        );
-        ensure!(
-            self.topic_message_count(&self.args.output_topic, &output_partitions)? == 0,
-            "output topic is not empty"
-        );
+        wait_for_empty_topic(&self.args.input_topic, KAFKA_QUERY_TIMEOUT, |deadline| {
+            self.topic_message_count_until(&self.args.input_topic, &input_partitions, deadline)
+        })?;
+        wait_for_empty_topic(&self.args.output_topic, KAFKA_QUERY_TIMEOUT, |deadline| {
+            self.topic_message_count_until(&self.args.output_topic, &output_partitions, deadline)
+        })?;
         let meter = self.start_output_meter(&output_partitions)?;
         let benchmark_result = (|| -> Result<BenchmarkReport> {
             self.wait_for_consumer_group()?;
@@ -1551,10 +1549,6 @@ impl BenchmarkRunner {
         }
     }
 
-    fn topic_message_count(&self, topic: &str, partitions: &[i32]) -> Result<u64> {
-        self.topic_message_count_until(topic, partitions, Instant::now() + KAFKA_QUERY_TIMEOUT)
-    }
-
     fn topic_partitions(&self, topic: &str) -> Result<Vec<i32>> {
         let metadata = self
             .producer
@@ -1673,9 +1667,106 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// A newly created partition can publish its metadata before its leader serves offsets.
+/// Wait inside one setup budget; no load is accepted until both topics are readable and empty.
+fn wait_for_empty_topic(
+    topic: &str,
+    timeout: Duration,
+    mut query: impl FnMut(Instant) -> Result<u64>,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match query(deadline) {
+            Ok(messages) => {
+                ensure!(messages == 0, "Kafka topic '{topic}' is not empty");
+                return Ok(());
+            }
+            Err(error) => {
+                let leader_unavailable = matches!(
+                    error.downcast_ref::<KafkaError>(),
+                    Some(KafkaError::MetadataFetch(
+                        RDKafkaErrorCode::NotLeaderForPartition
+                            | RDKafkaErrorCode::LeaderNotAvailable
+                    ))
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !leader_unavailable || remaining.is_zero() {
+                    return Err(error).context("failed to prepare an empty benchmark topic");
+                }
+                thread::sleep(OFFSET_POLL_INTERVAL.min(remaining));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_topic_setup_waits_for_partition_leaders_inside_one_budget() {
+        let mut outcomes = VecDeque::from([
+            Err(anyhow!(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::NotLeaderForPartition
+            ))
+            .context("initial watermarks")),
+            Err(anyhow!(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::LeaderNotAvailable
+            ))),
+            Ok(0),
+        ]);
+        let mut first_deadline = None;
+        wait_for_empty_topic("input", Duration::from_secs(30), |deadline| {
+            assert_eq!(*first_deadline.get_or_insert(deadline), deadline);
+            outcomes.pop_front().assured("three queries were prepared")
+        })
+        .assured("an empty topic whose leader became ready permits setup");
+        assert!(outcomes.is_empty());
+    }
+
+    #[test]
+    fn empty_topic_setup_refuses_records_and_unrelated_failures() {
+        let error = wait_for_empty_topic("input", Duration::from_secs(30), |_| Ok(1))
+            .err()
+            .assured("a nonempty topic cannot start a benchmark");
+        assert!(error.to_string().contains("topic 'input' is not empty"));
+
+        let mut queries = 0;
+        let error = wait_for_empty_topic("output", Duration::from_secs(30), |_| {
+            queries += 1;
+            Err(anyhow!(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::TopicAuthorizationFailed
+            )))
+        })
+        .err()
+        .assured("authorization failure must remain fatal");
+        assert_eq!(queries, 1);
+        assert!(matches!(
+            error.downcast_ref::<KafkaError>(),
+            Some(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::TopicAuthorizationFailed
+            ))
+        ));
+    }
+
+    #[test]
+    fn empty_topic_setup_stops_when_its_budget_is_exhausted() {
+        let mut queries = 0;
+        let error = wait_for_empty_topic("input", Duration::ZERO, |_| {
+            queries += 1;
+            Err(anyhow!(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::NotLeaderForPartition
+            )))
+        })
+        .err()
+        .assured("an unavailable leader cannot extend the setup budget");
+        assert_eq!(queries, 1);
+        assert!(
+            error
+                .to_string()
+                .contains("failed to prepare an empty benchmark topic")
+        );
+    }
 
     #[test]
     fn filter_map_generates_both_input_cases_and_audits_every_output_id() {

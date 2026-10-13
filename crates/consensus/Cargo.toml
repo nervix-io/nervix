@@ -51,7 +51,9 @@ tracing = { workspace = true }
 alloc_count = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-model-harness = { workspace = true }
+rcgen = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ubyte = { workspace = true }

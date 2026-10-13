@@ -51,6 +51,9 @@ use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
     read_body, send_static_error,
 };
+
+#[cfg(test)]
+mod write_progress_tests;
 use crate::{
     PoolClass, RequestError, TransportError,
     request::{
@@ -234,55 +237,59 @@ impl FrameWriter {
                 "duplex frame exceeds u32 bytes".to_string(),
             ))
         })?;
-        let progress_timeout = self.progress_timeout;
-        let send = async {
-            self.send_all(Bytes::copy_from_slice(&length.to_be_bytes()))
-                .await?;
-            let mut offset = 0;
-            while offset < payload.len() {
-                nervix_primitives::task::consume_budget().await;
-                let remaining = payload
-                    .len()
-                    .checked_sub(offset)
-                    .verified("the send offset never advances beyond the frame payload");
-                let end = offset
-                    .checked_add(remaining.min(BODY_CHUNK_BYTES))
-                    .verified("the next slice is bounded by the remaining frame payload");
-                let chunk = payload
-                    .slice(offset, end)
-                    .verified("the slice bounds were checked against the frame payload");
-                offset = end;
-                self.send_all(Bytes::from_owner(chunk)).await?;
-            }
-            Ok::<(), Report<TransportError>>(())
-        };
-        match timeout(progress_timeout, send).await {
-            Ok(result) => result,
-            Err(_) => {
-                self.stream.send_reset(Reason::CANCEL);
-                Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }))
-            }
+        self.send_all(Bytes::copy_from_slice(&length.to_be_bytes()))
+            .await?;
+        let mut offset = 0;
+        while offset < payload.len() {
+            nervix_primitives::task::consume_budget().await;
+            let remaining = payload
+                .len()
+                .checked_sub(offset)
+                .verified("the send offset never advances beyond the frame payload");
+            let end = offset
+                .checked_add(remaining.min(BODY_CHUNK_BYTES))
+                .verified("the next slice is bounded by the remaining frame payload");
+            let chunk = payload
+                .slice(offset, end)
+                .verified("the slice bounds were checked against the frame payload");
+            offset = end;
+            self.send_all(Bytes::from_owner(chunk)).await?;
         }
+        Ok(())
     }
 
     async fn send_all(&mut self, mut body: Bytes) -> Result<(), Report<TransportError>> {
         while !body.is_empty() {
             nervix_primitives::task::consume_budget().await;
             self.stream.reserve_capacity(body.len());
-            let assigned = poll_fn(|context| self.stream.poll_capacity(context))
-                .await
-                .ok_or_else(|| {
-                    Report::new(TransportError::Decode(
-                        "HTTP/2 stream closed while assigning send capacity".to_string(),
-                    ))
-                })?
-                .map_err(TransportError::from)?;
+            // Only a nonzero grant restarts the idle bound. A large frame may span many such
+            // bounds while its receiver keeps reading; zero-capacity notifications do not help it.
+            let capacity = async {
+                loop {
+                    let assigned = poll_fn(|context| self.stream.poll_capacity(context))
+                        .await
+                        .ok_or_else(|| {
+                            Report::new(TransportError::Decode(
+                                "HTTP/2 stream closed while assigning send capacity".to_string(),
+                            ))
+                        })?
+                        .map_err(TransportError::from)?;
+                    if assigned > 0 {
+                        break Ok::<_, Report<TransportError>>(assigned);
+                    }
+                    nervix_primitives::task::consume_budget().await;
+                }
+            };
+            let assigned = match timeout(self.progress_timeout, capacity).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    self.stream.send_reset(Reason::CANCEL);
+                    return Err(Report::new(TransportError::ProgressTimeout {
+                        timeout: self.progress_timeout,
+                    }));
+                }
+            };
             let ready = assigned.min(body.len());
-            if ready == 0 {
-                continue;
-            }
             self.stream
                 .send_data(body.split_to(ready), false)
                 .map_err(TransportError::from)?;

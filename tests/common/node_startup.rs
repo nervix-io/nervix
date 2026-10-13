@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The absolute per-node startup budget, the attempt limit spent inside it, the slice
 //!   a failed attempt's cleanup may take, the pause before the next launch, the classification
-//!   that decides whether an attempt may be retried, and the exhaustion diagnostic that carries
+//!   that decides whether an attempt may be retried and which listeners it moves, and the exhaustion diagnostic that carries
 //!   every attempt.
 //! - **Depends on.** The startup failure, task state and terminal outcomes of the node-liveness
 //!   owner, the phase deadline, the harness status timing policy, and the application error an
@@ -154,9 +154,20 @@ pub(crate) trait StartableNode {
     /// still stopping when that slice ends keeps its task, and the startup does not launch again.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup;
 
-    /// Move the node to freshly allocated ports, so a launch that lost a port race does not
-    /// repeat it.
-    fn move_to_fresh_ports(&mut self) -> io::Result<()>;
+    /// Move the selected listeners to freshly allocated ports, preserving unrelated addresses.
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()>;
+}
+
+/// The listening addresses a failed startup needs to allocate again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StartupPorts {
+    All,
+    Grpc,
+    Http,
+    Https,
+    Observability,
+    WebConsole,
+    Interconnect,
 }
 
 /// Whether the harness may launch a node again after an attempt failed.
@@ -165,7 +176,7 @@ pub(crate) enum StartupRetry {
     /// A fresh launch can plausibly produce a different outcome: an address another process held,
     /// a peer that was not listening yet, or readiness that did not arrive in time.
     #[strum(serialize = "transient")]
-    Transient,
+    Transient(StartupPorts),
     /// The node decided this outcome from its configuration, its stored state or its own code, so
     /// the next launch repeats it.
     #[strum(serialize = "terminal")]
@@ -197,7 +208,7 @@ impl AttemptFailure {
         match error.failure {
             // Readiness that did not arrive in time is the resource pressure this budget exists
             // for.
-            NodeStartupFailure::DeadlineExpired => StartupRetry::Transient,
+            NodeStartupFailure::DeadlineExpired => StartupRetry::Transient(StartupPorts::All),
             NodeStartupFailure::TaskTerminated => match &error.task_state {
                 NodeTaskState::Terminal(outcome) => Self::terminal_retry(outcome),
                 // A task reported as unstarted, still running or left stopping did not terminate,
@@ -227,14 +238,17 @@ impl AttemptFailure {
             // The harness allocates ports from a pool it shares with every concurrent scenario and
             // with sibling worktrees running the same suite, so an address another process took
             // first is the one application error a fresh allocation resolves.
-            AppError::BindGrpcListenAddress
-            | AppError::BindHttpListenAddress
-            | AppError::BindHttpsListenAddress
-            | AppError::BindObservabilityListenAddress
-            | AppError::BindWebConsoleListenAddress
-            | AppError::BindWebConsoleHttpsListenAddress
+            AppError::BindGrpcListenAddress => StartupRetry::Transient(StartupPorts::Grpc),
+            AppError::BindHttpListenAddress => StartupRetry::Transient(StartupPorts::Http),
+            AppError::BindHttpsListenAddress => StartupRetry::Transient(StartupPorts::Https),
+            AppError::BindObservabilityListenAddress => {
+                StartupRetry::Transient(StartupPorts::Observability)
+            }
+            AppError::BindWebConsoleListenAddress | AppError::BindWebConsoleHttpsListenAddress => {
+                StartupRetry::Transient(StartupPorts::WebConsole)
+            }
             // The interconnect transport binds its own listener while it starts.
-            | AppError::StartInterconnect => StartupRetry::Transient,
+            AppError::StartInterconnect => StartupRetry::Transient(StartupPorts::Interconnect),
             // Every other application error is the node's decision about its configuration, its
             // stored state or its peers, and it holds for the next launch too.
             _ => StartupRetry::Terminal,
@@ -419,9 +433,9 @@ impl<'node> NodeStartup<'node> {
             let still_stopping = matches!(cleanup, AttemptCleanup::StillStopping);
             self.record(attempt, failure, retry, cleanup);
 
-            if let StartupRetry::Terminal = retry {
+            let StartupRetry::Transient(retry_ports) = retry else {
                 return Err(self.exhausted(StartupEnd::TerminalFailure));
-            }
+            };
             if attempt == NODE_START_ATTEMPTS {
                 break;
             }
@@ -434,7 +448,7 @@ impl<'node> NodeStartup<'node> {
                 }
                 return Err(self.exhausted(StartupEnd::StillStopping));
             }
-            if let Err(error) = target.move_to_fresh_ports() {
+            if let Err(error) = target.move_to_fresh_ports(retry_ports) {
                 return Err(self.exhausted(StartupEnd::PortsUnavailable(error)));
             }
             self.budget.pause(RETRY_BACKOFF).await;

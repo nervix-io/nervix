@@ -1858,8 +1858,15 @@ struct ConsensusTestProbeState {
     /// `FjallStore` retains a clone after construction so live delay and failure controls continue
     /// to reach the storage worker without borrowing this probe.
     storage_fault: StorageFault,
-    append_stream_opens: Mutex<BTreeMap<ClusterNodeName, u64>>,
+    append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct AppendStreamCounts {
+    attempts: u64,
+    opened: u64,
 }
 
 #[cfg(feature = "testing")]
@@ -1874,9 +1881,17 @@ impl ConsensusTestProbe {
     }
 
     pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
-        let counts = self.inner.append_stream_opens.lock();
+        let counts = self.inner.append_stream_counts.lock();
         match counts.get(target) {
-            Some(count) => *count,
+            Some(count) => count.opened,
+            None => 0,
+        }
+    }
+
+    pub fn append_stream_attempt_count(&self, target: &ClusterNodeName) -> u64 {
+        let counts = self.inner.append_stream_counts.lock();
+        match counts.get(target) {
+            Some(count) => count.attempts,
             None => 0,
         }
     }
@@ -1890,27 +1905,33 @@ impl ConsensusTestProbe {
     }
 
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
-        let mut counts = self.inner.append_stream_opens.lock();
-        let current = match counts.get(target) {
-            Some(current) => *current,
-            None => 0,
-        };
-        let Some(next) = current.checked_add(1) else {
-            // At u64::MAX this is already a sufficient lower bound for every bounded append-stream
-            // assertion, so retaining it preserves the observation's meaning.
-            return;
-        };
-        counts.insert(target.clone(), next);
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.opened = count
+            .opened
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its append-stream open counter");
+    }
+
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName) {
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.attempts = count
+            .attempts
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its append-stream attempt counter");
     }
 }
 
 trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_open(&self, target: &ClusterNodeName);
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
 }
 
 impl AppendStreamOpenRecorder for () {
     fn record_append_stream_open(&self, _target: &ClusterNodeName) {}
+    fn record_append_stream_attempt(&self, _target: &ClusterNodeName) {}
 
     fn connectivity_fault(&self) -> ConnectivityFault {
         ConnectivityFault::default()
@@ -1921,6 +1942,10 @@ impl AppendStreamOpenRecorder for () {
 impl AppendStreamOpenRecorder for ConsensusTestProbe {
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         ConsensusTestProbe::record_append_stream_open(self, target);
+    }
+
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName) {
+        ConsensusTestProbe::record_append_stream_attempt(self, target);
     }
 
     fn connectivity_fault(&self) -> ConnectivityFault {
@@ -4331,10 +4356,10 @@ where
 
     /// Carry appends on the path this client was built for.
     ///
-    /// A replication client opens one ordered stream to its follower and pipelines every batch
-    /// over it, under the stream's own idle bound rather than OpenRaft's heartbeat-derived soft
-    /// TTL. A heartbeat client keeps OpenRaft's one-probe-at-a-time shape and deadline on the
-    /// management pool, where a saturated append stream cannot reach it.
+    /// A replication client sends initial empty probes on management capacity, then opens one
+    /// ordered stream for its first data batch and subsequent commit updates. That stream uses
+    /// its own idle bound rather than OpenRaft's heartbeat-derived soft TTL. A heartbeat client
+    /// keeps the one-probe-at-a-time shape on the independent management pool.
     fn stream_append<'s, S>(
         &'s mut self,
         input: S,
@@ -4355,29 +4380,15 @@ where
             + Unpin
             + 'static,
     {
-        if let Err(error) = self.connectivity.check() {
-            return Box::pin(async move { Err(RPCError::Unreachable(unreachable_err(error))) });
-        }
         match self.append_path {
             AppendPath::Heartbeat => {
                 openraft::network::stream_append_sequential(self, input, option)
             }
             AppendPath::Replication => {
-                let interconnect = self.interconnect.clone();
-                let executor = self.executor.clone();
-                let local_node_id = self.local_node_id.clone();
-                let target = self.target.clone();
-                let append_stream_open_recorder = self.append_stream_open_recorder.clone();
+                let client = self.clone();
                 Box::pin(async move {
-                    let answers = replication::open_append_stream(
-                        &interconnect,
-                        &executor,
-                        &local_node_id,
-                        &target,
-                        input,
-                    )
-                    .await?;
-                    append_stream_open_recorder.record_append_stream_open(&target);
+                    let answers: openraft::base::BoxStream<'s, _> =
+                        client.replication_answers(input, option).await?;
                     Ok(answers)
                 })
             }

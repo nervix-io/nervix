@@ -115,6 +115,13 @@ The failure detector retains dead process identities separately from the live pe
 Raft member removal uses the newest observed live or dead identity to fence the stopped process;
 dead identities alone never make a peer eligible for membership admission. Scheduling can retain an
 already established health target while gossip liveness lapses, as described below.
+Explicit member removal is checked against the mutation owner's effective availability, including
+that retained health target. Gossip absence can precede effective unavailability. Removal
+qualification establishes the target on both surviving voters and observes effective unavailability
+through each public membership warning before issuing the mutation, so either voter can own the
+leader's check. The warning uses the effective availability snapshot, while gossip visibility is
+reported separately. Its reason names application health when that owner excludes the peer, or
+Chitchat when gossip excludes it after the retained health observation has aged out.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
@@ -323,6 +330,14 @@ only while the original coordinator process and both bound participant incarnati
 the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
 second pass after the gate deadline reclaims work that was active during the first pass.
 
+Ownership-handoff engagement answers after admission is fenced and its force flush is requested.
+The coordinator then queries the exact operation's drain status. A participant publishes its capture
+freeze before returning a drained status, and capture requires that coordination identity's freeze
+in addition to its held gate. Pending status retains the work counts used by timeout diagnostics.
+Each engagement request keeps the two-second reply bound; a typed timeout retries the same identity
+and complete scope within the original preparation deadline. A retry observes the existing
+receiver-owned operation and lease. Other request failures keep their existing classification.
+
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
 an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
@@ -333,17 +348,24 @@ therefore neither release nor erase a replacement lease occupying the same logic
 
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
-the sender and moves its scheduled work through planned ownership handoffs, and release, which
-clears the cordon that drain set. The leader acts for the node the authenticated connection belongs
+the sender, carries its remaining drain budget, and moves its scheduled work through planned
+ownership handoffs, and release, which clears the cordon that drain set. The leader acts for
+the node the authenticated connection belongs
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
 and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
-with the leader's account of the action for the stopping node's log, or not the leader, from a node
-that changed nothing and leaves the sender to ask the leader it observes next. A leader that loses
-its leadership while it writes a release also answers not the leader, because clearing a cordon
-again through the next leader is harmless. The leader runs the action in a service task of its own,
+with the leader's account of the action for the stopping node's log, or not the leader, which leaves
+the sender to ask the leader it observes next. A node that does not lead when the request arrives
+changes nothing. A leader that loses leadership before completing a drain also answers not the
+leader, logs its interrupted report, and preserves any moves already committed. The next leader
+plans the remaining moves from the current schedule, within the sender's remaining budget. A
+leader that loses its leadership while it writes a release also answers not the leader, because
+clearing a cordon again through the next leader is harmless. The leader runs the action in a service
+task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
 abandons the request first. For a drain that deadline is what remains of the sender's drain
-timeout; for a release it is the bound
+timeout; the leader also uses the budget carried by the drain action to bound each unit's gate,
+state preparation, and activation waits, leaving a window for later units and the sender's in-place
+drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 
@@ -557,8 +579,11 @@ operation's domain semantics.
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
    is awaiting. The initiator's sender reports when the peer's flow control last accepted its
    bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Receiving is
-   cancel-safe on both ends: a frame is decoded under the pool's memory and CPU admission after it
-   leaves the stream, and a receive its caller abandons, because a timer or command it selects
+   cancel-safe on both ends. While a frame is being written, each nonzero flow-control grant
+   restarts the five-second write progress bound. A frame has no total transfer deadline while
+   bytes keep advancing; zero-capacity notifications do not restart the bound. Expiry resets that
+   stream with the typed transport progress timeout. A frame is decoded under the pool's memory
+   and CPU admission after it leaves the stream, and a receive its caller abandons, because a timer or command it selects
    against won, leaves that decoding to the next receive, which finishes the frame before it reads
    another. No abandoned receive loses a frame or reorders one. A stream has one codec, fixed by
    its operation's pool class: the opening message, the initiator's frames and the responder's
@@ -956,6 +981,16 @@ consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
 
+The consensus adapter obtains its first append request before opening the duplex transport. This
+lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
+it immediately because its target left or its quota is full. The transport still reports that typed
+failure without a retry loop of its own. Ended input opens no connection. Leading empty requests
+use the management heartbeat operation, including a finite probe that ends before data is ready;
+its answer preserves the previous-log match, conflict or higher vote. The first nonempty request
+opens replication and is submitted once after the follower accepts the stream headers. Empty
+commit updates following that data remain ordered on the same duplex stream. The five-second setup
+bound starts after the caller gate; the management probe retains its heartbeat-derived deadline.
+
 Elections begin with a pre-vote exchange. A voter asks whether a quorum would accept its next term
 before it persists that term or becomes a candidate. A restarted voter whose log is stale, or whose
 discovery connections are not ready yet, therefore cannot advance the term and tear down the healthy
@@ -1081,6 +1116,10 @@ the receiving process after the first 64 KiB install chunk: its replacement refu
 finish and publishes only after a complete new 36 MiB transfer. The handlers retain counts and
 digests; these checks qualify the authenticated transport, while the public restore scenarios
 and storage checks qualify native containers, atomic publication and activation.
+Their 300-second simulated completion deadline follows two intentional request deadlines and
+allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
+latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
+still fail a transfer that does not complete.
 Capture fetch and state installation share the peer connection's one reserved snapshot stream
 slot. The archive staging phase finishes and releases its fetch stream before installation starts;
 an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
@@ -1156,8 +1195,12 @@ entity, through two replication-class request kinds and, when a checkpoint advan
 A state synchronization request names one placement and the revision the replica holds of it. The
 owner answers through the actual state handle published when that placement was installed: with
 the newer checkpoint's revision, length and BLAKE3 digest, or with nothing when it is current.
-The owner reads storage only when it holds no live state for the placement. The replica opens a
-Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
+The owner reads storage only when it holds no live state for the placement.
+
+Branch-aggregate metrics retain the exact encoded bytes first selected for each dirty revision;
+elapsed times are captured once. Describing, streaming and persisting that revision therefore
+agree byte for byte, and restoration retains the incoming bytes until the next metric update.
+The replica opens a Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
 holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
 whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
 transfer bound. The replica checks the stream's declared length, received length and digest before
