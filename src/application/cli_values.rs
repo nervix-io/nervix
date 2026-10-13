@@ -3,7 +3,8 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Parsing operator-supplied duration, byte quantity and trace sampling values,
-//!   with typed errors that retain the reason a value was rejected.
+//!   with typed errors that retain the reason a value was rejected, and the transport mode an
+//!   operator selects for the node's gRPC listener.
 //! - **Depends on.** Vocabulary duration parsing, byte quantities and typed error reports.
 //! - **Must not know.** Runtime state, sessions, graph planning or deadline policy.
 
@@ -14,8 +15,29 @@
 
 use std::{fmt, time::Duration};
 
+use clap::ValueEnum;
 use error_stack::{Report, ResultExt as _};
 use nervix_models::parse_duration_text;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lower")]
+pub enum InternalTransportMode {
+    Http,
+    Https,
+}
+
+impl InternalTransportMode {
+    pub(in crate::application) fn scheme(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    pub(in crate::application) fn is_tls(self) -> bool {
+        matches!(self, Self::Https)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum CliValueError {
