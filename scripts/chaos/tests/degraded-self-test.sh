@@ -60,12 +60,22 @@ jq -n '{sent:40,received:40,lost:0,longest_loss_run:0,min_ms:1,avg_ms:2,max_ms:3
     >"${tmp_dir}/baseline.json"
 "${verify}" effect jitter "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json" >/dev/null
 must_fail "${verify}" effect random-loss "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json"
-jq -n '{bytes:262144,duration_ms:1200}' >"${tmp_dir}/rate-baseline.json"
-jq -n '{bytes:262144,duration_ms:4200}' >"${tmp_dir}/rate-fault.json"
+jq -n '{bytes:262144,received_bytes:262144,duration_ms:1200,clock_resolution_ms:10}' >"${tmp_dir}/rate-baseline.json"
+jq -n '{bytes:262144,received_bytes:262144,duration_ms:4200,clock_resolution_ms:10}' >"${tmp_dir}/rate-fault.json"
 "${verify}" effect combined "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json" \
     "${tmp_dir}/rate-baseline.json" "${tmp_dir}/rate-fault.json" >/dev/null
 must_fail "${verify}" effect combined "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json" \
     "${tmp_dir}/rate-baseline.json" "${tmp_dir}/rate-baseline.json"
+jq '.duration_ms = 2410' "${tmp_dir}/rate-fault.json" >"${tmp_dir}/rate-uncertain.json"
+must_fail "${verify}" effect combined "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json" \
+    "${tmp_dir}/rate-baseline.json" "${tmp_dir}/rate-uncertain.json"
+jq '.duration_ms = 2420' "${tmp_dir}/rate-fault.json" >"${tmp_dir}/rate-bound.json"
+"${verify}" effect combined "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json" \
+    "${tmp_dir}/rate-baseline.json" "${tmp_dir}/rate-bound.json" >/dev/null \
+    || fail 'a measured twofold lower bound was rejected'
+jq '.received_bytes = 131072' "${tmp_dir}/rate-fault.json" >"${tmp_dir}/rate-partial.json"
+must_fail "${verify}" effect combined "${tmp_dir}/baseline.json" "${tmp_dir}/ping.json" \
+    "${tmp_dir}/rate-baseline.json" "${tmp_dir}/rate-partial.json"
 
 jq -n '{at_ms:1000,stage:"fault",profile:"delay",source_end:50,output_end:30,
     backlog:20,pending_operations:9,docker_memory:[{container:"nervix-2",bytes:300}]}' \

@@ -278,9 +278,20 @@ The 262,144-byte transfer has one 90-second deadline shared by the sender and re
 connection establishment, TCP retransmissions, byte delivery and receiver completion. It uses
 the pinned BusyBox netcat's EOF half-close rather than an idle timeout. At 256 kbit/s the payload
 alone needs at least 8.192 seconds; packet loss
-can add retransmission stalls. The measured duration continues to include connection establishment
-and receiver completion, so it is end-to-end transfer throughput, not isolated steady-state link
-capacity. A failed transfer remains an `observation` failure and names both nodes and the receiver's
+can add retransmission stalls. The sender records its kernel uptime immediately before connecting,
+and the receiver records its uptime after counting the complete payload. Both helpers must report
+the same kernel boot identity and boot-time offset. Their time-namespace identifiers are retained
+as diagnostics: separate namespaces can share the same clock coordinate. Docker launch, wait and
+log collection stay in the adjacent helper-lifetime evidence and the original total budget.
+The [Linux uptime implementation](https://github.com/torvalds/linux/blob/master/fs/proc/uptime.c)
+exposes boot-time uptime at ten-millisecond precision. The reported `duration_ms` is the interval's
+upper bound, and `clock_resolution_ms` records that precision. Both endpoint readings can round
+down, so the lower bound subtracts two clock ticks from the reported upper bound. The effect
+assertion requires that fault lower bound to be at least twice the baseline's upper bound. This
+retains the twofold contract while accounting for clock uncertainty, including a transfer inside
+one clock tick.
+The duration includes connection establishment, retransmissions and receiver completion.
+A failed transfer remains an `observation` failure and names both nodes and the receiver's
 address and port. The adjacent `*.probe.json` records readiness, deadlines, both helper outcomes,
 received bytes and cleanup outcomes; `*.log`, `*.server-start.log`, `*.readiness.log`,
 `*.server.log`, `*.server.stderr.log` and `*.server-exit.txt` retain raw evidence for stages reached.
@@ -1361,10 +1372,11 @@ Run the external verifier, pinned tool image and Compose contract checks directl
 just chaos self-test
 ```
 
-`just test-chaos-rate-probe` exercises the production probe with a two-second connect delay,
+`just test-chaos-rate-probe` exercises the production probe with a six-second Docker launch delay
+that stays outside transfer time, a real healthy/256kbit twofold effect, a two-second connect delay,
 receiver completion delayed twelve seconds, partial bytes, complete loss, a receiver that does not
 listen, a receiver launch failure and a nonzero receiver exit, failed log retrieval and failed
-cleanup. It uses only the pinned probe and
+cleanup, invalid or missing clocks and mismatched clock coordinates. It uses only the pinned probe and
 nettools images with Docker, and leaves no helper behind. `just coverage-chaos-rate-probe` runs
 those controls under kcov and retains its
 shell Cobertura report under `target/chaos-rate-probe-coverage/`. These observations test the external

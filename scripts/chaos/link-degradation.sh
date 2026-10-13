@@ -59,15 +59,17 @@ link_ping() {
     "${script_dir}/verify-degraded-evidence.sh" ping "${output}" "${output%.txt}.json" "${probe_count}"
 }
 
-# Times one 262,144-byte transfer, including TCP connection and retransmissions, within one total
-# budget. BusyBox nc half-closes after stdin ends and exits when the receiver closes its side;
-# an idle timeout would instead abandon a valid loss-stalled connection. Keep both helpers' raw
-# logs and outcomes even when no complete transfer can be measured.
+# Times one 262,144-byte transfer from the sender's connect to receiver completion on their shared
+# kernel clock, keeping Docker control time separate, within the same total budget. BusyBox nc
+# half-closes after stdin ends and exits when the receiver closes its side; an idle timeout would
+# abandon a valid loss-stalled connection. Keep raw logs and complete helper outcomes on failure.
 link_rate_probe() {
     local output="$1" sender="$2" receiver="$3"
     local sender_id receiver_id receiver_ip server_id
     local evidence="${output%.json}"
     local transfer_deadline_seconds=90
+    local helper_script
+    helper_script="$(cat "$(dirname "${BASH_SOURCE[0]}")/link-rate-helper.sh")"
     sender_id="$(owned_service_container "${sender}")"
     receiver_id="$(owned_service_container "${receiver}")"
     receiver_ip="$(node_address "${receiver}")"
@@ -76,7 +78,7 @@ link_rate_probe() {
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=link-probe \
         --network "container:${receiver_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
-        -c 'nc -l -p 18081 | wc -c' 2>"${evidence}.server-start.log")" \
+        -c "${helper_script}" -- receiver 2>"${evidence}.server-start.log")" \
         || server_start_status=$?
     if [[ "${server_start_status}" -eq 0 ]]; then
         local readiness_deadline=$((SECONDS + 10))
@@ -93,19 +95,33 @@ link_rate_probe() {
     local started=null finished=null status=null server_status=null receiver_exit_code=null
     local sender_cleanup_status=0 server_cleanup_status=0 log_status=null receiver_bytes=""
     local sender_helper_id=""
+    local transfer_started=null transfer_finished=null sender_resolution=null receiver_resolution=null
+    local sender_clock_namespace="" receiver_clock_namespace=""
+    local sender_boot_id="" receiver_boot_id="" sender_boottime_offset="" receiver_boottime_offset=""
     if [[ "${ready}" == true ]]; then
         started="$(epoch_ms)"
         local transfer_deadline=$((SECONDS + transfer_deadline_seconds))
         status=0
-        # The positional parameter belongs to the helper container's shell.
-        # shellcheck disable=SC2016
         run_bounded "${transfer_deadline_seconds}" docker run --rm \
             --cidfile "${evidence}.sender-id.txt" \
             --label "io.nervix.chaos.run=${run_id}" \
             --label io.nervix.chaos.role=link-probe \
             --network "container:${sender_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
-            -c 'dd if=/dev/zero bs=1024 count=256 2>/dev/null | nc "$1" 18081' \
-            -- "${receiver_ip}" >"${evidence}.log" 2>&1 || status=$?
+            -c "${helper_script}" -- sender "${receiver_ip}" >"${evidence}.log" 2>&1 || status=$?
+        if [[ "${status}" -eq 0 ]]; then
+            transfer_started="$(jq -s -er 'select(length == 1) | .[0].started_uptime_ms
+                | select(type == "number" and . > 0 and . == floor)' "${evidence}.log")" \
+                || transfer_started=null
+            sender_resolution="$(jq -s -er 'select(length == 1) | .[0].clock_resolution_ms
+                | select(. == 10)' "${evidence}.log")" || sender_resolution=null
+            sender_clock_namespace="$(jq -s -er 'select(length == 1) | .[0].clock_namespace
+                | select(type == "string" and test("^time:\\[[0-9]+\\]$"))' "${evidence}.log")" \
+                || sender_clock_namespace=""
+            sender_boot_id="$(jq -s -er 'select(length == 1) | .[0].boot_id
+                | select(type == "string" and test("^[0-9a-f-]{36}$"))' "${evidence}.log")" || sender_boot_id=""
+            sender_boottime_offset="$(jq -s -er 'select(length == 1) | .[0].boottime_offset
+                | select(type == "string" and test("^-?[0-9]+ [0-9]+$"))' "${evidence}.log")" || sender_boottime_offset=""
+        fi
         if [[ -s "${evidence}.sender-id.txt" ]]; then
             sender_helper_id="$(cat "${evidence}.sender-id.txt")"
             # Timing out the Docker client does not end the container. End this exact sender so
@@ -132,7 +148,23 @@ link_rate_probe() {
         log_status=0
         run_bounded 20 docker logs "${server_id}" >"${evidence}.server.log" \
             2>"${evidence}.server.stderr.log" || log_status=$?
-        receiver_bytes="$(tr -d '[:space:]' <"${evidence}.server.log")"
+        if [[ "${log_status}" -eq 0 ]]; then
+            receiver_bytes="$(jq -s -er 'select(length == 1) | .[0].received_bytes
+                | select(type == "number" and . >= 0 and . == floor)' "${evidence}.server.log")" \
+                || receiver_bytes=""
+            transfer_finished="$(jq -s -er 'select(length == 1) | .[0].finished_uptime_ms
+                | select(type == "number" and . > 0 and . == floor)' "${evidence}.server.log")" \
+                || transfer_finished=null
+            receiver_resolution="$(jq -s -er 'select(length == 1) | .[0].clock_resolution_ms
+                | select(. == 10)' "${evidence}.server.log")" || receiver_resolution=null
+            receiver_clock_namespace="$(jq -s -er 'select(length == 1) | .[0].clock_namespace
+                | select(type == "string" and test("^time:\\[[0-9]+\\]$"))' "${evidence}.server.log")" \
+                || receiver_clock_namespace=""
+            receiver_boot_id="$(jq -s -er 'select(length == 1) | .[0].boot_id
+                | select(type == "string" and test("^[0-9a-f-]{36}$"))' "${evidence}.server.log")" || receiver_boot_id=""
+            receiver_boottime_offset="$(jq -s -er 'select(length == 1) | .[0].boottime_offset
+                | select(type == "string" and test("^-?[0-9]+ [0-9]+$"))' "${evidence}.server.log")" || receiver_boottime_offset=""
+        fi
         run_bounded 20 docker container rm --force "${server_id}" \
             >"${evidence}.server-cleanup.log" 2>&1 || server_cleanup_status=$?
     fi
@@ -144,7 +176,12 @@ link_rate_probe() {
         --argjson start_status "${server_start_status}" --argjson wait_status "${server_status}" \
         --arg exit_code "${receiver_exit_code}" --arg bytes "${receiver_bytes}" \
         --argjson log_status "${log_status}" --argjson sender_cleanup "${sender_cleanup_status}" \
-        --argjson server_cleanup "${server_cleanup_status}" '
+        --argjson server_cleanup "${server_cleanup_status}" \
+        --argjson transfer_started "${transfer_started}" --argjson transfer_finished "${transfer_finished}" \
+        --argjson sender_resolution "${sender_resolution}" --argjson receiver_resolution "${receiver_resolution}" \
+        --arg sender_clock_namespace "${sender_clock_namespace}" --arg receiver_clock_namespace "${receiver_clock_namespace}" \
+        --arg sender_boot_id "${sender_boot_id}" --arg receiver_boot_id "${receiver_boot_id}" \
+        --arg sender_boottime_offset "${sender_boottime_offset}" --arg receiver_boottime_offset "${receiver_boottime_offset}" '
         def count: if test("^[0-9]+$") then tonumber else null end;
         {sender:$sender,receiver:$receiver,address:$address,port:18081,bytes:262144,
          sender_container_id:$sender_container_id,receiver_container_id:$receiver_container_id,
@@ -154,7 +191,13 @@ link_rate_probe() {
          sender_status:$sender_status,receiver_start_status:$start_status,
          receiver_wait_status:$wait_status,receiver_exit_code:($exit_code | count),
          receiver_log_status:$log_status,received_bytes:($bytes | count),
-         sender_cleanup_status:$sender_cleanup,receiver_cleanup_status:$server_cleanup}' \
+         sender_cleanup_status:$sender_cleanup,receiver_cleanup_status:$server_cleanup,
+         transfer_started_uptime_ms:$transfer_started,transfer_finished_uptime_ms:$transfer_finished,
+         sender_clock_resolution_ms:$sender_resolution,receiver_clock_resolution_ms:$receiver_resolution,
+         sender_clock_namespace:$sender_clock_namespace,receiver_clock_namespace:$receiver_clock_namespace,
+         sender_boot_id:$sender_boot_id,receiver_boot_id:$receiver_boot_id,
+         sender_boottime_offset:$sender_boottime_offset,receiver_boottime_offset:$receiver_boottime_offset,
+         helper_lifetime_ms:(if $started == null or $finished == null then null else $finished-$started end)}' \
         >"${evidence}.probe.json"
     local endpoint="rate probe ${sender} -> ${receiver} (${receiver_ip}:18081)"
     if [[ "${server_start_status}" -ne 0 || "${ready}" != true ]]; then
@@ -167,9 +210,20 @@ link_rate_probe() {
         link_degradation_fail observation "${endpoint}: sender=${status}, receiver wait=${server_status}, exit=${receiver_exit_code}, bytes=${receiver_bytes:-unknown}/262144, logs=${log_status}, cleanup=${sender_cleanup_status}/${server_cleanup_status}; see ${evidence}.probe.json and helper logs"
         return 1
     fi
+    if [[ "${transfer_started}" == null || "${transfer_finished}" == null \
+        || "${sender_resolution}" != 10 || "${receiver_resolution}" != 10 ]] \
+        || [[ -z "${sender_clock_namespace}" || -z "${receiver_clock_namespace}" \
+            || -z "${sender_boot_id}" || "${sender_boot_id}" != "${receiver_boot_id}" \
+            || -z "${sender_boottime_offset}" || "${sender_boottime_offset}" != "${receiver_boottime_offset}" ]] \
+        || ((transfer_finished < transfer_started)); then
+        link_degradation_fail observation "${endpoint}: invalid helper transfer clocks; see ${evidence}.probe.json and raw helper logs"
+        return 1
+    fi
+    # /proc/uptime has ten-millisecond resolution. Keep an upper duration bound and its precision;
+    # the effect verifier compares the fault's lower bound to twice the baseline's upper bound.
     jq -n --argjson bytes 262144 --argjson received_bytes "${receiver_bytes}" \
-        --argjson duration_ms "$((finished - started))" \
-        '{bytes:$bytes,received_bytes:$received_bytes,duration_ms:$duration_ms,
+        --argjson duration_ms "$((transfer_finished - transfer_started + 10))" \
+        '{bytes:$bytes,received_bytes:$received_bytes,duration_ms:$duration_ms,clock_resolution_ms:10,
           bytes_per_second:($received_bytes * 1000 / $duration_ms)}' \
         >"${output}"
 }

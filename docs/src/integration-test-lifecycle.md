@@ -943,6 +943,18 @@ Recovery](./shutdown.md#exit-status).
 
 ## Test Dependencies
 
+The external Chaos directed-rate probe times the sender's connection and the receiver's complete
+byte count through helper-local kernel uptime. A successful observation requires the same kernel
+boot identity and boot-time offset at both helpers. Namespace identifiers are diagnostic values;
+they do not identify the clock coordinate. The ten-millisecond clock precision produces a duration
+upper bound. Its lower bound subtracts two ticks from that upper bound because both endpoint
+readings can round down. Rate-effect qualification requires the fault's lower bound to reach twice
+the baseline's upper bound. Docker control time remains in separate helper-lifetime evidence and the
+unchanged ninety-second total probe budget. Missing, malformed or mismatched clocks fail the
+observation with raw helper logs retained. Direct Docker controls exercise launch delay, actual
+connection and receiver stalls, byte-count failures, failed helper operations and the real rate
+effect; they qualify the harness measurement and establish no product recovery outcome.
+
 Brokers, databases, and the other external systems that scenarios use run as containers, started the
 first time a scenario needs one and shared by every scenario of the run. The run removes them when
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them

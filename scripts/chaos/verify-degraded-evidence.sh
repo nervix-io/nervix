@@ -119,8 +119,12 @@ case "${mode}" in
         if [[ "${profile}" == rate-limit || "${profile}" == combined ]]; then
             [[ "$#" -eq 6 && -s "$5" && -s "$6" ]] || fail 'rate evidence is missing'
             jq -n -e --slurpfile base "$5" --slurpfile fault "$6" '
-                $fault[0].bytes == $base[0].bytes
-                and $fault[0].duration_ms >= ($base[0].duration_ms * 2)
+                $base[0] as $b | $fault[0] as $f
+                | $b.bytes == 262144 and $f.bytes == $b.bytes
+                and $b.received_bytes == $b.bytes and $f.received_bytes == $f.bytes
+                and $b.clock_resolution_ms == 10 and $f.clock_resolution_ms == 10
+                and $b.duration_ms >= 10 and $f.duration_ms >= 10
+                and ($f.duration_ms - 2 * $f.clock_resolution_ms) >= ($b.duration_ms * 2)
               ' >/dev/null || fail "${profile} did not reduce measured link throughput"
         fi
         printf 'verified %s effect\n' "${profile}"
