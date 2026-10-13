@@ -214,16 +214,6 @@ impl TestDependencies {
         Ok(body.contains(needle))
     }
 
-    pub(crate) async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
-        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
-            io::Error::other(
-                "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
-                 running'",
-            )
-        })?;
-        suite.lock().await.otel_collector_contains(needle).await
-    }
-
     /// One Collector observation, with the time it waited for the suite's dependency lock and the
     /// time the container log read took once it held the lock.
     pub(crate) async fn otel_collector_observation(

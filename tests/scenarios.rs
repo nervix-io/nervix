@@ -26495,6 +26495,8 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
     let deadline = started + Duration::from_secs(10);
     let mut observation_count = 0_usize;
     let mut slow_observations = Vec::new();
+    let mut slowest_lock_wait = Duration::ZERO;
+    let mut slowest_read = Duration::ZERO;
     loop {
         nervix_primitives::task::consume_budget().await;
         let requested = Instant::now();
@@ -26515,7 +26517,15 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
                 observation.read
             ));
         }
+        slowest_lock_wait = slowest_lock_wait.max(observation.lock_wait);
+        slowest_read = slowest_read.max(observation.read);
         if observation.contains {
+            append_cucumber_log_line(&format!(
+                "otel collector observed {expected:?} after {:?}: {observation_count} \
+                 observations, slowest lock={slowest_lock_wait:?} read={slowest_read:?}, slower \
+                 than 100ms: {slow_observations:?}",
+                Instant::now().duration_since(started)
+            ));
             return;
         }
         if Instant::now() >= deadline {
