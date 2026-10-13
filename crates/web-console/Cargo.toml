@@ -58,4 +58,6 @@ web-sys = { workspace = true, features = [
 
 [dev-dependencies]
 any_spawner = { workspace = true, features = ["futures-executor"] }
+bolero = { workspace = true }
 leptos = { workspace = true, features = ["ssr"] }
+nervix-arbitrary = { workspace = true }

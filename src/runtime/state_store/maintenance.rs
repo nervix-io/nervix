@@ -339,6 +339,14 @@ mod active_chunk_tests;
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
+#[path = "namespace_properties_tests.rs"]
+mod namespace_properties;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 pub(in crate::runtime::state_store) mod tests {
     use nervix_interconnect::backup::RestoreStateInventory;
 
