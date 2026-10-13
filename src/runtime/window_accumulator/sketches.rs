@@ -760,7 +760,10 @@ mod tests {
             sketches.admit(0, &retained, 2..4);
             // An absent argument contributes nothing, so its pane never gets a sketch.
             assert_eq!(sketches.panes.keys().copied().collect::<Vec<_>>(), vec![2]);
-            assert_eq!(rendered(&sketches.panes), rendered(&reference(config, &retained)));
+            assert_eq!(
+                rendered(&sketches.panes),
+                rendered(&reference(config, &retained))
+            );
         }
     }
 

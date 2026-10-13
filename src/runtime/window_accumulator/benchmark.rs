@@ -9,10 +9,7 @@
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(
-        harness,
-        reason = "benchmark fixture outside product execution"
-    )
+    nervix::layer(harness, reason = "benchmark fixture outside product execution")
 )]
 
 use std::num::NonZeroUsize;
