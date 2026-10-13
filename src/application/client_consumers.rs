@@ -48,7 +48,7 @@ const PEER_SILENCE: Duration = Duration::from_secs(10);
 const OPEN_DEADLINE: Duration = Duration::from_secs(20);
 const CHUNK_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 struct OpenConsumerStream {
     serving_node: ClusterNodeName,
     domain: DomainName,
@@ -66,7 +66,7 @@ impl InterconnectDuplexRequest for OpenConsumerStream {
     const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 }
 
-#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 enum ConsumerItem {
     Settle {
         key: u64,
@@ -77,7 +77,7 @@ enum ConsumerItem {
     Close,
 }
 
-#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 enum ConsumerEvent {
     Opened(ClientEmitterDescription),
     Refused(ClientEmitterRefusal),
@@ -578,3 +578,7 @@ async fn serve_forwarded(
     // Dropping the delivery sender ends the session's reads. The owner detaches the consumer and
     // reassigns every unsettled attempt when this duplex stream ends.
 }
+
+#[cfg(test)]
+#[path = "client_consumers_properties.rs"]
+mod properties;
