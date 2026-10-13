@@ -82,6 +82,9 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, deduplicator key groups and window row and argument groups, synthetic raw payloads at tar block boundaries and long paths, v3 | 256 | 4096 bytes |
 | `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all eleven kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v3 | 256 | 4096 bytes |
 | `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records, materialized, deduplicator and window group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v3 | 256 | 4096 bytes |
+| `console-pending-backups` | `nervix-web-console` pending backup entry and tab storage round-trip equality, with forgetting only by its own reference | any execution reference and query text, no domain or one in any spelling the name rule admits, recorded over an earlier record, v1 | 256 | 1024 bytes |
+| `console-pending-backups-malformed` | `nervix-web-console` exact read-back or refusal of a tab's stored record, which a refusal forgets while other entries stay | missing, canonical, edited, upper-cased and drawn reference, query and domain entries beside an unrelated entry, v1 | 256 | 1024 bytes |
+| `console-restore-drafts` | `nervix-web-console` restore draft lowering equality and existing-user option text | every `RESTORE` scope, source, mode, runtime state and lifecycle, domains in any spelling the name rule admits, every policy, v1 | 256 | 512 bytes |
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v1 | 128 | 65536 bytes |
@@ -114,6 +117,11 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `remote-relay-rows-malformed` | `nervix-server` the first payload defect in the receiver's check order | foreign bodies, miscounted watermarks and registrations and invalid branch keys, v1 | 128 | 2048 bytes |
 | `relay-wire-messages` | `nervix-interconnect` relay grant, reply, admission, acknowledgement and connection binding equality through the bounded codec | every message variant, branch key values with any float bits and per-row metadata, v1 | 256 | 2048 bytes |
 | `relay-wire-messages-malformed` | `nervix-interconnect` typed decode failure or a message that encodes and decodes back to itself, with every allocation of the decoder freed | damaged encodings of every message and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `client-producer-link-frames` | `nervix-server` complete equality of every client producer link frame through the bounded duplex codec of its stream, with nothing left charged | the opening message, every serving-node frame and every owning-node answer, with schemas of any field type, limits and counts at their ends, opaque batch bytes, every refusal, outcome, admission state and end reason, v1 | 256 | 2048 bytes |
+| `client-producer-link-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every link frame, frames read as another direction's type and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `client-consumer-stream-frames` | `nervix-server` complete equality of every client consumer stream frame through the bounded duplex codec of its stream, with nothing left charged | the opening message, every serving-node frame and every owning-node answer, with schemas of any field type, policy durations from zero to the longest, every answer, refusal and settlement outcome, delivery headers across their ranges with and without a branch fingerprint, and chunks from empty to the largest one sent, v1 | 256 | 2048 bytes |
+| `client-consumer-stream-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every stream frame, frames read as another direction's type and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `client-emitter-deliveries` | `nervix-server` client emitter delivery equality from the sink's Arrow IPC stream to the client library's batch: the Arrow schema of exactly the declared fields, every delivered row in order, values, nulls and float bits; refusal under another row count or other fields | every field type with nulls, nested lists and sliced views, deliveries of adjacent and scattered rows, v1 | 128 | 2048 bytes |
 | `wasm-generated-pools` | `nervix-server` generated column pool equality from a WASM guest's Arrow IPC stream to the node's batch: unnamed fields, types, nullability, values, nulls and float bits | every field type with nulls, nested lists and sliced views, streams ended by the marker or closed, v1 | 128 | 2048 bytes |
 | `wasm-generated-pools-malformed` | `nervix-server` a typed generated-IPC or batch-count defect, or one batch of unnamed columns that writes and decodes back to itself | truncated, flipped, overwritten, shifted, trailing and arbitrary pools, v1 | 256 | 2048 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
@@ -157,10 +165,16 @@ properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers decla
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
+A target names the test executable that holds its property: its package's library unit tests,
+`lib`, the unit tests of one of its binaries, `bin:<name>`, or one integration test,
+`test:<name>`. The web console's backup dialog belongs to the console's browser binary, whose unit
+tests compile natively, so its properties are `bin:nervix-web-console` targets; Bolero and the
+generators stay development dependencies outside the browser's graph.
 Before instrumenting a target, the runner reads Cargo metadata to resolve its package, target kind,
 name and source root. It selects the emitted executable by that identity, including integration
-tests in folders and explicitly configured library or test paths. A missing or ambiguous Cargo
-target or executable fails the run before the campaign starts.
+tests in folders, a binary's unit tests beside a library of the same name, and explicitly
+configured library or test paths. A missing or ambiguous Cargo target or executable fails the run
+before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
 bounded campaign. Its overall limit is three hours; per-build, per-case and per-campaign deadlines
@@ -193,12 +207,15 @@ boundaries. Request, reply and event coverage checks compare generated families 
 union declarations, so adding a family requires extending its generator.
 
 The [Arrow, codec and interconnect representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/arrow-representation-coverage.md)
-ties the relay body, producer batch, WASM generated pool, schemaful codec, JAQ-native and protobuf
-codec number, routed relay payload and relay wire message targets to their oracles, each codec's
-value domain and the contract boundaries they record. Its server targets share one generator of
-schemas and batches over every current field type and one logical oracle that compares batches cell
-by cell with floats by their bits. `just test-bolero codec-` runs the four codec targets, and
-`just test-bolero jaq-native` the numbers a JAQ program and its native formats carry.
+ties the relay body, producer batch, client emitter delivery, WASM generated pool, schemaful codec,
+JAQ-native and protobuf codec number, routed relay payload, relay wire message, client producer
+link frame and client consumer stream frame targets to their oracles, each codec's value domain and
+the contract boundaries they record. Its server targets share one generator of schemas and batches
+over every current field type and one logical oracle that compares batches cell by cell with floats
+by their bits. `just test-bolero codec-` runs the four codec targets, `just test-bolero jaq-native`
+the numbers a JAQ program and its native formats carry, and `just test-bolero client-producer-link`
+and `just test-bolero client-consumer-stream` the frames a forwarded client producer and consumer
+travel in between nodes.
 
 ## Generated Domains
 
@@ -217,6 +234,14 @@ as a sequence of bounded choices, so the same bytes always build the same value 
 replays exactly. It is a harness outside the layer order: it depends only on the vocabulary, and
 states what NSPL can spell as a rule over values instead of calling the parser, so the vocabulary's
 own properties use it without a language dependency. No product code names it.
+
+For native client producers and consumers it draws the window a client asks for and is granted,
+with counts at one, at the bound the vocabulary declares and at the largest count their type holds,
+a producer's whole description, every outcome of a submitted batch with each cause it names, and
+physical durations that land on zero, one nanosecond and the longest duration as often as anywhere
+else. It also lists one field of every declared type, each scalar, a list of it and a fixed-length
+array of such lists, across the four combinations of optional and sensitive, for a property that
+must carry every type on every run.
 
 A generator draws from one of two domains:
 
@@ -465,9 +490,9 @@ The server package uses the current profile's lighter optimization and omits deb
 single codegen unit; sanitizer instrumentation, coverage, debug assertions and overflow checks remain
 enabled.
 The pinned cargo-bolero CLI does not expose a Cargo test-harness selector. Each instrumented build
-therefore records a run-local Rustup adapter that forwards the declared `--lib` or `--test` selector
-to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the toolchain,
-features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
+therefore records a run-local Rustup adapter that forwards the declared `--lib`, `--bin` or `--test`
+selector to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the
+toolchain, features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
 registered harness; they do not compile or invoke the server's Cucumber executable.
 On a shared host, a cold server build can exceed the campaign runner's 30-minute compilation
 limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour

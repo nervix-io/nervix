@@ -308,6 +308,7 @@ does not retarget a handle. Typed refusals leave no attachment or reservation.
 | `Client::subscribe_emitter` | Open one competing worker of an emitter |
 | `EmitterConsumer::next_batch` | Read one attempt; abandoned reads remain retrievable by the next read of that attachment |
 | `EmitterDelivery::record_batch` | Decode native output with the optional `arrow` feature; decoding is not ACK |
+| `EmitterDelivery::decode_record_batch` | Decode retained delivery bytes under an emitter's declared fields and a row count, as `record_batch` does for a live delivery |
 | `ack` / `retry` / `reject` | Settle the attempt and inspect the typed confirmation |
 | Handle `description` / `connection` | Inspect the pinned contract and active/interrupted/restoring/reopen-required/closed state |
 | Producer `admission` / `end` | Inspect the newest admission state and terminal or explicit-reopen reason |

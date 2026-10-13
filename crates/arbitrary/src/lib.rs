@@ -25,6 +25,7 @@
 )]
 
 mod client;
+mod client_io;
 mod codec;
 mod control;
 mod emitter;
@@ -48,6 +49,7 @@ pub use entropy::Entropy;
 pub use expression::{EXPRESSION_DEPTH, ExpressionForm};
 pub use model::ModelVariant;
 pub use route::{RouteBranch, RouteFlush, RouteShape};
+pub use schema::fields_of_every_type;
 pub use statement::StatementVariant;
 pub use text::{GeneratedName, KEYWORDS};
 pub use wasm::WasmValues;
@@ -286,6 +288,201 @@ mod tests {
         }
         for keyword in super::KEYWORDS {
             assert!(spelled.contains(keyword), "{keyword} is never drawn");
+        }
+    }
+
+    /// The position of a declared type among the types a field declares. The match is exhaustive,
+    /// so a new type fails to compile here until the complete list below holds it.
+    fn type_class(ty: &nervix_models::ParseAsType) -> usize {
+        match ty {
+            nervix_models::ParseAsType::U8 => 0,
+            nervix_models::ParseAsType::I8 => 1,
+            nervix_models::ParseAsType::U16 => 2,
+            nervix_models::ParseAsType::I16 => 3,
+            nervix_models::ParseAsType::U32 => 4,
+            nervix_models::ParseAsType::I32 => 5,
+            nervix_models::ParseAsType::U64 => 6,
+            nervix_models::ParseAsType::I64 => 7,
+            nervix_models::ParseAsType::Bool => 8,
+            nervix_models::ParseAsType::String => 9,
+            nervix_models::ParseAsType::Datetime => 10,
+            nervix_models::ParseAsType::F32 => 11,
+            nervix_models::ParseAsType::F64 => 12,
+            nervix_models::ParseAsType::Bytes => 13,
+            nervix_models::ParseAsType::Vec { .. } => 14,
+            nervix_models::ParseAsType::Array { .. } => 15,
+        }
+    }
+
+    #[test]
+    fn the_fields_of_every_type_hold_every_type_and_every_flag_combination() {
+        let fields = super::fields_of_every_type();
+        let names: std::collections::BTreeSet<&str> =
+            fields.iter().map(|field| field.name.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            fields.len(),
+            "every field has a name of its own"
+        );
+        let mut top_level = std::collections::BTreeSet::new();
+        let mut listed = std::collections::BTreeSet::new();
+        let mut flags = std::collections::BTreeSet::new();
+        let mut lengths = std::collections::BTreeSet::new();
+        for field in &fields {
+            top_level.insert(type_class(&field.ty));
+            flags.insert((field.optional, field.sensitive));
+            match &field.ty {
+                nervix_models::ParseAsType::Vec { element } => {
+                    listed.insert(type_class(element));
+                }
+                nervix_models::ParseAsType::Array { len, .. } => {
+                    lengths.insert(len.get());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            top_level.into_iter().collect::<Vec<_>>(),
+            (0..16).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            listed.into_iter().collect::<Vec<_>>(),
+            (0..14).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            flags.len(),
+            4,
+            "optional and sensitive take all four combinations"
+        );
+        assert_eq!(lengths.into_iter().collect::<Vec<_>>(), vec![1, u32::MAX]);
+    }
+
+    #[test]
+    fn a_physical_duration_reaches_zero_one_nanosecond_and_the_longest() {
+        let mut drawn = std::collections::BTreeSet::new();
+        for first in 0..=u8::MAX {
+            for second in [0, 1, 4, u8::MAX] {
+                let bytes = [
+                    first, second, first, second, first, second, first, second, first,
+                ];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+                drawn.insert(arbitrary.physical_duration());
+            }
+        }
+        for boundary in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_nanos(1),
+            std::time::Duration::MAX,
+        ] {
+            assert!(drawn.contains(&boundary), "{boundary:?} is never drawn");
+        }
+        assert!(
+            drawn
+                .iter()
+                .any(|duration| duration.subsec_nanos() == 999_999_999
+                    && *duration != std::time::Duration::MAX),
+            "no duration ends just below a whole second"
+        );
+    }
+
+    #[test]
+    fn a_variant_reaches_every_variant_and_only_variants() {
+        let mut drawn = std::collections::BTreeSet::new();
+        for first in 0..=u8::MAX {
+            let bytes = [first];
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+            let defect: nervix_models::ClientBatchDefect = arbitrary.variant();
+            drawn.insert(<&'static str>::from(defect));
+        }
+        let every: std::collections::BTreeSet<&'static str> =
+            nervix_models::ClientBatchDefect::iter()
+                .map(<&'static str>::from)
+                .collect();
+        assert_eq!(drawn, every);
+    }
+
+    /// The position of an outcome among the outcomes a submitted batch has. The match is
+    /// exhaustive, so a new outcome fails to compile here until the generator draws it.
+    fn outcome_class(outcome: &nervix_models::ClientSubmissionOutcome) -> usize {
+        match outcome {
+            nervix_models::ClientSubmissionOutcome::NotAdmitted(_) => 0,
+            nervix_models::ClientSubmissionOutcome::Completed => 1,
+            nervix_models::ClientSubmissionOutcome::ProcessingFailed(_) => 2,
+            nervix_models::ClientSubmissionOutcome::OutcomeUnknown(_) => 3,
+        }
+    }
+
+    /// The position of a refusal among the reasons a batch is not admitted, exhaustive for the
+    /// same reason as [`outcome_class`].
+    fn refusal_class(refusal: &nervix_models::ClientSubmissionRefusal) -> usize {
+        match refusal {
+            nervix_models::ClientSubmissionRefusal::InvalidBatch(_) => 0,
+            nervix_models::ClientSubmissionRefusal::Suspended => 1,
+            nervix_models::ClientSubmissionRefusal::Busy => 2,
+            nervix_models::ClientSubmissionRefusal::Draining => 3,
+            nervix_models::ClientSubmissionRefusal::ProducerEnded => 4,
+            nervix_models::ClientSubmissionRefusal::CreditExceeded => 5,
+        }
+    }
+
+    #[test]
+    fn a_submission_outcome_reaches_every_outcome_and_every_refusal() {
+        let mut outcomes = std::collections::BTreeSet::new();
+        let mut refusals = std::collections::BTreeSet::new();
+        for first in 0..=u8::MAX {
+            for second in 0..=u8::MAX {
+                let bytes = [first, second, first];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+                let outcome = arbitrary.client_submission_outcome();
+                outcomes.insert(outcome_class(&outcome));
+                if let nervix_models::ClientSubmissionOutcome::NotAdmitted(refusal) = &outcome {
+                    refusals.insert(refusal_class(refusal));
+                }
+            }
+        }
+        assert_eq!(outcomes.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        assert_eq!(
+            refusals.into_iter().collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn client_limits_reach_one_their_declared_bound_and_the_largest_count() {
+        let mut producer_batches = std::collections::BTreeSet::new();
+        let mut producer_bytes = std::collections::BTreeSet::new();
+        let mut consumer_batches = std::collections::BTreeSet::new();
+        let mut consumer_bytes = std::collections::BTreeSet::new();
+        for first in 0..=u8::MAX {
+            for second in 0..=u8::MAX {
+                let bytes = [first, second, first, second];
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+                let producer = arbitrary.client_producer_limits();
+                producer_batches.insert(producer.batches.get());
+                producer_bytes.insert(producer.bytes.get());
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+                let consumer = arbitrary.client_consumer_limits();
+                consumer_batches.insert(consumer.batches.get());
+                consumer_bytes.insert(consumer.bytes.get());
+            }
+        }
+        for bound in [1, nervix_models::MAX_CLIENT_PRODUCER_BATCHES, u32::MAX] {
+            assert!(
+                producer_batches.contains(&bound),
+                "{bound} producer batches"
+            );
+        }
+        for bound in [1, nervix_models::CLIENT_PRODUCER_SESSION_BYTES, u64::MAX] {
+            assert!(producer_bytes.contains(&bound), "{bound} producer bytes");
+        }
+        for bound in [1, nervix_models::MAX_CLIENT_CONSUMER_BATCHES, u32::MAX] {
+            assert!(
+                consumer_batches.contains(&bound),
+                "{bound} consumer batches"
+            );
+        }
+        for bound in [1, nervix_models::CLIENT_CONSUMER_SESSION_BYTES, u64::MAX] {
+            assert!(consumer_bytes.contains(&bound), "{bound} consumer bytes");
         }
     }
 

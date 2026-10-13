@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Opening one ordered frame stream per caller, frame length validation, per-frame
-//!   memory admission, the decoding of a frame a receive took off the stream, when the peer last
-//!   accepted a sender's bytes, and the half-close that ends a stream.
+//!   memory admission, the bounded codec every message of a stream is encoded and decoded with,
+//!   the decoding of a frame a receive took off the stream, when the peer last accepted a sender's
+//!   bytes, and the half-close that ends a stream.
 //!
 //! Receiving is cancel-safe. A receive that took its frame off the stream waits for the frame's
 //! decoding, and a caller that selects the receive against a timer or a command drops it whenever
@@ -70,7 +71,7 @@ const INITIAL_FRAME_CHARGE: u64 = 4 * 1024;
 
 /// The decoding of one frame a receive took off the stream, kept until a receive finishes it.
 type FrameDecoding<T> =
-    Pin<Box<dyn Future<Output = Result<(T, Reservation), Report<TransportError>>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send>>;
 
 fn carry_limit(frame_limit: u64) -> u64 {
     frame_limit
@@ -355,10 +356,67 @@ impl DuplexSendProgress {
     }
 }
 
+/// The bounded codec of the messages one duplex request carries: its opening message, the frames
+/// its initiator submits and the answers its responder produces.
+///
+/// Every message of a stream is encoded and decoded under the request's pool class. The class
+/// names the memory budget that charges the message, the CPU class that does the work off the async
+/// workers, and the payload limit an encoding may not grow past. Both ends of a stream hold this
+/// codec, so what one end encodes is exactly what the other decodes.
+#[derive(Clone)]
+pub struct DuplexCodec {
+    executor: Executor,
+    class: PoolClass,
+}
+
+/// One encoded message and the charge that covers its bytes for as long as they are held.
+pub struct EncodedMessage {
+    pub bytes: Vec<u8>,
+    pub charge: Reservation,
+}
+
+impl DuplexCodec {
+    /// The codec of the streams `M` opens.
+    pub fn of<M: InterconnectDuplexRequest>(executor: &Executor) -> Self {
+        Self {
+            executor: executor.clone(),
+            class: M::CLASS,
+        }
+    }
+
+    /// Encodes one message within the class's payload limit. An encoding that would grow past the
+    /// limit fails instead of being sent.
+    pub fn encode<T: RkyvMessage>(
+        &self,
+        message: T,
+    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
+        let limit = self.class.payload_limit(&self.executor);
+        let encoding = message.encode_rkyv(self.executor.clone(), self.class, limit);
+        async move {
+            let (bytes, charge) = encoding.await?;
+            Ok(EncodedMessage { bytes, charge })
+        }
+    }
+
+    /// Validates one encoded message within the decoder's depth bound and decodes it, handing it
+    /// over with the charge that covers it. The decoding borrows nothing, so a receive may keep it
+    /// across the calls that finish it.
+    pub fn decode<T: RkyvMessage>(
+        &self,
+        payload: Vec<u8>,
+    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
+        let decoding = T::decode_rkyv(self.executor.clone(), self.class, payload);
+        async move {
+            let (item, charge) = decoding.await?;
+            Ok(ChargedItem { item, charge })
+        }
+    }
+}
+
 /// The frames a caller submits, in the order it submits them.
 pub struct DuplexSender<M: InterconnectDuplexRequest> {
     writer: FrameWriter,
-    executor: Executor,
+    codec: DuplexCodec,
     node: ClusterNodeName,
     _hold: Arc<DuplexHold>,
     item: PhantomData<fn(M::Item)>,
@@ -370,15 +428,12 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
     /// Returns how many encoded bytes the frame carried, which is what a caller bounding its own
     /// outstanding work counts.
     pub async fn send(&mut self, item: M::Item) -> Result<u64, Report<RequestError>> {
-        let (payload, reservation) = item
-            .encode_rkyv(
-                self.executor.clone(),
-                M::CLASS,
-                M::CLASS.payload_limit(&self.executor),
-            )
+        let encoded = self
+            .codec
+            .encode(item)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
-        let frame = ChargedBytes::from_owned(payload, reservation);
+        let frame = ChargedBytes::from_owned(encoded.bytes, encoded.charge);
         let bytes = u64::try_from(frame.len())
             .assured("supported targets have a pointer width no larger than u64");
         self.writer
@@ -408,7 +463,7 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
 /// The answers a peer produced, in the order it produced them.
 pub struct DuplexReceiver<M: InterconnectDuplexRequest> {
     reader: FrameReader,
-    executor: Executor,
+    codec: DuplexCodec,
     node: ClusterNodeName,
     /// The answer an abandoned receive took off the stream, still decoding.
     decoding: Option<FrameDecoding<M::Response>>,
@@ -431,7 +486,7 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
             let Some(frame) = frame else {
                 return Ok(None);
             };
-            let decoding = M::Response::decode_rkyv(self.executor.clone(), M::CLASS, frame);
+            let decoding = self.codec.decode::<M::Response>(frame);
             self.decoding = Some(Box::pin(decoding));
         }
         let decoding = self
@@ -440,7 +495,10 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
             .verified("the branch above starts a decoding whenever no receive left one");
         let decoded = decoding.await;
         self.decoding = None;
-        let (response, _reservation) = decoded
+        let ChargedItem {
+            item: response,
+            charge: _charge,
+        } = decoded
             .map_err(|error| error.change_context(RequestError::Decode { request: M::NAME }))?;
         Ok(Some(response))
     }
@@ -449,8 +507,7 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
 /// The frames one peer sent after it opened a duplex stream.
 pub struct DuplexItems<T> {
     reader: FrameReader,
-    executor: Executor,
-    class: PoolClass,
+    codec: DuplexCodec,
     request: &'static str,
     /// The frame an abandoned read took off the stream, still decoding.
     decoding: Option<FrameDecoding<T>>,
@@ -458,16 +515,10 @@ pub struct DuplexItems<T> {
 }
 
 impl<T> DuplexItems<T> {
-    pub(crate) fn new(
-        reader: FrameReader,
-        executor: Executor,
-        class: PoolClass,
-        request: &'static str,
-    ) -> Self {
+    pub(crate) fn new(reader: FrameReader, codec: DuplexCodec, request: &'static str) -> Self {
         Self {
             reader,
-            executor,
-            class,
+            codec,
             request,
             decoding: None,
             item: PhantomData,
@@ -500,7 +551,7 @@ impl<T: RkyvMessage> DuplexItems<T> {
             let Some(frame) = frame else {
                 return Ok(None);
             };
-            let decoding = T::decode_rkyv(self.executor.clone(), self.class, frame);
+            let decoding = self.codec.decode::<T>(frame);
             self.decoding = Some(Box::pin(decoding));
         }
         let decoding = self
@@ -509,13 +560,13 @@ impl<T: RkyvMessage> DuplexItems<T> {
             .verified("the branch above starts a decoding whenever no read left one");
         let decoded = decoding.await;
         self.decoding = None;
-        let (item, charge) = decoded.map_err(|error| {
+        let item = decoded.map_err(|error| {
             Report::new(StreamHandlerError::new(format!(
                 "{} frame: {error}",
                 self.request
             )))
         })?;
-        Ok(Some(ChargedItem { item, charge }))
+        Ok(Some(item))
     }
 }
 
@@ -652,17 +703,18 @@ impl TransportState {
             _lease: lease,
             _admission: admission,
         });
+        let codec = DuplexCodec::of::<M>(&self.executor);
         Ok((
             DuplexSender {
                 writer,
-                executor: self.executor.clone(),
+                codec: codec.clone(),
                 node: node_id.clone(),
                 _hold: hold.clone(),
                 item: PhantomData,
             },
             DuplexReceiver {
                 reader,
-                executor: self.executor.clone(),
+                codec,
                 node: node_id.clone(),
                 decoding: None,
                 _hold: hold,
