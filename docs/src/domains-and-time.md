@@ -241,25 +241,27 @@ ATTACH DOMAIN CLOCK;
 DETACH DOMAIN CLOCK;
 ```
 
-The attach reply, and a frame on every later change, carry the `START` generation and the clock as
-the serving node has it installed: stopped, uninstalled, unpaced, or paced with its `PERIOD`,
-`SKEW`, logical origin, UTC anchor, and `TIME RATE`. A paced clock is the committed mapping this
+The attach reply, and a frame after later changes of the installed clock, carry the `START`
+generation and the clock as the serving node has it installed: stopped, uninstalled, unpaced, or
+paced with its `PERIOD`, `SKEW`, logical origin, UTC anchor, and `TIME RATE`. Changes made before a
+frame is sent arrive together as the newest clock. A paced clock is the committed mapping this
 chapter describes, so a client projects the domain's logical time for its own UTC observation with
 the same arithmetic every node uses, including rounding down, and reconstructs the admission window
 from the origin, `PERIOD`, and `SKEW`. A driver of a paced simulation can therefore choose
 `TIMESTAMP AT` values the ingestor admits, such as the newest reached center, and compute how long
-to wait until a logical instant; the [Paced Simulation Drivers](paced-simulation-drivers.md) are
-two runnable such drivers. The projection uses the client host's UTC, so the synchronization
-requirement above extends to such a client: its offset from the cluster's hosts, multiplied by
-`TIME RATE`, shifts every projection. The session also receives each newest accepted tick as a
+to wait until a logical instant; the [Paced Simulation Drivers](paced-simulation-drivers.md) are two
+runnable such drivers. The projection uses the client host's UTC, so the synchronization requirement
+above extends to such a client: its offset from the cluster's hosts, multiplied by `TIME RATE`,
+shifts the logical instants and admission centers it projects, and the offset itself moves the end
+of every physical wait it computes. The session also receives each newest accepted tick as a
 replaceable frame with its id, logical boundary, authority UTC observation, and serving node's
-logical reading. A client can pace from those accepted boundaries even if its own UTC is offset;
-the serving node's reading gives it a cluster-side anchor.
+logical reading. A client can pace from those accepted boundaries even if its own UTC is offset; the
+serving node's reading gives it a cluster-side anchor.
 
-Both statements are session-local, are refused while a transaction is open, and follow each domain
-at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment) for the delivery
-contract and [Rust Client Library](client-library.md#following-a-domain-clock) for the helper that
-performs this arithmetic, which the shared C binding exposes to its hosts through
+Both statements are session-local and are refused while a transaction is open, and a session follows
+each domain clock at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment)
+for the delivery contract and [Rust Client Library](client-library.md#following-a-domain-clock) for
+the helper that performs this arithmetic, which the shared C binding exposes to its hosts through
 `nx_session_domain_clock`.
 
 ## Execution-Time Snapshots

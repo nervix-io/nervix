@@ -15,7 +15,7 @@ DETACH DOMAIN CLOCK;
 
 Following a domain clock is not a subscription; see
 [Domain Clock Attachment](#domain-clock-attachment). Publishing to a client ingestor uses
-[producers](#producers), which are not statements either.
+[producers](#producers), which are not statements.
 
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter connects
 these transient handles to their persisted graph endpoints, ACK boundaries and restoration.
@@ -140,14 +140,19 @@ A session can follow the clock of a domain: its `START` generation and what the 
 installed for it. `ATTACH DOMAIN CLOCK;` starts following the clock of the active domain and
 `DETACH DOMAIN CLOCK;` stops following it. Clients send them as an `AttachDomainClockRequest` and a
 `DetachDomainClockRequest` naming the active domain, so each addresses the domain active when it
-runs. Selecting another domain with `USE` does not change what the session follows, and a session
-follows several domain clocks by attaching while each domain is active.
+runs. The Rust client, the CLI and every host of the shared C binding send each statement on its
+own: they refuse it beside other statements, and fail it when no domain is active. Selecting
+another domain with `USE` does not change what the session follows, and a session follows several
+domain clocks by attaching while each domain is active. The web console instead follows the clock
+of the domain it has selected: selecting another domain, from its domain menu or with `USE`,
+detaches the previous clock and attaches the selected one.
 
 An attachment is keyed by its domain alone. It is not a subscription: it reads no relay, has no
 name or generation of its own, and a session follows each domain clock at most once. The observed
 clock carries the `START` generation and one state:
 
-- **Stopped.** The generation exists but executes no domain work.
+- **Stopped.** The generation exists but executes no domain work. Generation 0 means the domain has
+  never started.
 - **Uninstalled.** A paced generation is running, but the serving node has no assigned clock
   authority or mapping for it, so it cannot execute paced work.
 - **Unpaced.** The domain reads actual UTC.
@@ -157,44 +162,54 @@ clock carries the `START` generation and one state:
 
 An attachment moves through one lifecycle:
 
-- **Attached.** The reply carries the clock as the serving node has it installed, and no frame about
-  the domain precedes it. A second attach is refused as already attached, and a domain the serving
-  node does not have is refused as not found. A node that has not installed the cluster's committed
-  domains since it started, as right after a restart, answers only once it has, so it never refuses
-  a domain the cluster has as not found. That wait ends early only with the session. When the reply
-  cannot be delivered, because the request was cancelled, the session ended, or the reply did not
-  fit the session limits, the attachment is abandoned before it delivers anything. If the
-  installation has not changed and the node already holds a tick of that generation, its newest
-  tick is the first frame after the reply.
+- **Attached.** The reply carries the clock as the serving node has it installed, and no frame of
+  this attachment precedes it. A second attach is refused as already attached, and a domain the
+  serving node does not have is refused as not found. A node that has not installed the cluster's
+  committed domains since it started, as right after a restart, answers only once it has, so it
+  never refuses a domain the cluster has as not found. That wait ends early only with the session.
+  While it waits, the attach holds the session's ordered lane, so the session's later commands and
+  ordered requests wait behind it. When the reply cannot be delivered, because the request was
+  cancelled, the session ended, or the reply did not fit the session limits, the attachment is
+  abandoned before it delivers anything; cancelling a waiting attach therefore attaches nothing,
+  though it does not end the wait. If the installation has not changed and the node already holds a
+  tick of that generation, its newest tick is the first frame after the reply.
 - **Following.** Each later change of the installed clock arrives as a `DomainClockObserved` frame
-  carrying the new clock: `STOP` delivers stopped, a `START` delivers its generation and mapping,
-  and a paced generation left without an assigned clock authority delivers uninstalled, then its
-  mapping again once an authority is assigned. A frame carries the clock installed when it is sent.
-  Changes made while an earlier frame waits for room on the session arrive together as the newest
-  clock, and a change that leaves the clock as the client last received it sends nothing: moving the
-  authority to another node and the pause that alters a running model are not observed. For a paced
-  installation, each newer accepted tick arrives as a `DomainClockTicked` frame with its generation,
-  one-based id, logical boundary, the authority's UTC observation, and the serving node's own
-  logical reading taken when it built the frame. A tick of a new generation follows that
-  generation's state frame. Ticks are replaceable on the control lane: each attached domain holds
-  at most one queued tick, updated to the newest while the client is slow. Tick ids may skip after
-  coalesced periods. An unpaced or uninstalled clock emits no ticks.
+  carrying the new clock: `STOP` delivers stopped, a `START` delivers its new generation, paced with
+  its mapping or unpaced, and a paced generation left without an assigned clock authority delivers
+  uninstalled, then its mapping again once an authority is assigned. A frame carries the clock
+  installed when the server built it. Changes made while an earlier frame waits for room on the
+  session arrive together as the newest clock, and a change that leaves the clock as the client last
+  received it sends nothing: moving the authority to another node and the pause that alters a
+  running model are not observed. For a paced installation, each newer accepted tick arrives as a
+  `DomainClockTicked` frame with its generation, one-based id, logical boundary, the authority's UTC
+  observation, and the serving node's own logical reading taken when it built the frame. A tick of
+  a new generation follows that generation's state frame. Ticks are replaceable on the control
+  lane: each attached domain holds at most one queued tick, updated to the newest while the client
+  is slow, and a changed clock withdraws a queued tick the transport has not taken yet. Tick ids may
+  skip after coalesced periods. An unpaced, stopped or uninstalled clock emits no ticks.
 - **Detached.** `DETACH DOMAIN CLOCK` stops delivery before its reply, so nothing about the domain
   follows the reply. A detach without an attachment is refused as not attached.
 - **Ended by the server.** When the domain no longer exists on the serving node, the session
   receives `DomainClockAttachmentEnded` with reason `DomainRemoved`, the last frame about that
-  attachment. A request sent after that frame finds the attachment gone: an attach attaches again
-  and a detach is refused as not attached.
+  attachment. A request sent after that frame finds the attachment gone: an attach is served as a
+  new attachment, which the serving node refuses as not found unless it holds the domain again, and
+  a detach is refused as not attached.
 - **Session end.** The attachment ends with the session, and nothing is sent about it. The Rust
   client, the CLI, and every host of the shared C binding attach every clock they followed again on
-  their next session, which delivers the clock as it is then and the newest tick its serving node
-  holds. That tick can repeat one the client already received, or precede it when another node
-  serves the new session.
+  their next session, and the web console attaches its selected domain's clock again when it
+  reconnects. A console that holds a transaction attaches it first on the new connection, so the
+  server refuses that clock attach, and the console shows the refusal until its selection or
+  connection changes. The new attachment delivers the clock as it is then and the newest tick its
+  serving node holds. That tick can repeat one the client already received, or precede it when
+  another node serves the new session.
 
-Both statements run in order with the session's commands and are refused, with the session-local
-refusal, while the session holds a transaction. Neither is persisted or becomes transaction
-content. See [Domains And Time](domains-and-time.md#following-a-domain-clock) for what a client
-computes from a paced clock.
+Both statements run in order with the session's commands. While the session holds a transaction,
+the server refuses them as it refuses a subscription change, and the Rust client, the CLI, every
+host of the shared C binding and the web console refuse them before sending, as they refuse every
+client-local statement. Neither is persisted or becomes transaction content. See
+[Domains And Time](domains-and-time.md#following-a-domain-clock) for what a client computes from a
+paced clock, and [Domain Clock](domain-clock.md#session-attachment) for how the serving node
+delivers an attachment.
 
 ## Producers
 
