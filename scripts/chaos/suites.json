@@ -1,5 +1,5 @@
 {
-  "ci_reserve_minutes": 10,
+  "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
       "description": "Three-node baseline, a leader crash with its restart, and the recovery from an isolated follower's partition",

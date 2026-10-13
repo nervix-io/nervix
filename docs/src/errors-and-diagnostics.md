@@ -1901,6 +1901,9 @@ lacks netem or iptables capabilities from a Docker client failure. A successful 
 does not establish successful Docker-client completion within the inspection bound.
 Only the ping helper's missing-replies outcome qualifies blocked traffic. A Docker execution
 refusal or a probe timeout supplies no effect observation and fails preflight with its own status.
+The real preflight failure controls qualify separately from a scenario's timed verifier self-check.
+CI retains their raw outcomes before starting the suite; failure to complete that qualification
+fails the shard without consuming a product scenario's execution window.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product

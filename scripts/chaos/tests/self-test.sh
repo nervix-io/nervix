@@ -810,9 +810,10 @@ heal_sidecar="$(docker run --detach --label com.gaiaadm.pumba.skip=true \
     --network "container:${heal_target}" "${chaos_probe_image}" sleep 120)"
 "${network_faults}" heal --run-id "${cleanup_run_id}" --nettools "${chaos_nettools_image}" \
     --output "${tmp_dir}/heal-report.txt" || fail 'healing did not clear faults left by a killed injector'
-grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
-    && grep -Fq 'removed Pumba INPUT rule' "${tmp_dir}/heal-report.txt" \
-    || fail 'healing did not report the owned rules it removed'
+if ! grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
+    || ! grep -Fq 'removed Pumba INPUT rule' "${tmp_dir}/heal-report.txt"; then
+    fail 'healing did not report the owned rules it removed'
+fi
 if docker inspect "${heal_sidecar}" >/dev/null 2>&1; then
     fail 'healing left a Pumba sidecar joined to a run-owned namespace'
 fi
@@ -848,7 +849,6 @@ if docker inspect "${foreign_sidecar}" >/dev/null 2>&1 || docker inspect "${fore
 fi
 
 printf 'chaos harness self-test passed\n'
-"${script_dir}/network-preflight-self-test.sh"
 "${script_dir}/degraded-self-test.sh"
 "${script_dir}/rate-probe-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"

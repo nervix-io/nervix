@@ -133,8 +133,8 @@ jobs:
     # disciplines, which the Blacksmith workers' kernel does not provide, so every run there stops
     # in its network preflight or verifier self-check.
     runs-on: ubuntu-24.04
-    # The job budget is the shard's step budget plus the measured reserve for evidence, cleanup and
-    # upload, so those steps still run when the suite step reaches its own budget.
+    # The shard's CI reserve funds the separate 600s network qualification and its 10s termination
+    # grace, in addition to the measured evidence, cleanup and upload allowance.
     timeout-minutes: ${{ matrix.shard.job_minutes }}
     strategy:
       fail-fast: false
@@ -211,6 +211,16 @@ jobs:
         if: always()
         run: docker logout ghcr.io
 
+      # Real refusal controls took 118s locally and contributed to a 204s timed self-check in CI.
+      # Keep their existing 600s qualification cap outside every scenario's execution budget.
+      - name: Qualify network preflight failures and healing
+        timeout-minutes: 11
+        run: |
+          export PATH="${CHAOS_PATH}"
+          export CHAOS_NETWORK_PREFLIGHT_ARTIFACTS="${RUNNER_TEMP}/chaos/${CHAOS_SUITE_ID}-network-controls"
+          export CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE="${CHAOS_IMAGE}"
+          exec timeout --foreground --kill-after=10s 600s just test-chaos-network-preflight
+
       # The suite step ends at its budget: the runs' own bounds and one teardown reserve. exec hands
       # a cancellation's TERM to just, which passes it to the suite and the run it executes.
       - name: Run the ${{ inputs.suite }} suite
@@ -266,7 +276,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chaos-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ inputs.image-kind }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}
+          path: |
+            ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}
+            ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}-network-controls
           if-no-files-found: warn
           retention-days: 14
 

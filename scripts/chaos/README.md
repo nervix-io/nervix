@@ -1381,6 +1381,11 @@ a Docker launch that created a canary before refusing, an injector that cannot s
 image, sidecar disappearance versus inspection failure while still present, and a refused
 Docker execution of the blocked-traffic probe. The same controls run in `just chaos self-test`; `just coverage-chaos-network-preflight`
 retains their shell coverage under `target/chaos-network-preflight-coverage/`.
+Each scenario keeps its existing verifier self-check. The full command adds the real network
+refusal controls afterward; they do not consume a scenario's execution budget. CI runs the controls
+once before each shard's timed suite and retains their raw evidence beside the suite evidence.
+That qualification keeps the existing 600-second full-self-check cap, with a ten-second termination
+grace; the job funds it with eleven additional minutes. Fault and product deadlines are unchanged.
 Pass an already-built Nervix image as `just coverage-chaos-network-preflight IMAGE` to include
 the public runner's setup-error projection; the controlled refusal ends before any node starts.
 Existing evidence directories are refused, preserving their records and preventing stale launch
@@ -1578,7 +1583,10 @@ ended and which runs cleanup signalled or killed, and renders the summary again.
 `just chaos suite shards SUITE` prints the budgets CI applies to each shard. Its execution budget is
 the sum of its entries' budgets. Its step budget adds one 15-minute run teardown reserve, the bound
 within which a run that reached its own timeout finishes its teardown. Its job budget adds
-`ci_reserve_minutes` for the steps that follow the suite: cleanup, the summary and the uploads.
+`ci_reserve_minutes` for the separate network-control qualification and for the steps that follow
+the suite: cleanup, the summary and the uploads. Its 21 minutes retain the existing ten-minute
+cleanup/evidence allowance and fund the qualification's 600-second cap plus ten-second termination
+grace with eleven additional minutes.
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards
 and fails unless each passed and N of them are present.
 

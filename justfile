@@ -2678,7 +2678,7 @@ coverage-chaos-network-preflight image="":
     if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
         ulimit -n 65536
     fi
-    CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE={{ quote(image) }} kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/network-faults.sh") }},{{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/network-preflight-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-network-preflight-coverage") }} scripts/chaos/tests/network-preflight-self-test.sh
+    CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE={{ quote(image) }} kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/chaos.sh") }},{{ quote(invocation_directory() / "scripts/chaos/network-faults.sh") }},{{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/network-preflight-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-network-preflight-coverage") }} scripts/chaos/chaos.sh self-test
 
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:
