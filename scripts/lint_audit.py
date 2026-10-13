@@ -49,7 +49,9 @@ RULES = {
         Rule("as_casts", re.compile(r"\bas\s+(?:[ui](?:8|16|32|64|128|size)|f32|f64)\b")),
         Rule("discarded_results", re.compile(r"\blet\s+_\s*=")),
         Rule("result_string_errors", re.compile(r"\bResult\s*<[^;{}]*,\s*String\s*>")),
-        Rule("bare_error_signatures", re.compile(r"->\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*Result\s*<")),
+        # The counter matched a returned Result whose failure was a plain error type, not a report.
+        Rule("bare_error_signatures",
+             re.compile(r"->\s*(?:[A-Za-z_]\w*\s*::\s*)*Result\s*<[^;{}]*,\s*(?:[A-Za-z_]\w*\s*::\s*)*[A-Z]\w*Error\s*>")),
         Rule("combinator_control_flow",
              re.compile(r"\.\s*(?:map_or_else|map_or|and_then|ok_or_else|unwrap_or_else|or_else)\s*\(")),
         Rule("model_matches_in_data_plane", re.compile(r"\bModel\s*::")),
@@ -293,6 +295,101 @@ class Hunks:
         return Hunk(line, 0)
 
 
+class CommitSpellings:
+    """Governed spellings a commit's Rust changes removed, across every file it touched."""
+
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = root
+        self.removed: dict[str, dict[str, int]] = {}
+
+    def net_removed(self, sha: str, rule: Rule) -> bool:
+        if rule.spelling is None:
+            return False
+        if sha not in self.removed:
+            diff = git(self.root, "show", "--format=", "--unified=0", sha, "--", "*.rs")
+            counts: dict[str, int] = {}
+            for name, candidate in RULES.items():
+                if candidate.spelling is None:
+                    continue
+                removed = 0
+                added = 0
+                for line in diff.splitlines():
+                    if line.startswith("-") and not line.startswith("---"):
+                        removed += len(candidate.spelling.findall(line))
+                    elif line.startswith("+") and not line.startswith("+++"):
+                        added += len(candidate.spelling.findall(line))
+                counts[name] = removed - added
+            self.removed[sha] = counts
+        return self.removed[sha].get(rule.name, 0) > 0
+
+
+@dataclasses.dataclass(frozen=True)
+class PullRequestChange:
+    sha: str
+    removed: list[str]
+    added: list[str]
+
+
+class PullRequests:
+    """The commits a squash merge folded away, read from the hosting repository on request."""
+
+    SUBJECT = re.compile(r"\(#(\d+)\)\s*$")
+    REMOTE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repository>[^/]+?)(?:\.git)?$")
+
+    def __init__(self, root: pathlib.Path) -> None:
+        remote = git(root, "remote", "get-url", "origin").strip()
+        match = self.REMOTE.search(remote)
+        if match is None:
+            raise AuditError(f"origin {remote} is not a GitHub repository")
+        self.repository = f"{match.group('owner')}/{match.group('repository')}"
+        self.changes: dict[int, dict[str, list[PullRequestChange]]] = {}
+
+    def api(self, path: str) -> Any:
+        completed = subprocess.run(["gh", "api", "--paginate", "--slurp", path], text=True, capture_output=True)
+        if completed.returncode:
+            raise AuditError(f"gh api {path} failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def number(self, subject: str) -> int | None:
+        match = self.SUBJECT.search(subject)
+        if match is None:
+            return None
+        return int(match.group(1))
+
+    def history(self, number: int) -> dict[str, list[PullRequestChange]]:
+        if number in self.changes:
+            return self.changes[number]
+        files: dict[str, list[PullRequestChange]] = {}
+        for page in self.api(f"repos/{self.repository}/pulls/{number}/commits"):
+            for commit in page:
+                if len(commit["parents"]) != 1:
+                    continue
+                details = self.api(f"repos/{self.repository}/commits/{commit['sha']}")[0]
+                for changed in details.get("files", []):
+                    removed = []
+                    added = []
+                    for line in changed.get("patch", "").splitlines():
+                        if line.startswith("-") and not line.startswith("---"):
+                            removed.append(line[1:])
+                        elif line.startswith("+") and not line.startswith("+++"):
+                            added.append(line[1:])
+                    files.setdefault(changed["filename"], []).append(PullRequestChange(commit["sha"], removed, added))
+        self.changes[number] = files
+        return files
+
+    def rewrite(self, subject: str, path: str, rule: Rule) -> PullRequestChange | None:
+        """A pull-request commit that removed the rule's spelling from this file."""
+        number = self.number(subject)
+        if number is None or rule.spelling is None:
+            return None
+        for change in self.history(number).get(path, []):
+            removed = sum(len(rule.spelling.findall(line)) for line in change.removed)
+            added = sum(len(rule.spelling.findall(line)) for line in change.added)
+            if removed > added:
+                return change
+        return None
+
+
 def candidate_lines(candidate: dict[str, Any]) -> list[int]:
     pattern = candidate["pattern"]
     spans = [candidate["span"]]
@@ -374,7 +471,8 @@ def lock_counter_scope(path: str, date: str, history: History) -> bool:
     return connectors is not None and date >= connectors.date
 
 
-def attribute(candidate: dict[str, Any], history: History, blame: Blame, hunks: Hunks) -> dict[str, Any]:
+def attribute(candidate: dict[str, Any], history: History, blame: Blame, hunks: Hunks,
+              spellings: CommitSpellings, pull_requests: PullRequests | None) -> dict[str, Any]:
     """The commit that completed a candidate's lines, its diff, and the counts it touched."""
     path = candidate["path"]
     provenance = []
@@ -398,13 +496,21 @@ def attribute(candidate: dict[str, Any], history: History, blame: Blame, hunks: 
         removed = False
         if rule.spelling is not None:
             removed = len(rule.spelling.findall(before)) > len(rule.spelling.findall(after))
+        commit_removed = spellings.net_removed(introducing.sha, rule)
+        rewrite = None
+        if pull_requests is not None:
+            rewrite = pull_requests.rewrite(introducing.subject, introducing.path, rule)
         predates = history.predates(date, name)
-        rules.append({"rule": name, "event": event, "spelling_removed": removed, "predates_rule": predates})
+        evidence = {"rule": name, "event": event, "spelling_removed": removed,
+                    "commit_spelling_removed": commit_removed, "predates_rule": predates}
+        if rewrite is not None:
+            evidence["pull_request_rewrite"] = {"sha": rewrite.sha, "removed": rewrite.removed, "added": rewrite.added}
+        rules.append(evidence)
         if predates:
             continue
-        if event is not None and (removed or rule.spelling is None):
+        if rewrite is not None or (event is not None and (removed or commit_removed or rule.spelling is None)):
             level = "suspected"
-        elif event is not None or removed:
+        elif event is not None or removed or commit_removed:
             level = "possible"
         else:
             level = "unattributed"
@@ -553,6 +659,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="analyze with warning levels, so current diagnostics do not stop the audit")
     parser.add_argument("--configuration", action="append",
                         help="audit selected declared configurations (an inventory, not the complete matrix)")
+    parser.add_argument("--pull-requests", action="store_true",
+                        help="also read the commits squash merges folded away, through gh")
     parser.add_argument("--output-dir", type=pathlib.Path)
     args = parser.parse_args(argv)
     args.root = args.root.resolve()
@@ -564,15 +672,18 @@ def main(argv: list[str] | None = None) -> int:
         blame = Blame(args.root)
         blame.load({candidate["path"] for candidate in candidates})
         hunks = Hunks(args.root)
+        spellings = CommitSpellings(args.root)
+        pull_requests = PullRequests(args.root) if args.pull_requests else None
         candidates.extend(relocated_acquisitions(report["findings"], history, blame))
         for candidate in candidates:
-            candidate["attribution"] = attribute(candidate, history, blame, hunks)
+            candidate["attribution"] = attribute(candidate, history, blame, hunks, spellings, pull_requests)
         revision = git(args.root, "rev-parse", "HEAD").strip()
         output = {
             "revision": revision,
             "source_identity": report["source_identity"],
             "matrix_complete": report["matrix_complete"],
             "configurations": [entry["name"] for entry in report["configurations"]],
+            "pull_requests": args.pull_requests,
             "rules": {name: {"introduced": commit.sha, "date": commit.date}
                       for name, commit in sorted(history.introduced.items())},
             "summary": summarize(candidates),

@@ -18,11 +18,14 @@ pub fn counted(counts: &mut BTreeMap<Vec<u8>, u64>, key: &Vec<u8>) {
     *counts.entry(key.clone()).or_default() += 1;
 }
 
-/// A copy that exists only to be borrowed.
-pub fn measured(name: &String) -> usize {
+/// A copy that exists only to be borrowed. Formatting a number builds new text, which is not a
+/// copy a borrow could replace.
+pub fn measured(name: &String, text: &str, count: u64) -> usize {
     let copy_length = name.clone().len();
     let borrowed = describe(&name.to_owned());
-    copy_length + borrowed
+    let copied_text = describe(&text.to_string());
+    let formatted = describe(&count.to_string());
+    copy_length + borrowed + copied_text + formatted
 }
 
 fn describe(value: &str) -> usize {

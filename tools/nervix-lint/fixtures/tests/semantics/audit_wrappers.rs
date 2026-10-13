@@ -49,7 +49,20 @@ pub fn largest(left: u64, right: u64) -> u64 {
     std::cmp::max(left, right)
 }
 
+/// A newtype constructor builds a value; it forwards to no function.
+pub struct Identifier(u64);
+
+impl Identifier {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+}
+
 pub fn callers(store: &mut Store) -> u64 {
     store.push(1);
-    combined(1, 2) + combined(3, 4)
+    combined(1, 2) + combined(3, 4) + Identifier::new(5).value()
 }

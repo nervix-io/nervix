@@ -180,12 +180,18 @@ pub fn preserves_value(operation: &str) -> bool {
     )
 }
 
-/// Conversions that build an owned value from a borrowed one.
+/// Conversions that always build an owned copy of an existing value.
 pub fn copies_value(operation: &str) -> bool {
     matches!(
         operation,
-        "clone" | "to_owned" | "to_string" | "to_vec" | "to_path_buf" | "into_owned" | "into"
+        "clone" | "to_owned" | "to_vec" | "to_path_buf" | "into_owned"
     )
+}
+
+/// Conversions that copy only when their receiver is text; on any other value they format or
+/// convert it, which a borrowed form cannot replace.
+pub fn copies_text(operation: &str) -> bool {
+    matches!(operation, "to_string" | "into")
 }
 
 /// Primitive integer and Duration operations that report overflow as absence.

@@ -121,11 +121,13 @@ class RepositoryTests(unittest.TestCase):
         candidate["pattern"]["operations"][1]["span"] = span(path, second, lines[second - 1].strip())
         return lint_audit.collect([evidence("ordinary", candidate)])[0]
 
-    def attribute(self, candidate: dict[str, Any]) -> dict[str, Any]:
+    def attribute(self, candidate: dict[str, Any],
+                  pull_requests: lint_audit.PullRequests | None = None) -> dict[str, Any]:
         history = lint_audit.History(self.root)
         blame = lint_audit.Blame(self.root)
         blame.load({candidate["path"]})
-        return lint_audit.attribute(candidate, history, blame, lint_audit.Hunks(self.root))
+        return lint_audit.attribute(candidate, history, blame, lint_audit.Hunks(self.root),
+                                    lint_audit.CommitSpellings(self.root), pull_requests)
 
     def test_history_records_introductions_and_lowerings(self) -> None:
         history = lint_audit.History(self.root)
@@ -145,6 +147,58 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("        map.insert(pane, vec![1]);", attribution["after"])
         rule = attribution["rules"][0]
         self.assertEqual((rule["event"], rule["spelling_removed"], rule["predates_rule"]), ("lowered 3->2", True, False))
+
+    def test_a_lowering_that_moved_the_spelling_out_of_another_file_is_suspected(self) -> None:
+        self.commit("2026-09-21", "count old entry", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 3}),
+            "src/runtime/old.rs": "fn old(map: &mut M) {\n    map.entry(1).or_insert(2);\n}\n",
+        })
+        # The port removes the counted spelling from one file and writes the lookup pair in
+        # another, so the candidate's own hunk removed nothing.
+        self.commit("2026-09-22", "port offsets", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 2}),
+            "src/runtime/old.rs": "fn old(map: &mut M) {\n    map.insert(1, 2);\n}\n",
+            "src/runtime/ported.rs": ("fn ported(map: &mut M, key: u64) {\n    if let Some(value) = map.get_mut(&key) {\n"
+                                      "        *value += 1;\n    } else {\n        map.insert(key, 1);\n    }\n}\n"),
+        })
+        attribution = self.attribute(self.candidate("src/runtime/ported.rs", 2, 5))
+        self.assertEqual(attribution["suggestion"], "suspected")
+        rule = attribution["rules"][0]
+        self.assertEqual((rule["event"], rule["spelling_removed"], rule["commit_spelling_removed"]),
+                         ("lowered 3->2", False, True))
+
+    def test_a_pull_request_that_rewrote_the_spelling_before_its_squash_is_suspected(self) -> None:
+        self.git("remote", "add", "origin", "https://github.com/example/project.git")
+        self.commit("2026-09-23", "feat(window): add pane sketches (#7)", {
+            "src/runtime/sketches.rs": ("fn admit(map: &mut M, pane: i64) {\n    if let Some(sketch) = map.get_mut(&pane) {\n"
+                                        "        sketch.add(1);\n    } else {\n        map.insert(pane, S::new());\n    }\n}\n"),
+        })
+        pages = {
+            "repos/example/project/pulls/7/commits": [[{"sha": "a" * 40, "parents": [{}]},
+                                                        {"sha": "b" * 40, "parents": [{}]},
+                                                        {"sha": "c" * 40, "parents": [{}, {}]}]],
+            f"repos/example/project/commits/{'a' * 40}": [{"files": [{
+                "filename": "src/runtime/sketches.rs",
+                "patch": "@@ -0,0 +1,3 @@\n+fn admit(map: &mut M, pane: i64) {\n+    map.entry(pane).or_insert_with(S::new).add(1);\n+}"}]}],
+            f"repos/example/project/commits/{'b' * 40}": [{"files": [{
+                "filename": "src/runtime/sketches.rs",
+                "patch": "@@ -2 +2,5 @@\n-    map.entry(pane).or_insert_with(S::new).add(1);\n+    if let Some(sketch) = map.get_mut(&pane) {"}]}],
+        }
+        pull_requests = lint_audit.PullRequests(self.root)
+        with mock.patch.object(pull_requests, "api", side_effect=lambda path: pages[path]):
+            attribution = self.attribute(self.candidate("src/runtime/sketches.rs", 2, 5), pull_requests)
+        self.assertEqual(attribution["suggestion"], "suspected")
+        rewrite = attribution["rules"][0]["pull_request_rewrite"]
+        self.assertEqual(rewrite["sha"], "b" * 40)
+        self.assertEqual(rewrite["removed"], ["    map.entry(pane).or_insert_with(S::new).add(1);"])
+        self.assertIsNone(pull_requests.number("refactor: no pull request"))
+
+    def test_error_signature_spelling_names_a_plain_failure_not_a_report(self) -> None:
+        spelling = lint_audit.RULES["bare_error_signatures"].spelling
+        self.assertTrue(spelling.search("fn parse() -> Result<u8, ParseError> {"))
+        self.assertTrue(spelling.search("fn parse() -> std::result::Result<u8, crate::ParseError> {"))
+        self.assertFalse(spelling.search("fn parse() -> Result<u8, Report<ParseError>> {"))
+        self.assertFalse(spelling.search("fn parse() -> Result<u8, String> {"))
 
     def test_code_before_the_rule_and_unrelated_later_code(self) -> None:
         self.assertEqual(self.attribute(self.candidate("src/runtime/old.rs", 2, 3))["suggestion"], "pre-existing")

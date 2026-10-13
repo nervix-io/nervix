@@ -438,7 +438,8 @@ fn recognition_requires_actual_definition_and_receiver_identity() {
 #[test]
 fn audit_catalogs_resolve_owners_and_conversions() {
     use crate::audit::{
-        KeyedAccess, checked_operation, copies_value, fallback, keyed_access, preserves_value,
+        KeyedAccess, checked_operation, copies_text, copies_value, fallback, keyed_access,
+        preserves_value,
     };
     for (collection, operation, expected) in [
         (
@@ -476,13 +477,20 @@ fn audit_catalogs_resolve_owners_and_conversions() {
     assert!(KeyedAccess::Removal.borrows_key());
     assert!(!KeyedAccess::Insertion.borrows_key());
     assert!(!KeyedAccess::Entry.borrows_key());
-    for operation in ["clone", "to_string", "to_vec", "into"] {
+    for operation in ["clone", "to_owned", "to_vec"] {
         assert!(copies_value(operation));
+        assert!(!copies_text(operation));
         assert!(preserves_value(operation));
+    }
+    // Formatting a number or converting a value is not a copy of existing text.
+    for operation in ["to_string", "into"] {
+        assert!(copies_text(operation));
+        assert!(!copies_value(operation));
     }
     for operation in ["as_str", "borrow", "copied"] {
         assert!(preserves_value(operation));
         assert!(!copies_value(operation));
+        assert!(!copies_text(operation));
     }
     assert!(!preserves_value("next"));
     assert!(checked_operation("checked_sub"));

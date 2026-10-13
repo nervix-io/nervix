@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use ahash::{HashSet, HashSetExt as _};
 use nervix_lint_report::audit::{
-    Construct, ErrorInformation, KeyedAccess, checked_operation, copies_value, fallback,
-    keyed_access, preserves_value,
+    Construct, ErrorInformation, KeyedAccess, checked_operation, copies_text, copies_value,
+    fallback, keyed_access, preserves_value,
 };
 use rustc_attr_ir::LangItem;
 use rustc_hir::{
@@ -159,6 +159,9 @@ struct Assignment {
 struct Statement {
     text: String,
     span: Span,
+    /// Resolved callees, generic arguments and value type, which differ between arms that
+    /// dispatch the same text by type.
+    resolution: String,
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -525,8 +528,12 @@ impl<'tcx> Walker<'_, 'tcx> {
         });
     }
 
-    /// Owned values built from existing ones: a copying conversion or a formatted string.
+    /// An owned copy of an existing value: a copying conversion, or a text conversion of text.
+    /// Formatting a number or converting a value builds something new, not a copy.
     fn allocation(&self, expression: &'tcx Expr<'tcx>) -> Option<String> {
+        let ExprKind::MethodCall(segment, receiver, [], _) = expression.kind else {
+            return None;
+        };
         let value = self.cx.typeck_results().expr_ty(expression);
         if self
             .cx
@@ -543,27 +550,40 @@ impl<'tcx> Walker<'_, 'tcx> {
         {
             return None;
         }
-        if let ExprKind::MethodCall(segment, _, [], _) = expression.kind
-            && copies_value(segment.ident.name.as_str())
-        {
-            return Some(segment.ident.name.to_string());
+        let name = segment.ident.name.as_str();
+        if copies_value(name) {
+            return Some(name.to_owned());
         }
-        let mut context = expression.span.ctxt();
-        while !context.is_root() {
-            let data = context.outer_expn_data();
-            if let rustc_span::hygiene::ExpnKind::Macro(_, name) = data.kind
-                && name.as_str() == "format"
-            {
-                return Some("format!".into());
-            }
-            context = data.call_site.ctxt();
+        if copies_text(name) && self.textual(self.cx.typeck_results().expr_ty(receiver)) {
+            return Some(name.to_owned());
         }
         None
     }
 
+    /// `str`, `String` or a `Cow` of text, behind any references.
+    fn textual(&self, value: Ty<'tcx>) -> bool {
+        let mut value = self.normalize(value);
+        while let ty::Ref(_, referent, _) = value.kind() {
+            value = *referent;
+        }
+        if value.is_str() {
+            return true;
+        }
+        match self.adt_path(value).as_deref() {
+            Some("alloc::string::String") => true,
+            Some("alloc::borrow::Cow") => {
+                let ty::Adt(_, arguments) = value.kind() else {
+                    return false;
+                };
+                arguments.type_at(0).is_str()
+            }
+            _ => false,
+        }
+    }
+
     /// A copy whose only use is a borrow: `&value.clone()` or `value.to_string().len()`.
     fn borrowed_copy(&mut self, expression: &'tcx Expr<'tcx>, name: &str) {
-        if !copies_value(name) || name == "into" {
+        if name == "into" {
             return;
         }
         if self.allocation(expression).is_none() {
@@ -825,11 +845,8 @@ impl<'tcx> Walker<'_, 'tcx> {
     fn statements(&self, branch: &'tcx Expr<'tcx>) -> Vec<Statement> {
         let mut result = Vec::new();
         let ExprKind::Block(block, _) = branch.kind else {
-            if let Some(text) = self.statement(branch) {
-                result.push(Statement {
-                    text,
-                    span: branch.span,
-                });
+            if let Some(statement) = self.statement(branch, branch.span) {
+                result.push(statement);
             }
             return result;
         };
@@ -839,53 +856,93 @@ impl<'tcx> Walker<'_, 'tcx> {
                 StmtKind::Let(local) => {
                     if let Some(init) = local.init
                         && matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+                        && !init.span.from_expansion()
                         && let Some(text) = self.snippet(statement.span)
                     {
                         result.push(Statement {
                             text: normalized(&text),
                             span: statement.span,
+                            resolution: self.resolution(init),
                         });
                     }
                     continue;
                 }
                 StmtKind::Item(_) => continue,
             };
-            if let Some(text) = self.statement(expression) {
-                result.push(Statement {
-                    text,
-                    span: statement.span,
-                });
+            if let Some(found) = self.statement(expression, statement.span) {
+                result.push(found);
             }
         }
         if let Some(tail) = block.expr
-            && let Some(text) = self.statement(tail)
+            && let Some(found) = self.statement(tail, tail.span)
         {
-            result.push(Statement {
-                text,
-                span: tail.span,
-            });
+            result.push(found);
         }
         result
     }
 
-    /// Calls and assignments are work worth hoisting; exits and values are not.
-    fn statement(&self, expression: &'tcx Expr<'tcx>) -> Option<String> {
+    /// Calls and assignments are work worth hoisting; exits and constructed values are not.
+    fn statement(&self, expression: &'tcx Expr<'tcx>, span: Span) -> Option<Statement> {
         if expression.span.from_expansion() {
             return None;
         }
-        if !matches!(
-            expression.kind,
-            ExprKind::Call(..)
-                | ExprKind::MethodCall(..)
-                | ExprKind::Assign(..)
-                | ExprKind::AssignOp(..)
-        ) {
-            return None;
+        match expression.kind {
+            ExprKind::MethodCall(..) | ExprKind::Assign(..) | ExprKind::AssignOp(..) => {}
+            ExprKind::Call(function, _) => {
+                if let ExprKind::Path(ref path) = function.kind
+                    && let Res::Def(DefKind::Ctor(..), _) | Res::SelfCtor(_) =
+                        self.cx.qpath_res(path, function.hir_id)
+                {
+                    return None;
+                }
+            }
+            _ => return None,
         }
         if self.cx.typeck_results().expr_ty(expression).is_never() {
             return None;
         }
-        Some(normalized(&self.snippet(expression.span)?))
+        Some(Statement {
+            text: normalized(&self.snippet(expression.span)?),
+            span,
+            resolution: self.resolution(expression),
+        })
+    }
+
+    /// The resolved calls and value type of a statement. Arms that spell the same text over
+    /// differently typed bindings dispatch by type; they do not repeat one operation.
+    fn resolution(&self, expression: &'tcx Expr<'tcx>) -> String {
+        struct Calls<'a, 'tcx> {
+            typeck: &'a ty::TypeckResults<'tcx>,
+            resolved: Vec<String>,
+        }
+        impl<'tcx> Visitor<'tcx> for Calls<'_, 'tcx> {
+            fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {
+                match expression.kind {
+                    ExprKind::MethodCall(..) => {
+                        if let Some(definition) =
+                            self.typeck.type_dependent_def_id(expression.hir_id)
+                        {
+                            let arguments = self.typeck.node_args(expression.hir_id);
+                            self.resolved.push(format!("{definition:?}{arguments:?}"));
+                        }
+                    }
+                    ExprKind::Call(function, _) => {
+                        let callee = self.typeck.expr_ty(function);
+                        self.resolved.push(format!("{callee:?}"));
+                    }
+                    _ => {}
+                }
+                intravisit::walk_expr(self, expression);
+            }
+        }
+        let typeck = self.cx.typeck_results();
+        let value = typeck.expr_ty(expression);
+        let mut calls = Calls {
+            typeck,
+            resolved: vec![format!("{value:?}")],
+        };
+        calls.visit_expr(expression);
+        calls.resolved.join(";")
     }
 
     fn duplicated(&mut self, construct: Construct, branches: &[&'tcx Expr<'tcx>]) {
@@ -898,14 +955,14 @@ impl<'tcx> Walker<'_, 'tcx> {
             .collect();
         let mut reported = HashSet::new();
         for first in &statements[0] {
-            let text = &first.text;
-            if !reported.insert(text.clone()) {
+            if !reported.insert(first.text.clone()) {
                 continue;
             }
             let mut occurrences = Vec::new();
             for branch in &statements {
-                let Some(statement) = branch.iter().find(|candidate| &candidate.text == text)
-                else {
+                let Some(statement) = branch.iter().find(|candidate| {
+                    candidate.text == first.text && candidate.resolution == first.resolution
+                }) else {
                     break;
                 };
                 occurrences.push(statement.span);
@@ -918,7 +975,7 @@ impl<'tcx> Walker<'_, 'tcx> {
                 span: occurrences[0],
                 pattern: Pattern::DuplicatedBranch {
                     construct,
-                    statement: text.clone(),
+                    statement: first.text.clone(),
                     occurrences,
                 },
             });
@@ -1159,7 +1216,11 @@ fn forwarding_wrapper<'tcx>(
         }
         _ => return None,
     };
-    if !callee.is_local() || body.params.is_empty() || arguments.len() != body.params.len() {
+    if !callee.is_local()
+        || !matches!(cx.tcx.def_kind(callee), DefKind::Fn | DefKind::AssocFn)
+        || body.params.is_empty()
+        || arguments.len() != body.params.len()
+    {
         return None;
     }
     for (parameter, argument) in body.params.iter().zip(arguments) {

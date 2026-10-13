@@ -50,3 +50,24 @@ impl Ledger {
         }
     }
 }
+
+pub enum Column {
+    Narrow(Vec<u8>),
+    Wide(Vec<u64>),
+}
+
+/// Arms that spell one call over differently typed bindings dispatch by type.
+pub fn width(column: &Column) -> usize {
+    match column {
+        Column::Narrow(values) => values.len(),
+        Column::Wide(values) => values.len(),
+    }
+}
+
+/// Constructing the same value in every arm is not repeated work.
+pub fn accepted(column: &Column) -> Option<usize> {
+    match column {
+        Column::Narrow(_) => Some(1),
+        Column::Wide(_) => Some(1),
+    }
+}

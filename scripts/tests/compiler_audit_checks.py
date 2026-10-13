@@ -75,8 +75,9 @@ class CompilerAuditTests(unittest.TestCase):
         self.assertEqual((counted["operation"], counted["allocation"]), ("entry", "clone"))
         copies = self.by_owner(candidates, "borrowed_copy")
         self.assertEqual(set(copies), {"measured"})
+        # Formatting a number is not a copy; converting borrowed text into a String is.
         self.assertEqual(sorted(candidate["pattern"]["operation"] for candidate in copies["measured"]),
-                         ["clone", "to_owned"])
+                         ["clone", "to_owned", "to_string"])
         self.assertNotIn("borrowed", {owner for kind in ("repeated_lookup", "discarded_error", "disguised_clamp")
                                       for owner in self.by_owner(candidates, kind)})
 
@@ -100,6 +101,7 @@ class CompilerAuditTests(unittest.TestCase):
     def test_duplicated_branches_require_every_exhaustive_branch(self) -> None:
         candidates = self.candidates("audit_branches")
         duplicated = self.by_owner(candidates, "duplicated_branch")
+        # Type-dispatched arms and constructed values are controls.
         self.assertEqual(set(duplicated), {"record", "classify"})
         record = duplicated["record"][0]["pattern"]
         self.assertEqual((record["construct"], record["statement"]), ("if", "self.entries.push(value)"))
@@ -109,6 +111,8 @@ class CompilerAuditTests(unittest.TestCase):
     def test_forwarding_wrappers_pass_parameters_unchanged(self) -> None:
         candidates = self.candidates("audit_wrappers")
         wrappers = self.by_owner(candidates, "forwarding_wrapper")
+        # Transformed, reordered and library-forwarding bodies and a newtype constructor are
+        # controls.
         self.assertEqual(set(wrappers), {"push", "combined"})
         push = wrappers["push"][0]["pattern"]
         self.assertTrue(push["callee"].endswith("::append"))
