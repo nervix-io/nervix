@@ -95,13 +95,18 @@ pub(super) fn write_branch_lru_snapshot(
             }),
         },
     };
-    rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
-        &snapshot,
-        rkyv::ser::writer::IoWriter::new(writer),
-        rkyv::ser::allocator::SubAllocator::new(&mut scratch),
-    )
-    .map(|_| ())
-    .map_err(|error| Report::new(error).change_context(encode_error()))
+    {
+        let mapping_input = rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+            &snapshot,
+            rkyv::ser::writer::IoWriter::new(writer),
+            rkyv::ser::allocator::SubAllocator::new(&mut scratch),
+        )
+        .map(|_| ());
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(Report::new(error).change_context(encode_error())),
+        }
+    }
 }
 
 fn field_scratch(fields: &[RemoteRuntimeField]) -> Option<usize> {
@@ -167,14 +172,17 @@ pub(super) fn encode_branch_lru_snapshot(
             })
             .collect(),
     };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| {
-            Report::new(BranchLruSnapshotError::Encode {
+    {
+        let mapping_input =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot).map(|bytes| bytes.to_vec());
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(Report::new(BranchLruSnapshotError::Encode {
                 entries: entries.len(),
             })
-            .attach_printable(error)
-        })
+            .attach_printable(error)),
+        }
+    }
 }
 
 pub(super) fn decode_branch_lru_snapshot(

@@ -3109,15 +3109,21 @@ impl ListConstruction {
                 let child = if let Some(nulls) = child.nulls() {
                     let mask = BooleanArray::new(nulls.inner().clone(), None);
                     let empty = new_null_array(&child_type, 1);
-                    let empty = empty
-                        .to_data()
-                        .into_builder()
-                        .nulls(None)
-                        .build()
-                        .map(make_array)
-                        .map_err(|error| {
-                            collection_arrow_error("VEC null-element replacement", error)
-                        })?;
+                    let empty = {
+                        let mapping_input = empty
+                            .to_data()
+                            .into_builder()
+                            .nulls(None)
+                            .build()
+                            .map(make_array);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err(collection_arrow_error(
+                                "VEC null-element replacement",
+                                error,
+                            )),
+                        }
+                    }?;
                     zip(&mask, &child, &Scalar::new(empty)).map_err(|error| {
                         collection_arrow_error("VEC null-element replacement", error)
                     })?

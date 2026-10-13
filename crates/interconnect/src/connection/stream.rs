@@ -104,10 +104,20 @@ impl IncomingByteStream {
             }
             return Ok(None);
         };
-        let chunk = next.map_err(|error| {
-            self.finished = true;
-            RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
-        })?;
+        let chunk = {
+            let mapping_input = next;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    self.finished = true;
+                    RequestError::stream_with_cause(
+                        Report::new(error),
+                        self.node.clone(),
+                        self.request,
+                    )
+                }),
+            }
+        }?;
         if chunk.is_empty() {
             self.finished = true;
             if !self.body.is_end_stream() {

@@ -367,8 +367,10 @@ dependencies = [
  "error-stack",
  "indexmap",
  "meticulous",
+ "proc-macro2",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "thiserror",
 ]
 

@@ -216,18 +216,21 @@ impl SessionServiceImpl {
                     cancellation
                         .check()
                         .map_err(|error| failed(&domain_owned, &format!("{error:#}")))?;
-                    service
-                        .inner
-                        .consensus
-                        .with_restore_state_installation(&domain_owned, &authority, || {
+                    let publication = service.inner.consensus.with_restore_state_installation(
+                        &domain_owned,
+                        &authority,
+                        || {
                             service.inner.runtime.publish_restored_domain_state(
                                 &domain_owned,
                                 &authority,
                                 inventory,
                                 cancellation,
                             )
-                        })
-                        .map_err(|error| {
+                        },
+                    );
+                    let state = match publication {
+                        Ok(state) => state,
+                        Err(error) => {
                             #[cfg(feature = "testing")]
                             service
                                 .inner
@@ -236,9 +239,10 @@ impl SessionServiceImpl {
                                     &domain_owned,
                                     &authority.leader,
                                 );
-                            failed(&domain_owned, &format!("{error:#}"))
-                        })?
-                        .map_err(|error| failed(&domain_owned, &format!("{error:#}")))
+                            return Err(failed(&domain_owned, &format!("{error:#}")));
+                        }
+                    };
+                    state.map_err(|error| failed(&domain_owned, &format!("{error:#}")))
                 },
             )
             .await

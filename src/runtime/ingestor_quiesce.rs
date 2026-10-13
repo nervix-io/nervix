@@ -513,7 +513,11 @@ impl IngestorQuiesceBuffer {
     /// here: altering an ingestor may lower `max_size` under an already filled buffer, and such a
     /// buffer has no room left until it drains.
     pub(super) fn remaining_capacity(&self, max_size: usize) -> usize {
-        max_size.saturating_sub(self.bytes)
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "lowering the limit below retained bytes leaves zero admission capacity",
+            max_size.saturating_sub(self.bytes)
+        )
     }
 
     /// Whether `payload_bytes` would fit within `max_size` once overflow evicted every payload it

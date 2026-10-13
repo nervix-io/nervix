@@ -183,14 +183,20 @@ impl StateDependencyDraft {
             StatePolicyDraft::Default(assignments) => {
                 let mut built = Vec::new();
                 for (assignment_index, assignment) in assignments.iter().enumerate() {
-                    built.push(assignment.build().map_err(|error| {
-                        let cause = error.current_context().clone();
-                        error.change_context(ProcessorDraftError::StateDefault {
-                            index,
-                            assignment: assignment_index + 1,
-                            cause,
-                        })
-                    })?);
+                    built.push({
+                        let mapping_input = assignment.build();
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let cause = error.current_context().clone();
+                                error.change_context(ProcessorDraftError::StateDefault {
+                                    index,
+                                    assignment: assignment_index + 1,
+                                    cause,
+                                })
+                            }),
+                        }
+                    }?);
                 }
                 MaterializedStatePolicy::Default(built)
             }
@@ -510,13 +516,19 @@ impl ProcessorDraft {
                 ProcessorFamily::Junction => route.build_preserving(),
                 ProcessorFamily::Reingestor => route.build_reingestor(),
             };
-            routes.push(built.map_err(|error| {
-                let cause = error.current_context().clone();
-                error.change_context(ProcessorDraftError::Route {
-                    index: index + 1,
-                    cause,
-                })
-            })?);
+            routes.push({
+                let mapping_input = built;
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let cause = error.current_context().clone();
+                        error.change_context(ProcessorDraftError::Route {
+                            index: index + 1,
+                            cause,
+                        })
+                    }),
+                }
+            }?);
         }
         Ok(ProcessorParts {
             inputs,

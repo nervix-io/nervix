@@ -1208,11 +1208,14 @@ impl BenchmarkRunner {
                 self.backlog_messages(observed.since(plan.baseline)?, accepted_messages)?;
             peak_backlog_messages = peak_backlog_messages.max(backlog_messages);
             // A backlog past the configured ceiling leaves no room for another cycle.
-            let available_cycles = self
-                .args
-                .max_backlog_messages
-                .saturating_sub(backlog_messages)
-                / messages_per_cycle;
+            let remaining_messages = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "backlog beyond its configured ceiling permits zero further messages",
+                self.args
+                    .max_backlog_messages
+                    .saturating_sub(backlog_messages)
+            );
+            let available_cycles = remaining_messages / messages_per_cycle;
             if available_cycles == 0 {
                 let remaining = generation_deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {

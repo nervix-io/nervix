@@ -581,8 +581,8 @@ impl OtelClientSettings {
                 )));
             }
         };
-        let timeout = optional_client_config_value(config, "timeout_ms")
-            .map(|raw| -> SinkStartResult<Duration> {
+        let timeout = match optional_client_config_value(config, "timeout_ms") {
+            Some(raw) => {
                 // `NonZeroU64` rejects both a non-number and a zero, so a request budget that
                 // could never allow a request is not representable past this point.
                 let millis = raw.parse::<NonZeroU64>().map_err(|_| {
@@ -590,9 +590,10 @@ impl OtelClientSettings {
                         "invalid OTEL timeout_ms '{raw}'; expected a positive integer"
                     ))
                 })?;
-                Ok(Duration::from_millis(millis.get()))
-            })
-            .transpose()?;
+                Some(Duration::from_millis(millis.get()))
+            }
+            None => None,
+        };
         let headers = optional_client_config_value(config, "headers")
             .map(Self::parse_headers)
             .transpose()?
@@ -981,12 +982,18 @@ impl RowRequestSink for OtelSink {
         rows: MappedSinkRows<'_>,
     ) -> SinkPublishResult<RowRequestPreparation> {
         let mut preparation = RowRequestPreparation::default();
-        let observed_time = OtelSink::observation_time_unix_nano().map_err(|error| {
-            let reason = error.current_context().reason.clone();
-            error
-                .change_context(SinkPublishError::Publish { sink: OTEL })
-                .attach_printable(reason)
-        })?;
+        let observed_time = {
+            let mapping_input = OtelSink::observation_time_unix_nano();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.current_context().reason.clone();
+                    error
+                        .change_context(SinkPublishError::Publish { sink: OTEL })
+                        .attach_printable(reason)
+                }),
+            }
+        }?;
         for carrier in &rows.carriers {
             nervix_primitives::task::consume_budget().await;
             self.prepare_carrier(carrier, observed_time, &mut preparation)
@@ -1911,9 +1918,13 @@ impl OtelMappedBatch<'_> {
         if array.is_null(row) {
             return Ok(None);
         }
-        numeric_as_f64(&array, row)
-            .map(Some)
-            .map_err(|error| OtelRecordError::from_value(key, error))
+        {
+            let mapping_input = numeric_as_f64(&array, row).map(Some);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(OtelRecordError::from_value(key, error)),
+            }
+        }
     }
 
     fn required_u64_list(

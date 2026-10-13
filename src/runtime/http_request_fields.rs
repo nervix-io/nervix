@@ -470,26 +470,31 @@ impl CompiledHttpRequestFields {
         if let Some(lookup_binding) = lookup_binding {
             bindings.push(lookup_binding);
         }
-        let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
-            &parsed,
-            request_schema,
-            VmSchemaSensitivity::default(),
-            bindings,
-            context.compile_options(VmCompileOptions {
-                output_mode: VmOutputMode::ExplicitOnly,
-                allow_sensitive_output: false,
-                allow_header_writes: true,
-                ..VmCompileOptions::default()
-            }),
-        )
-        .map_err(|error| {
-            let message = error.current_context().message.clone();
-            error
-                .change_context(HttpRequestFieldsError::Compile {
-                    emitter: emitter.clone(),
-                })
-                .attach_printable(message)
-        })?;
+        let compiled = {
+            let mapping_input = compile_vm_program_with_options_for_bindings_with_sensitivity(
+                &parsed,
+                request_schema,
+                VmSchemaSensitivity::default(),
+                bindings,
+                context.compile_options(VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    allow_sensitive_output: false,
+                    allow_header_writes: true,
+                    ..VmCompileOptions::default()
+                }),
+            );
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().message.clone();
+                    error
+                        .change_context(HttpRequestFieldsError::Compile {
+                            emitter: emitter.clone(),
+                        })
+                        .attach_printable(message)
+                }),
+            }
+        }?;
         Ok(Self {
             program: CompiledProgramWithMaterializedInterest {
                 compiled: Arc::new(compiled),

@@ -36,15 +36,20 @@ pub(super) fn plan_resource_rebind(
             resource: rebind.resource.clone(),
         }));
     }
-    let resolved = resource_uploads
-        .resolve_completed_version(domain, &rebind.resource, rebind.version)
-        .map_err(|error| {
-            let resolution = error.current_context().clone();
-            error.change_context(TransactionPlanningError::ResourceVersion {
-                operation,
-                error: resolution,
-            })
-        })?;
+    let resolved = {
+        let mapping_input =
+            resource_uploads.resolve_completed_version(domain, &rebind.resource, rebind.version);
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let resolution = error.current_context().clone();
+                error.change_context(TransactionPlanningError::ResourceVersion {
+                    operation,
+                    error: resolution,
+                })
+            }),
+        }
+    }?;
     let selected: BTreeSet<NodeRef> = match &rebind.selection {
         RebindResourceSelection::Members(members) => members.iter().cloned().collect(),
         RebindResourceSelection::All => prefix_models

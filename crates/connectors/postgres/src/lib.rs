@@ -220,32 +220,39 @@ impl PostgresPool {
             );
         };
         let options = connect_options(addr, config)?;
-        PgPoolOptions::new()
-            .min_connections(bounds.minimum())
-            .max_connections(bounds.maximum().get())
-            .acquire_timeout(ACQUIRE_DEADLINE)
-            .idle_timeout(Some(IDLE_LIFETIME))
-            .max_lifetime(Some(MAX_LIFETIME))
-            .test_before_acquire(true)
-            .connect_with(options)
-            .await
-            .map(Self)
-            .map_err(|source| {
-                Report::new(SinkStartError::Initialize { sink: POSTGRES })
-                    .attach_printable(source.to_string())
-            })
+        {
+            let mapping_input = PgPoolOptions::new()
+                .min_connections(bounds.minimum())
+                .max_connections(bounds.maximum().get())
+                .acquire_timeout(ACQUIRE_DEADLINE)
+                .idle_timeout(Some(IDLE_LIFETIME))
+                .max_lifetime(Some(MAX_LIFETIME))
+                .test_before_acquire(true)
+                .connect_with(options)
+                .await
+                .map(Self);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(source) => Err(Report::new(SinkStartError::Initialize { sink: POSTGRES })
+                    .attach_printable(source.to_string())),
+            }
+        }
     }
 
     /// Borrow one connection, which returns to the pool when the borrow is dropped.
     pub async fn connection(&self) -> SinkPublishResult<PostgresConnection> {
-        self.0
-            .acquire()
-            .await
-            .map(PostgresConnection)
-            .map_err(|source| {
-                Report::new(SinkPublishError::NotInitialized { sink: POSTGRES })
-                    .attach_printable(source.to_string())
-            })
+        {
+            let mapping_input = self.0.acquire().await.map(PostgresConnection);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(source) => {
+                    Err(
+                        Report::new(SinkPublishError::NotInitialized { sink: POSTGRES })
+                            .attach_printable(source.to_string()),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -359,10 +366,16 @@ impl PostgresSink {
         &self,
         columns: &[String],
     ) -> error_stack::Result<Vec<String>, PostgresWriteError> {
-        let mut connection = self.connections.connection().await.map_err(|error| {
-            let reason = format!("{error:?}");
-            error.change_context(PostgresWriteError::Pool { reason })
-        })?;
+        let mut connection = {
+            let mapping_input = self.connections.connection().await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!("{error:?}");
+                    error.change_context(PostgresWriteError::Pool { reason })
+                }),
+            }
+        }?;
         let table_name = self.table.as_str().to_string();
         let column_refs = columns.to_vec();
         let rows = sqlx::query(
@@ -446,10 +459,16 @@ impl PostgresSink {
                 .assured("an insert carries rows of the write whose texts were bound");
             query = query.bind(texts);
         }
-        let mut connection = self.connections.connection().await.map_err(|error| {
-            let reason = format!("{error:?}");
-            error.change_context(PostgresWriteError::Pool { reason })
-        })?;
+        let mut connection = {
+            let mapping_input = self.connections.connection().await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!("{error:?}");
+                    error.change_context(PostgresWriteError::Pool { reason })
+                }),
+            }
+        }?;
         let result = connection
             .0
             .execute(query)

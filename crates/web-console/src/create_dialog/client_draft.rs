@@ -239,18 +239,30 @@ impl ClientDraft {
                 .trim()
                 .parse::<NonZeroU32>()
                 .map_err(|_| Report::new(ClientDraftError::PoolMaximum))?;
-            Some(ClientPoolBounds::new(minimum, maximum).map_err(|error| {
-                let context = ClientDraftError::PoolBounds(error.current_context().clone());
-                error.change_context(context)
-            })?)
+            Some({
+                let mapping_input = ClientPoolBounds::new(minimum, maximum);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let context = ClientDraftError::PoolBounds(error.current_context().clone());
+                        error.change_context(context)
+                    }),
+                }
+            }?)
         } else {
             None
         };
         let mount = if self.mount_enabled {
-            let pin = self.mount.build().map_err(|error| {
-                let context = ClientDraftError::Mount(error.current_context().clone());
-                error.change_context(context)
-            })?;
+            let pin = {
+                let mapping_input = self.mount.build();
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let context = ClientDraftError::Mount(error.current_context().clone());
+                        error.change_context(context)
+                    }),
+                }
+            }?;
             Some(ClientResourceMount {
                 resource: pin.resource,
                 version: pin.version,
