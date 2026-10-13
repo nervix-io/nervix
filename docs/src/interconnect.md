@@ -1120,6 +1120,21 @@ Their 300-second simulated completion deadline follows two intentional request d
 allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
 latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
 still fail a transfer that does not complete.
+
+The registered `backup-capture-wire` property checks complete drain, capture, inventory and fetch
+messages through the production payload codec under each request's declared class limit. It covers
+every drain action, all ten counters at zero, their full-width maximum and independent generated
+values, all twelve inventory section kinds, ordered and empty inventories, arbitrary digests,
+bounded Unicode paths, and capture/drain/inventory success and refusal responses. The fetch response
+remains an opaque byte stream. `backup-capture-wire-malformed` separately
+checks typed refusal or complete stable re-encoding of damaged and arbitrary message bytes, and
+release of management and bulk reservations. `restore-installation-wire` covers every installation
+action and response, with all eight runtime state kinds branched and unbranched. The server's
+`backup-section-mapping` property checks the total, injective content mapping and distinct validated
+archive paths. These properties supply wire and mapping evidence; the transport simulations and
+public scenarios retain the authentication, fencing and recovery evidence described above. See
+[Property Testing And Fuzzing](./property-testing-and-fuzzing.md) for their domains and commands.
+
 Capture fetch and state installation share the peer connection's one reserved snapshot stream
 slot. The archive staging phase finishes and releases its fetch stream before installation starts;
 an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
