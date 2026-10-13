@@ -57,7 +57,10 @@ case "${mode}" in
         fi
         ;;
     ping)
-        [[ "$#" -eq 3 ]] || fail 'ping needs raw ping output and result JSON'
+        [[ "$#" -eq 4 ]] || fail 'ping needs raw ping output, result JSON and expected packet count'
+        expected_count="$4"
+        [[ "${expected_count}" =~ ^[1-9][0-9]{0,2}$ ]] && ((expected_count <= 400)) \
+            || fail 'ping expected packet count must be between 1 and 400'
         [[ -s "$2" ]] || fail 'ping output is empty'
         parsed="$(awk '
             BEGIN { previous=-1 }
@@ -81,7 +84,8 @@ case "${mode}" in
             }
         ' "$2")"
         read -r sent received longest minimum average maximum <<<"${parsed}"
-        [[ "${sent}" -eq 40 && "${received}" -gt 0 ]] || fail 'ping sent fewer than 40 probes or received none'
+        [[ "${sent}" -eq "${expected_count}" && "${received}" -gt 0 ]] \
+            || fail "ping did not complete its ${expected_count}-packet observation or received none"
         jq -n --argjson sent "${sent}" --argjson received "${received}" \
             --argjson longest_loss_run "${longest}" \
             --argjson min_ms "${minimum}" --argjson avg_ms "${average}" \
@@ -95,24 +99,32 @@ case "${mode}" in
         [[ -s "${baseline}" && -s "${observed}" ]] || fail 'effect samples are missing'
         jq -n -e --arg profile "${profile}" --slurpfile base "${baseline}" \
             --slurpfile fault "${observed}" '
+            def received($minimum): .received * 40 >= .sent * $minimum;
+            def lost($minimum): .lost * 40 >= .sent * $minimum;
             $base[0] as $b | $fault[0] as $f
-            | if $profile == "healed" then $f.received >= 39 and $f.avg_ms <= ($b.avg_ms + 50)
-              elif $profile == "delay" then $f.received >= 35 and $f.avg_ms >= ($b.avg_ms + 100)
-              elif $profile == "jitter" then $f.received >= 35 and $f.avg_ms >= ($b.avg_ms + 80)
+            | ($f.sent > 0 and $f.received > 0 and $f.received <= $f.sent
+               and $f.lost == ($f.sent - $f.received))
+              and if $profile == "healed" then ($f | received(39)) and $f.avg_ms <= ($b.avg_ms + 50)
+              elif $profile == "delay" then ($f | received(35)) and $f.avg_ms >= ($b.avg_ms + 100)
+              elif $profile == "jitter" then ($f | received(35)) and $f.avg_ms >= ($b.avg_ms + 80)
                    and ($f.max_ms - $f.min_ms) >= 70
-              elif $profile == "random-loss" then $f.lost >= 3 and $f.received >= 5
-              elif $profile == "burst-loss" then $f.lost >= 3 and $f.received >= 5
+              elif $profile == "random-loss" then ($f | lost(3)) and ($f | received(5))
+              elif $profile == "burst-loss" then ($f | lost(3)) and ($f | received(5))
                    and $f.longest_loss_run >= 2
-              elif $profile == "rate-limit" then $f.received >= 30
+              elif $profile == "rate-limit" then ($f | received(30))
               elif $profile == "combined" then $f.avg_ms >= ($b.avg_ms + 80)
-                   and $f.lost >= 2 and $f.received >= 5
+                   and ($f | lost(2)) and ($f | received(5))
               else false end
-          ' >/dev/null || fail "${profile} did not measurably affect the intended link"
+          ' >/dev/null || fail "${profile} observation did not meet the directed-link effect limits"
         if [[ "${profile}" == rate-limit || "${profile}" == combined ]]; then
             [[ "$#" -eq 6 && -s "$5" && -s "$6" ]] || fail 'rate evidence is missing'
             jq -n -e --slurpfile base "$5" --slurpfile fault "$6" '
-                $fault[0].bytes == $base[0].bytes
-                and $fault[0].duration_ms >= ($base[0].duration_ms * 2)
+                $base[0] as $b | $fault[0] as $f
+                | $b.bytes == 262144 and $f.bytes == $b.bytes
+                and $b.received_bytes == $b.bytes and $f.received_bytes == $f.bytes
+                and $b.clock_resolution_ms == 10 and $f.clock_resolution_ms == 10
+                and $b.duration_ms >= 10 and $f.duration_ms >= 10
+                and ($f.duration_ms - 2 * $f.clock_resolution_ms) >= ($b.duration_ms * 2)
               ' >/dev/null || fail "${profile} did not reduce measured link throughput"
         fi
         printf 'verified %s effect\n' "${profile}"

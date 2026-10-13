@@ -777,11 +777,6 @@ Feature: Cluster scheduling
     When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
-      START;
-      """
-    Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
-      """
-      status: running
       """
     When emitter "kafka_forward" enters stall mode
     And Kafka message is published to topic "notifications_{{test_id}}"
@@ -792,7 +787,15 @@ Feature: Cluster scheduling
       """
       {"user_id":84}
       """
-    Then within "10s" the relay subscription receives payloads
+    When these NSPL commands are executed on the leader node
+      """
+      START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      status: running
+      """
+    And within "10s" the relay subscription receives payloads
       """
       "user_id":42
       "user_id":84

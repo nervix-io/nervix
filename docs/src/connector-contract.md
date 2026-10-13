@@ -254,6 +254,14 @@ failure beneath it. A successful pooled channel may outlive an answer's TTL; a n
 resolves again through the node resolver. OTEL HTTP protobuf continues to use the shared Reqwest
 path described above.
 
+The native prepared-request check uses a real loopback DNS authority and gRPC receiver. It
+observes an initial negative answer without delivering or rejecting the prepared log record,
+publishes the receiver's address, and requires another DNS question and exactly one accepted
+request with the original prepared bytes inside ten seconds. The public one- and three-node
+outline also checks log and trace exports after clearing an unavailable sink and a negative DNS
+answer. These are bounded recovery observations, not a simulation of Tonic or a guarantee about
+every external collector's availability.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models
@@ -395,6 +403,13 @@ host admits its `ON INGESTION` unfolding to wait for a place on the node's exten
 than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
 and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
 rejects leaves the buffer and is reported.
+
+At the start of a graceful stop, the host closes intake on the stopping node before the control
+plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
+admission regardless of the ingestor's declared `ON QUIESCE` mode; already admitted payloads and
+ACK roots continue through the graph. The connector does not choose the move or finish its own
+acknowledgements early. A source started on the destination node after handoff uses that node's
+open intake.
 
 A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
 `NO_ACK` mode, cannot be presented again either. An acknowledged batch the extension workers refuse
@@ -549,6 +564,14 @@ delivered before it and routes every other still-owned source row through the em
 error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
+
+An ownership handoff closes source admission and boundary dispatch while installed routes and
+sinks finish their admitted work and requested flush. Engagement confirms the closed admission
+hold; the participant's exact-operation drain-status query publishes its ownership freeze only
+when that local drain completes. Capture requires the held operation and its exact freeze identity,
+so it cannot prevent a route from completing its flush. Preparation retains its original deadline; the distinct gate lease protects capture
+and activation. [Shutdown And Recovery](./shutdown.md) owns the complete
+handoff lifecycle and failure outcomes.
 
 A quiesced backup keeps these source and sink tasks installed. The host stops domain source
 admission according to each source's declared quiesce policy, reports admitted ACK roots and

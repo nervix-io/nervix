@@ -264,18 +264,40 @@ prebuilt Alpine netcat transfer. A node's readiness is not part of that check, b
 leader's link can start an election, during which a node can report no leader for a moment. The
 transfer counts all bytes at the receiver and times their arrival. It records a healthy ICMP and
 transfer baseline before any fault.
-The 262,144-byte transfer has one 90-second sender deadline, covering connection establishment,
-TCP retransmissions and byte delivery. It uses the pinned BusyBox netcat's EOF half-close rather
-than an idle timeout. At 256 kbit/s the payload alone needs at least 8.192 seconds; packet loss
-can add retransmission stalls. The measured duration continues to include connection establishment
-and receiver completion, so it is end-to-end transfer throughput, not isolated steady-state link
-capacity. A failed transfer remains an `observation` failure and names both nodes and the receiver's
+ICMP observations have one 30-second total helper budget. Burst loss uses 400 packets at
+10 ms intervals; every other profile, healthy baseline and healing check uses 40 at 100 ms.
+Both sample in approximately four seconds. The parser requires the declared complete packet
+count. Effect limits scale by the number sent: loss profiles still need at least 7.5% loss and
+12.5% replies, and burst loss still needs at least two consecutive lost packets. Combined loss
+keeps its 5% minimum loss. A missing effect, an excessive loss fraction or a truncated sample
+fails injection qualification; a large sample cannot turn four replies per forty packets into
+passing evidence. Pumba parameters, action hold times and product recovery deadlines do not
+change with the sample size. `just test-chaos-degraded-evidence` runs the focused controller,
+parser and effect controls; `just coverage-chaos-degraded-evidence` retains their shell coverage.
+The 262,144-byte transfer has one 90-second deadline shared by the sender and receiver, covering
+connection establishment, TCP retransmissions, byte delivery and receiver completion. It uses
+the pinned BusyBox netcat's EOF half-close rather than an idle timeout. At 256 kbit/s the payload
+alone needs at least 8.192 seconds; packet loss
+can add retransmission stalls. The sender records its kernel uptime immediately before connecting,
+and the receiver records its uptime after counting the complete payload. Both helpers must report
+the same kernel boot identity and boot-time offset. Their time-namespace identifiers are retained
+as diagnostics: separate namespaces can share the same clock coordinate. Docker launch, wait and
+log collection stay in the adjacent helper-lifetime evidence and the original total budget.
+The [Linux uptime implementation](https://github.com/torvalds/linux/blob/master/fs/proc/uptime.c)
+exposes boot-time uptime at ten-millisecond precision. The reported `duration_ms` is the interval's
+upper bound, and `clock_resolution_ms` records that precision. Both endpoint readings can round
+down, so the lower bound subtracts two clock ticks from the reported upper bound. The effect
+assertion requires that fault lower bound to be at least twice the baseline's upper bound. This
+retains the twofold contract while accounting for clock uncertainty, including a transfer inside
+one clock tick.
+The duration includes connection establishment, retransmissions and receiver completion.
+A failed transfer remains an `observation` failure and names both nodes and the receiver's
 address and port. The adjacent `*.probe.json` records readiness, deadlines, both helper outcomes,
 received bytes and cleanup outcomes; `*.log`, `*.server-start.log`, `*.readiness.log`,
 `*.server.log`, `*.server.stderr.log` and `*.server-exit.txt` retain raw evidence for stages reached.
-Timing out the Docker client also removes its exact sender container. Receiver completion has a
-separate ten-second observation bound; helper logs and removal each retain their twenty-second
-controller bounds. These bounds do not relax the product's post-heal recovery deadline.
+Timing out the Docker client also removes its exact sender container. Receiver completion uses
+the transfer budget remaining after the sender finishes; helper logs and removal each retain their
+twenty-second controller bounds. These bounds do not relax the product's post-heal recovery deadline.
 Loss, delay, jitter and rate must also show their expected measured effect; an installed qdisc alone
 cannot pass. SIGTERM heals each injector, after which the qdisc and ICMP delay must return to the
 healthy state. The exit trap heals all run-owned faults even with `--keep` or an interrupted run.
@@ -749,7 +771,11 @@ STATUS` several times a second. Once a surviving node no longer counts the fault
 because its interconnect entry reads `unavailable` or has left the list, another voter must take the
 clock over within ten physical seconds. A node becomes unavailable only after its health probes have
 failed continuously for the deployed unavailability timeout; a gossip warning alone does not end its
-availability, so a short fault may end before any replacement. No public command, metric or
+availability, so a short fault may end before any replacement. The replacement bound measures the
+portion of each continuous tick stall following that observation while the fault remains held.
+Ticks that continued before a later stall remain healthy time in this accounting. Returning voters
+can change the eligible authority set and wait for runtime readiness; gaps after healing retain the
+sixty-second authority bound. No public command, metric or
 info-level log names the clock authority, so a rotation covers every voter: the round whose fault
 stalls the ticks on every surviving observer is the one that removed the authority, and a rotation
 without such a round fails as missing evidence. Every paced window must close no earlier than eight
@@ -1346,13 +1372,19 @@ Run the external verifier, pinned tool image and Compose contract checks directl
 just chaos self-test
 ```
 
-`just test-chaos-rate-probe` exercises the production probe with a two-second connect delay,
-partial bytes, complete loss, a receiver that does not listen, a receiver launch failure and a
-nonzero receiver exit, failed log retrieval and failed cleanup. It uses only the pinned probe and
+`just test-chaos-rate-probe` exercises the production probe with a six-second Docker launch delay
+that stays outside transfer time, a real healthy/256kbit twofold effect, a two-second connect delay,
+receiver completion delayed twelve seconds, partial bytes, complete loss, a receiver that does not
+listen, a receiver launch failure and a nonzero receiver exit, failed log retrieval and failed
+cleanup, invalid or missing clocks and mismatched clock coordinates. It uses only the pinned probe and
 nettools images with Docker, and leaves no helper behind. `just coverage-chaos-rate-probe` runs
 those controls under kcov and retains its
 shell Cobertura report under `target/chaos-rate-probe-coverage/`. These observations test the external
 probe; they make no claim about product recovery or model-checker coverage.
+
+`just test-chaos-stateful-verifiers` runs the state, clock and window verdict controls separately.
+`just verify-chaos-clock` accepts the clock verifier's arguments for judging retained observer
+transcripts, and `just coverage-chaos-stateful-verifiers` retains shell coverage for these controls.
 
 ## Diagnostic images
 

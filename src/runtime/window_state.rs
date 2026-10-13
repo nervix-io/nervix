@@ -1184,13 +1184,16 @@ impl ReplicatedWindowProcessorState {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use arrow_array::{ArrayRef, Int64Array, RecordBatch};
+    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use nervix_models::ParseAsType;
     use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{
-        runtime::{WindowArgumentColumns, test_schema, window_plan},
+        runtime::{
+            WindowArgumentColumns, test_schema, window_checkpoint_cases::WindowCheckpointCase,
+            window_plan,
+        },
         runtime_schema::{
             CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
         },
@@ -1402,19 +1405,27 @@ mod tests {
     /// revision it is sealed at.
     struct GeneratedWindow {
         snapshot: WindowProcessorStateSnapshot,
-        argument_values: Vec<Option<i64>>,
+        argument_values: Vec<Option<RuntimeValue>>,
         incarnation: u64,
         revision: u64,
     }
 
     impl WindowSnapshotFixture {
         fn new() -> Self {
+            Self::with_input_type(ParseAsType::I64)
+        }
+
+        fn checkpoint() -> Self {
+            Self::with_input_type(ParseAsType::String)
+        }
+
+        fn with_input_type(input_type: ParseAsType) -> Self {
             let plan = window_plan(
                 "SET count = COUNT(input.latency)",
-                ParseAsType::I64,
+                input_type.clone(),
                 &[("count", ParseAsType::I64)],
             );
-            let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+            let input_schema = test_schema(&[("latency", input_type)]);
             let argument_schema = WindowArgumentColumns::snapshot_schema(&plan);
             let argument_nullable = argument_schema.field(0).is_nullable();
             Self {
@@ -1478,31 +1489,85 @@ mod tests {
 
         /// A window of up to three rows with consecutive sequences and typed aggregate state.
         fn generated(&self, arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> GeneratedWindow {
-            use meticulous::{OptionExt as _, ResultExt as _};
-
             // A window belongs to one branch, so every row it retains carries the same key.
             let key = crate::runtime::BranchKey::generated_scope(arbitrary);
             let count = arbitrary.entropy().between(0..=3);
-            let first = arbitrary.entropy().boundary_biased(0..=u64::MAX - 3);
+            self.generated_rows(arbitrary, key, count, 3, None, None)
+        }
+
+        fn generated_checkpoint(
+            &self,
+            arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+            case: &WindowCheckpointCase,
+        ) -> GeneratedWindow {
+            use meticulous::ResultExt as _;
+
+            let rows = u64::try_from(case.rows).assured("at most 192 rows fit in u64");
+            self.generated_rows(
+                arbitrary,
+                case.branch.clone(),
+                rows,
+                WindowCheckpointCase::MAX_ROWS,
+                Some(case.removals),
+                Some(case.column_bytes),
+            )
+        }
+
+        fn generated_rows(
+            &self,
+            arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+            key: Option<crate::runtime::BranchKey>,
+            count: u64,
+            sequence_room: u64,
+            removals: Option<usize>,
+            column_bytes: Option<usize>,
+        ) -> GeneratedWindow {
+            use meticulous::{OptionExt as _, ResultExt as _};
+
+            let last_first = u64::MAX
+                .checked_sub(sequence_room)
+                .assured("the generated row bound is at most 192");
+            let first = arbitrary.entropy().boundary_biased(0..=last_first);
             let mut entries = Vec::new();
             let mut argument_values = Vec::new();
             for index in 0..count {
                 let low = arbitrary.timestamp();
                 let high = arbitrary.timestamp();
                 let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(low, high);
-                let latency = arbitrary.entropy().any_i64();
-                let record = crate::runtime_schema::test_runtime_row([(
-                    "latency".to_string(),
-                    RuntimeValue::I64(latency),
-                )])
-                .with_metadata(metadata.clone());
-                let argument = if self.argument_nullable && arbitrary.entropy().flag() {
-                    None
-                } else {
-                    Some(arbitrary.entropy().any_i64())
+                let (latency, argument, argument_array): (_, _, ArrayRef) = match column_bytes {
+                    Some(bytes) => {
+                        let latency = arbitrary.entropy().pick(["a", "b", "c"]).repeat(bytes);
+                        let argument = if self.argument_nullable && arbitrary.entropy().flag() {
+                            None
+                        } else {
+                            Some(arbitrary.entropy().pick(["a", "b", "c"]).repeat(bytes))
+                        };
+                        let array = StdArc::new(StringArray::from(vec![argument.as_deref()]));
+                        (
+                            RuntimeValue::String(latency),
+                            argument.map(RuntimeValue::String),
+                            array,
+                        )
+                    }
+                    None => {
+                        let latency = arbitrary.entropy().any_i64();
+                        let argument = if self.argument_nullable && arbitrary.entropy().flag() {
+                            None
+                        } else {
+                            Some(arbitrary.entropy().any_i64())
+                        };
+                        let array = StdArc::new(Int64Array::from(vec![argument]));
+                        (
+                            RuntimeValue::I64(latency),
+                            argument.map(RuntimeValue::I64),
+                            array,
+                        )
+                    }
                 };
+                let record =
+                    crate::runtime_schema::test_runtime_row([("latency".to_string(), latency)])
+                        .with_metadata(metadata.clone());
                 argument_values.push(argument);
-                let argument_array: ArrayRef = StdArc::new(Int64Array::from(vec![argument]));
                 let argument_batch =
                     RecordBatch::try_new(self.argument_schema.clone(), vec![argument_array])
                         .assured("the argument column matches its plan's schema");
@@ -1516,7 +1581,7 @@ mod tests {
                 entries.push(WindowEntrySnapshot {
                     sequence: first
                         .checked_add(index)
-                        .verified("the first sequence leaves room for three rows"),
+                        .verified("the first sequence leaves room for the generated row bound"),
                     // A window orders its rows by the time each was ingested.
                     timestamp: low,
                     key: key.clone(),
@@ -1529,21 +1594,28 @@ mod tests {
             } else {
                 first
                     .checked_add(count)
-                    .verified("the first sequence leaves room for three rows")
+                    .verified("the first sequence leaves room for the generated row bound")
             };
             let incarnation = arbitrary.entropy().any_u64();
-            let accumulators = arbitrary.records(|arbitrary| {
-                if arbitrary.entropy().flag() {
-                    return WindowAccumulatorSnapshot::Retained;
+            let accumulators = match removals {
+                Some(count) => {
+                    let mut delayed_removals = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        delayed_removals.push(Self::generated_removal(arbitrary));
+                    }
+                    vec![
+                        WindowAccumulatorSnapshot::Retained,
+                        WindowAccumulatorSnapshot::LinearHistogram { delayed_removals },
+                    ]
                 }
-                let delayed_removals =
-                    arbitrary.records(|arbitrary| LinearHistogramDelayedRemovalSnapshot {
-                        expires_at: arbitrary.timestamp(),
-                        bucket: usize::try_from(arbitrary.entropy().any_u64())
-                            .assured("the native test and fuzz targets address 64 bits"),
-                    });
-                WindowAccumulatorSnapshot::LinearHistogram { delayed_removals }
-            });
+                None => arbitrary.records(|arbitrary| {
+                    if arbitrary.entropy().flag() {
+                        return WindowAccumulatorSnapshot::Retained;
+                    }
+                    let delayed_removals = arbitrary.records(Self::generated_removal);
+                    WindowAccumulatorSnapshot::LinearHistogram { delayed_removals }
+                }),
+            };
             let snapshot = WindowProcessorStateSnapshot {
                 entries,
                 next_sequence,
@@ -1555,6 +1627,18 @@ mod tests {
                 argument_values,
                 incarnation,
                 revision: arbitrary.entropy().any_u64(),
+            }
+        }
+
+        fn generated_removal(
+            arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+        ) -> LinearHistogramDelayedRemovalSnapshot {
+            use meticulous::ResultExt as _;
+
+            LinearHistogramDelayedRemovalSnapshot {
+                expires_at: arbitrary.timestamp(),
+                bucket: usize::try_from(arbitrary.entropy().any_u64())
+                    .assured("the native test and fuzz targets address 64 bits"),
             }
         }
 
@@ -1664,7 +1748,7 @@ mod tests {
         use meticulous::{OptionExt as _, ResultExt as _};
         use nervix_arbitrary::{Arbitrary, Domain};
 
-        let fixture = WindowSnapshotFixture::new();
+        let fixture = WindowSnapshotFixture::checkpoint();
         bolero::check!()
             .with_iterations(128)
             .with_max_len(2048)
@@ -1673,9 +1757,10 @@ mod tests {
                     .enable_all()
                     .build()
                     .assured("a property runtime opens");
-                let executor = Executor::default();
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-                let generated = fixture.generated(&mut arbitrary);
+                let case = WindowCheckpointCase::generated(arbitrary.entropy());
+                let executor = case.executor();
+                let generated = fixture.generated_checkpoint(&mut arbitrary, &case);
                 runtime.block_on(async {
                     let payload = encode_window_processor_snapshot(
                         &generated.snapshot,
@@ -1707,10 +1792,10 @@ mod tests {
     /// resident encoding, so either one restores the window the other does.
     #[test]
     fn bolero_sealed_window_checkpoints_match_their_resident_encoding() {
-        use meticulous::ResultExt as _;
+        use meticulous::{OptionExt as _, ResultExt as _};
         use nervix_arbitrary::{Arbitrary, Domain};
 
-        let fixture = WindowSnapshotFixture::new();
+        let fixture = WindowSnapshotFixture::checkpoint();
         bolero::check!()
             .with_iterations(64)
             .with_max_len(2048)
@@ -1720,14 +1805,15 @@ mod tests {
                     .build()
                     .assured("a property runtime opens");
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-                let executor = Executor::default();
+                let case = WindowCheckpointCase::generated(arbitrary.entropy());
+                let executor = case.executor();
                 let directory = tempfile::tempdir().assured("the staging directory opens");
                 let staging = SnapshotStaging::new(
                     directory.path().to_path_buf(),
                     executor.clone(),
                     crate::runtime::snapshot_staging::SnapshotStagingLimits::default(),
                 );
-                let generated = fixture.generated(&mut arbitrary);
+                let generated = fixture.generated_checkpoint(&mut arbitrary, &case);
                 runtime.block_on(async {
                     let resident = encode_window_processor_snapshot(
                         &generated.snapshot,
@@ -1755,6 +1841,16 @@ mod tests {
                         sealed_bytes, resident,
                         "the sealed pieces concatenate into the resident container"
                     );
+                    let restored = fixture
+                        .open(&sealed_bytes, &executor, generated.incarnation)
+                        .await
+                        .assured("a sealed checkpoint opens")
+                        .verified("the checkpoint preserves its branch lifetime");
+                    assert_window_snapshots_match(
+                        &restored,
+                        &generated.snapshot,
+                        &generated.argument_values,
+                    );
                 });
                 assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
             });
@@ -1774,6 +1870,109 @@ mod tests {
             ..nervix_execution::ExecutionConfig::default()
         })
         .assured("narrow snapshot limits within the default bulk budget are valid")
+    }
+
+    #[nervix_primitives::test]
+    async fn generated_checkpoint_cases_split_columns_identities_and_typed_sections() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        let fixture = WindowSnapshotFixture::checkpoint();
+        for branched in [false, true] {
+            nervix_primitives::task::consume_budget().await;
+            let mut identity_groups = None;
+            let mut column_groups = None;
+            for (section_limit, record_limit, padded) in
+                [(0, 0, false), (0, 2, false), (0, 2, true), (2, 2, true)]
+            {
+                nervix_primitives::task::consume_budget().await;
+                let seed = [
+                    section_limit,
+                    record_limit,
+                    192,
+                    96,
+                    u8::from(padded),
+                    u8::from(branched),
+                ];
+                let mut arbitrary = Arbitrary::new(&seed, Domain::Vocabulary);
+                let case = WindowCheckpointCase::generated(arbitrary.entropy());
+                let executor = case.executor();
+                let generated = fixture.generated_checkpoint(&mut arbitrary, &case);
+                let payload = encode_window_processor_snapshot(
+                    &generated.snapshot,
+                    generated.revision,
+                    &executor,
+                )
+                .await
+                .assured("a bounded generated checkpoint encodes");
+                let length = u32::from_le_bytes(
+                    payload[WINDOW_SNAPSHOT_MAGIC.len()..WINDOW_SNAPSHOT_FRAME_BYTES]
+                        .try_into()
+                        .assured("the checkpoint frame contains a four-byte header length"),
+                );
+                let length = usize::try_from(length).assured("the bounded header is addressable");
+                let header_end = WINDOW_SNAPSHOT_FRAME_BYTES
+                    .checked_add(length)
+                    .assured("the bounded header and its frame fit in memory");
+                let header = decode_aligned_rkyv::<WindowSnapshotHeader>(
+                    &payload[WINDOW_SNAPSHOT_FRAME_BYTES..header_end],
+                )
+                .assured("the current checkpoint header opens");
+                assert_eq!(header.revision, generated.revision);
+                let input_end = header_end
+                    .checked_add(usize::try_from(header.input_bytes).assured("input fits memory"))
+                    .assured("the bounded input container fits memory");
+                let arguments_end = input_end
+                    .checked_add(
+                        usize::try_from(header.argument_bytes).assured("arguments fit memory"),
+                    )
+                    .assured("the bounded argument container fits memory");
+                let header_limit = executor.limits().snapshot_header_bytes.as_u64();
+                let input = crate::runtime::inspect_sealed_container(
+                    &payload[header_end..input_end],
+                    header_limit,
+                )
+                .assured("the input container has valid bounded sections");
+                let arguments = crate::runtime::inspect_sealed_container(
+                    &payload[input_end..arguments_end],
+                    header_limit,
+                )
+                .assured("the argument container has valid bounded sections");
+                assert_eq!(input.records, WindowCheckpointCase::MAX_ROWS);
+                assert_eq!(arguments.records, WindowCheckpointCase::MAX_ROWS);
+                if record_limit == 0 {
+                    assert!(input.groups > 1 && arguments.groups > 1);
+                    assert!(
+                        header.typed_sections > 1,
+                        "delayed removals span typed sections"
+                    );
+                    identity_groups = Some(arguments.groups);
+                } else if !padded {
+                    assert!(
+                        arguments.groups < identity_groups.verified("the narrow record ran first"),
+                        "the wider identities preserve more rows in each group"
+                    );
+                } else if section_limit == 0 {
+                    assert!(input.groups > 1 && arguments.groups > 1);
+                    column_groups = Some(arguments.groups);
+                } else {
+                    assert!(
+                        arguments.groups < column_groups.verified("the narrow columns ran first"),
+                        "the wider columns preserve more rows in each group"
+                    );
+                }
+                let restored = fixture
+                    .open(&payload, &executor, generated.incarnation)
+                    .await
+                    .assured("the split checkpoint opens")
+                    .verified("the checkpoint keeps its branch lifetime");
+                assert_window_snapshots_match(
+                    &restored,
+                    &generated.snapshot,
+                    &generated.argument_values,
+                );
+            }
+        }
     }
 
     /// A published window persists in memory while its rows fit one snapshot section, and is
@@ -2038,7 +2237,7 @@ mod tests {
     fn assert_window_snapshots_match(
         restored: &WindowProcessorStateSnapshot,
         expected: &WindowProcessorStateSnapshot,
-        arguments: &[Option<i64>],
+        arguments: &[Option<RuntimeValue>],
     ) {
         use meticulous::ResultExt as _;
 
@@ -2048,6 +2247,7 @@ mod tests {
                 .to_vec()
         };
         assert_eq!(restored.entries.len(), expected.entries.len());
+        assert_eq!(arguments.len(), expected.entries.len());
         for ((restored, expected), argument) in restored
             .entries
             .iter()
@@ -2057,6 +2257,16 @@ mod tests {
             assert_eq!(restored.sequence, expected.sequence);
             assert_eq!(restored.timestamp, expected.timestamp);
             assert_eq!(key_bits(&restored.key), key_bits(&expected.key));
+            assert_eq!(
+                restored.record.one_row_batch().batch(),
+                expected.record.one_row_batch().batch(),
+                "the input schema and complete row survive"
+            );
+            assert_eq!(
+                restored.arguments.one_row_batch().batch(),
+                expected.arguments.one_row_batch().batch(),
+                "the argument schema and complete row survive"
+            );
             assert_eq!(
                 restored
                     .record
@@ -2085,7 +2295,7 @@ mod tests {
                     .arguments
                     .value("argument_0")
                     .assured("the restored argument reads"),
-                argument.map(RuntimeValue::I64)
+                argument.clone()
             );
         }
         assert_eq!(restored.next_sequence, expected.next_sequence);

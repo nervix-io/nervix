@@ -30,13 +30,15 @@ const SECTION_COUNT: usize = 6;
 const SECTION_BYTES: usize = 6 * 1024 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
 const CONTAINER_BYTES: usize = SECTION_COUNT * SECTION_BYTES;
-const TRANSFER_DEADLINE: Duration = Duration::from_secs(160);
+// A 36 MiB fetch and 64 KiB-at-a-time install follow two intentional request deadlines.
+// Leave room for every chunk at the fixture's 100 ms maximum network latency.
+const TRANSFER_DEADLINE: Duration = Duration::from_secs(300);
 
 fn backup_transfer_config(seed: u64) -> SimulationConfig {
     let mut config = fault_config(seed);
-    config.bounds.simulated_duration = Duration::from_secs(180);
+    config.bounds.simulated_duration = Duration::from_secs(320);
     config.bounds.max_steps =
-        NonZeroUsize::new(200_000).assured("the large transfer step bound is nonzero");
+        NonZeroUsize::new(400_000).assured("the large transfer step bound is nonzero");
     config
 }
 
@@ -297,7 +299,7 @@ fn backup_section_fetch_is_fenced_and_recovers_after_partition() {
         name: "backup section transfer",
         fault_plan: "reject forged identities and bound stalled and partitioned fetches, then \
                      install six streamed sections totaling 36 MiB after repairing the link",
-        seeds: &[101],
+        seeds: &[101, 1000],
     }
     .check(backup_transfer_config, |run| {
         exercise_backup_section(run, SectionSet::Materialized)

@@ -719,6 +719,8 @@ mod wasm_state_recovery;
 mod wasm_state_reset;
 mod window_accumulator;
 mod window_archive;
+#[cfg(test)]
+mod window_checkpoint_cases;
 mod window_processor;
 mod window_state;
 

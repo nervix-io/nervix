@@ -397,12 +397,15 @@ schedule, so a former owner cannot resume a branch the cluster moved while it wa
 boundary check at the start of every checkpoint, and the schedule rereads while it waits for
 replicas, refuse a checkpoint whose placement or ownership moved on while its callback ran.
 
-A planned ownership handoff keeps the generation. The source flushes each branch and checkpoints
-it, then sends the destination a small revision, length and digest description for each branch.
-The destination fetches each exact checkpoint that capture retained in the source's stable storage
-through the bulk stream and verifies it before restoring the guest. A fetch or restore failure ends
-the handoff before the schedule changes. The replacement instances then restore the transferred
-checkpoints. See [Planned Ownership Handoffs And
+A planned ownership handoff keeps the generation. Intake and boundary admission close first.
+Affected branches remain runnable until their admitted work and requested force flush complete;
+only then does the participant freeze their state for capture. The capture reads the completed
+checkpoints without asking a frozen guest to flush. The source sends the destination a small
+revision, length and digest description for each branch. The destination fetches each exact
+checkpoint that capture retained in the source's stable storage through the bulk stream and
+verifies it before restoring the guest. A fetch or restore failure ends the handoff before the
+schedule changes. The replacement instances then restore the transferred checkpoints. See
+[Planned Ownership Handoffs And
 Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Forced Recovery

@@ -1190,11 +1190,12 @@ pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
 )]
 mod tests {
     use ahash::HashMap;
+    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
     use nervix_primitives::sync::{Arc, oneshot};
 
     use super::*;
-    use crate::runtime::{RuntimeState, StateReplicationRoles};
+    use crate::runtime::{RuntimeState, StateReplicationRoles, native_checkpoint_properties};
 
     fn aligned(payload: &[u8]) -> rkyv::util::AlignedVec<16> {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
@@ -1659,6 +1660,109 @@ mod tests {
             StateReplicationError::Capture { .. }
         ));
         assert_eq!(originator.read().next_offset(topic, partition), Some(9));
+    }
+
+    /// One check before a native offset checkpoint is read and one before each entry it holds:
+    /// every recorded partition, every topic schedule, and every assignment and observed partition
+    /// of a schedule.
+    fn native_entry_checks(view: &KafkaOffsetView) -> usize {
+        let mut checks = 1_usize;
+        for partitions in view.offsets.values() {
+            checks = checks
+                .checked_add(partitions.len())
+                .assured("a generated table records at most nine partitions");
+        }
+        for schedule in view.schedules.values() {
+            let partitions = schedule
+                .assignments
+                .len()
+                .checked_add(schedule.observed_partitions.len())
+                .assured("a generated schedule assigns and observes at most three partitions");
+            let entries = partitions
+                .checked_add(1)
+                .assured("a generated schedule assigns and observes at most three partitions");
+            checks = checks
+                .checked_add(entries)
+                .assured("a generated table records at most three schedules");
+        }
+        checks
+    }
+
+    /// A captured offset table with its topic schedules writes a native checkpoint no longer than
+    /// the bound its capture reserves. The replica's cancellable reader restores every partition
+    /// offset and topic schedule from it, checks before every native entry, and stops at whichever
+    /// check refuses.
+    #[test]
+    fn bolero_captured_offsets_write_within_their_bound_and_read_back_whole() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(2048)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let table = KafkaOffsetTable::generated(&mut arbitrary);
+                let expected = table.view();
+                let lsm = arbitrary.entropy().any_u64();
+                let payload = table
+                    .encode()
+                    .assured("a bounded generated offset table encodes");
+                let state = Arc::new(
+                    ReplicatedKafkaOffsetState::new(
+                        offset_placement(),
+                        Some(PersistedRuntimeStateEntry { lsm, payload }),
+                    )
+                    .assured("a stored generated offset table loads"),
+                );
+                let captured = ReplicatedKafkaOffsetState::read(&state)
+                    .capture_after(None)
+                    .assured("a capture after no revision retains the table");
+                assert_eq!(captured.lsm, lsm);
+                let (maximum, _scratch) = captured
+                    .bounds()
+                    .assured("the checkpoint of a generated table is bounded");
+                let written = native_checkpoint_properties::in_admitted_job(move |cancellation| {
+                    let mut written = Vec::new();
+                    captured
+                        .write(&mut written, cancellation)
+                        .assured("a captured generated table writes its native checkpoint");
+                    written
+                });
+                let written_bytes =
+                    u64::try_from(written.len()).assured("a checkpoint length fits u64");
+                assert!(
+                    written_bytes <= maximum,
+                    "{written_bytes} written bytes exceed the reserved {maximum}"
+                );
+
+                let checks = native_entry_checks(&expected);
+                let mut performed = 0_usize;
+                let restored = KafkaOffsetTable::decode_with(&written, || {
+                    performed += 1;
+                    Ok(())
+                })
+                .assured("a written native checkpoint reads back");
+                assert_eq!(restored.view(), expected);
+                assert_eq!(performed, checks);
+
+                let refusing = arbitrary.entropy().positive_count(
+                    std::num::NonZeroUsize::new(checks)
+                        .assured("a reader checks once before it reads any entry"),
+                );
+                let mut performed = 0_usize;
+                let refused = KafkaOffsetTable::decode_with(&written, || {
+                    performed += 1;
+                    if performed == refusing {
+                        return Err(Report::new(RuntimePersistenceError::Cancelled));
+                    }
+                    Ok(())
+                })
+                .err()
+                .assured("a refused check stops the read");
+                assert!(matches!(
+                    refused.current_context(),
+                    RuntimePersistenceError::Cancelled
+                ));
+                assert_eq!(performed, refusing);
+            });
     }
 
     fn offset_placement() -> RuntimeStatePlacement {

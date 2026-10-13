@@ -266,6 +266,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__field_descriptors__bolero_host_field_descriptions_round_trip_through_the_binding/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-field-descriptors"
+invariant = "Every field a host describes level by level, of every scalar inside 0 to 32 LIST and FIXED_LIST levels of 1 to INT32_MAX elements, nullable or not, sensitive or not and named by the whole name rule in any letter case, becomes the original canonical field, and reads back through the field and level accessors as its canonical host description."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/field_descriptors.rs"
+test = "tests::field_descriptors::bolero_host_field_descriptions_round_trip_through_the_binding"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__field_descriptors__bolero_invalid_field_descriptions_are_refused_without_changing_the_list/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-field-descriptors-malformed"
+invariant = "Every unknown type, length on a scalar or LIST level, FIXED_LIST of no or more than INT32_MAX elements, 33rd list, name the rule refuses, element without an open field and field added before the open one's element fails as an invalid argument and leaves the list as the accepted calls built it; an open last field leaves the list incomplete, and reads past a field's innermost level or past the last field fail as invalid arguments."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/field_descriptors.rs"
+test = "tests::field_descriptors::bolero_invalid_field_descriptions_are_refused_without_changing_the_list"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []
@@ -1420,10 +1450,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/materialized__tests__bolero_materialized_descriptors_and_identities_preserve_the_complete_generation/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "backup-materialized-identities"
-invariant = "Current materialized descriptors and bounded identity groups preserve every generation field, typed nested branch value, float bit pattern and watermark."
+invariant = "Current empty and one-to-four-group materialized generations preserve every descriptor field, group index, ordered identity, typed nested branch value, float bit pattern and watermark."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-backup"
@@ -1480,10 +1510,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_archive__tests__bolero_window_archive_groups_rebuild_the_published_window/corpus"
-domain_version = 2
+domain_version = 3
 features = ["testing"]
 id = "backup-window-groups"
-invariant = "A published window written as bounded input and argument Arrow groups and sealed group by group into a native checkpoint, keeping each archived section or splitting it under a narrow identity record, keeps every row, sequence, watermark, argument value and delayed removal, and answers every aggregate as before."
+invariant = "A published window, branched or unbranched with finite float bits and fixed-offset datetimes, written as bounded input and argument Arrow groups and sealed under generated identity limits, keeps every row, bit-exact branch key, sequence, watermark, argument value and delayed removal, and answers every aggregate as before."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-server"
@@ -1549,6 +1579,51 @@ package = "nervix-server"
 random_iterations = 256
 source = "src/runtime/native_checkpoint_properties.rs"
 test = "runtime::native_checkpoint_properties::bolero_captured_kafka_offsets_stream_in_archive_order"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__kafka_offset_state__tests__bolero_captured_offsets_write_within_their_bound_and_read_back_whole/corpus"
+domain_version = 1
+features = []
+id = "runtime-kafka-offset-captures"
+invariant = "A captured offset table with its topic schedules writes a native checkpoint no longer than the bound its capture reserves, from which the replica's cancellable reader restores every partition offset and schedule, checking before every native entry and stopping at whichever check refuses."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/kafka_offset_state.rs"
+test = "runtime::kafka_offset_state::tests::bolero_captured_offsets_write_within_their_bound_and_read_back_whole"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__kafka_offset_transfer__tests__bolero_checkpoint_headers_reassemble_at_every_split/corpus"
+domain_version = 1
+features = []
+id = "runtime-kafka-offset-transfer-headers"
+invariant = "A transferred checkpoint's revision and digest header and its payload, cut at every position and into generated chunks with empty ones between them, reassemble into exactly that revision, digest and payload."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/kafka_offset_transfer.rs"
+test = "runtime::kafka_offset_transfer::tests::bolero_checkpoint_headers_reassemble_at_every_split"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__kafka_offset_transfer__tests__bolero_short_and_stale_checkpoint_headers_are_refused_at_every_split/corpus"
+domain_version = 1
+features = []
+id = "runtime-kafka-offset-transfer-headers-malformed"
+invariant = "Arbitrary streams cut at every position and into generated chunks fail with the typed length refusal when they end inside the header and the typed revision refusal when their revision does not advance the held one or precedes the described one, otherwise yield the revision and digest their header spells, and always forward exactly the bytes behind the header."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/kafka_offset_transfer.rs"
+test = "runtime::kafka_offset_transfer::tests::bolero_short_and_stale_checkpoint_headers_are_refused_at_every_split"
 test_target = "lib"
 
 [[target]]
@@ -1720,6 +1795,51 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__key_properties__bolero_malformed_chunk_keys_fail_typed_or_decode_canonically/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-chunk-keys-malformed"
+invariant = "Damaged or arbitrary chunk keys fail with the typed chunk, storage-format or decoding failure, or name a segment set whose placement key decodes canonically and whose chunk prefix followed by the key's offset is exactly the key, below the set's exclusive end."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/key_properties.rs"
+test = "runtime::state_store::key_properties::bolero_malformed_chunk_keys_fail_typed_or_decode_canonically"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__maintenance__namespace_properties__bolero_staged_namespaces_name_their_domain_and_are_each_visited_once_in_key_order/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-staging-namespaces"
+invariant = "Placement, index and chunk keys of several domains in the initial namespace and restored generations name their domain after their namespace, and the maintenance walk visits every namespace of every domain exactly once in key order without passing another namespace's key."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 64
+source = "src/runtime/state_store/namespace_properties_tests.rs"
+test = "runtime::state_store::maintenance::namespace_properties::bolero_staged_namespaces_name_their_domain_and_are_each_visited_once_in_key_order"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__maintenance__namespace_properties__bolero_malformed_staged_keys_fail_typed_or_name_their_namespace_canonically/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-staging-namespaces-malformed"
+invariant = "Damaged or arbitrary keys fail the domain decoder and the maintenance walk with the typed storage-format failure at the first key whose namespace does not decode, or name the namespace and domain their leading bytes spell exactly, resuming where that namespace ends."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/state_store/namespace_properties_tests.rs"
+test = "runtime::state_store::maintenance::namespace_properties::bolero_malformed_staged_keys_fail_typed_or_name_their_namespace_canonically"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__identity_properties__bolero_runtime_state_identity_records_round_trip/corpus"
 domain_version = 1
 features = []
@@ -1781,12 +1901,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__store_properties__bolero_runtime_state_checkpoints_read_back_from_the_store/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-state-store-checkpoints"
-invariant = "Checkpoints of any placement stored inline or as chunked streams at, beside and between the chunk boundaries read back byte for byte at their revision through the latest-snapshot read and the streaming reader, before and after the database reopens."
+invariant = "Checkpoints of up to three placements of one domain stored inline, as chunked streams or in a published restore generation, at, beside and between the chunk boundaries, read back byte for byte at their revision through the latest-snapshot read and the streaming reader, and a backup cut lists exactly them in key order and by kind, beside an unpublished generation and another domain, each with its stored size and reading back whole through its aligned, entry and streaming readers, before and after the database reopens."
 manifest = "Cargo.toml"
-max_input_bytes = 2048
+max_input_bytes = 4096
 package = "nervix-server"
 random_iterations = 64
 source = "src/runtime/state_store/store_properties.rs"
@@ -1796,10 +1916,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_window_snapshots_restore_every_retained_row_and_typed_state/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-window-snapshots"
-invariant = "A sealed window restores every retained row's sequence, ingestion time, branch bits and argument values, its next sequence, branch lifetime and typed aggregate state, and a snapshot of another branch lifetime restores nothing."
+invariant = "A window of up to 192 rows with bounded string columns and 96 delayed removals splits columns, identities and typed sections under generated limits and restores every row's sequence, ingestion time, branch bits, schemas and argument values, its next sequence, branch lifetime and typed aggregate state; another branch lifetime restores nothing."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -1901,10 +2021,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_sealed_window_checkpoints_match_their_resident_encoding/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-window-sealed-checkpoints"
-invariant = "A window sealed group by group into quota-owned pieces concatenates into exactly the container its resident encoding writes, with the artifact's length and digest of those bytes, and returns every bulk charge."
+invariant = "A window of up to 192 rows with bounded string columns and 96 delayed removals sealed under generated section and record limits concatenates into its bit-identical resident container, restores the complete window and bit-exact branch keys, preserves the artifact's length and digest, and returns every bulk charge."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"

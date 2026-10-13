@@ -109,3 +109,11 @@ tokio = { workspace = true, features = [
 tokio-stream = { workspace = true, features = ["net"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
 turmoil = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+harness = false
+name = "ordinary_cost"
+required-features = ["native"]

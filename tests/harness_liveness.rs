@@ -4,12 +4,12 @@
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
 //!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver and gRPC-receiver regressions with Rust's test runner, and the stand-in nodes and
-//!   clients those regressions talk to.
+//!   HTTP-receiver, materialized-state diagnostic and gRPC-receiver regressions with Rust's test
+//!   runner, and the stand-in nodes and clients those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver and
-//!   gRPC-receiver harness modules, and the client wire session protocol the stand-in nodes answer
-//!   status requests with.
+//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver, gRPC-receiver
+//!   and materialized-state diagnostic harness modules, and the client wire session
+//!   protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -18,6 +18,10 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/materialized_state_diagnostics.rs"]
+mod materialized_state_diagnostics;
+#[path = "common/materialized_state_diagnostics_tests.rs"]
+mod materialized_state_diagnostics_tests;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]
@@ -99,7 +103,7 @@ mod tests {
         node_startup::{
             ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, NODE_START_ATTEMPTS,
             NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted, StartableNode, StartupEnd,
-            StartupRetry, cluster_startup_budget,
+            StartupPorts, StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
         port_pool::{
@@ -711,6 +715,7 @@ mod tests {
         ports_available: bool,
         launches: u32,
         ports_moved: u32,
+        port_moves: Vec<StartupPorts>,
     }
 
     impl StandInStartupNode {
@@ -724,6 +729,7 @@ mod tests {
                 ports_available: true,
                 launches: 0,
                 ports_moved: 0,
+                port_moves: Vec::new(),
             }
         }
 
@@ -810,11 +816,12 @@ mod tests {
             AttemptCleanup::from(self.task.wait(cleanup).await)
         }
 
-        fn move_to_fresh_ports(&mut self) -> io::Result<()> {
+        fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
             if !self.ports_available {
                 return Err(io::Error::other("the port pool is exhausted"));
             }
             self.ports_moved += 1;
+            self.port_moves.push(ports);
             Ok(())
         }
     }
@@ -2337,7 +2344,7 @@ mod tests {
         assert_eq!(exhausted.attempts.spent.len(), attempt_limit());
         assert_eq!(
             attempt_retries(exhausted),
-            vec![StartupRetry::Transient; attempt_limit()]
+            vec![StartupRetry::Transient(StartupPorts::All); attempt_limit()]
         );
         for attempt in &exhausted.attempts.spent {
             let AttemptFailure::NotReady(readiness) = &attempt.failure else {
@@ -2385,6 +2392,41 @@ mod tests {
             "retries must share one budget rather than restart it: {:?}",
             exhausted.elapsed
         );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_bound_listener_retries_only_its_own_addresses() {
+        for (error, ports) in [
+            (AppError::BindGrpcListenAddress, StartupPorts::Grpc),
+            (AppError::BindHttpListenAddress, StartupPorts::Http),
+            (AppError::BindHttpsListenAddress, StartupPorts::Https),
+            (
+                AppError::BindObservabilityListenAddress,
+                StartupPorts::Observability,
+            ),
+            (
+                AppError::BindWebConsoleListenAddress,
+                StartupPorts::WebConsole,
+            ),
+            (
+                AppError::BindWebConsoleHttpsListenAddress,
+                StartupPorts::WebConsole,
+            ),
+            (AppError::StartInterconnect, StartupPorts::Interconnect),
+        ] {
+            let mut node = StandInStartupNode::new(
+                "node-bound",
+                [
+                    LaunchBehavior::ApplicationError(error),
+                    LaunchBehavior::Ready,
+                ],
+            );
+            node.start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+                .await
+                .assured("a bound listener must be retried within the same startup budget");
+            assert_eq!(node.launches, 2);
+            assert_eq!(node.port_moves, [ports]);
+        }
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -2521,7 +2563,7 @@ mod tests {
         let [attempt] = exhausted.attempts.spent.as_slice() else {
             panic!("a startup that ends at its first cleanup records one attempt");
         };
-        assert_eq!(attempt.retry, StartupRetry::Transient);
+        assert_eq!(attempt.retry, StartupRetry::Transient(StartupPorts::All));
         assert!(
             matches!(attempt.cleanup, AttemptCleanup::StillStopping),
             "a node that ignores its stop is still stopping at the cleanup deadline: {}",

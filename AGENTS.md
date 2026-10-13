@@ -96,6 +96,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   Nervix node. Its listener is independent of leadership and placement and must remain present
   across all cluster events, including leader changes, node joins, node restarts, and recovery.
 - Selected execution state may use node-owned snapshot or replication mechanisms.
+- A consensus append-stream adapter consumes the caller's first request before attempting
+  peer admission, so the caller's retry and cancellation gates also govern immediate failures.
+  Leading empty probes use management capacity; the first data request opens an ordered append
+  stream and later empty commit updates share it. Ended input opens no transport, and every
+  consumed request is submitted exactly once on its owning path.
 - Records, batches, payload attempts, handoff state, ACK guards, ACK tokens, and ACK maps are
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
@@ -977,10 +982,12 @@ build and the existing tests, and nothing in it changes behavior.
   join or an extra lock, or a real atomic does not qualify. Name the invariant with an
   `InvariantId`, explore it through `nervix_model_harness::loom::explore`, register it in
   `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
-  must make the model fail. A standalone relaxed counter carries no cross-location claim, and an
-  operation inside an opaque dependency is excluded from a claim rather than given a fictional
-  model. A store-load claim, in which each side writes one location and then reads the other's,
-  holds only under sequential consistency, which acquire and release do not give and Loom cannot
+  must make the model fail. Successful qualifications retain their counterexample checkpoint,
+  replay checkpoint, both outputs and source, bounds and weakening metadata; CI uploads those
+  records on success as well as failure. A standalone relaxed counter carries no cross-location
+  claim, and an operation inside an opaque dependency is excluded from a claim rather than given
+  a fictional model. A store-load claim, in which each side writes one location and then reads
+  the other's, holds only under sequential consistency, which acquire and release do not give and Loom cannot
   check, because it models `SeqCst` accesses as acquire and release. The side off the hot path
   therefore reads the other side's location by read-modify-write, so acquire and release decide the
   claim and Loom can check it.
@@ -1232,6 +1239,11 @@ build and the existing tests, and nothing in it changes behavior.
   unless the deadlock evidence of each process its nodes started qualifies; a change to the
   diagnostic image, its evidence collection or a path its scenarios exercise under tracked locks
   keeps both green.
+- Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
+  approximately four-second observation window and 30-second probe budget. Other profiles and
+  healthy observations use 40 packets at 100 ms intervals. Effect limits retain their received
+  and lost fractions at every sample size; an incomplete sample, ineffective fault, excessive loss
+  or missing consecutive burst fails qualification. Sampling never extends a product deadline.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
   latest run of every required check passed on that revision. Its register lists each gap a

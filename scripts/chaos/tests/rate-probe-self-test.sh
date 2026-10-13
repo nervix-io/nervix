@@ -2,6 +2,7 @@
 set -euo pipefail
 
 chaos_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="${chaos_dir}"
 # shellcheck source=../tool-images.sh
 source "${chaos_dir}/tool-images.sh"
 # shellcheck source=../link-degradation.sh
@@ -54,10 +55,16 @@ epoch_ms() {
 # total deadline; the partial-payload control changes the producer's input, not the probe owner.
 test_case=delayed-connect
 sender_failed=false
+# These controls rewrite code that the helper's shell executes; parameter expressions stay literal.
+# shellcheck disable=SC2016
 run_bounded() {
     local limit="$1"
     shift
     local arguments=("$@") i status=0
+    if [[ "${test_case}" == launcher-delay && "$1 $2" == 'docker run' \
+        && " ${arguments[*]} " != *' --detach '* ]]; then
+        sleep 6
+    fi
     if [[ "${test_case}" == unreachable && "$1 $2" == 'docker run' \
         && " ${arguments[*]} " != *' --detach '* ]] \
         || [[ "${test_case}" == unreachable && "$1 $2" == 'docker wait' ]]; then
@@ -75,14 +82,35 @@ run_bounded() {
         printf 'deliberate receiver launch failure\n' >&2
         return 125
     fi
-    if [[ "${test_case}" == not-listening || "${test_case}" == receiver-failure ]]; then
+    if [[ "${test_case}" == not-listening || "${test_case}" == receiver-failure \
+        || "${test_case}" == delayed-receiver ]]; then
         for i in "${!arguments[@]}"; do
-            if [[ "${arguments[i]}" == 'nc -l -p 18081 | wc -c' ]]; then
+            local receive_command='received_bytes="$(nc -l -p 18081 | wc -c)"'
+            if [[ "${arguments[i]}" == *"${receive_command}"* ]]; then
+                local replacement
                 if [[ "${test_case}" == not-listening ]]; then
-                    arguments[i]='sleep 60'
+                    replacement='sleep 60; received_bytes=0'
+                elif [[ "${test_case}" == delayed-receiver ]]; then
+                    replacement='received_bytes="$(nc -l -p 18081 | { dd bs=1 count=1 2>/dev/null; sleep 12; cat; } | wc -c)"'
                 else
-                    arguments[i]+='; exit 7'
+                    arguments[i]+=$'\nif [ "$1" = receiver ]; then exit 7; fi'
+                    continue
                 fi
+                arguments[i]="${arguments[i]//"${receive_command}"/"${replacement}"}"
+            fi
+        done
+    fi
+    if [[ "${test_case}" == invalid-clock ]]; then
+        for i in "${!arguments[@]}"; do
+            arguments[i]="${arguments[i]//'"$(uptime_ms)"'/'0'}"
+        done
+    fi
+    if [[ "${test_case}" == clock-coordinate-mismatch || "${test_case}" == missing-clock ]]; then
+        for i in "${!arguments[@]}"; do
+            if [[ "${test_case}" == missing-clock ]]; then
+                arguments[i]="${arguments[i]//started_uptime_ms/unreported_start}"
+            else
+                arguments[i]="${arguments[i]/'case "$1" in'/'if [ "$1" = receiver ]; then boottime_offset="1 0"; fi; case "$1" in'}"
             fi
         done
     fi
@@ -107,6 +135,18 @@ netem() {
         --entrypoint tc "${chaos_nettools_image}" "$@"
 }
 
+# A delay in the Docker control plane is not a slower directed link. The measured transfer keeps
+# its original byte count and total deadline while excluding time before its sender begins.
+test_case=launcher-delay
+link_rate_probe "${tmp_dir}/launcher-delay.json" sender receiver
+jq -e '.received_bytes == 262144 and .duration_ms < 6000' \
+    "${tmp_dir}/launcher-delay.json" >/dev/null \
+    || fail 'Docker launch delay was counted as directed-link transfer time'
+jq -e '.helper_lifetime_ms >= 6000 and .sender_clock_resolution_ms == 10
+    and .receiver_clock_resolution_ms == 10' "${tmp_dir}/launcher-delay.probe.json" >/dev/null \
+    || fail 'control overhead or transfer-clock precision was lost'
+test_case=delayed-connect
+
 # A SYN crosses a two-second egress delay. The transfer must finish through the same owner despite
 # that connect stall, with exact receiver bytes and both helper outcomes retained.
 netem qdisc add dev eth0 root netem delay 2000ms
@@ -117,6 +157,15 @@ jq -e '.sender_status == 0 and .receiver_wait_status == 0 and .receiver_exit_cod
     and .sender == "sender" and .receiver == "receiver" and .port == 18081' \
     "${tmp_dir}/delayed-connect.probe.json" >/dev/null || fail 'successful helper evidence is incomplete'
 netem qdisc del dev eth0 root
+
+# The sender's success does not complete the receiver helper. Its complete byte count and final
+# outcome must still be collected when completion takes longer than ten seconds inside the budget.
+test_case=delayed-receiver
+link_rate_probe "${tmp_dir}/delayed-receiver.json" sender receiver
+jq -e '.received_bytes == 262144 and .duration_ms >= 12000' \
+    "${tmp_dir}/delayed-receiver.json" >/dev/null || fail 'receiver completion was abandoned'
+jq -e '.sender_status == 0 and .receiver_wait_status == 0 and .receiver_exit_code == 0' \
+    "${tmp_dir}/delayed-receiver.probe.json" >/dev/null || fail 'receiver completion lost its outcome'
 
 test_case=partial
 if (set -e; link_rate_probe "${tmp_dir}/partial.json" sender receiver) \
@@ -142,11 +191,18 @@ jq -e '(.sender_status == 124 or .sender_status == 137)
 grep -q 'rate probe.*sender.*receiver.*18081' "${tmp_dir}/unreachable.failure.txt" \
     || fail 'deadline failure did not name the probe'
 netem qdisc del dev eth0 root
-for test_case in start-failure not-listening receiver-failure log-failure cleanup-failure; do
+for test_case in start-failure not-listening receiver-failure log-failure cleanup-failure \
+    invalid-clock missing-clock clock-coordinate-mismatch; do
     if (set -e; link_rate_probe "${tmp_dir}/${test_case}.json" sender receiver) \
         >"${tmp_dir}/${test_case}.failure.txt" 2>&1; then
         fail "${test_case} passed"
     fi
+done
+grep -q 'invalid helper transfer clocks' "${tmp_dir}/invalid-clock.failure.txt" \
+    || fail 'an invalid transfer clock lost its diagnostic'
+for test_case in missing-clock clock-coordinate-mismatch; do
+    grep -q 'invalid helper transfer clocks' "${tmp_dir}/${test_case}.failure.txt" \
+        || fail "${test_case} lost its diagnostic"
 done
 jq -e '.receiver_start_status == 125 and .receiver_ready == false and .sender_status == null' \
     "${tmp_dir}/start-failure.probe.json" >/dev/null || fail 'receiver launch failure lost its outcome'
@@ -168,6 +224,19 @@ grep -q 'deliberate receiver cleanup failure' "${tmp_dir}/cleanup-failure.server
 retained_helper="$(jq -r .receiver_helper_id "${tmp_dir}/cleanup-failure.probe.json")"
 docker inspect "${retained_helper}" >/dev/null || fail 'cleanup failure lost the retained helper'
 timeout --foreground --kill-after=5s 20s docker container rm --force "${retained_helper}" >/dev/null
+
+# Qualify the existing twofold effect against real healthy and 256kbit directed transfers.
+test_case=rate-effect
+link_ping "${tmp_dir}/healthy-ping.txt" sender receiver baseline
+link_rate_probe "${tmp_dir}/healthy-rate.json" sender receiver
+netem qdisc add dev eth0 root netem rate 256kbit
+link_ping "${tmp_dir}/capped-ping.txt" sender receiver rate-limit
+link_rate_probe "${tmp_dir}/capped-rate.json" sender receiver
+netem qdisc del dev eth0 root
+"${chaos_dir}/verify-degraded-evidence.sh" effect rate-limit \
+    "${tmp_dir}/healthy-ping.json" "${tmp_dir}/capped-ping.json" \
+    "${tmp_dir}/healthy-rate.json" "${tmp_dir}/capped-rate.json" >/dev/null \
+    || fail 'the real directed rate limit did not meet the unchanged effect contract'
 [[ -z "$(docker ps -aq --filter "label=io.nervix.chaos.run=${run_id}" \
     --filter 'label=io.nervix.chaos.role=link-probe')" ]] \
     || fail 'a failed probe retained a helper'
