@@ -1021,6 +1021,27 @@ the engagement owns a lease and the protected mutation can proceed. The acquisit
 waiting for that fence; a successfully acquired lease remains engaged until its owner releases or
 drops it.
 
+Forced ownership recovery closes the affected dispatch gates, then cancels changing routes'
+preceding channel generations before waiting for their permits. Retirement retains that cancelled
+generation until the swap publishes its new owner and consumer routes. Retained channels and
+first-use bindings therefore both reject further deliveries through the preceding routes; cancelling
+and immediately publishing a fresh generation would let an existing fan-out acquire a new channel
+for a consumer it selected before the fence. Only relays selected by the typed forced-recovery plan
+and whose routing actually changes are retired. Completed planned handoffs keep their ordinary
+quiescence path. Remote admission uses its existing cancellation/reconciliation budget of five
+seconds per interrupted attempt, rather than retaining a permit until the former owner resumes or
+the entity gate deadline passes. Unconfirmed deliveries fail their record ACKs for source retry;
+already admitted work retains its existing ACK and silence contracts.
+
+The production channel-owner Shuttle check
+`shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication` races first-use
+binding against retirement and requires every preceding slot to remain cancelled across successor
+publication. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
+admission and runtime preparation, checks delivery and a later revision before releasing it, and
+runs in the active, order and lifecycle-stress Deloxide selections. Those selections observe the
+tracked gate, channel-ordering and ACK-owner locks; asynchronous cancellation, admission waits and
+network behavior retain the complementary Shuttle, public-scenario and external Chaos evidence.
+
 An owner buffer admits a batch before its fan-out begins. Fan-out therefore takes a nonwaiting
 dispatch permit before it reads any local or remote runtime-consumer route and holds the permit
 until fan-out has attached the consumer ACK shares and resolved the owner's share. A schedule swap

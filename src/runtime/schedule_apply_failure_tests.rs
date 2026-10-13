@@ -91,6 +91,7 @@ fn swap_of(entity: NodeRef) -> EntitySwapExecution {
         dynamic_updates: Vec::new(),
         state_purges: BTreeMap::new(),
         gate_relays: Vec::new(),
+        forced_recovery_relays: Vec::new(),
     }
 }
 

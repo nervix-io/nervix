@@ -1153,12 +1153,42 @@ impl RelayBoundaryServices {
         self.fanout.subscription_receiver()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "schedule publication replaces the relay's owner route"
+        )
+    )]
     pub(super) fn replace_owner_node(&self, owner_node: Option<ClusterNodeName>) {
         if self.owner_node.load().as_deref() == owner_node.as_ref() {
             return;
         }
         self.channels.replace_owner();
         self.owner_node.store(owner_node.map(StdArc::new));
+    }
+
+    /// A committed forced move cannot drain through its fenced former owner. Retire only a
+    /// changed route's preceding channels while its dispatch gate is closed; normal publication
+    /// creates the successor generation after the swap has installed its consumers.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "forced schedule installation fences changed routes"
+        )
+    )]
+    pub(super) fn fence_routing_change(
+        &self,
+        owner_node: Option<&ClusterNodeName>,
+        consumers: &[RemoteRuntimeConsumer],
+    ) {
+        if self.owner_node.load().as_deref() == owner_node
+            && self.remote_runtime_consumers.load().as_slice() == consumers
+        {
+            return;
+        }
+        self.channels.fence_routing();
     }
 
     pub(super) fn dispatch_is_fenced(&self) -> bool {
@@ -1577,6 +1607,13 @@ impl RelayBoundaryServices {
         debug_assert!(previous > 0, "relay runtime consumer count underflow");
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "schedule publication replaces the relay's consumer routes"
+        )
+    )]
     pub(super) fn replace_remote_runtime_consumers(&self, consumers: Vec<RemoteRuntimeConsumer>) {
         if *self.remote_runtime_consumers.load().as_ref() == consumers {
             return;

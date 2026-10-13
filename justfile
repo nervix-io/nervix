@@ -403,8 +403,8 @@ test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
 
 # Measure the ordinary harness owners without clearing the current workspace profiles.
-coverage-harness-liveness output *args: tests-deps
-    cargo llvm-cov --no-clean --features testing --test harness_liveness --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+coverage-harness-liveness-append output *args: tests-deps
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --no-clean --features testing --test harness_liveness --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
 # Measure native consensus transport regressions through the configured compiler cache.
 coverage-consensus output *args:

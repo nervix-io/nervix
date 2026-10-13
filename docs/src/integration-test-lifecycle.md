@@ -367,7 +367,7 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
-  `just coverage-harness-liveness <report>` measures the ordinary startup and other harness owner
+  `just coverage-harness-liveness-append <report> [filter]` measures the ordinary startup and other harness owner
   regressions through the configured compiler cache and preserves the current workspace profiles.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
@@ -1484,6 +1484,12 @@ and do not join product coverage or qualify a diagnostic lane.
 After replaying an instrumented ordinary scenario binary from that target directory without a
 source edit, `just coverage-harness-liveness-report <output>` exports the retained profiles without
 another test invocation.
+
+`just coverage-harness-liveness-append <report> [filter]` instead appends the selected ordinary
+harness tests to the current workspace profiles and writes the requested report. It preserves
+those counters and supplies the ONNX runtime path, so collection uses the same environment as the
+isolated harness command. Use the isolated command when the report must measure the harness
+separately from ordinary product execution.
 
 Public materialized-state inspection can read installed or checkpoint state and can forward an
 empty non-owner observation to the primary. Record the addressed node and returned placement;

@@ -44,6 +44,55 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_owner: bool) {
+    let owner = named::<ClusterNodeName>("node-1");
+    let consumers = vec![RemoteRuntimeConsumer {
+        node_id: named("node-3"),
+        relay: named("events"),
+        mode: AckMode::Attached,
+    }];
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        0,
+        0,
+        consumers.clone(),
+        None,
+        Arc::new(BranchPresence::new()),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    services.replace_owner_node(Some(owner.clone()));
+    let retained = services.ingress_slot(&None);
+    services.fence_routing_change(Some(&owner), &consumers);
+    assert!(!retained.cancellation().is_cancelled());
+
+    let destination = if move_owner { named("node-2") } else { owner };
+    let destinations = if move_owner { consumers } else { Vec::new() };
+    services.fence_routing_change(Some(&destination), &destinations);
+    assert!(retained.cancellation().is_cancelled());
+    assert!(services.ingress_slot(&None).cancellation().is_cancelled());
+    let appearing = string_branch_key("tenant", "beta");
+    assert!(
+        services
+            .ingress_slot(&appearing)
+            .cancellation()
+            .is_cancelled()
+    );
+
+    services.replace_owner_node(Some(destination));
+    services.replace_remote_runtime_consumers(destinations);
+    assert!(!services.ingress_slot(&None).cancellation().is_cancelled());
+    assert!(
+        !services
+            .ingress_slot(&appearing)
+            .cancellation()
+            .is_cancelled()
+    );
+    assert!(retained.cancellation().is_cancelled());
+}
+
 #[nervix_primitives::test(start_paused = true)]
 async fn runtime_report_chain_detached_relay_delivery_log() {
     use crate::runtime::report_observer::ReportLogObserver;
