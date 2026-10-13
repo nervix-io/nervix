@@ -34,7 +34,9 @@ use super::{
 };
 
 /// Runs `work` as one admitted bulk CPU job under a bounded preparation grant.
-fn in_admitted_job<T: Send + 'static>(work: impl FnOnce(&Cancellation) -> T + Send + 'static) -> T {
+pub(super) fn in_admitted_job<T: Send + 'static>(
+    work: impl FnOnce(&Cancellation) -> T + Send + 'static,
+) -> T {
     let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
