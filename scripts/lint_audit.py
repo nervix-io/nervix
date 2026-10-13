@@ -38,12 +38,16 @@ class Rule:
 
     name: str
     spelling: re.Pattern[str] | None
+    # Whether the count read only the files `lock_counter_scope` names. Moving code out of them
+    # lowered it, so a removal anywhere in a commit can explain a workaround the commit wrote in
+    # another file; and code written into them while it counted could avoid its spelling instead.
+    scoped: bool = False
 
 
 RULES = {
     rule.name: rule
     for rule in (
-        Rule("data_plane_lock_acquisitions", re.compile(r"\.\s*(?:lock|read|write|entry)\s*\(")),
+        Rule("data_plane_lock_acquisitions", re.compile(r"\.\s*(?:lock|read|write|entry)\s*\("), scoped=True),
         Rule("bare_unwrap_and_expect", re.compile(r"\.\s*(?:unwrap\s*\(\s*\)|expect\s*\()")),
         Rule("clamped_arithmetic", re.compile(r"\b(?:saturating|wrapping)_[a-z_]+\s*\(")),
         Rule("as_casts", re.compile(r"\bas\s+(?:[ui](?:8|16|32|64|128|size)|f32|f64)\b")),
@@ -79,8 +83,12 @@ OWNERS: dict[str, tuple[str, ...]] = {
 LOCK_COUNTER_FILES = ("src/runtime/", "crates/interconnect/src/", "src/runtime_ack.rs", "src/metrics.rs")
 LOCK_COUNTER_CONNECTORS = "crates/connectors/"
 CONNECTORS_COUNTED = "364aa492"
+# From this commit the compiler resolved the lock count, so a plain map's `.entry(` stopped counting.
+LOCK_COUNTER_RESOLVED = "a1d9050d"
 
 SUGGESTIONS = ("suspected", "possible", "unattributed", "pre-existing", "uncommitted")
+# Lines of the introducing diff a report keeps on each side of the candidate's line.
+EXCERPT_REACH = 12
 
 
 def git(root: pathlib.Path, *args: str) -> str:
@@ -250,6 +258,20 @@ class Hunk:
         # A pure deletion has no new-side lines; it sits before its start line.
         return self.start <= line < self.start + max(self.length, 1)
 
+    def excerpt(self, line: int, reach: int) -> "Hunk":
+        """This hunk bounded to `reach` lines on each side of `line`, so a commit that wrote a whole
+        file does not copy that file into a report. Removed lines keep the same offsets."""
+        width = 2 * reach + 1
+        first = max(line - self.start - reach, 0)
+        return Hunk(self.start + first, min(width, max(self.length - first, 0)),
+                    window(self.before, first, width), window(self.after, first, width))
+
+
+def window(lines: list[str], first: int, width: int) -> list[str]:
+    """At most `width` lines from `first`, moved back so a shorter side still shows its end."""
+    start = min(first, max(len(lines) - width, 0))
+    return lines[start:start + width]
+
 
 @dataclasses.dataclass(frozen=True)
 class FileRevision:
@@ -303,39 +325,56 @@ class CommitSpellings:
     def __init__(self, root: pathlib.Path, history: History) -> None:
         self.root = root
         self.history = history
-        self.removed: dict[str, dict[str, int]] = {}
+        # Net removals of each count's spelling, by commit and then by the file they were made in.
+        self.removed: dict[str, dict[str, dict[str, int]]] = {}
 
     def counted(self, rule: Rule, path: str, date: str) -> bool:
         """Whether the textual counter of `rule` read `path` at `date`. The lock counter read only
         the data-plane files; the other counts read every Rust file."""
-        if rule.name != "data_plane_lock_acquisitions":
+        if not rule.scoped:
             return True
         return lock_counter_scope(path, date, self.history)
 
+    def files(self, sha: str) -> dict[str, dict[str, int]]:
+        """Each counted spelling's net removal in every Rust file the commit changed."""
+        if sha in self.removed:
+            return self.removed[sha]
+        date = git(self.root, "show", "-s", "--format=%ad", "--date=short", sha).strip()
+        diff = git(self.root, "show", "--format=", "--unified=0", sha, "--", "*.rs")
+        files: dict[str, dict[str, int]] = {}
+        path = ""
+        for line in diff.splitlines():
+            header = self.DIFF.match(line)
+            if header:
+                path = header.group("after")
+                files[path] = {name: 0 for name in RULES}
+                continue
+            removed = line.startswith("-") and not line.startswith("---")
+            added = line.startswith("+") and not line.startswith("+++")
+            if not removed and not added:
+                continue
+            for name, candidate in RULES.items():
+                if candidate.spelling is None or not self.counted(candidate, path, date):
+                    continue
+                matches = len(candidate.spelling.findall(line))
+                files[path][name] += matches if removed else -matches
+        self.removed[sha] = files
+        return files
+
     def net_removed(self, sha: str, rule: Rule) -> bool:
+        """Whether the commit removed more of the spelling than it added, across every file."""
         if rule.spelling is None:
             return False
-        if sha not in self.removed:
-            date = git(self.root, "show", "-s", "--format=%ad", "--date=short", sha).strip()
-            diff = git(self.root, "show", "--format=", "--unified=0", sha, "--", "*.rs")
-            counts: dict[str, int] = {name: 0 for name in RULES}
-            path = ""
-            for line in diff.splitlines():
-                header = self.DIFF.match(line)
-                if header:
-                    path = header.group("after")
-                    continue
-                removed = line.startswith("-") and not line.startswith("---")
-                added = line.startswith("+") and not line.startswith("+++")
-                if not removed and not added:
-                    continue
-                for name, candidate in RULES.items():
-                    if candidate.spelling is None or not self.counted(candidate, path, date):
-                        continue
-                    matches = len(candidate.spelling.findall(line))
-                    counts[name] += matches if removed else -matches
-            self.removed[sha] = counts
-        return self.removed[sha][rule.name] > 0
+        total = 0
+        for counts in self.files(sha).values():
+            total += counts[rule.name]
+        return total > 0
+
+    def removed_in(self, sha: str, rule: Rule, path: str) -> bool:
+        """Whether the commit removed more of the spelling than it added in `path` itself."""
+        if rule.spelling is None or path not in self.files(sha):
+            return False
+        return self.files(sha)[path][rule.name] > 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -358,6 +397,7 @@ class PullRequests:
             raise AuditError(f"origin {remote} is not a GitHub repository")
         self.repository = f"{match.group('owner')}/{match.group('repository')}"
         self.changes: dict[int, dict[str, list[PullRequestChange]]] = {}
+        self.merged: dict[str, int | None] = {}
 
     def api(self, path: str) -> Any:
         completed = subprocess.run(["gh", "api", "--paginate", "--slurp", path], text=True, capture_output=True)
@@ -365,11 +405,20 @@ class PullRequests:
             raise AuditError(f"gh api {path} failed:\n{completed.stderr}")
         return json.loads(completed.stdout)
 
-    def number(self, subject: str) -> int | None:
+    def number(self, subject: str, sha: str) -> int | None:
+        """The pull request that merged `sha`: the number a squash merge's subject names, or for a
+        subject without one, the merged pull request the hosting repository associates with it."""
         match = self.SUBJECT.search(subject)
-        if match is None:
-            return None
-        return int(match.group(1))
+        if match is not None:
+            return int(match.group(1))
+        if sha not in self.merged:
+            merged = None
+            for page in self.api(f"repos/{self.repository}/commits/{sha}/pulls"):
+                for pull in page:
+                    if merged is None and pull.get("merged_at") is not None:
+                        merged = pull["number"]
+            self.merged[sha] = merged
+        return self.merged[sha]
 
     def history(self, number: int) -> dict[str, list[PullRequestChange]]:
         if number in self.changes:
@@ -392,10 +441,11 @@ class PullRequests:
         self.changes[number] = files
         return files
 
-    def rewrite(self, subject: str, path: str, rule: Rule, fragments: list[str]) -> PullRequestChange | None:
+    def rewrite(self, subject: str, sha: str, path: str, rule: Rule,
+                fragments: list[str]) -> PullRequestChange | None:
         """A pull-request commit that removed the rule's spelling from this file and wrote one of
         the candidate's own source lines."""
-        number = self.number(subject)
+        number = self.number(subject, sha)
         if number is None or rule.spelling is None:
             return None
         for change in self.history(number).get(path, []):
@@ -553,6 +603,16 @@ def lock_counter_scope(path: str, date: str, history: History) -> bool:
     return connectors is not None and date >= connectors.date
 
 
+def lock_counter_textual(date: str, history: History) -> bool:
+    """Whether the lock count matched its spelling at a commit's date, before the compiler resolved
+    it. A commit dated the day of the cutover counts, since dates do not order a day's commits."""
+    introduced = history.introduced.get("data_plane_lock_acquisitions")
+    if introduced is None or date < introduced.date:
+        return False
+    resolved = history.commit(LOCK_COUNTER_RESOLVED)
+    return resolved is None or date <= resolved.date
+
+
 @dataclasses.dataclass(frozen=True)
 class Evidence:
     """What one commit did to the counts one candidate's kind could have worked around."""
@@ -586,21 +646,30 @@ class Attribution:
                 before = len(rule.spelling.findall("\n".join(hunk.before)))
                 removed = before > len(rule.spelling.findall("\n".join(hunk.after)))
             commit_removed = self.spellings.net_removed(sha, rule)
+            file_removed = self.spellings.removed_in(sha, rule, path)
             rewrite = None
             if self.pull_requests is not None:
-                rewrite = self.pull_requests.rewrite(subject, path, rule, fragments(candidate))
+                rewrite = self.pull_requests.rewrite(subject, sha, path, rule, fragments(candidate))
             predates = self.history.predates(date, name)
+            # Code written into a counted file while the spelling counted could avoid it rather
+            # than lower the count, so no event or removal records it.
+            counted_file = rule.scoped and lock_counter_scope(path, date, self.history)
+            avoided = counted_file and lock_counter_textual(date, self.history)
             found = {"rule": name, "event": event, "spelling_removed": removed,
-                     "commit_spelling_removed": commit_removed, "predates_rule": predates}
+                     "file_spelling_removed": file_removed, "commit_spelling_removed": commit_removed,
+                     "written_while_counted": avoided, "predates_rule": predates}
             if rewrite is not None:
                 found["pull_request_rewrite"] = {"sha": rewrite.sha, "removed": rewrite.removed,
                                                  "added": rewrite.added}
             rules.append(found)
             if predates:
                 continue
-            if rewrite is not None or (event is not None and (removed or commit_removed or rule.spelling is None)):
+            # A removal in another file explains this site only when moving code out of the counted
+            # files lowered the count; otherwise it shares the commit, not the cause.
+            explained = removed or file_removed or rule.spelling is None or (rule.scoped and commit_removed)
+            if rewrite is not None or (event is not None and explained):
                 level = "suspected"
-            elif event is not None or removed or commit_removed:
+            elif event is not None or removed or file_removed or commit_removed or avoided:
                 level = "possible"
             else:
                 level = "unattributed"
@@ -623,13 +692,14 @@ class Attribution:
         introducing = max(provenance, key=lambda line: (line.author_time, line.sha))
         hunk = self.hunks.around(introducing.sha, introducing.path, introducing.original)
         found = self.evidence(candidate, introducing.sha, introducing.subject, introducing.path, hunk)
+        shown = hunk.excerpt(introducing.original, EXCERPT_REACH)
         attribution: dict[str, Any] = {
             "suggestion": found.suggestion,
             "commit": {"sha": introducing.sha, "date": self.blame.date(introducing.sha),
                        "subject": introducing.subject},
             "commits": sorted({line.sha[:12] for line in provenance}),
-            "before": hunk.before,
-            "after": hunk.after,
+            "before": shown.before,
+            "after": shown.after,
             "rules": found.rules,
         }
         if found.suggestion == "suspected":
@@ -715,6 +785,34 @@ def detail(candidate: dict[str, Any]) -> str:
     return f"{pattern['receiver']}::{pattern['operation']} ({pattern['acquisition']})"
 
 
+def evidence_text(attribution: dict[str, Any]) -> str:
+    """The count events and spelling changes behind a suggestion, read from the origin when the
+    completing commit only carried the pattern forward."""
+    rules = attribution.get("rules", [])
+    if "origin" in attribution:
+        rules = attribution["origin"]["rules"]
+    facts = []
+    for rule in rules:
+        found = []
+        if rule.get("event"):
+            found.append(rule["event"])
+        if rule.get("spelling_removed"):
+            found.append("hunk removed spelling")
+        elif rule.get("file_spelling_removed"):
+            found.append("file removed spelling")
+        elif rule.get("commit_spelling_removed"):
+            found.append("commit removed spelling")
+        if "pull_request_rewrite" in rule:
+            found.append(f"folded rewrite `{rule['pull_request_rewrite']['sha'][:8]}`")
+        if rule.get("written_while_counted"):
+            found.append("written while counted")
+        if rule.get("predates_rule"):
+            found.append("predates")
+        if found:
+            facts.append(f"{rule['rule']}: {', '.join(found)}")
+    return "; ".join(facts) or "—"
+
+
 def markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Lint workaround audit",
@@ -732,18 +830,23 @@ def markdown(report: dict[str, Any]) -> str:
         lines.append(f"| {kind} | {counts['total']} | {counts['recurring']} | {counts['suspected']} | "
                      f"{counts['possible']} | {counts['unattributed']} | {counts['pre-existing']} |")
     for kind in report["summary"]:
-        lines.extend(["", f"## {kind}", "", "| ID | Location | Owner | Context | Detail | Suggestion | Commit |",
-                      "| --- | --- | --- | --- | --- | --- | --- |"])
+        lines.extend(["", f"## {kind}", "",
+                      "| ID | Location | Owner | Context | Detail | Suggestion | Commit | Evidence |",
+                      "| --- | --- | --- | --- | --- | --- | --- | --- |"])
         for candidate in report["candidates"]:
             if candidate["kind"] != kind:
                 continue
             attribution = candidate["attribution"]
             commit = attribution.get("commit") or {}
             introduced = f"`{commit['sha'][:8]}` {commit['date']}" if commit else "—"
+            if "origin" in attribution:
+                introduced += f", origin `{attribution['origin']['sha'][:8]}` {attribution['origin']['date']}"
             owner = candidate["owner"].replace("|", "\\|")
             text = detail(candidate).replace("|", "\\|")
+            facts = evidence_text(attribution).replace("|", "\\|")
             lines.append(f"| `{candidate['id']}` | `{candidate['path']}:{candidate['line']}` | `{owner}` | "
-                         f"{context_name(candidate['contexts'])} | {text} | {attribution['suggestion']} | {introduced} |")
+                         f"{context_name(candidate['contexts'])} | {text} | {attribution['suggestion']} | {introduced} | "
+                         f"{facts} |")
     return "\n".join(lines) + "\n"
 
 

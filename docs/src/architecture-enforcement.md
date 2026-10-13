@@ -154,20 +154,26 @@ compiled it.
 
 Attribution blames each candidate's lines in the working tree, reads the diff hunk of the commit
 that completed them, and replays the history of `debt-baseline.json`. For every count the
-candidate's kind could have worked around, it records whether that commit introduced or lowered
-the count, whether its hunk or the commit's other changes removed the counter's governed spelling
-(such as `.entry(` for the lock counter, counted only in the files that counter read at the time),
-and whether the code predates the count. When the completing commit only carried the pattern
-forward, the earlier commits of the same lines are read for that evidence and the one found is
-recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
-folded away, and records a commit that removed the spelling while writing one of the candidate's
-own lines.
+candidate's kind could have worked around, it records whether that commit introduced or lowered the
+count, whether its hunk, the rest of the candidate's file or the commit's other files removed the
+counter's governed spelling (such as `.entry(` for the lock counter, counted only in the files that
+counter read at the time), and whether the code predates the count. The report keeps the hunk's
+removed and added lines around the candidate's line. When the completing commit only carried the
+pattern forward, the earlier commits of the same lines are read for that evidence and the one found
+is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
+folded away, finding its pull request by the number the subject names or, for a subject without one,
+by the merged commit, and records a commit that removed the spelling while writing one of the
+candidate's own lines.
 
-The suggestion is `suspected` when a count event coincides with a removed spelling, or a folded
-commit rewrote the candidate's lines away from it; `possible` when only one of those is present;
-`unattributed` when the code was written while a count existed without either; `pre-existing` when
-it predates every plausible count; and `uncommitted` for lines not yet committed. A suggestion is
-evidence for review, never a classification: chronology alone proves nothing.
+The suggestion is `suspected` when a count event coincides with a spelling removed from the
+candidate's own hunk or file, or a folded commit rewrote the candidate's lines away from it. A
+removal in another file explains the candidate only for the lock counter, which read named files, so
+moving an operation out of them lowered it. The suggestion is `possible` when only an event or a
+removal is present, or when the code was written into a file the lock counter read before the
+compiler resolved that count, since such code could avoid the spelling without changing the count;
+`unattributed` when the code was written while a count existed without any of these; `pre-existing`
+when it predates every plausible count; and `uncommitted` for lines not yet committed. A suggestion
+is evidence for review, never a classification: chronology alone proves nothing.
 
 Candidate identities hash the kind, file, owner, primary source and pattern facts without byte
 offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal.
@@ -180,6 +186,9 @@ intentional, recording the source revision, owning rule, before and after code, 
 disposition. A repair keeps lazy and fallible initialization, side-effect counts, borrowed-key hit
 behavior, exact equality, lifetimes, reentrancy, error and acknowledgement semantics and ordering.
 An `entry` is not a repair where a hit would discard an allocated key, where a callback runs between
-the lookup and the insertion, or where the miss path needs the whole collection. A performance
-claim needs measured lookup, comparison and allocation counts and same-host Criterion or `just
-benchmark-ab` evidence; a shorter function or a lower count is not a speedup.
+the lookup and the insertion, or where the miss path needs the whole collection. Fewer searches do
+not make an `entry` faster either: on a small ordered map whose hits dominate, a lookup can cost
+less than building the entry, so the measurement covers hit-heavy and miss-heavy key
+distributions. A performance claim needs measured lookup, comparison and allocation counts and
+same-host Criterion or `just benchmark-ab` evidence; a shorter function or a lower count is not a
+speedup.

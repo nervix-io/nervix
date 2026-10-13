@@ -70,6 +70,20 @@ class CollectTests(unittest.TestCase):
         self.assertIn("get_mut -> insert (guarded)", text)
 
 
+class HunkTests(unittest.TestCase):
+    def test_an_excerpt_keeps_the_lines_around_the_candidate(self) -> None:
+        written = lint_audit.Hunk(1, 200, [], [f"line {number}" for number in range(1, 201)])
+        shown = written.excerpt(100, 2)
+        self.assertEqual(shown.after, ["line 98", "line 99", "line 100", "line 101", "line 102"])
+        self.assertEqual(shown.before, [])
+        replaced = lint_audit.Hunk(10, 3, ["old a", "old b"], ["new a", "new b", "new c"])
+        self.assertEqual(replaced.excerpt(11, 2).before, ["old a", "old b"])
+        self.assertEqual(replaced.excerpt(11, 2).after, ["new a", "new b", "new c"])
+        shorter = lint_audit.Hunk(1, 200, [f"old {number}" for number in range(1, 11)],
+                                  [f"line {number}" for number in range(1, 201)])
+        self.assertEqual(shorter.excerpt(150, 2).before, ["old 6", "old 7", "old 8", "old 9", "old 10"])
+
+
 class RepositoryTests(unittest.TestCase):
     """Attribution over a scratch repository with a real lint history."""
 
@@ -95,7 +109,7 @@ class RepositoryTests(unittest.TestCase):
             "src/registry.rs": "fn helper(shared: &Shared) {\n    shared.lock();\n}\n",
         })
         self.commit("2026-09-25", "unrelated feature", {
-            "src/runtime/later.rs": "fn later(map: &mut M) {\n    map.remove(&1);\n    map.insert(1, 2);\n}\n",
+            "src/later.rs": "fn later(map: &mut M) {\n    map.remove(&1);\n    map.insert(1, 2);\n}\n",
         })
 
     def tearDown(self) -> None:
@@ -186,6 +200,9 @@ class RepositoryTests(unittest.TestCase):
             f"repos/example/project/commits/{'b' * 40}": [{"files": [{
                 "filename": "src/runtime/sketches.rs",
                 "patch": f"@@ -2 +2,5 @@\n-    map.entry(pane).or_insert_with(S::new).add(1);\n+{rewritten}"}]}],
+            f"repos/example/project/commits/{'d' * 40}/pulls": [[{"number": 3, "merged_at": None},
+                                                                 {"number": 9, "merged_at": "2026-09-23T12:00:00Z"}]],
+            f"repos/example/project/commits/{'e' * 40}/pulls": [[]],
         }
         pull_requests = lint_audit.PullRequests(self.root)
         pull_requests.api = lambda path: pages[path]
@@ -205,14 +222,17 @@ class RepositoryTests(unittest.TestCase):
         rewrite = attribution["rules"][0]["pull_request_rewrite"]
         self.assertEqual(rewrite["sha"], "b" * 40)
         self.assertEqual(rewrite["removed"], ["    map.entry(pane).or_insert_with(S::new).add(1);"])
-        self.assertIsNone(pull_requests.number("refactor: no pull request"))
+        self.assertEqual(pull_requests.number("refactor: merged under another title", "d" * 40), 9)
+        self.assertIsNone(pull_requests.number("refactor: pushed without a pull request", "e" * 40))
 
     def test_a_pull_request_rewrite_of_other_lines_is_not_this_candidates(self) -> None:
         self.squash_sketches()
         pull_requests = self.pull_request("    let other = map.len();")
         attribution = self.attribute(self.candidate("src/runtime/sketches.rs", 2, 5), pull_requests)
-        self.assertEqual(attribution["suggestion"], "unattributed")
+        # Written into a counted file while the spelling counted, but not rewritten from it.
+        self.assertEqual(attribution["suggestion"], "possible")
         self.assertNotIn("pull_request_rewrite", attribution["rules"][0])
+        self.assertTrue(attribution["rules"][0]["written_while_counted"])
 
     def test_a_later_change_that_carried_the_pattern_keeps_its_origin(self) -> None:
         path = self.root / "src/runtime/panes.rs"
@@ -225,6 +245,37 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(attribution["suggestion"], "suspected")
         self.assertEqual(attribution["origin"]["subject"], "lower the lock count")
 
+    def discarded(self, path: str, line: int) -> dict[str, Any]:
+        source = (self.root / path).read_text().splitlines()[line - 1].strip()
+        raw = {"owner": "crate::parse", "context": None, "span": span(path, line, source), "expansion": [],
+               "pattern": {"kind": "discarded_error", "operation": "map_err",
+                           "error_type": "std::num::ParseIntError", "information": "value"}}
+        return lint_audit.collect([evidence("ordinary", raw)])[0]
+
+    def test_an_error_count_lowered_in_another_file_does_not_explain_a_discard(self) -> None:
+        self.commit("2026-09-21", "count string errors", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 2, "result_string_errors": 2}),
+            "src/convert.rs": ("fn convert(text: &str) -> Result<u8, String> {\n    let trimmed = text.trim();\n"
+                               "    let length = trimmed.len();\n    trimmed.parse().map_err(|error| error.to_string())\n}\n"),
+            "src/parse.rs": "fn parse(text: &str) -> Result<u8, String> {\n    text.parse().map_err(|error| error.to_string())\n}\n",
+        })
+        # The signature and the discard are separate hunks of one file; the other discard sits in a
+        # file whose own changes removed no string failure.
+        self.commit("2026-09-22", "type conversion failures", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 2, "result_string_errors": 1}),
+            "src/convert.rs": ("fn convert(text: &str) -> Result<u8, Report<ConvertError>> {\n    let trimmed = text.trim();\n"
+                               "    let length = trimmed.len();\n    trimmed.parse().map_err(|_| Report::new(ConvertError))\n}\n"),
+            "src/other.rs": "fn other(text: &str) -> Option<u8> {\n    text.parse().map_err(|_| Missing).ok()\n}\n",
+        })
+        same = self.attribute(self.discarded("src/convert.rs", 4))
+        self.assertEqual(same["suggestion"], "suspected")
+        rule = [item for item in same["rules"] if item["rule"] == "result_string_errors"][0]
+        self.assertEqual((rule["spelling_removed"], rule["file_spelling_removed"]), (False, True))
+        elsewhere = self.attribute(self.discarded("src/other.rs", 2))
+        self.assertEqual(elsewhere["suggestion"], "possible")
+        rule = [item for item in elsewhere["rules"] if item["rule"] == "result_string_errors"][0]
+        self.assertEqual((rule["file_spelling_removed"], rule["commit_spelling_removed"]), (False, True))
+
     def test_error_signature_spelling_names_a_plain_failure_not_a_report(self) -> None:
         spelling = lint_audit.RULES["bare_error_signatures"].spelling
         self.assertTrue(spelling.search("fn parse() -> Result<u8, ParseError> {"))
@@ -234,12 +285,29 @@ class RepositoryTests(unittest.TestCase):
 
     def test_code_before_the_rule_and_unrelated_later_code(self) -> None:
         self.assertEqual(self.attribute(self.candidate("src/runtime/old.rs", 2, 3))["suggestion"], "pre-existing")
-        self.assertEqual(self.attribute(self.candidate("src/runtime/later.rs", 2, 3))["suggestion"], "unattributed")
+        self.assertEqual(self.attribute(self.candidate("src/later.rs", 2, 3))["suggestion"], "unattributed")
+
+    def test_code_written_into_counted_files_only_while_the_spelling_counted_is_possible(self) -> None:
+        lookup_pair = ("fn admit(map: &mut M, key: u64) {\n    if let Some(value) = map.get_mut(&key) {\n"
+                       "        *value += 1;\n    } else {\n        map.insert(key, 1);\n    }\n}\n")
+        self.commit("2026-09-26", "add counted admission", {"src/runtime/counted.rs": lookup_pair})
+        self.commit("2026-09-27", "resolve the lock count", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 1}),
+        })
+        self.commit("2026-09-28", "add resolved admission", {"src/runtime/resolved.rs": lookup_pair})
+        resolution = self.git("rev-parse", "HEAD~1").strip()
+        with mock.patch.object(lint_audit, "LOCK_COUNTER_RESOLVED", resolution[:8]):
+            counted = self.attribute(self.candidate("src/runtime/counted.rs", 2, 5))
+            resolved = self.attribute(self.candidate("src/runtime/resolved.rs", 2, 5))
+        self.assertEqual(counted["suggestion"], "possible")
+        self.assertTrue(counted["rules"][0]["written_while_counted"])
+        self.assertEqual(resolved["suggestion"], "unattributed")
+        self.assertFalse(resolved["rules"][0]["written_while_counted"])
 
     def test_uncommitted_lines_have_no_attribution(self) -> None:
-        path = self.root / "src/runtime/later.rs"
+        path = self.root / "src/later.rs"
         path.write_text(path.read_text().replace("map.remove(&1);", "map.remove(&1).is_some();"))
-        self.assertEqual(self.attribute(self.candidate("src/runtime/later.rs", 2, 3))["suggestion"], "uncommitted")
+        self.assertEqual(self.attribute(self.candidate("src/later.rs", 2, 3))["suggestion"], "uncommitted")
 
     def test_relocated_acquisitions_require_a_lowering_outside_the_counted_files(self) -> None:
         history = lint_audit.History(self.root)
@@ -279,7 +347,9 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue(report["complete"])
         self.assertEqual(report["rules"]["data_plane_lock_acquisitions"]["date"], "2026-09-14")
         self.assertEqual([item["attribution"]["suggestion"] for item in report["candidates"]], ["suspected"])
-        self.assertIn("| repeated_lookup | 1 | 1 | 1 | 0 | 0 | 0 |", (directory / "audit.md").read_text())
+        text = (directory / "audit.md").read_text()
+        self.assertIn("| repeated_lookup | 1 | 1 | 1 | 0 | 0 | 0 |", text)
+        self.assertIn("data_plane_lock_acquisitions: lowered 3->2, hunk removed spelling, written while counted", text)
 
     def test_an_incomplete_analysis_fails(self) -> None:
         with mock.patch.object(lint_audit.typed_ratchet, "main", return_value=1):
