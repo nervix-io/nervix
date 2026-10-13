@@ -1395,6 +1395,60 @@ scenarios two to three times slower than CI, so `deloxide-stress-restore` expire
 saturated, or again once their builds are warm; an expired budget ends the lane with status `124`,
 never as a clean result.
 
+For a focused comparison, `just test-diagnostic-scenarios <selection> <feature> --name
+<scenario> --concurrency 2 --retry 0` builds and runs the public scenario in `deloxide`,
+`deloxide-order` or `deloxide-stress`, with the lane's prerequisites and ordinary CLI. Its builds
+share the diagnostic target directory. The recipe resolves its feature file to an absolute path:
+Cucumber's relative input glob walks the entire working directory, including build artifacts,
+before starting any scenario. The absolute input glob matches the exact file in its containing
+directory. Argument boundaries, including a scenario name with spaces, are preserved. Each attempt
+retains its output under `target/deloxide/focused/<selection>/run.*` and rejects an empty scenario
+selection. It records detector evidence there unless `NERVIX_DEADLOCK_EVIDENCE` names another
+directory. Use a fresh evidence directory for each run and retain the standard output, scenario
+log and suite summary together. The complete lane remains the entry point for inventory accounting
+and diagnostic evidence qualification.
+
+In this comparison, `--concurrency` counts scenarios in one process. Their in-process nodes share
+one runtime and one detector; the runtime still has one worker per available CPU. Record the
+available CPU count, affinity and host load, and keep them the same for the plain and stressed
+selections. A failure's phase matters: missing generator rows immediately after restore and missing
+rows after a subsequent restart exercise different installation boundaries. Preserve the first
+failure, the missing relay and tenant identities, and any stop or startup deadline outcome before
+running a control. A passing control or replay describes that run only.
+
+The oversized materialized-generation assertion preserves its missing relay and tenant pairs,
+expected round and value length, domain, and subscription node when its row deadline expires.
+Before teardown it queries `SHOW RELAY ... MATERIALIZED STATE` on at most three nodes for the first
+four missing relays. The observations share a ten-second budget, with at most two seconds per
+query. They keep the placement, branch, round, value byte length and watermarks, without printing
+the fixture's large values. Query failure or timeout stays a diagnostic observation; the original
+exact-row assertion still fails. This observation budget starts after the row deadline and grants
+no additional time for a missing row to satisfy the assertion.
+
+`just test-diagnostic-harness <selection> <filter>` runs focused harness regressions in the chosen
+diagnostic build. `just coverage-harness-liveness <filter>` measures ordinary harness regressions
+in a separate target directory and retains its log and `lcov.info`, including the harness source,
+in a fresh `target/harness-coverage-reports/run.*` directory. Both commands reject a selection
+that completed no tests or left selected tests ignored. These counters measure the harness itself
+and do not join product coverage or qualify a diagnostic lane.
+After replaying an instrumented ordinary scenario binary from that target directory without a
+source edit, `just coverage-harness-liveness-report <output>` exports the retained profiles without
+another test invocation.
+
+Public materialized-state inspection can read installed or checkpoint state and can forward an
+empty non-owner observation to the primary. Record the addressed node and returned placement;
+rows returned by a replica's endpoint alone do not prove that replica installed the generation.
+Correlate the observations with the restore execution report, runtime log and lifecycle snapshot
+before deciding which publication or delivery owner needs a regression.
+
+A debugger attached to this process suspends every in-process node while it collects thread
+stacks. Record that suspension separately and retain the attempt as a diagnostic run; its elapsed
+time and deadline outcomes cannot qualify an uninterrupted throughput comparison. Preserve an
+unprofiled failure before collecting stacks on a diagnostic replay. Thread stacks can identify
+workers blocked in a tracked lock or the detector itself, but a suspended async task is not a
+worker's call stack. Retain the node's lifecycle and placement observations alongside the dump
+when deciding whether the failure belongs to drain, state publication or scheduling contention.
+
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is
 running with that process's whole group, records `interrupted` in `lane.json` and exits; the upload

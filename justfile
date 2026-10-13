@@ -283,7 +283,56 @@ test-native-metadata-restore-repeat: tests-deps
 
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
 test-scenarios-binary binary *args: download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
+
+# Reproduce a focused public scenario in one diagnostic selection, with the same prerequisites
+# as the complete lane. This does not replace the lane's inventory and evidence qualification.
+test-diagnostic-scenarios selection feature *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    diagnostic_feature="$(realpath -- {{ quote(feature) }})"
+    if [[ ! -f "$diagnostic_feature" ]]; then
+        echo "expected an existing feature file" >&2
+        exit 2
+    fi
+    # A glob component makes Cucumber walk the containing directory and match this exact file.
+    diagnostic_input="${diagnostic_feature%/*}/{${diagnostic_feature##*/}}"
+    diagnostic_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$diagnostic_attempts"
+    diagnostic_attempt="$(mktemp -d "$diagnostic_attempts/run.XXXXXX")"
+    export NERVIX_DEADLOCK_EVIDENCE="${NERVIX_DEADLOCK_EVIDENCE:-$diagnostic_attempt/evidence}"
+    mkdir -p "$NERVIX_DEADLOCK_EVIDENCE"
+    echo "diagnostic scenario attempt: $diagnostic_attempt"
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }}
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --test scenarios -- --input "$diagnostic_input" {{ quote(args) }} 2>&1 | tee "$diagnostic_attempt/scenarios.log"
+    if ! rg --quiet '^[1-9][0-9]* scenarios?([ (]|$)' "$diagnostic_attempt/scenarios.log"; then
+        echo "diagnostic scenario selection executed no scenarios" >&2
+        exit 1
+    fi
+
+# Run focused harness regressions against a diagnostic build without changing its execution mode.
+test-diagnostic-harness selection *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    harness_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$harness_attempts"
+    harness_attempt="$(mktemp -d "$harness_attempts/harness.XXXXXX")"
+    echo "diagnostic harness attempt: $harness_attempt"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_attempt/harness.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$harness_attempt/harness.log"; then
+        echo "diagnostic harness selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
@@ -1047,6 +1096,29 @@ check-coverage report="lcov-workspace.info":
 # Measure added executable lines; --pr <number> updates an advisory GitHub PR comment.
 coverage-patch base="origin/main" report="lcov-workspace.info" *args:
     python3 -m scripts.patch_coverage --base {{ quote(base) }} --report {{ quote(report) }} --output {{ quote(cargo_target_dir + "/patch-coverage.md") }} {{ args }}
+
+# Measure ordinary harness regressions separately from product coverage and diagnostic profiles.
+coverage-harness-liveness *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    harness_reports={{ quote(cargo_target_dir + "/harness-coverage-reports") }}
+    mkdir -p "$harness_reports"
+    harness_report="$(mktemp -d "$harness_reports/run.XXXXXX")"
+    echo "harness coverage attempt: $harness_report"
+    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }}
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --features testing --package nervix-server --test harness_liveness -- {{ quote(args) }} 2>&1 | tee "$harness_report/tests.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$harness_report/tests.log"; then
+        echo "harness coverage selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
+    cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path "$harness_report/lcov.info"
+    echo "harness coverage report: $harness_report/lcov.info"
+
+# Export the current ordinary harness profiles after a replay, without another test invocation.
+coverage-harness-liveness-report output:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/harness-coverage") }} cargo llvm-cov report --package nervix-server --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every
