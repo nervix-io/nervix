@@ -734,12 +734,26 @@ impl SilenceSweeps {
         Self { ticks }
     }
 
+    /// Sweeps at `ticks`, for a regression that needs a cadence the sweep interval cannot produce.
+    #[cfg(test)]
+    pub(super) fn ticking(ticks: Interval) -> Self {
+        Self { ticks }
+    }
+
     /// Runs `sweep` at every tick, for as long as the task polling this runs.
+    ///
+    /// A sweep is synchronous, so nothing can end the task while one runs. A sweep that overran
+    /// its interval finds the next tick already due, and a due tick does not suspend the task, so
+    /// the loop returns to the executor after every sweep. A cancellation that arrived during the
+    /// sweep, such as runtime teardown's, then ends the task before the next sweep rather than
+    /// after as many more as the task's cooperative budget allows, and the join waits for the sweep
+    /// in progress and for no other.
     pub(super) async fn run(mut self, mut sweep: impl FnMut()) {
         loop {
             nervix_primitives::task::consume_budget().await;
             self.ticks.tick().await;
             sweep();
+            nervix_primitives::task::yield_now().await;
         }
     }
 }

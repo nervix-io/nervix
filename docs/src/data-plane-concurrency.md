@@ -60,8 +60,10 @@ nothing takes none and a sweep's cost follows the positions its deliveries have 
 guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share
 whose first claim races a sweep is counted from that sweep or from the first one after its
 registration, so it still fails between the silence timeout and one sweep interval later. Runtime
-shutdown cancels the sweep task and waits for it, and the task observes the cancellation between
-sweeps, so a sweep's guard count also bounds how long a stopping node waits for it. A diagnostic
+shutdown cancels the sweep task and waits for it. The task returns to its executor after every
+sweep, because a sweep that overran its interval finds the next tick already due and that tick does
+not suspend the task, so it observes the cancellation between sweeps and a sweep's guard count also
+bounds how long a stopping node waits for it. A diagnostic
 build pays for every one of those guards: the acquisition-order selection enters Deloxide's
 process-wide detector on each tracked acquisition and release, and the nodes of every scenario in
 one process share that detector, which is why a recurring pass takes guards in proportion to its

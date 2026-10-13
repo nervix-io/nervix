@@ -798,12 +798,16 @@ is unadmitted, so that cancellation ends its hold, and so does the end of the re
 when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
 queues, and negatively resolves remaining volatile correlations exactly once. The once-a-second
-silence sweep is one of the joined tasks. It observes the cancellation when it waits for its next
-tick, so the join waits for the sweep in progress, and a sweep that overran the second between
-sweeps is followed at once by the next one, without that wait. A sweep, like the resolution that
-follows, visits only the correlation positions the node's deliveries and admissions have claimed,
-never its fixed capacity, which is what keeps it inside that second. No ACK owner state is stored
-for restart. The interconnect also retires the pool
+silence sweep is one of the joined tasks. A sweep is synchronous, so its task cannot observe the
+cancellation while one runs, and a sweep that overran the second between sweeps finds the next tick
+already due, which does not suspend the task. The task therefore returns to its executor after every
+sweep and observes the cancellation there, whatever the sweep took, so the join waits for the sweep
+in progress and for no other. The receiver-side acknowledgement watchers the same join waits for
+have no cadence that can fall behind: each of their steps takes one row's progress and awaits its
+delivery to the forwarding node, so they return to the executor within their cooperative budget. A
+sweep, like the resolution that follows, visits only the correlation positions the node's deliveries
+and admissions have claimed, never its fixed capacity, which is what keeps it inside that second. No
+ACK owner state is stored for restart. The interconnect also retires the pool
 connections the node opened, giving their leased streams up to ten seconds before closing whatever
 remains. Connections that peers opened to the node close at once, together with the handlers still
 serving their streams, so a peer's request the node has not answered fails instead of completing.
