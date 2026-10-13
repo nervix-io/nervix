@@ -103,6 +103,16 @@ progress while one peer holds its guard. The production admission choice has a L
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
 Registered bounded Bolero sequences check complete verdicts, capacity and generation outcomes.
+The `remote-correlation-lifetimes` sequence uses an independent sequential model to predict
+registration identities and FIFO reuse before calling the production owner. It varies both pools'
+capacity, receiver identities, attached and detached batch rows, admission receiver closure,
+single and bulk admission, Alive and sequenced parking/resume, terminal replies, clear, relay-memory
+refusal and shutdown. Every operation and every individual silence sweep checks exact root outcomes
+and progress, drain and handoff counts, admission updates, per-receiver expiry counts, retained
+memory and the positions ever first-claimed. Stale generations and non-record admission row
+numbers are also checked through the public routing operations. This is sequential representation
+evidence; the registered Shuttle checks above own races, and the runtime scenarios own the timed
+sweep loop and its public delivery behavior.
 Turmoil covers transport loss, retry, cancellation, reconnect and process restart within its
 documented scope; public one/three-node branch delivery and producer-restart scenarios cover host
 ACKs. External immutable-image faults remain separate evidence.
