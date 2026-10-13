@@ -112,6 +112,11 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `remote-relay-rows-malformed` | `nervix-server` the first payload defect in the receiver's check order | foreign bodies, miscounted watermarks and registrations and invalid branch keys, v1 | 128 | 2048 bytes |
 | `relay-wire-messages` | `nervix-interconnect` relay grant, reply, admission, acknowledgement and connection binding equality through the bounded codec | every message variant, branch key values with any float bits and per-row metadata, v1 | 256 | 2048 bytes |
 | `relay-wire-messages-malformed` | `nervix-interconnect` typed decode failure or a message that encodes and decodes back to itself, with every allocation of the decoder freed | damaged encodings of every message and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `client-producer-link-frames` | `nervix-server` complete equality of every client producer link frame through the bounded duplex codec of its stream, with nothing left charged | the opening message, every serving-node frame and every owning-node answer, with schemas of any field type, limits and counts at their ends, opaque batch bytes, every refusal, outcome, admission state and end reason, v1 | 256 | 2048 bytes |
+| `client-producer-link-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every link frame, frames read as another direction's type and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `client-consumer-stream-frames` | `nervix-server` complete equality of every client consumer stream frame through the bounded duplex codec of its stream, with nothing left charged | the opening message, every serving-node frame and every owning-node answer, with schemas of any field type, policy durations from zero to the longest, every answer, refusal and settlement outcome, delivery headers across their ranges with and without a branch fingerprint, and chunks from empty to the largest one sent, v1 | 256 | 2048 bytes |
+| `client-consumer-stream-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every stream frame, frames read as another direction's type and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `client-emitter-deliveries` | `nervix-server` client emitter delivery equality from the sink's Arrow IPC stream to the client library's batch: the Arrow schema of exactly the declared fields, every delivered row in order, values, nulls and float bits; refusal under another row count or other fields | every field type with nulls, nested lists and sliced views, deliveries of adjacent and scattered rows, v1 | 128 | 2048 bytes |
 | `wasm-generated-pools` | `nervix-server` generated column pool equality from a WASM guest's Arrow IPC stream to the node's batch: unnamed fields, types, nullability, values, nulls and float bits | every field type with nulls, nested lists and sliced views, streams ended by the marker or closed, v1 | 128 | 2048 bytes |
 | `wasm-generated-pools-malformed` | `nervix-server` a typed generated-IPC or batch-count defect, or one batch of unnamed columns that writes and decodes back to itself | truncated, flipped, overwritten, shifted, trailing and arbitrary pools, v1 | 256 | 2048 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
@@ -191,12 +196,15 @@ boundaries. Request, reply and event coverage checks compare generated families 
 union declarations, so adding a family requires extending its generator.
 
 The [Arrow, codec and interconnect representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/arrow-representation-coverage.md)
-ties the relay body, producer batch, WASM generated pool, schemaful codec, JAQ-native and protobuf
-codec number, routed relay payload and relay wire message targets to their oracles, each codec's
-value domain and the contract boundaries they record. Its server targets share one generator of
-schemas and batches over every current field type and one logical oracle that compares batches cell
-by cell with floats by their bits. `just test-bolero codec-` runs the four codec targets, and
-`just test-bolero jaq-native` the numbers a JAQ program and its native formats carry.
+ties the relay body, producer batch, client emitter delivery, WASM generated pool, schemaful codec,
+JAQ-native and protobuf codec number, routed relay payload, relay wire message, client producer
+link frame and client consumer stream frame targets to their oracles, each codec's value domain and
+the contract boundaries they record. Its server targets share one generator of schemas and batches
+over every current field type and one logical oracle that compares batches cell by cell with floats
+by their bits. `just test-bolero codec-` runs the four codec targets, `just test-bolero jaq-native`
+the numbers a JAQ program and its native formats carry, and `just test-bolero client-producer-link`
+and `just test-bolero client-consumer-stream` the frames a forwarded client producer and consumer
+travel in between nodes.
 
 ## Generated Domains
 
@@ -215,6 +223,14 @@ as a sequence of bounded choices, so the same bytes always build the same value 
 replays exactly. It is a harness outside the layer order: it depends only on the vocabulary, and
 states what NSPL can spell as a rule over values instead of calling the parser, so the vocabulary's
 own properties use it without a language dependency. No product code names it.
+
+For native client producers and consumers it draws the window a client asks for and is granted,
+with counts at one, at the bound the vocabulary declares and at the largest count their type holds,
+a producer's whole description, every outcome of a submitted batch with each cause it names, and
+physical durations that land on zero, one nanosecond and the longest duration as often as anywhere
+else. It also lists one field of every declared type, each scalar, a list of it and a fixed-length
+array of such lists, across the four combinations of optional and sensitive, for a property that
+must carry every type on every run.
 
 A generator draws from one of two domains:
 

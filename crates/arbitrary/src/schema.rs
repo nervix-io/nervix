@@ -1,17 +1,52 @@
 //! Schemas, wire schemas and user-defined functions: the typed field lists Models declare.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU32, str::FromStr as _};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf, JsonType,
-    SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField, WireSchemaStrictness,
+    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf, FieldName,
+    JsonType, ParseAsType, SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField,
+    WireSchemaStrictness,
 };
 
 use crate::{Arbitrary, text::GeneratedName};
 
 /// The most fields a generated schema or argument list declares.
 const FIELDS: usize = 5;
+
+/// One field of every declared type: each scalar, a list of it, and a fixed-length array of such
+/// lists at the shortest and the longest length, with the optional and sensitive flags cycling
+/// through their four combinations. A property that must carry every type on every run sends this
+/// list, so that no type is left to its random cases.
+pub fn fields_of_every_type() -> Vec<SchemaField> {
+    let mut fields = Vec::new();
+    for scalar in ParseAsType::scalar_variants() {
+        let list = ParseAsType::Vec {
+            element: Box::new(scalar.clone()),
+        };
+        let length = if fields.len().is_multiple_of(2) {
+            NonZeroU32::MIN
+        } else {
+            NonZeroU32::MAX
+        };
+        let array = ParseAsType::Array {
+            element: Box::new(list.clone()),
+            len: length,
+        };
+        for ty in [scalar.clone(), list, array] {
+            let position = fields.len();
+            let name = FieldName::from_str(&format!("field_{position}"))
+                .assured("a name of letters, an underscore and digits is a field name");
+            fields.push(SchemaField {
+                name,
+                ty,
+                optional: position % 2 == 1,
+                sensitive: position % 4 >= 2,
+            });
+        }
+    }
+    fields
+}
 
 const JSON_TYPES: [JsonType; 19] = [
     JsonType::String,
