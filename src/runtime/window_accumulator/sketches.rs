@@ -101,6 +101,13 @@ impl PaneSketches {
         self.panes.clear();
     }
 
+    /// The sketch of `pane`, which the pane's first admitted row creates.
+    fn pane(&mut self, pane: i64) -> &mut WindowSketch {
+        self.panes
+            .entry(pane)
+            .or_insert_with(|| WindowSketch::new(self.config))
+    }
+
     #[cfg(feature = "benchmarks")]
     pub(super) fn pane_count(&self) -> usize {
         self.panes.len()
@@ -126,13 +133,7 @@ impl PaneSketches {
                         let pane = self
                             .layout
                             .pane_of(rows.retained_row(position).timestamp.unix_nanos());
-                        if let Some(sketch) = self.panes.get_mut(&pane) {
-                            sketch.admit_key(key);
-                        } else {
-                            let mut sketch = WindowSketch::new(self.config);
-                            sketch.admit_key(key);
-                            self.panes.insert(pane, sketch);
-                        }
+                        self.pane(pane).admit_key(key);
                     });
                 }
                 WindowSketchConfig::Quantile { .. } => {
@@ -146,13 +147,7 @@ impl PaneSketches {
                         let value = argument
                             .number_at(row)
                             .verified("quantile accepts numeric arguments");
-                        if let Some(sketch) = self.panes.get_mut(&pane) {
-                            sketch.admit_number(value);
-                        } else {
-                            let mut sketch = WindowSketch::new(self.config);
-                            sketch.admit_number(value);
-                            self.panes.insert(pane, sketch);
-                        }
+                        self.pane(pane).admit_number(value);
                     }
                 }
             }
