@@ -54,8 +54,8 @@ mod wire;
 
 pub use authentication::TransportClock;
 pub use connection::{
-    ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
-    IncomingByteStream, RelayAdmission, RelayCancellationGuard,
+    ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
+    DuplexSender, EncodedMessage, IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
 pub use entropy::TransportEntropy;
 pub use identity::{TlsConfigBundle, TransportIdentity};

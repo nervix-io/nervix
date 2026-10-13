@@ -1851,8 +1851,12 @@ Stress widens timing windows; it does not make untracked waits visible. A Tokio 
 `Notify` wait, a DashMap shard, dependency locks, an atomic publication and a wait on another node
 are invisible to the detector with or without disturbance, and a workload that stalls on one of them
 ends as `timed-out`, not as an active cycle. Those owners keep their Shuttle, Loom, Turmoil and
-Chaos evidence. A stressed workload that fails is reproduced first as a focused failing test
-against its owner before the owner changes.
+Chaos evidence. A dependency's own channels are invisible in the same way: closing a database waits
+for the storage engine's background workers through the engine's worker channel and active-worker
+count, with no tracked lock involved, so that close is held by the pinned engine's own worker-stop
+tests and the store-close regression beside `ApplicationStartup::close_stores`, not by the lane. A
+stressed workload that fails is reproduced first as a focused failing test against its owner before
+the owner changes.
 
 Every process the lane starts runs in a session of its own. A process that outlives its bound
 receives `SIGTERM` and, after the stop grace period, `SIGKILL` with its whole group. The lane is a

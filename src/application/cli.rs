@@ -1,5 +1,5 @@
 //! Layer: edges.
-//! Owns: node CLI arguments, command variants and their transport choice.
+//! Owns: node CLI arguments and command variants.
 //! Depends on: control-plane configuration values, Clap and the shared vocabulary.
 //! Must not know: graph execution or connector internals.
 #![cfg_attr(
@@ -7,9 +7,12 @@
     nervix::layer(edge, reason = "owns node command-line configuration")
 )]
 
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
 
-use super::*;
+use super::{
+    cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio},
+    *,
+};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-server")]
@@ -345,24 +348,4 @@ pub enum Command {
         /// Target shell
         shell: Shell,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[clap(rename_all = "lower")]
-pub enum InternalTransportMode {
-    Http,
-    Https,
-}
-
-impl InternalTransportMode {
-    pub(super) fn scheme(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Https => "https",
-        }
-    }
-
-    pub(super) fn is_tls(self) -> bool {
-        matches!(self, Self::Https)
-    }
 }

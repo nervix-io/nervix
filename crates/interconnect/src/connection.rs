@@ -102,7 +102,8 @@ use body::{read_body, read_body_into, send_body, send_response, send_static_erro
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
-    ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
+    ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
+    DuplexSender, EncodedMessage,
 };
 use relay_owner::{RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;

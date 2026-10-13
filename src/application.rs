@@ -49,8 +49,8 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
-pub use cli::{Args, Command, InternalTransportMode};
-use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
+pub use cli::{Args, Command};
+pub use cli_values::InternalTransportMode;
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
