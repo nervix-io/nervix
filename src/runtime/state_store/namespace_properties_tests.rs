@@ -86,6 +86,52 @@ fn stored_key(arbitrary: &mut Arbitrary<'_>, placement_key: Vec<u8>) -> Vec<u8> 
 }
 
 /// Keys of up to three domains, each in up to three namespaces holding up to three placements'
+/// headers, index entries or chunks.
+struct StagedKeys {
+    /// Every stored key, with the prefix of the namespace it lies in.
+    keys: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Every namespace a walk visits, keyed by its prefix.
+    namespaces: BTreeMap<Vec<u8>, Visit>,
+}
+
+impl StagedKeys {
+    fn generated(arbitrary: &mut Arbitrary<'_>) -> Self {
+        let mut keys = BTreeMap::new();
+        let mut namespaces = BTreeMap::new();
+        let domains = arbitrary
+            .entropy()
+            .positive_count(nonzero_ext::nonzero!(3_usize));
+        for _ in 0..domains {
+            let domain: DomainName = arbitrary.rule_name();
+            let domain_namespaces = arbitrary
+                .entropy()
+                .positive_count(nonzero_ext::nonzero!(3_usize));
+            for _ in 0..domain_namespaces {
+                let namespace = generated_namespace(arbitrary);
+                let prefix = namespace.prefix(&domain);
+                let placements = arbitrary
+                    .entropy()
+                    .positive_count(nonzero_ext::nonzero!(3_usize));
+                for _ in 0..placements {
+                    let mut placement = generated_placement(arbitrary);
+                    placement.domain = domain.clone();
+                    let placement_key = namespace
+                        .key(&placement)
+                        .assured("a generated placement stays inside the key bound");
+                    keys.insert(stored_key(arbitrary, placement_key), prefix.clone());
+                }
+                let visit = Visit {
+                    namespace,
+                    domain: domain.clone(),
+                };
+                namespaces.insert(prefix, visit);
+            }
+        }
+        Self { keys, namespaces }
+    }
+}
+
+/// Keys of up to three domains, each in up to three namespaces holding up to three placements'
 /// headers, index entries or chunks, name the domain of their namespace after it. A walk from the
 /// start visits every namespace of every domain exactly once, in key order: every key between
 /// where it resumed and where the namespace ends lies in that namespace, and no key lies past the
@@ -97,45 +143,17 @@ fn bolero_staged_namespaces_name_their_domain_and_are_each_visited_once_in_key_o
         .with_max_len(4096)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-            let mut namespaces = BTreeMap::new();
-            let mut keys = BTreeMap::new();
-            let domains = arbitrary
-                .entropy()
-                .positive_count(nonzero_ext::nonzero!(3_usize));
-            for _ in 0..domains {
-                let domain: DomainName = arbitrary.rule_name();
-                let domain_namespaces = arbitrary
-                    .entropy()
-                    .positive_count(nonzero_ext::nonzero!(3_usize));
-                for _ in 0..domain_namespaces {
-                    let namespace = generated_namespace(&mut arbitrary);
-                    let prefix = namespace.prefix(&domain);
-                    let placements = arbitrary
-                        .entropy()
-                        .positive_count(nonzero_ext::nonzero!(3_usize));
-                    for _ in 0..placements {
-                        let mut placement = generated_placement(&mut arbitrary);
-                        placement.domain = domain.clone();
-                        let placement_key = namespace
-                            .key(&placement)
-                            .assured("a generated placement stays inside the key bound");
-                        let key = stored_key(&mut arbitrary, placement_key);
-                        let (decoded, tail) =
-                            physical_namespace(&key).assured("a current key names its namespace");
-                        assert_eq!(decoded, namespace);
-                        let named = RuntimeStateStore::restore_key_domain(tail)
-                            .assured("a current key names its domain after its namespace");
-                        assert_eq!(named, domain);
-                        keys.insert(key, prefix.clone());
-                    }
-                    namespaces.insert(
-                        prefix,
-                        Visit {
-                            namespace,
-                            domain: domain.clone(),
-                        },
-                    );
-                }
+            let StagedKeys { keys, namespaces } = StagedKeys::generated(&mut arbitrary);
+            for (key, prefix) in &keys {
+                let visit = namespaces
+                    .get(prefix)
+                    .assured("every generated key's namespace is recorded with it");
+                let (decoded, tail) =
+                    physical_namespace(key).assured("a current key names its namespace");
+                assert_eq!(decoded, visit.namespace);
+                let named = RuntimeStateStore::restore_key_domain(tail)
+                    .assured("a current key names its domain after its namespace");
+                assert_eq!(named, visit.domain);
             }
 
             let stored = StoredKeys::new(keys.keys());
@@ -167,6 +185,28 @@ fn bolero_staged_namespaces_name_their_domain_and_are_each_visited_once_in_key_o
         });
 }
 
+/// Up to three keys a store keeps, or arbitrary bytes, each damaged up to three times.
+fn damaged_keys(arbitrary: &mut Arbitrary<'_>) -> BTreeSet<Vec<u8>> {
+    let mut keys = BTreeSet::new();
+    let count = arbitrary
+        .entropy()
+        .positive_count(nonzero_ext::nonzero!(3_usize));
+    for _ in 0..count {
+        let mut key = if arbitrary.entropy().flag() {
+            let placement_key = generated_placement_key(arbitrary);
+            stored_key(arbitrary, placement_key)
+        } else {
+            arbitrary_key(arbitrary, 64)
+        };
+        damage_repeatedly(arbitrary, &mut key);
+        // The storage engine admits no empty key, and no store writes one.
+        if !key.is_empty() {
+            keys.insert(key);
+        }
+    }
+    keys
+}
+
 /// Damaged or arbitrary keys either fail the domain decoder with the typed storage-format failure
 /// or name a domain whose canonical text and separator open what they hold. A walk over such keys
 /// stops with the typed storage-format failure at the first key whose namespace does not decode,
@@ -179,23 +219,7 @@ fn bolero_malformed_staged_keys_fail_typed_or_name_their_namespace_canonically()
         .with_max_len(2048)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-            let mut keys = BTreeSet::new();
-            let count = arbitrary
-                .entropy()
-                .positive_count(nonzero_ext::nonzero!(3_usize));
-            for _ in 0..count {
-                let mut key = if arbitrary.entropy().flag() {
-                    let placement_key = generated_placement_key(&mut arbitrary);
-                    stored_key(&mut arbitrary, placement_key)
-                } else {
-                    arbitrary_key(&mut arbitrary, 64)
-                };
-                damage_repeatedly(&mut arbitrary, &mut key);
-                // The storage engine admits no empty key, and no store writes one.
-                if !key.is_empty() {
-                    keys.insert(key);
-                }
-            }
+            let keys = damaged_keys(&mut arbitrary);
 
             for key in &keys {
                 // What follows a namespace that decodes, or the whole key when none does.
