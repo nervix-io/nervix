@@ -837,10 +837,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_compiler_reports_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "typed-report"
-invariant = "Current compiler reports round trip without losing spans, provenance, receiver identity or completion evidence."
+invariant = "Current compiler reports round trip without losing spans, provenance, receiver identity, audit candidates or completion evidence."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"
