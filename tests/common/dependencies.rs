@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nervix_primitives::sync::{Mutex, blocking::OnceLock};
+use nervix_primitives::{
+    sync::{Mutex, blocking::OnceLock},
+    time::Instant,
+};
 pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
@@ -17,6 +20,14 @@ use nervix_test_environment::{
 };
 
 static SUITE_DEPENDENCIES: OnceLock<Mutex<DependencyEnvironment>> = OnceLock::new();
+
+/// Whether the Collector's output held a needle, and where the observation spent its time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CollectorObservation {
+    pub(crate) contains: bool,
+    pub(crate) lock_wait: std::time::Duration,
+    pub(crate) read: std::time::Duration,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct TestDependencies {
@@ -211,6 +222,30 @@ impl TestDependencies {
             )
         })?;
         suite.lock().await.otel_collector_contains(needle).await
+    }
+
+    /// One Collector observation, with the time it waited for the suite's dependency lock and the
+    /// time the container log read took once it held the lock.
+    pub(crate) async fn otel_collector_observation(
+        &self,
+        needle: &str,
+    ) -> io::Result<CollectorObservation> {
+        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
+            io::Error::other(
+                "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
+                 running'",
+            )
+        })?;
+        let requested = Instant::now();
+        let environment = suite.lock().await;
+        let locked = Instant::now();
+        let contains = environment.otel_collector_contains(needle).await?;
+        let read = Instant::now();
+        Ok(CollectorObservation {
+            contains,
+            lock_wait: locked.duration_since(requested),
+            read: read.duration_since(locked),
+        })
     }
 
     pub(crate) async fn otel_collector_logs(&self) -> io::Result<String> {

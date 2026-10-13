@@ -2625,6 +2625,25 @@ impl Cluster {
         Err(io::Error::other(message))
     }
 
+    /// The observability endpoint's current exposition of `node_id`, read once within `wait`.
+    pub(crate) async fn observability_metrics_text(
+        &self,
+        node_id: &str,
+        wait: Duration,
+    ) -> io::Result<String> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        let url = format!("http://{}/metrics", handle.spec.observability_addr());
+        let response = timeout(wait, async {
+            reqwest::Client::new().get(&url).send().await?.text().await
+        })
+        .await
+        .map_err(|_| io::Error::other(format!("no metrics from {url} within {wait:?}")))?;
+        response.map_err(io::Error::other)
+    }
+
     pub(crate) async fn wait_for_observability_metric_value(
         &self,
         node_id: &str,

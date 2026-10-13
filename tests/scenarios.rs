@@ -26491,27 +26491,99 @@ async fn then_quickwit_index_eventually_contains(
 #[then(expr = "OpenTelemetry Collector eventually contains {string}")]
 async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expected: String) {
     let expected = expand_placeholders(world, &expected);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(10);
+    let mut observation_count = 0_usize;
+    let mut slow_observations = Vec::new();
     loop {
         nervix_primitives::task::consume_budget().await;
-        if world
+        let requested = Instant::now();
+        let observation = world
             .dependencies
-            .otel_collector_contains(&expected)
+            .otel_collector_observation(&expected)
             .await
-            .expect("OpenTelemetry Collector logs must be readable")
-        {
+            .expect("OpenTelemetry Collector logs must be readable");
+        observation_count = observation_count
+            .checked_add(1)
+            .assured("a ten-second wait cannot make usize::MAX observations");
+        let slow = Duration::from_millis(100);
+        if observation.lock_wait >= slow || observation.read >= slow {
+            slow_observations.push(format!(
+                "+{:?} lock={:?} read={:?}",
+                requested.duration_since(started),
+                observation.lock_wait,
+                observation.read
+            ));
+        }
+        if observation.contains {
             return;
         }
         if Instant::now() >= deadline {
+            let last = format!(
+                "+{:?} lock={:?} read={:?}",
+                requested.duration_since(started),
+                observation.lock_wait,
+                observation.read
+            );
+            let diagnostics = otel_collector_timeout_diagnostics(world, &expected).await;
             let logs = world.dependencies.otel_collector_logs().await;
             panic!(
-                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; last \
-                 command output: {:?}; collector output:\n{logs:?}",
+                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; \
+                 {observation_count} observations, last {last}, slower than 100ms: \
+                 {slow_observations:?}; {diagnostics}; last command output: {:?}; collector \
+                 output:\n{logs:?}",
                 world.last_command_output
             );
         }
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// What a Collector timeout leaves to explain it: whether one more observation finds the needle,
+/// and every emitter's published counters and status on every node of the scenario's cluster.
+async fn otel_collector_timeout_diagnostics(world: &ScenarioWorld, expected: &str) -> String {
+    let mut diagnostics = Vec::new();
+    let final_observation = world
+        .dependencies
+        .otel_collector_observation(expected)
+        .await;
+    diagnostics.push(format!("final observation: {final_observation:?}"));
+    for node_id in world.cluster().node_ids() {
+        let metrics = world
+            .cluster()
+            .observability_metrics_text(&node_id, Duration::from_secs(5))
+            .await;
+        let metrics = match metrics {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                diagnostics.push(format!("node {node_id} metrics unavailable: {error}"));
+                continue;
+            }
+        };
+        let mut emitters = BTreeSet::new();
+        for line in metrics.lines() {
+            if !line.starts_with("nervix_messages_total")
+                || !line.contains("target_kind=\"EMITTER\"")
+            {
+                continue;
+            }
+            diagnostics.push(format!("node {node_id}: {line}"));
+            if let Some(target) = line.split("target=\"").nth(1)
+                && let Some(name) = target.split('"').next()
+            {
+                emitters.insert(name.to_string());
+            }
+        }
+        for emitter in emitters {
+            let described =
+                run_nspl_commands_on_node(world, &node_id, &format!("DESCRIBE EMITTER {emitter};"))
+                    .await;
+            diagnostics.push(format!(
+                "node {node_id} DESCRIBE EMITTER {emitter}: {described:?}"
+            ));
+        }
+    }
+    diagnostics.join("; ")
 }
 
 #[then(
