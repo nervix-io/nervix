@@ -57,16 +57,27 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 
 ### Following the selected domain clock
 
-Selecting a domain attaches the console session to its clock once. The console detaches the
-previous clock when the selection changes. After a connection interruption, it attaches the
-selected clock again on the new session; the server releases the earlier attachment when its
-session ends. The panel shows the attached clock's typed state and START
-generation. For a paced clock it also shows logical now, rate, period, skew, and the latest accepted
-tick id and logical boundary. Logical now is projected from the committed mapping at the browser's
-UTC, refreshed four times a second; a browser whose clock differs from the cluster's can show a
-different projection. The tick is the serving node's accepted observation. Stopped, uninstalled,
-and unpaced states have no projected logical time. A refused attachment shows its reason and is
-not retried until the selection or connection changes.
+Selecting a domain attaches the console session to its clock once. The console selects the first
+listed domain on its own when none is selected or the selected one disappears, and selecting
+another domain, from the domain menu or with a typed `USE`, detaches the previous clock first. The
+console's session is served by the leader, so after a connection interruption or a leader change it
+attaches the selected clock again on the new session; the server releases the earlier attachment
+when its session ends. A console that holds a transaction attaches it first on a new connection,
+and while the session holds it the server refuses the clock attachment, as it refuses the
+automatic detach. The panel shows the attached clock's typed state and START generation. For a
+paced clock it also shows logical now, rate, period, skew, the logical origin and UTC anchor, and
+the latest accepted tick id and logical boundary. Logical now is projected from the committed
+mapping at the browser's UTC, refreshed four times a second; a browser whose clock differs from the
+cluster's can show a different projection. The tick is the serving node's accepted observation.
+Stopped, uninstalled, and unpaced states have no projected logical time. A refused attachment
+shows its reason and is not retried until the selection or connection changes.
+
+The panel and the top bar's `CLOCK` state name the attachment's phase: `NO DOMAIN` without a
+selection, `ATTACHING` until the attach reply, `STOPPED`, `UNINSTALLED`, `UNPACED` or `PACED` while
+it follows the clock, `INTERRUPTED` while the connection is lost, which shows no projection,
+`REFUSED` with the server's reason, `DETACHED` after a typed detach, and `ENDED` with its reason
+once the server ends the attachment, which the console does not attach again until the selection
+or connection changes.
 
 ## Creating Entities From Forms
 
@@ -389,12 +400,14 @@ statement's options, because the browser cannot read the path the statement name
 `RESTORE`, and `DESCRIBE BACKUP` must each be sent on their own, and `DESCRIBE BACKUP`, which reads
 an archive file on the client's machine, runs only in `nervix-cli`.
 
-The console event log renders attachment outcomes, domain-clock state and tick frames, and
-attachment ends. Tick entries include the id, boundary, authority UTC observation, and serving
-node's logical reading. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` typed into the REPL use the
-same session-local requests as the automatic attachment. A typed second attach is refused as
-already attached. A typed detach releases the clock and leaves the panel detached until another
-domain selection or connection restores automatic following.
+The REPL renders attachment outcomes, domain-clock state and tick frames, and attachment ends.
+Tick entries include the id, boundary, authority UTC observation, and serving node's logical
+reading. Every tick adds a line, so a fast clock can push earlier output out of the REPL's latest
+256 lines. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` typed into the REPL use the same
+session-local requests as the automatic attachment, and the console refuses them itself while a
+transaction is active. A typed second attach is refused as already attached. A typed detach
+releases the clock and leaves the panel detached until a typed `ATTACH DOMAIN CLOCK`, another
+domain selection, or a new connection restores following.
 
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.

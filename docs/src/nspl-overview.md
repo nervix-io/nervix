@@ -800,6 +800,8 @@ DESCRIBE RELOCATION <selection> ONTO NODE <node_id>
   [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 DESCRIBE DOMAIN;
 LOOKUP <hash_map> KEY '<key>';
+ATTACH DOMAIN CLOCK;
+DETACH DOMAIN CLOCK;
 ```
 
 Show commands:
@@ -832,6 +834,9 @@ General notes:
 - transport/client configs are generally preserved as pass-through string key/value pairs
 - native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external sink
 - `CREATE SUBSCRIPTION` and `DELETE SUBSCRIPTION` are not persisted in the registry
+- `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` follow and stop following the active domain's
+  clock for the session alone and are not persisted either; see
+  [Domain Clock Attachment](sessions.md#domain-clock-attachment)
 - session subscription names are unique within a connected session; one session may subscribe to relays from multiple domains, and `DELETE SUBSCRIPTION` uses the name rather than repeating subscription parameters
 - every `RELAY` is scheduled with one owner; only that owner instantiates its buffer, concrete
   branch presence, fan-out, subscriptions, and metrics

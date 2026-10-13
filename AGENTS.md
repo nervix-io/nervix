@@ -169,11 +169,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   lifecycle, command completion, domain time, interconnect, and client recovery retain their own
   documentation owners.
 - [Domain Clock](docs/src/domain-clock.md) is the authoritative architecture reference for domain
-  time. Any change to the domain-clock architecture, or to domain architecture that changes how
-  time is established, propagated, or consumed, must keep that chapter current in the same change.
-  Its scope includes mappings and lifecycle generations, authority selection and fencing, local
-  installation and reads, progress delivery, execution snapshots, admission, logical and physical
-  deadline ownership, recovery, and distributed-time guarantees.
+  time. Any change to the domain-clock architecture, to domain architecture that changes how time
+  is established, propagated, or consumed, or to how a client session attaches to and follows a
+  domain clock must keep that chapter current in the same change. Its scope includes mappings and
+  lifecycle generations, authority selection and fencing, local installation and reads, progress
+  delivery, session attachment with its observer, delivery order and what an attached client
+  observes, execution snapshots, admission, logical and physical deadline ownership, recovery, and
+  distributed-time guarantees.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
   reference for synchronization on record, batch, remote-frame, and acknowledgement paths, and for
   the primitive boundary those paths are built from. Any change to hot-path state publication,

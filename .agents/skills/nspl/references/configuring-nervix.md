@@ -37,7 +37,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
-| Session subscriptions and domain clock attachment | `Sessions`; `Command Line Client` for the CLI `subscribe` and `domain-clock` streams |
+| Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
@@ -53,6 +53,10 @@ For native application graphs, endpoint ownership, Arrow/credit limits, ACK boun
 restoration and replay, read [Client Ingestors And Emitters](https://docs.nervix.io/client-io-architecture.html)
 directly. Follow the same documentation version as the selected index; this architecture chapter
 is outside the curated NSPL index.
+
+For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
+[Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
+documentation version as the selected index; this client chapter is outside the curated NSPL index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -447,8 +451,8 @@ Choose checks relevant to the configured graph:
   values: the mapping and tick frontier show which logical centers the admission window has reached.
   A node that is still starting answers it once it has installed the committed domains, so a
   `does not exist` refusal means the cluster has no such domain, not that the node restarted.
-- `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
-  printing the attach reply, state changes, and tick lines.
+- `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C, or until
+  the server ends the attachment, printing the attach reply, state changes, and tick lines.
 - A host using the shared C binding executes attach and detach through `nx_session_execute`, reads
   the clock the attach reported, generation and paced mapping included, with
   `nx_session_domain_clock` before it uses a tick, and reads later states and ticks with

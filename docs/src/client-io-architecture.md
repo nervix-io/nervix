@@ -466,8 +466,9 @@ ends; preceding batches still receive their outcomes.
 ## Domain Time And Fencing
 
 Data handles pin the domain's `START` generation. The optional, domain-keyed clock attachment is
-a separate observation interface with its own restoration and coalescing control lane. It has no
-user attachment name or generic data-stream handle. It observes committed time rather than
+a separate observation interface with its own restoration and coalescing. Its frames travel on the
+session's control lane, with one replaceable tick slot per attached domain. It has no user
+attachment name or generic data-stream handle. It observes committed time rather than
 granting authority to set it. Tick progress can skip; clock/data events establish neither a barrier
 nor a total order. Applications needing event time declare it in exported fields.
 

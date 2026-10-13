@@ -58,7 +58,8 @@ its `--dns-resolver-config`, `--dns-hosts-file`, and repeatable `--dns-name-serv
 when the session needs an explicitly configured resolver. Browser sessions use browser DNS.
 
 Use the CLI's `subscribe` and `domain-clock` subcommands for shell streams of relay records and
-the selected domain's clock. See the Command Line Client chapter for their line formats.
+the selected domain's clock. See [Command Line Client](https://docs.nervix.io/client-tools-cli.html)
+for their line formats.
 
 For diagnostic-node lock findings, follow the local report inspection and triage guidance in
 [references/configuring-nervix.md](references/configuring-nervix.md#verification-and-troubleshooting).
