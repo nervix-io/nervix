@@ -17,10 +17,17 @@
 //! returns, and so before the transaction it attaches next: a session holding a transaction
 //! refuses them.
 //!
+//! A clock whose detach is in flight is not attached: its restoration waits until the detach has
+//! ended and then decides again. A detach of a clock waits for the attaches already decided for
+//! it, which reach their session first: an attach sent before publication counts as sent once the
+//! exchange is published, because a detach the client sends afterwards uses that exchange.
+//!
 //! The exchange reader applies replies to followed clocks and desired subscriptions as they
 //! arrive. Each endpoint's restoration task checks its own open reply against the pinned contract
 //! before publishing a new attachment. A restoration task waits for the replies of its own
-//! requests and sends a transient refusal again while the exchange stays open.
+//! requests and sends a transient refusal again while the exchange stays open. A clock's
+//! restoration task whose exchange stops taking requests, as one whose attach outlives the request
+//! timeout does, wakes the caller waiting for clock events so that it opens the next session.
 
 #![cfg_attr(
     nervix_lint,
@@ -31,7 +38,7 @@ use std::time::Duration;
 
 use ahash::HashSet;
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDomainClockRequest, ClientMessage, ClientRequest, ConsumerId,
     DomainClockAttachDisposition, OpenEmitterDisposition, OpenIngestorDisposition, ReplyBody,
@@ -45,7 +52,10 @@ use nervix_primitives::{
 
 use crate::{
     consumer::ConsumerHandle,
-    domain_clock::DomainClockAttachments,
+    domain_clock::{
+        ClockRestorationAttempt, ClockRestorationScope, ClockRestorationStep,
+        DomainClockAttachments,
+    },
     error::{ClientError, RequestKind},
     exchange::{EventSinks, Exchange, ExchangeRequests, PendingRequest, SESSION_LIMITS},
     producer::{Answered, ProducerInner},
@@ -161,18 +171,31 @@ pub(crate) struct Restoration {
     channel: RestorationChannel,
     generation: Arc<()>,
     sinks: EventSinks,
-    /// The domains whose clocks an attach was sent for.
+    /// The domains whose clocks this exchange restores: an attach was sent, or one waits for a
+    /// detach of the clock to end.
     attached: HashSet<DomainName>,
     clocks: Vec<ClockRestoration>,
+    /// The attaches sent before the exchange is published. Each stays an attempt until the
+    /// exchange is published, so a detach decided meanwhile is sent on this exchange behind it.
+    unpublished: Vec<ClockRestorationAttempt>,
     subscriptions: Vec<SubscriptionRestoration>,
     producers: Vec<ProducerRestoration>,
     consumers: Vec<ConsumerRestoration>,
 }
 
-/// The attach request restoring one followed clock, as it was sent.
+/// The restoration of one followed clock on the exchange.
 struct ClockRestoration {
     domain: DomainName,
-    sent: error_stack::Result<PendingRequest, ClientError>,
+    start: ClockFollowerStart,
+}
+
+/// Where the restoration of one clock begins.
+enum ClockFollowerStart {
+    /// The attach was sent, and its reply is awaited.
+    Sent(error_stack::Result<PendingRequest, ClientError>),
+    /// A detach of the clock was in flight, so no attach was sent: the restoration decides again
+    /// once the detach has ended.
+    AwaitingRelease,
 }
 
 /// The subscribe request restoring one desired subscription, as it was sent.
@@ -202,29 +225,59 @@ impl Restoration {
             sinks: exchange.sinks.clone(),
             attached: HashSet::default(),
             clocks: Vec::new(),
+            unpublished: Vec::new(),
             subscriptions: Vec::new(),
             producers: Vec::new(),
             consumers: Vec::new(),
         }
     }
 
-    /// Attaches every clock the client follows, before the exchange is published.
+    /// Attaches every clock the client follows, before the exchange is published. A clock whose
+    /// detach is in flight waits for it instead.
     pub(crate) async fn attach_followed_clocks(&mut self) {
         for domain in self.sinks.clocks.followed_domains() {
             nervix_primitives::task::consume_budget().await;
-            self.attach_clock(domain).await;
+            let step = self
+                .sinks
+                .clocks
+                .restoration_step(&domain, ClockRestorationScope::Followed);
+            match step {
+                ClockRestorationStep::Attach(attempt) => {
+                    self.attach_clock(domain).await;
+                    self.unpublished.push(attempt);
+                }
+                ClockRestorationStep::AwaitRelease => self.defer_clock(domain),
+                ClockRestorationStep::Done => {}
+            }
         }
     }
 
-    /// Attaches the clocks the end of the previous exchange interrupted that no attach was sent
-    /// for yet: a clock the client began to follow there while this exchange was opening.
+    /// Records that the exchange is published: a detach that waited for the attaches sent before
+    /// is sent on this exchange now, behind them.
+    pub(crate) fn published(&mut self) {
+        self.unpublished.clear();
+    }
+
+    /// Attaches the clocks the end of the previous exchange interrupted that this exchange does
+    /// not restore yet: a clock the client began to follow there while this exchange was opening.
     pub(crate) async fn attach_interrupted_clocks(&mut self) {
         for domain in self.sinks.clocks.interrupted_domains() {
             nervix_primitives::task::consume_budget().await;
             if self.attached.contains(&domain) {
                 continue;
             }
-            self.attach_clock(domain).await;
+            let step = self
+                .sinks
+                .clocks
+                .restoration_step(&domain, ClockRestorationScope::Interrupted);
+            match step {
+                ClockRestorationStep::Attach(attempt) => {
+                    self.attach_clock(domain).await;
+                    drop(attempt);
+                }
+                ClockRestorationStep::AwaitRelease => self.defer_clock(domain),
+                ClockRestorationStep::Done => {}
+            }
         }
     }
 
@@ -234,7 +287,20 @@ impl Restoration {
         });
         let sent = self.channel.send(request).await;
         self.attached.insert(domain.clone());
-        self.clocks.push(ClockRestoration { domain, sent });
+        self.clocks.push(ClockRestoration {
+            domain,
+            start: ClockFollowerStart::Sent(sent),
+        });
+    }
+
+    /// Leaves the clock of `domain` to its restoration task, which attaches it once the detach in
+    /// flight has ended and the clock still waits to be attached.
+    fn defer_clock(&mut self, domain: DomainName) {
+        self.attached.insert(domain.clone());
+        self.clocks.push(ClockRestoration {
+            domain,
+            start: ClockFollowerStart::AwaitingRelease,
+        });
     }
 
     /// Opens every acknowledged subscription the end of the previous exchange interrupted, each
@@ -287,7 +353,7 @@ impl Restoration {
                 clocks: self.sinks.clocks.clone(),
                 domain: clock.domain,
             };
-            nervix_primitives::task::spawn(follower.run(clock.sent));
+            nervix_primitives::task::spawn(follower.run(clock.start));
         }
         for subscription in self.subscriptions {
             let follower = SubscriptionFollower {
@@ -470,48 +536,104 @@ struct ClockFollower {
 }
 
 impl ClockFollower {
-    async fn run(self, sent: error_stack::Result<PendingRequest, ClientError>) {
-        let mut sent = sent;
+    async fn run(self, start: ClockFollowerStart) {
+        let mut sent = match start {
+            ClockFollowerStart::Sent(sent) => sent,
+            ClockFollowerStart::AwaitingRelease => {
+                let Some(sent) = self.attach_again().await else {
+                    return;
+                };
+                sent
+            }
+        };
         let mut delay = RestorationDelay::default();
         loop {
             nervix_primitives::task::consume_budget().await;
-            let reply = self
-                .channel
-                .reply(sent, RequestKind::AttachDomainClock)
-                .await;
-            let message = match reply {
-                Ok(ReplyBody::DomainClockAttach(outcome)) => match outcome.disposition {
-                    // The reader applied each of these as the reply arrived.
-                    DomainClockAttachDisposition::Attached { .. }
-                    | DomainClockAttachDisposition::AlreadyAttached(_)
-                    | DomainClockAttachDisposition::DomainNotFound(_) => return,
-                    DomainClockAttachDisposition::Failed => outcome.message,
-                },
-                Ok(other) => {
-                    ClientError::unexpected_reply(RequestKind::AttachDomainClock, other).to_string()
-                }
-                // The exchange ended, and the next one attaches the clock again.
-                Err(report) if report.current_context().retryable_session_failure() => return,
-                Err(report) => format!("{report:#}"),
+            let Some(retry_after) = self.refusal(sent, &mut delay).await else {
+                return;
             };
-            if !self.channel.is_open() {
-                return;
-            }
-            let retry_after = delay.advance();
-            if !self
-                .clocks
-                .restoration_failed(&self.domain, message, retry_after)
-            {
-                return;
-            }
             sleep(retry_after).await;
-            if !self.clocks.awaits_restoration_of(&self.domain) {
+            let Some(next) = self.attach_again().await else {
                 return;
+            };
+            sent = next;
+        }
+    }
+
+    /// Waits for the reply to an attach the follower sent. A refusal is reported, and the wait
+    /// before the next attempt is returned while the exchange stays open. `None` once the follower
+    /// has nothing more to send on its exchange: the attach was answered, or the exchange takes no
+    /// more requests and the next one attaches the clock again.
+    async fn refusal(
+        &self,
+        sent: error_stack::Result<PendingRequest, ClientError>,
+        delay: &mut RestorationDelay,
+    ) -> Option<Duration> {
+        let reply = self
+            .channel
+            .reply(sent, RequestKind::AttachDomainClock)
+            .await;
+        let message = match reply {
+            Ok(ReplyBody::DomainClockAttach(outcome)) => match outcome.disposition {
+                // The reader applied each of these as the reply arrived.
+                DomainClockAttachDisposition::Attached { .. }
+                | DomainClockAttachDisposition::AlreadyAttached(_)
+                | DomainClockAttachDisposition::DomainNotFound(_) => return None,
+                DomainClockAttachDisposition::Failed => outcome.message,
+            },
+            Ok(other) => {
+                ClientError::unexpected_reply(RequestKind::AttachDomainClock, other).to_string()
             }
-            let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest {
-                domain: self.domain.clone(),
-            });
-            sent = self.channel.send(request).await;
+            Err(report) if report.current_context().retryable_session_failure() => {
+                self.clocks.restoration_abandoned();
+                return None;
+            }
+            Err(report) => format!("{report:#}"),
+        };
+        if !self.channel.is_open() {
+            self.clocks.restoration_abandoned();
+            return None;
+        }
+        let retry_after = delay.advance();
+        if !self
+            .clocks
+            .restoration_failed(&self.domain, message, retry_after)
+        {
+            return None;
+        }
+        Some(retry_after)
+    }
+
+    /// Sends the attach again once the clock waits for one and no detach of it is in flight.
+    /// `None` when the clock needs no attach any more, or the exchange takes no more requests.
+    async fn attach_again(&self) -> Option<error_stack::Result<PendingRequest, ClientError>> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let mut changed = self.clocks.watch();
+            let step = self
+                .clocks
+                .restoration_step(&self.domain, ClockRestorationScope::Interrupted);
+            match step {
+                ClockRestorationStep::Attach(attempt) => {
+                    let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest {
+                        domain: self.domain.clone(),
+                    });
+                    let sent = self.channel.send(request).await;
+                    drop(attempt);
+                    return Some(sent);
+                }
+                ClockRestorationStep::AwaitRelease => {
+                    if !self.channel.is_open() {
+                        self.clocks.restoration_abandoned();
+                        return None;
+                    }
+                    changed
+                        .changed()
+                        .await
+                        .assured("the attachments hold the sender of their own notifications");
+                }
+                ClockRestorationStep::Done => return None,
+            }
         }
     }
 }

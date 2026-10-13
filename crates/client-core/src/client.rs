@@ -788,7 +788,7 @@ impl Client {
                     return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
-                match self.request(request, None, None).await? {
+                match self.clock_request_once(&request).await? {
                     ReplyBody::DomainClockAttach(outcome) => Ok(CommandOutcome::from(outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::AttachDomainClock,
@@ -801,7 +801,7 @@ impl Client {
                     return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
-                match self.request(request, None, None).await? {
+                match self.clock_request_once(&request).await? {
                     ReplyBody::DomainClockDetach(outcome) => Ok(CommandOutcome::from(outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::DetachDomainClock,
@@ -1385,10 +1385,11 @@ impl Client {
     /// Events are coalesced per domain, so a caller that reads late receives the newest state and
     /// tick, with the state first, rather than every intermediate observation. When the session
     /// holding an attachment ends, this reopens a session and attaches every followed clock again.
-    /// An attach that session refuses or leaves unanswered is reported as
-    /// [`DomainClockEvent::RestorationFailed`] and sent again after a growing wait. A failure to open
-    /// a session is returned while the clocks keep waiting to be restored, and the next call tries
-    /// again.
+    /// An attach that session refuses is reported as [`DomainClockEvent::RestorationFailed`] and
+    /// sent again on it after a growing wait. An attach it leaves unanswered past the request
+    /// timeout ends it instead, and a caller waiting here then opens the next session. A failure to
+    /// open a session is returned while the clocks keep waiting to be restored, and the next call
+    /// tries again.
     /// A client that follows no clock waits until it attaches to one.
     pub async fn next_domain_clock_event(
         &self,
@@ -1428,7 +1429,7 @@ impl Client {
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
                 for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
                     nervix_primitives::task::consume_budget().await;
-                    match self.request(request.clone(), None, None).await {
+                    match self.clock_request_once(&request).await {
                         Ok(body) => return Ok(body),
                         Err(report) if report.current_context().retryable_session_failure() => {
                             match self.recover_session(RecoveryMode::IfClosed).await? {
@@ -1447,6 +1448,29 @@ impl Client {
             Ok(result) => result,
             Err(_) => Err(Report::new(ClientError::RetryDeadline)),
         }
+    }
+
+    /// Sends a domain clock request once, on the current exchange, and waits for its reply.
+    ///
+    /// A detach first registers its release of the clock, so no restoration attaches the clock
+    /// while the detach is in flight, and waits until every restoration attach decided before it is
+    /// sent. The detach then reaches each session that receives one of those attaches behind it,
+    /// and releases what it attached.
+    async fn clock_request_once(
+        &self,
+        request: &ClientRequest,
+    ) -> error_stack::Result<ReplyBody, ClientError> {
+        let release = match request {
+            ClientRequest::DetachDomainClock(detach) => {
+                let release = self.inner.events.sinks.clocks.release(&detach.domain);
+                release.settled().await;
+                Some(release)
+            }
+            _ => None,
+        };
+        let reply = self.request(request.clone(), None, None).await;
+        drop(release);
+        reply
     }
 
     /// Waits for the next complete domain list the server observes. Only the latest list is kept,
@@ -1590,6 +1614,7 @@ impl Client {
         let mut restoration = Restoration::new(&exchange, self.inner.connector.request_timeout());
         restoration.attach_followed_clocks().await;
         let previous = std::mem::replace(&mut *self.inner.exchange.lock().await, exchange);
+        restoration.published();
         previous.close().await;
         restoration.attach_interrupted_clocks().await;
         restoration.open_subscriptions().await;
