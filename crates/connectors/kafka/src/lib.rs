@@ -46,15 +46,15 @@ use rdkafka::{
     message::{Header as KafkaHeader, OwnedHeaders},
     producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
 };
-// Criterion measures the per-partition folds an acknowledgement and a rejection run.
-#[cfg(feature = "benchmarks")]
-pub use source::{earliest_message_offsets, latest_positions};
 pub use source::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
     KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceMessage, KafkaSourceOffsetMode,
     KafkaSourcePlan, TopicPartitionInspector,
 };
+// Criterion measures the per-partition folds an acknowledgement and a rejection run.
+#[cfg(feature = "benchmarks")]
+pub use source::{earliest_message_offsets, latest_positions};
 
 const KAFKA: &str = "kafka";
 
