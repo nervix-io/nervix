@@ -396,8 +396,8 @@ bench-endpoint-routing: build-web-console download-onnxruntime
 test-endpoint-intake *args: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
-test-web-console:
-    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console
+test-web-console *args:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console -- {{ args }}
 
 test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
@@ -1181,7 +1181,7 @@ test-coverage-feature +features: tests-deps
 # public-scenario coverage collected by `test-coverage-feature`.
 test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
-        --package nervix-client-core --package nervix-client-wire \
+        --package nervix-client-core --package nervix-client-wire --package nervix-client-ffi \
         --package nervix-models --package nervix-cli --package nervix-web-console
 
 # Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.

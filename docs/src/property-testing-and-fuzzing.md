@@ -42,6 +42,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-arrow-rows` | `nervix-server` Arrow logical values and validity against production Row views | scalar columns, nullable and nested lists, arrays, selected rows, concrete branches, frame splitting and explicit redaction, v1 | 128 | 512 bytes |
 | `client-arrow-selection` | `nervix-server` whole-input typed rejection without partial output | invalid row bounds, order, duplicates and branch alignment, v1 | 128 | 512 bytes |
 | `client-binding-rows` | `nervix-client-ffi` complete column values and retained frame ownership | native scalar bits, states, string/bytes offsets, branch keys and nested cells, v1 | 128 | 512 bytes |
+| `client-ffi-field-descriptors` | `nervix-client-ffi` field descriptor ABI equality both ways: a host's level-by-level description becomes the complete original field, and the field and level accessors read back its canonical description as the header's `nx_type` values | every scalar inside 0 to 32 `LIST` and `FIXED_LIST` levels of 1 to `INT32_MAX` elements, either nullability and sensitivity, names from the whole name rule spelled in any letter case, v1 | 256 | 2048 bytes |
+| `client-ffi-field-descriptors-malformed` | `nervix-client-ffi` invalid-argument refusal that leaves the field list as the accepted calls built it | unknown types, lengths on scalar and `LIST` levels, empty and oversized `FIXED_LIST` levels, a 33rd list, refused names, elements without an open field, fields before the open one's element, an open last field, and reads past a field's last level or past the last field, v1 | 256 | 4096 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
 | `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v6 | 256 | 2048 bytes |
@@ -80,6 +82,9 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, deduplicator key groups and window row and argument groups, synthetic raw payloads at tar block boundaries and long paths, v3 | 256 | 4096 bytes |
 | `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all eleven kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v3 | 256 | 4096 bytes |
 | `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records, materialized, deduplicator and window group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v3 | 256 | 4096 bytes |
+| `console-pending-backups` | `nervix-web-console` pending backup entry and tab storage round-trip equality, with forgetting only by its own reference | any execution reference and query text, no domain or one in any spelling the name rule admits, recorded over an earlier record, v1 | 256 | 1024 bytes |
+| `console-pending-backups-malformed` | `nervix-web-console` exact read-back or refusal of a tab's stored record, which a refusal forgets while other entries stay | missing, canonical, edited, upper-cased and drawn reference, query and domain entries beside an unrelated entry, v1 | 256 | 1024 bytes |
+| `console-restore-drafts` | `nervix-web-console` restore draft lowering equality and existing-user option text | every `RESTORE` scope, source, mode, runtime state and lifecycle, domains in any spelling the name rule admits, every policy, v1 | 256 | 512 bytes |
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v1 | 128 | 65536 bytes |
@@ -90,11 +95,17 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `registry-stored-models-corruption` | `nervix-server` typed registry storage failure or Models whose own keys are exactly the stored keys | flipped, truncated, extended, recased, extended-key, copied and unknown records, v1 | 128 | 4096 bytes |
 | `runtime-state-keys` | `nervix-server` exact decoded placement projection, and prefixes, index and chunk keys that reach no other placement | every state kind with schema, generation, Model kind and name and branch key, names across the whole name rule, v1 | 256 | 2048 bytes |
 | `runtime-state-keys-malformed` | `nervix-server` typed storage failure or a placement whose own key is the stored key | damaged and arbitrary keys, v1 | 256 | 2048 bytes |
+| `runtime-state-chunk-keys-malformed` | `nervix-server` typed chunk, storage-format or decoding failure, or a segment set whose placement key decodes canonically and whose chunk prefix and offset respell the key | damaged and arbitrary chunk keys, v1 | 256 | 2048 bytes |
+| `runtime-state-staging-namespaces` | `nervix-server` the domain each key names after its namespace, and a maintenance walk that visits every namespace once in key order without passing another's key | placement, index and chunk keys of up to three domains in the initial namespace and restored generations of any value, v1 | 64 | 4096 bytes |
+| `runtime-state-staging-namespaces-malformed` | `nervix-server` typed storage-format failure at the first key whose namespace does not decode, or the namespace and domain the key's leading bytes spell exactly | damaged and arbitrary keys, v1 | 128 | 2048 bytes |
 | `runtime-state-identity-records` | `nervix-server` complete handoff and forced-recovery record equality with branch values by archived bits, and key identity | transitions with checkpoints of every placement kind, v1 | 256 | 4096 bytes |
 | `runtime-state-identity-records-malformed` | `nervix-server` typed decode failure or a record that stores back unchanged | arbitrary bytes as every identity record, v1 | 256 | 4096 bytes |
 | `runtime-state-snapshots` | `nervix-server` every owner's complete restored snapshot through its codec and the inline checkpoint envelope | Kafka offsets, branch lifecycles, deduplicator keyspaces with float bits and branch-aggregated metrics, v1 | 256 | 4096 bytes |
 | `runtime-state-snapshots-malformed` | `nervix-server` each kind's typed decode failure or a value that stores back to the same payload | arbitrary bytes as every snapshot payload, v1 | 256 | 4096 bytes |
-| `runtime-state-store-checkpoints` | `nervix-server` byte equality at the stored revision through both readers, before and after the database reopens | inline and chunked checkpoints of every placement at, beside and between the chunk boundaries, v1 | 64 | 2048 bytes |
+| `runtime-state-store-checkpoints` | `nervix-server` byte equality at the stored revision through both readers and every reader of a backup cut's listing, which lists exactly the domain's checkpoints in key order and by kind with their stored sizes, before and after the database reopens | up to three placements of one domain stored inline, as chunked streams or in a published restore generation at, beside and between the chunk boundaries, beside an unpublished generation and another domain, v2 | 64 | 4096 bytes |
+| `runtime-kafka-offset-captures` | `nervix-server` every offset and topic schedule the replica's cancellable reader restores from a capture's native checkpoint, a written length within the capture's reserved bound, and a check before every native entry | up to three topics of three partitions at any offset, and three topic schedules, v1 | 256 | 2048 bytes |
+| `runtime-kafka-offset-transfer-headers` | `nervix-server` exact revision, digest and payload from a checkpoint stream cut at every position and into generated chunks | advancing revisions beside the held and described ones, payloads of up to 128 bytes, v1 | 256 | 1024 bytes |
+| `runtime-kafka-offset-transfer-headers-malformed` | `nervix-server` typed length or revision refusal, or the revision and digest the header spells, with exactly the bytes behind the header forwarded at every split | arbitrary streams, half of them shorter than the header, with revisions beside the one they spell, v1 | 256 | 1024 bytes |
 | `runtime-window-snapshots` | `nervix-server` complete sealed window equality, and nothing for another branch lifetime | up to three rows of one branch with boundary sequences, nullable arguments and typed aggregate state, v1 | 128 | 2048 bytes |
 | `runtime-window-snapshots-malformed` | `nervix-server` typed window snapshot failure or a window that seals back to the same bytes | sealed windows damaged once and arbitrary bytes behind the magic, v1 | 256 | 4096 bytes |
 | `runtime-window-sealed-checkpoints` | `nervix-server` a window sealed in quota-owned pieces byte-identical to its resident encoding | up to three rows of one branch with boundary sequences, nullable arguments and typed aggregate state, v1 | 64 | 2048 bytes |
@@ -160,10 +171,16 @@ properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers decla
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
+A target names the test executable that holds its property: its package's library unit tests,
+`lib`, the unit tests of one of its binaries, `bin:<name>`, or one integration test,
+`test:<name>`. The web console's backup dialog belongs to the console's browser binary, whose unit
+tests compile natively, so its properties are `bin:nervix-web-console` targets; Bolero and the
+generators stay development dependencies outside the browser's graph.
 Before instrumenting a target, the runner reads Cargo metadata to resolve its package, target kind,
 name and source root. It selects the emitted executable by that identity, including integration
-tests in folders and explicitly configured library or test paths. A missing or ambiguous Cargo
-target or executable fails the run before the campaign starts.
+tests in folders, a binary's unit tests beside a library of the same name, and explicitly
+configured library or test paths. A missing or ambiguous Cargo target or executable fails the run
+before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
 bounded campaign. Its overall limit is three hours; per-build, per-case and per-campaign deadlines
@@ -479,9 +496,9 @@ The server package uses the current profile's lighter optimization and omits deb
 single codegen unit; sanitizer instrumentation, coverage, debug assertions and overflow checks remain
 enabled.
 The pinned cargo-bolero CLI does not expose a Cargo test-harness selector. Each instrumented build
-therefore records a run-local Rustup adapter that forwards the declared `--lib` or `--test` selector
-to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the toolchain,
-features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
+therefore records a run-local Rustup adapter that forwards the declared `--lib`, `--bin` or `--test`
+selector to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the
+toolchain, features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
 registered harness; they do not compile or invoke the server's Cucumber executable.
 On a shared host, a cold server build can exceed the campaign runner's 30-minute compilation
 limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour

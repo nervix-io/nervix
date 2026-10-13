@@ -5,7 +5,8 @@
 //! Layer: test harness.
 //! - **Owns.** Saving the archive a console download hands the browser into the scenario's archive
 //!   directory, handing a scenario archive to a file input, reloading the console while it
-//!   downloads, and checking what the console reports against an archive's own size and digest.
+//!   downloads, writing and reading the pending backup record in the tab's session storage, and
+//!   checking what the console reports against an archive's own size and digest.
 //! - **Depends on.** The scenario's browser page, its archive directory, and the server's fault
 //!   injection for backup downloads.
 //! - **Must not know.** How the console verifies, assembles or streams an archive.
@@ -18,6 +19,17 @@ use super::*;
 /// How long a console backup may take to reach the browser as a download, the backup itself
 /// included. It bounds a wait for something to happen, so it is generous under parallel load.
 const CONSOLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The session storage keys the console records the backup a reload resumes under.
+const PENDING_REFERENCE_KEY: &str = "nervix.console.backup.reference";
+const PENDING_QUERY_KEY: &str = "nervix.console.backup.query";
+const PENDING_DOMAIN_KEY: &str = "nervix.console.backup.domain";
+const PENDING_BACKUP_KEYS: [&str; 3] =
+    [PENDING_REFERENCE_KEY, PENDING_QUERY_KEY, PENDING_DOMAIN_KEY];
+
+/// How long a reloaded console may take to read the pending backup record. It bounds a wait for
+/// something to happen, so it is generous under parallel load.
+const CONSOLE_RECORD_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn browser_page(world: &ScenarioWorld) -> &playwright_rs::Page {
     world
@@ -132,6 +144,73 @@ async fn when_console_is_reloaded_and_download_is_saved(world: &mut ScenarioWorl
         .await
         .expect("the web console page reloads");
     save_console_download(browser_page(world), waiter, &archive).await;
+}
+
+#[when("the web console page is reloaded")]
+async fn when_console_is_reloaded(world: &mut ScenarioWorld) {
+    browser_page(world)
+        .reload(None)
+        .await
+        .expect("the web console page reloads");
+}
+
+#[when(
+    expr = "a pending backup of {string} whose domain entry spells {string} in upper case is \
+            written into the web console tab's session storage"
+)]
+async fn when_respelled_pending_backup_is_written(
+    world: &mut ScenarioWorld,
+    query: String,
+    domain: String,
+) {
+    let query = expand_placeholders(world, &query);
+    let domain = expand_placeholders(world, &domain).to_uppercase();
+    // A retry identity minted now, as the console mints one, so the leader would admit the backup
+    // again if the console resumed the record.
+    let reference = uuid::Uuid::now_v7().to_string();
+    let entries = serde_json::to_string(&[
+        [PENDING_QUERY_KEY, query.as_str()],
+        [PENDING_DOMAIN_KEY, domain.as_str()],
+        [PENDING_REFERENCE_KEY, reference.as_str()],
+    ])
+    .assured("the record's entries serialize as JavaScript text");
+    let script = format!(
+        r#"() => {{
+            for (const [key, value] of {entries}) {{
+                sessionStorage.setItem(key, value);
+            }}
+            return true;
+        }}"#
+    );
+    let written = browser_page(world)
+        .evaluate::<(), bool>(&script, None::<&()>)
+        .await
+        .expect("the tab's session storage accepts the record");
+    assert!(written, "the tab's session storage did not take the record");
+}
+
+#[then("the web console tab's session storage holds no pending backup")]
+async fn then_no_pending_backup_is_recorded(world: &mut ScenarioWorld) {
+    let keys = serde_json::to_string(&PENDING_BACKUP_KEYS)
+        .assured("the record's keys serialize as JavaScript text");
+    let script = format!("() => {keys}.filter((key) => sessionStorage.getItem(key) !== null)");
+    let page = browser_page(world);
+    let deadline = Instant::now() + CONSOLE_RECORD_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let recorded = page
+            .evaluate::<(), Vec<String>>(&script, None::<&()>)
+            .await
+            .expect("the tab's session storage is readable");
+        if recorded.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reloaded console still records a pending backup under {recorded:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[when(expr = "selector {string} is given backup archive {string}")]

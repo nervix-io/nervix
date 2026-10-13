@@ -28,6 +28,10 @@ INVENTORY = ROOT / "tests/bolero-targets.toml"
 RUNS = ROOT / "target/bolero/runs"
 QUALIFICATION = ROOT / "tests/bolero-qualification/Cargo.toml"
 TARGET_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+# A registered test target other than the library's unit tests, `lib`: the unit tests of one
+# binary, `bin:<name>`, or one integration test, `test:<name>`, each named as Cargo names it.
+NAMED_TEST_TARGET = re.compile(r"(?:bin|test):[A-Za-z_][A-Za-z_0-9-]*")
+LIBRARY_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"})
 TEST_LINE = re.compile(r"^(\S+): test$", re.MULTILINE)
 # Cargo names every test executable it builds: a library's or binary's as `unittests <root>`, an
 # integration test's by its source path.
@@ -164,9 +168,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
             raise BoleroError(f"invalid target id: {item['id']}")
         if not item["test"].split("::")[-1].startswith("bolero_"):
             raise BoleroError(f"{item['id']}: test name must start with bolero_")
-        if item["test_target"] != "lib" and not re.fullmatch(
-            r"test:[A-Za-z_][A-Za-z_0-9-]*", item["test_target"]
-        ):
+        if item["test_target"] != "lib" and not NAMED_TEST_TARGET.fullmatch(item["test_target"]):
             raise BoleroError(f"{item['id']}: invalid cargo test target")
         if not isinstance(item["features"], list) or any(
             not isinstance(feature, str)
@@ -390,9 +392,25 @@ def cargo_test_args(target: Target) -> list[str]:
 
 
 def cargo_target_args(test_target: str) -> list[str]:
+    """Cargo's selector of a registered test target: `--lib`, `--bin <name>` or `--test <name>`."""
     if test_target == "lib":
         return ["--lib"]
-    return ["--test", test_target.removeprefix("test:")]
+    kind, name = test_target.split(":", 1)
+    return [f"--{kind}", name]
+
+
+def is_cargo_target(test_target: str, item: dict[str, Any]) -> bool:
+    """Whether `item`, one target of a package's Cargo metadata, is the registered test target."""
+    if test_target == "lib":
+        return bool(LIBRARY_KINDS.intersection(item["kind"]))
+    kind, name = test_target.split(":", 1)
+    return kind in item["kind"] and item["name"] == name
+
+
+def builds_unit_tests(test_target: str) -> bool:
+    """Whether Cargo builds the test target as unit tests, which it names `unittests <root>`: a
+    library's or a binary's, rather than an integration test it names by its source path."""
+    return test_target == "lib" or test_target.startswith("bin:")
 
 
 def listed_tests(
@@ -813,15 +831,9 @@ def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, st
     if len(packages) != 1:
         raise BoleroError(f"{target.id}: expected one Cargo package {target.package}")
     package = packages[0]
-    library_kinds = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
     targets = [
         item for item in package["targets"]
-        if (
-            target.test_target == "lib" and library_kinds.intersection(item["kind"])
-        ) or (
-            target.test_target != "lib" and "test" in item["kind"]
-            and item["name"] == target.test_target.removeprefix("test:")
-        )
+        if is_cargo_target(target.test_target, item)
     ]
     if len(targets) != 1:
         raise BoleroError(f"{target.id}: expected one Cargo {target.test_target} target")
@@ -865,7 +877,7 @@ def build_instrumented(
     matches = [
         ROOT / executable
         for label, executable in executables
-        if label.startswith("unittests ") == (target.test_target == "lib")
+        if label.startswith("unittests ") == builds_unit_tests(target.test_target)
         if (package_root / label.removeprefix("unittests ").strip()).resolve() == source
         if pathlib.Path(executable).name.startswith(prefix)
     ]
