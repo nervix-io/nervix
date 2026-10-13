@@ -2066,12 +2066,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__remote_ack_owner__tests__bolero_remote_correlations_preserve_capacity_and_exact_generation_outcomes/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "remote-correlation-lifetimes"
-invariant = "Bounded register, resolve, progress, stale reply and shutdown sequences preserve independent record outcomes, exact delivery generations and complete capacity reclamation."
+invariant = "A sequential reference model predicts every record and admission identity and outcome after bounded single/batch/detached registration, admission closure and reclamation, single/bulk admission, Alive and ordered parked/resumed progress, terminal replies, clear, every silence sweep, memory refusal and shutdown; exact per-receiver expirations, stale and foreign-row rejection, FIFO reuse before fresh claims, ever-claimed scan positions, tracker progress and complete capacity/relay-memory reclamation agree at every step."
 manifest = "Cargo.toml"
-max_input_bytes = 64
+max_input_bytes = 256
 package = "nervix-server"
 random_iterations = 256
 source = "src/runtime/remote_ack_owner_tests.rs"

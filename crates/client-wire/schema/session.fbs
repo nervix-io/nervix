@@ -2421,7 +2421,9 @@ table DomainClockObserved {
 /// Newest tick accepted for an attached domain's paced clock generation.
 table DomainClockTicked {
   domain: string (required);
+  /// The START generation the tick belongs to. Non-zero.
   generation: ulong;
+  /// One-based within the generation, increasing and possibly skipping ids. Non-zero.
   tick_id: ulong;
   logical_boundary_unix_nanos: long;
   authority_utc_unix_nanos: long;
