@@ -367,7 +367,7 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
-  `just coverage-harness-liveness <report>` measures the ordinary startup and other harness owner
+  `just coverage-harness-liveness-append <report>` measures the ordinary startup and other harness owner
   regressions through the configured compiler cache and preserves the current workspace profiles.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to

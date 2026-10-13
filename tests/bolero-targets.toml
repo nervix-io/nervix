@@ -612,16 +612,61 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "restore-installation-wire"
-invariant = "Every current restore installation action retains its complete authority, coordination, placement, payload and inventory through the production wire encoder and decoder."
+invariant = "Every current restore installation action and success or refusal retains its complete value through its declared class's production wire codec, with every runtime state kind branched and unbranched, full-width lengths and arbitrary digests."
 manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-interconnect"
 random_iterations = 256
 source = "crates/interconnect/src/backup.rs"
 test = "backup::wire_properties::bolero_restore_installation_requests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/backup/__fuzz__/backup__capture_properties__bolero_backup_capture_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-capture-wire"
+invariant = "Capture, every drain action and counter, ordered inventories of every section kind and section fetch requests, including every success and refusal, retain complete values through their declared class's production wire codec, with zero/full-width counters and lengths, arbitrary digests and bounded Unicode paths."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup/capture_properties.rs"
+test = "backup::capture_properties::bolero_backup_capture_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/backup/capture_properties/__fuzz__/backup__capture_properties__malformed__bolero_backup_capture_messages_refuse_damage_or_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-capture-wire-malformed"
+invariant = "Truncated, bit-flipped, overwritten and arbitrary capture/drain/inventory request and response bytes and section fetch request bytes either fail with a typed decode report or re-encode and decode with complete equality; management and bulk reservations are released."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup/capture_properties/malformed.rs"
+test = "backup::capture_properties::malformed::bolero_backup_capture_messages_refuse_damage_or_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/backup/interconnect/__fuzz__/application__backup__interconnect__section_properties__bolero_captured_section_mapping_is_total_and_injective/corpus"
+domain_version = 1
+features = ["testing"]
+id = "backup-section-mapping"
+invariant = "Every current captured section kind maps back from its production archive content, and distinct kinds have distinct content and validated production paths over generated identities, fingerprints and group ordinals, branched and unbranched."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/backup/interconnect/section_properties.rs"
+test = "application::backup::interconnect::section_properties::bolero_captured_section_mapping_is_total_and_injective"
 test_target = "lib"
 
 [[target]]
