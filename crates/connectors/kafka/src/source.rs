@@ -732,6 +732,9 @@ impl AssignedPartitions {
 pub fn latest_positions(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPosition> {
     let mut topics = BTreeMap::<String, BTreeMap<i32, i64>>::new();
     for position in positions {
+        // A topic is found by its borrowed name, so only its first position copies the name. A
+        // partition is found before it is inserted rather than through an entry: positions arrive
+        // in runs from a few partitions, where the lookup measured faster (`bench-kafka-offsets`).
         if let Some(partitions) = topics.get_mut(&position.topic) {
             if let Some(offset) = partitions.get_mut(&position.partition) {
                 *offset = (*offset).max(position.offset);
@@ -771,6 +774,7 @@ pub fn earliest_message_offsets(
                 partition: position.partition,
             })
         })?;
+        // Folded as in `latest_positions`, for the same measured reason.
         if let Some(partitions) = topics.get_mut(&position.topic) {
             if let Some(current) = partitions.get_mut(&position.partition) {
                 *current = (*current).min(offset);
