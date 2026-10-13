@@ -11,6 +11,51 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
+domain_version = 1
+features = []
+id = "websocket-signaling-protobuf-values"
+invariant = "Protobuf signaling JSON with explicit scalar presence preserves every present field, full-width integer, string, boolean and ordered repeated value; finite double and float values retain their 64 and 32 bits, including signed zero."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-websockets"
+random_iterations = 256
+source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
+test = "signaling::representation_tests::bolero_protobuf_signaling_preserves_every_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_damaged_protobuf_signaling_frames_are_refused/corpus"
+domain_version = 1
+features = []
+id = "websocket-signaling-protobuf-malformed"
+invariant = "Zero field numbers, invalid wire types, incomplete fixed-width fields, oversized unterminated varints, truncated strings and incomplete packed floats fail through the production protobuf signaling decoder with its typed message context."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-websockets"
+random_iterations = 256
+source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
+test = "signaling::representation_tests::bolero_damaged_protobuf_signaling_frames_are_refused"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/otel/src/__fuzz__/hex_id_properties__bolero_hex_ids_match_the_scalar_reference/corpus"
+domain_version = 1
+features = []
+id = "otel-hex-ids"
+invariant = "Trace, span and parent-span identifiers decode to every original byte in lower, upper and mixed ASCII hex; arbitrary UTF-8 text is accepted exactly by the independent per-digit nonzero reference, or carries the exact typed key and refusal reason."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-otel"
+random_iterations = 256
+source = "crates/connectors/otel/src/hex_id_properties.rs"
+test = "hex_id_properties::bolero_hex_ids_match_the_scalar_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/connection/__fuzz__/connection__retained_slots_tests__bolero_pool_slot_generations_have_one_worker_and_fixed_capacity/corpus"
 domain_version = 1
 features = []
@@ -2066,12 +2111,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__remote_ack_owner__tests__bolero_remote_correlations_preserve_capacity_and_exact_generation_outcomes/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "remote-correlation-lifetimes"
-invariant = "Bounded register, resolve, progress, stale reply and shutdown sequences preserve independent record outcomes, exact delivery generations and complete capacity reclamation."
+invariant = "A sequential reference model predicts every record and admission identity and outcome after bounded single/batch/detached registration, admission closure and reclamation, single/bulk admission, Alive and ordered parked/resumed progress, terminal replies, clear, every silence sweep, memory refusal and shutdown; exact per-receiver expirations, stale and foreign-row rejection, FIFO reuse before fresh claims, ever-claimed scan positions, tracker progress and complete capacity/relay-memory reclamation agree at every step."
 manifest = "Cargo.toml"
-max_input_bytes = 64
+max_input_bytes = 256
 package = "nervix-server"
 random_iterations = 256
 source = "src/runtime/remote_ack_owner_tests.rs"

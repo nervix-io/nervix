@@ -416,6 +416,11 @@ test-harness-liveness *args: tests-deps
 coverage-consensus output *args:
     cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the Rust client library's unit tests, for a patch confined to it, through the configured
+# compiler cache.
+coverage-client-core output *args:
+    cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

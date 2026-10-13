@@ -716,5 +716,13 @@ impl Drop for RemoteDispatchRegistry {
 }
 
 #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
+#[path = "remote_ack_owner_model.rs"]
+mod model;
+
+#[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
+#[path = "remote_ack_owner_properties.rs"]
+mod properties;
+
+#[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
 #[path = "remote_ack_owner_tests.rs"]
 mod tests;
