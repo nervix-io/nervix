@@ -1680,26 +1680,13 @@ coverage-cli-process output="target/cli-process.lcov":
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
         --instr-profile="$coverage_dir/merged.profdata" --format=lcov > {{ quote(output) }}
 
-# Measure the Turmoil runner's changed lines without running the full scenario suite.
+# Collect the canonical Turmoil suite's product-source coverage with retained attempt evidence.
 coverage-turmoil output:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
-    cargo llvm-cov --no-report \
-        --package nervix-primitives --features 'turmoil native' --lib -- \
-        simulated_host turmoil_mode --test-threads=1
-    cargo llvm-cov --no-report \
-        --package nervix-execution --features turmoil --lib
-    cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --lib -- \
-        wire::simulation_checks authentication::simulation_tests --test-threads=1
-    cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
-    cargo llvm-cov report --no-default-ignore-filename-regex \
-        --lcov --output-path {{ quote(output) }}
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run test-turmoil --output {{ quote(output) }}
 
 # Run the eligible native extras in their declared modes, with the canonical Shuttle and Loom
-# runners and each primitive conformance mode. `test-primitives` selects all native conformance.
+# runners, the canonical Turmoil suite, and each primitive conformance mode.
+# `test-primitives` selects all native conformance.
 # Prerequisites build outside instrumentation. Compile/browser checks and weakening qualification
 # run independently. Each producer
 # writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
@@ -1711,7 +1698,11 @@ coverage-native-extras *producers:
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
 test-native-coverage:
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage scripts.tests.test_model_coverage
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_turmoil_coverage
+
+# Focused CI contract and patch-publication regressions for the Turmoil coverage producer.
+test-turmoil-coverage-runner:
+    python3 -m unittest scripts.tests.test_turmoil_coverage scripts.tests.test_patch_coverage
 
 # Exercise the Deloxide lane runner: its inventory, discovery, supervision of real processes,
 # accounting, record, replay, qualification classes, applicability check and CI contract.
@@ -1719,14 +1710,14 @@ test-deloxide-lane-runner:
     python3 -m unittest --quiet scripts.tests.test_deloxide_lane
 
 # Line coverage of collection and canonical runner changes, with actual command/artifact fixtures,
-# including the Deloxide lane's supervision of real processes.
+# including Turmoil's CI contract and the Deloxide lane's supervision of real processes.
 coverage-model-runner:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/model-coverage
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/model-coverage/python.coverage"
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_turmoil_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/model-coverage/python.lcov"
     "${coverage[@]}" report
 
