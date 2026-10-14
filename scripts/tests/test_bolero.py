@@ -290,6 +290,7 @@ class InventoryTests(unittest.TestCase):
             "simd-elapsed-histograms",
             "simd-flag-packing",
             "simd-window-runs",
+            "simd-window-moments",
             "columnar-json-rows",
             "bounded-write-limits",
             "connector-row-request-division",

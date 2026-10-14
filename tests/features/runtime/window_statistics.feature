@@ -1,4 +1,82 @@
 Feature: Window statistics
+  Scenario Outline: Constant finite readings keep zero variance when their run sum overflows
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA overflow_reading (tenant STRING, value F64 OPTIONAL, companion F64 OPTIONAL);
+      CREATE SCHEMA overflow_summary (tenant STRING, mean F64 OPTIONAL, variance F64 OPTIONAL, covariance F64 OPTIONAL, companion_mean F64 OPTIONAL);
+      CREATE CODEC overflow_codec FROM JSON TO SCHEMA overflow_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA overflow_branch_schema (tenant STRING);
+      CREATE BRANCH overflow_branch SCHEMA overflow_branch_schema TTL 5m;
+      CREATE RELAY overflow_readings SCHEMA overflow_reading BRANCHED BY overflow_branch;
+      CREATE RELAY overflow_summaries SCHEMA overflow_summary BRANCHED BY overflow_branch;
+      CREATE VHOST edge overflow-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE INGESTOR overflow_ingestor FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING overflow_codec
+        TO overflow_readings INHERIT ALL BRANCHED BY overflow_branch SET tenant = message.tenant
+        FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR overflow_window FROM overflow_readings WIDTH 17 MESSAGES STEP 17 MESSAGES
+        BRANCHED BY overflow_branch TO overflow_summaries
+        SET tenant = FIRST(input.tenant), mean = AVG(input.value), variance = VAR_POP(input.value),
+            covariance = COVAR_POP(input.value, input.companion), companion_mean = AVG(input.companion)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION overflow_subscription TO overflow_summaries;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "overflow-{{test_id}}.example.com" path "/readings"
+      """
+      [{"tenant":"acme","value":1e308,"companion":0},
+       {"tenant":"beta","value":2,"companion":15},
+       {"tenant":"acme","value":1e308,"companion":1},
+       {"tenant":"beta","value":2,"companion":14},
+       {"tenant":"acme","value":1e308,"companion":2},
+       {"tenant":"beta","value":2,"companion":13},
+       {"tenant":"acme","value":1e308,"companion":3},
+       {"tenant":"beta","value":2,"companion":12},
+       {"tenant":"acme","value":1e308,"companion":4},
+       {"tenant":"beta","value":2,"companion":11},
+       {"tenant":"acme","value":1e308,"companion":5},
+       {"tenant":"beta","value":2,"companion":10},
+       {"tenant":"acme","value":1e308,"companion":6},
+       {"tenant":"beta","value":2,"companion":9},
+       {"tenant":"acme","value":1e308,"companion":7},
+       {"tenant":"beta","value":2,"companion":8},
+       {"tenant":"acme","value":1e308,"companion":8},
+       {"tenant":"beta","value":2,"companion":7},
+       {"tenant":"acme","value":1e308,"companion":9},
+       {"tenant":"beta","value":2,"companion":6},
+       {"tenant":"acme","value":1e308,"companion":10},
+       {"tenant":"beta","value":2,"companion":5},
+       {"tenant":"acme","value":1e308,"companion":11},
+       {"tenant":"beta","value":2,"companion":4},
+       {"tenant":"acme","value":1e308,"companion":12},
+       {"tenant":"beta","value":2,"companion":3},
+       {"tenant":"acme","value":1e308,"companion":13},
+       {"tenant":"beta","value":2,"companion":2},
+       {"tenant":"acme","value":1e308,"companion":14},
+       {"tenant":"beta","value":2,"companion":1},
+       {"tenant":"acme","value":1e308,"companion":15},
+       {"tenant":"beta","value":2,"companion":0},
+       {"tenant":"acme"},
+       {"tenant":"beta"}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "mean":1e+308 | "variance":0.0 | "covariance":0.0 | "companion_mean":7.5
+      key={"tenant":"beta"} | "mean":2.0 | "variance":0.0 | "covariance":0.0 | "companion_mean":7.5
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Typed run admission preserves exact aggregates and centered variance across branches
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

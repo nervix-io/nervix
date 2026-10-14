@@ -238,6 +238,20 @@ fn bolero_model_roundtrip_canonical_nspl() {
 }
 
 #[test]
+fn statement_corpus_reaches_resumed_restore() {
+    let bytes = include_bytes!(
+        "__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus/\
+         resume"
+    );
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+    let ClientStatement::Server(Statement::Restore(restore)) = client_statement(&mut arbitrary)
+    else {
+        panic!("the resume corpus entry generates a current restore statement");
+    };
+    assert_eq!(restore.lifecycle, nervix_models::RestoreLifecycle::Resume);
+}
+
+#[test]
 fn bolero_statement_roundtrip_canonical_nspl() {
     bolero::check!()
         .with_iterations(256)
