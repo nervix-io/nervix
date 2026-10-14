@@ -347,6 +347,11 @@ test-admission-kernels *args:
 bench-window-admission *args:
     cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
+# Measure admitting a window's retained rows into its distinct, quantile and top-k pane sketches,
+# from a new pane for every row to a thousand rows per pane.
+bench-window-sketches *args: build-web-console
+    cargo bench --package nervix-server --bench window_sketches --features benchmarks -- {{ args }}
+
 # Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
 # run each. Extra arguments are forwarded to Criterion.
 bench-checked-lanes *args:
@@ -366,6 +371,11 @@ bench-byte-classes-x86-64-v3 *args:
 # Measure RFC 6587 stream framing over a mebibyte of frames read in a connection's 8 KiB reads.
 bench-syslog-framing *args:
     cargo bench --package nervix-connector-syslog --bench stream_framing --features benchmarks -- {{ args }}
+
+# Measure folding one acknowledgement batch's Kafka positions to each partition's latest offset and
+# a rejection's to each partition's earliest message, over repeated and distinct partitions.
+bench-kafka-offsets *args:
+    cargo bench --package nervix-connector-kafka --bench partition_offsets --features benchmarks -- {{ args }}
 
 bench-constant-division-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
@@ -1747,10 +1757,12 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench window_sketches --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-connector-kafka --bench partition_offsets --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
     just bench-remote-owners-bodies
@@ -2178,7 +2190,7 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
 test-ratchet-units: typed-ratchet-source-build
-    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries
+    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
 
 # Structural Rust properties use a stable source parser, without the compiler driver.
 typed-ratchet-source-build:
@@ -2199,11 +2211,19 @@ typed-ratchet *args: typed-ratchet-build
 typed-ratchet-turmoil *args:
     RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}" python3 -m scripts.typed_ratchet {{ args }}
 
+# Report review candidates for code shaped around inaccurate lints: repeated keyed lookups, key
+# allocations, borrowed copies, duplicated branches, forwarding wrappers, discarded errors,
+# disguised clamps and relocated acquisitions, each attributed to the commits and lint history
+# that introduced it. It reads the complete compiler evidence `just ratchet` uses and writes
+# audit.json and audit.md under target/lint-audit; `--inventory` audits despite open diagnostics.
+lint-audit *args: typed-ratchet-build
+    python3 -m scripts.lint_audit {{ args }}
+
 test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
     python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
-test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks": typed-ratchet-build
+test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks scripts.tests.compiler_audit_checks": typed-ratchet-build
     python3 -m unittest {{ tests }}
 
 # Error propagation uses the actual node startup and DNS hooks, plus both simulation drivers.
@@ -2289,7 +2309,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-com
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 

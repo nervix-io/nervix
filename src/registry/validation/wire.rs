@@ -637,7 +637,9 @@ mod tests {
     use std::fs;
 
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_models::{EmitSink, SchemaField, SchemaName, WireSchemaField};
+    use nervix_models::{
+        EmitSink, SchemaField, SchemaName, SyslogCollectorSink, SyslogSink, WireSchemaField,
+    };
     use rstest::rstest;
 
     use super::*;
@@ -964,9 +966,11 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter")
         };
-        emitter.sink = Box::new(EmitSink::Syslog {
-            client: named("syslog_out"),
-        });
+        emitter.sink = Box::new(EmitSink::Syslog(SyslogSink::Collector(
+            SyslogCollectorSink {
+                client: named("syslog_out"),
+            },
+        )));
 
         let error = registry
             .apply_batch(

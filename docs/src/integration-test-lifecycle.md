@@ -183,6 +183,17 @@ the follower before it tears the container down. A batching scenario reads the C
 exporter output to check the number and order of records in each received export request, using
 unique test markers to distinguish simultaneous scenarios sharing that container.
 
+The debug exporter prints each export as two log entries: a summary that counts the export's
+records, and then the export's body. The Collector prints each entry whole, but an entry of a
+concurrent export can print between a summary and its body, so a summary does not identify the body
+it counts. The batching scenario therefore reads each export from its body alone. The body's first
+line names its signal, and each log record, span or data point in it starts a line of its own,
+which is what the scenario counts. The logger prints the entry's fields after the body's last line,
+so a body is read only once its fields have arrived. The suite's Collector configuration turns off
+the sampling of the Collector's own logger. By default that logger prints only the first ten entries
+that share a message in each ten-second interval, and every hundredth after that, so it drops the
+summaries of exports that arrive close together.
+
 The raw session fixture records domain-clock replies and frames in the order it reads them. A wait
 for a detach reply can queue ticks that arrived before the reply; the post-detach assertion checks
 the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
@@ -1512,8 +1523,9 @@ a 40-CPU host whose one-minute load was 47 at the median and between 28 and 75.
   task with is observed only when the task waits. The run's first cleanups show it: four nodes that
   had served for under ten seconds logged nothing through 59 seconds of terminal teardown while the
   process kept three CPUs busy. The sweep now visits only the positions a node's deliveries and
-  admissions have claimed, which keeps it far inside its second; see
-  [Terminal Teardown](./shutdown.md#terminal-teardown).
+  admissions have claimed, which keeps it far inside its second, and its task returns to its
+  executor after every sweep, so teardown's cancellation ends it after the sweep in progress even
+  when that sweep overruns; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 - **Nodes the harness gave up on kept running.** A cleanup that reached its deadline aborted the
   node's root task, which ended that one future and left every task the node had spawned, its
   sweep among them, running for the rest of the process. A node aborted this way never reported

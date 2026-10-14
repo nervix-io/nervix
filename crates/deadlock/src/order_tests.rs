@@ -281,7 +281,11 @@ fn missing_or_omitted_context_remains_visible_and_cannot_be_reviewed() {
 }
 
 /// Current bounded values, including missing context, lifecycle states, modes and multiplicity.
-fn generated_cycle(entropy: &mut Entropy<'_>, complete: bool) -> PotentialCycle {
+fn generated_cycle(
+    entropy: &mut Entropy<'_>,
+    complete: bool,
+    access: Option<Access>,
+) -> PotentialCycle {
     let count = entropy
         .positive_count(NonZeroUsize::new(MAX_ORDER_EDGES).assured("the capacity is positive"));
     let omitted = if !complete && count == MAX_ORDER_EDGES {
@@ -301,7 +305,11 @@ fn generated_cycle(entropy: &mut Entropy<'_>, complete: bool) -> PotentialCycle 
             )),
             site: if complete || entropy.flag() {
                 Some(LockSite {
-                    kind: entropy.pick([LockKind::Mutex, LockKind::RwLock, LockKind::CondvarState]),
+                    kind: if access == Some(Access::Shared) {
+                        LockKind::RwLock
+                    } else {
+                        entropy.pick([LockKind::Mutex, LockKind::RwLock, LockKind::CondvarState])
+                    },
                     constructed_at: generated_site(entropy),
                 })
             } else {
@@ -347,11 +355,17 @@ fn generated_cycle(entropy: &mut Entropy<'_>, complete: bool) -> PotentialCycle 
                     None
                 },
                 held: BlockedAttempt {
-                    access: entropy.pick([Access::Shared, Access::Exclusive]),
+                    access: match access {
+                        Some(access) => access,
+                        None => entropy.pick([Access::Shared, Access::Exclusive]),
+                    },
                     at: generated_site(entropy),
                 },
                 requested: BlockedAttempt {
-                    access: entropy.pick([Access::Shared, Access::Exclusive]),
+                    access: match access {
+                        Some(access) => access,
+                        None => entropy.pick([Access::Shared, Access::Exclusive]),
+                    },
                     at: generated_site(entropy),
                 },
                 attempts: generated_number(entropy),
@@ -396,19 +410,30 @@ fn generated_site(entropy: &mut Entropy<'_>) -> SourceSite {
 }
 
 pub(super) fn generated_finding(entropy: &mut Entropy<'_>) -> RecordedFinding {
+    let shared_readers = entropy.flag();
     let complete = entropy.flag();
-    let cycle = generated_cycle(entropy, complete);
+    let review = entropy.flag();
+    let basis = if shared_readers {
+        ProofBasis::SharedReaders
+    } else {
+        entropy.pick([
+            ProofBasis::Correction,
+            ProofBasis::NonOverlap,
+            ProofBasis::Lifecycle,
+        ])
+    };
+    let access = if shared_readers {
+        Some(Access::Shared)
+    } else {
+        None
+    };
+    let cycle = generated_cycle(entropy, shared_readers || complete, access);
     let mut evidence = evidence(cycle);
     assert!(!evidence.qualifies(), "unreviewed order never qualifies");
     if let RecordedFinding::Potential { cycle, .. } = &evidence.findings()[0]
         && cycle.has_complete_context()
-        && entropy.flag()
+        && review
     {
-        let basis = entropy.pick([
-            ProofBasis::Correction,
-            ProofBasis::NonOverlap,
-            ProofBasis::Lifecycle,
-        ]);
         evidence
             .triage(0, proof(basis))
             .assured("bounded complete proof");
@@ -424,13 +449,35 @@ pub(super) fn generated_finding(entropy: &mut Entropy<'_>) -> RecordedFinding {
 }
 
 #[test]
+fn generated_shared_reader_reviews_keep_complete_shared_cycles() {
+    let bytes = [1; 4096];
+    let finding = generated_finding(&mut Entropy::new(&bytes));
+    let RecordedFinding::Potential {
+        cycle,
+        triage: PotentialTriage::Reviewed(proof),
+        ..
+    } = finding
+    else {
+        panic!("the shared-reader seed reaches a reviewed potential cycle");
+    };
+    assert_eq!(proof.basis(), ProofBasis::SharedReaders);
+    assert!(cycle.has_complete_context());
+    for edge in cycle.edges() {
+        for witness in edge.witnesses() {
+            assert_eq!(witness.held.access, Access::Shared);
+            assert_eq!(witness.requested.access, Access::Shared);
+        }
+    }
+}
+
+#[test]
 fn bolero_order_normalization_and_dedup_preserve_complete_evidence() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(4096)
         .for_each(|bytes: &[u8]| {
             let mut entropy = Entropy::new(bytes);
-            let original = generated_cycle(&mut entropy, true);
+            let original = generated_cycle(&mut entropy, true, None);
             let mut edges = original.edges().to_vec();
             let rotation = entropy.count(edges.len() - 1);
             edges.rotate_left(rotation);

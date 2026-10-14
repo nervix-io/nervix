@@ -24,7 +24,7 @@ use nervix_models::{
     WasmStateGeneration, WasmStateGenerations,
 };
 use nervix_primitives::{
-    publication::{ArcSwap, Guard},
+    publication::{ArcSwap, ArcSwapOption, Guard},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -846,6 +846,9 @@ pub(in crate::runtime) struct RuntimeStateStore {
     restore_publications: Keyspace,
     checkpoint_chunks: Keyspace,
     restore_staging_max_bytes: u64,
+    /// What the unpublished restore namespaces held when they were last measured, kept while that
+    /// stays exact. Read and changed only under the installation barrier.
+    restore_staging_usage: maintenance::StagedUsageMeasurement,
     handoff_preparations: Keyspace,
     handoff_activations: Keyspace,
     forced_recovery_preparations: Keyspace,
@@ -1303,6 +1306,7 @@ impl RuntimeStateStore {
             restore_publications,
             checkpoint_chunks,
             restore_staging_max_bytes,
+            restore_staging_usage: maintenance::StagedUsageMeasurement::default(),
             handoff_preparations,
             handoff_activations,
             forced_recovery_preparations,

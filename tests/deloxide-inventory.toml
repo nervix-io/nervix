@@ -514,6 +514,14 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
 [[workload]]
+coverage = "Remote acknowledgement silence sweeps whose ticks are already due when runtime teardown cancels them, and the registry's final resolution, under tracked position guards."
+id = "owner.remote-ack-silence-sweeps"
+invariant = "One fresh diagnostic process ends overrunning silence sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
+
+[[workload]]
 coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
 examples = 2
 feature = "tests/features/cluster/deadlock_diagnostics.feature"
@@ -687,6 +695,16 @@ id = "scenario.branch-state-large"
 invariant = "On one node, a 40 MiB keyspace and a 40 MiB window beside 24 small branches restore exactly after an interrupted publication, re-export identically from a stopped restore, and continue with exact keys and aggregates across a restart."
 invocation = "scenarios"
 scenario = "A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Lazy stored checkpoint selection, admitted native views, bounded archive groups and stopped restore through the existing capture and installation locks on one node. Three-node byte equality runs in the ordinary suite."
+examples = 1
+feature = "tests/features/cluster/backup_stored_branch_capture.feature"
+id = "scenario.stored-branch-capture"
+invariant = "Stored keyspaces and windows above 32 MiB beside 24 small branches are admitted and re-export every byte exactly after stop and stopped restore."
+invocation = "scenarios"
+scenario = "Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1334,6 +1352,16 @@ id = "stress.branch-state-large"
 invariant = "On one node, a 40 MiB keyspace and a 40 MiB window beside 24 small branches restore exactly after an interrupted publication, re-export identically from a stopped restore, and continue with exact keys and aggregates across a restart."
 invocation = "stress-restore-scenarios"
 scenario = "A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: lazy stored checkpoint selection, admitted native views, bounded archive groups and stopped restore through the existing capture and installation locks on one node."
+examples = 1
+feature = "tests/features/cluster/backup_stored_branch_capture.feature"
+id = "stress.stored-branch-capture"
+invariant = "Stored keyspaces and windows above 32 MiB beside 24 small branches are admitted and re-export every byte exactly after stop and stopped restore."
+invocation = "stress-restore-scenarios"
+scenario = "Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2070,6 +2098,7 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
 workloads = [
+  "owner.remote-ack-silence-sweeps",
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",

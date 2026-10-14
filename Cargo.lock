@@ -6873,6 +6873,8 @@ name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
+ "criterion 0.5.1",
  "error-stack",
  "futures-util",
  "humantime",
@@ -7657,6 +7659,7 @@ dependencies = [
  "imbl",
  "indexmap 2.14.2",
  "lapin",
+ "memmap2",
  "meticulous",
  "mongodb",
  "multer",
@@ -7800,6 +7803,7 @@ dependencies = [
  "nervix-recovery",
  "reqwest 0.13.5",
  "serde_json",
+ "strum 0.26.3",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.21",
