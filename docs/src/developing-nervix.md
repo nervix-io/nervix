@@ -742,7 +742,7 @@ just coverage-native-extras
 ```
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
-`test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`,
+`test-shuttle`, `test-loom`, `test-turmoil`, `test-deadlock-evidence-order`, `test-deadlock-report`,
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
 an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
 `deloxide-order` build; the local report command uses the ordinary build; each diagnostic lane
@@ -755,6 +755,7 @@ selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide exec
 just coverage-native-extras nspl-completion-walk
 just coverage-native-extras test-primitives
 just coverage-native-extras test-shuttle test-loom
+just coverage-native-extras test-turmoil
 just coverage-native-extras test-shuttle --filter cancellation
 just coverage-loom target/loom.lcov execution.cancellation
 ```
@@ -834,14 +835,18 @@ CI's extra-tests job collects native extras and per-mode primitive conformance, 
 compile checks independently. The `shuttle` job, which runs only for a pull request labeled
 `shuttle`, collects its complete inventory, including random/PCT exploration and paired
 nondeterminism checking, and runs schedule replay qualification independently. For a pull
-request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
+request labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once,
+including each fresh-process attempt, and runs failure replay qualification independently.
+For a request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
 loom-qualification jobs split weakening qualification into shards, because it rebuilds the server
 once for each weakening of a server owner. The jobs upload `lcov.info`, `completion.json`,
 `executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
-`coverage-shuttle` and `coverage-loom`, whatever the verdict. The ordinary coverage/CRAP
+`coverage-shuttle`, `coverage-loom` and `coverage-turmoil`, whatever the verdict. The ordinary
+coverage/CRAP
 gate merges ordinary artifacts only; mode reports describe modeled or diagnostic execution and
-retain separate attribution. `just coverage-shuttle <output> [filter]` and
-`just coverage-loom <output> [filter]` copy a successfully completed canonical report to the
+retain separate attribution. `just coverage-shuttle <output> [filter]`,
+`just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a successfully
+completed canonical report to the
 requested path while retaining its attempt evidence. Replay uses the unchanged exact-check
 commands and the failure directory under the matching mode build directory.
 The benchmark bodies run instrumented, so
@@ -867,11 +872,20 @@ numbers. The comment names the merge base and tested commit and links to the wor
 Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
 publication does not fail CI. The independent complexity check retains its own verdict.
 
+The label-enabled Turmoil job publishes a separate **Turmoil patch coverage** comment using
+`--scope turmoil` after its canonical instrumented suite and independent replay qualification
+pass. The scope selects a distinct marker, so the two jobs update their own comments regardless
+of completion order. This report describes only the current Turmoil build's product sources;
+it does not merge modeled counters into the ordinary complexity gate. Failed collection keeps
+its verdict and diagnostics without publishing a successful coverage report.
+
 Run the same calculation manually after collecting coverage for the committed source revision:
 
 ```bash
 just coverage-patch origin/main lcov-workspace.info
 just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
+just coverage-turmoil target/turmoil.lcov
+just coverage-patch origin/main target/turmoil.lcov --scope turmoil --output target/turmoil-patch-coverage.md
 ```
 
 The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
