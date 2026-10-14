@@ -1010,6 +1010,10 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
+  Window statistics reject non-finite arguments or results at their respective boundaries.
+  Overflow of a finite-input intermediate sum is handled by the moment kernel's normalized mean,
+  so it does not itself classify the window as failed; constant overflow-scale runs keep zero
+  centered moments. [SIMD Kernels](./simd-kernels.md) owns that numerical path and its reference bounds.
 - `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
   work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
   that cannot be read, a branch that cannot be instantiated, a branch task that is gone or whose

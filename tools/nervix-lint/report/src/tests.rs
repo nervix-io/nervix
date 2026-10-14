@@ -7,55 +7,92 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use super::*;
 
 fn report(seed: &[u8; 32]) -> CompilerReport {
-    let text = format!("symbol_{}", seed[0]);
+    let mut findings = Vec::new();
+    for index in 0..seed[0] % 5 {
+        let mut finding_seed = *seed;
+        finding_seed.rotate_left(usize::from(index) * 3);
+        findings.push(finding(&finding_seed, index));
+    }
+    let mut arguments = Vec::new();
+    for index in 0..seed[1] % 5 {
+        arguments.push(format!("{index}:{}", text(seed)));
+    }
+    CompilerReport {
+        compiler: text(seed),
+        identity: text(seed),
+        configuration: "ordinary".into(),
+        crate_name: text(seed),
+        crate_source: text(seed),
+        arguments,
+        findings,
+        excluded_generated: integer(seed, 6),
+        excluded_external: integer(seed, 7),
+        complete: seed[14].is_multiple_of(2),
+    }
+}
+
+fn text(seed: &[u8; 32]) -> String {
+    let code_point = integer(seed, 20) % 0x11_0000;
+    let character = char::from_u32(code_point).unwrap_or(char::REPLACEMENT_CHARACTER);
+    format!("symbol_{}\"\\\n\r\t\0é🦀{character}", seed[0])
+}
+
+fn integer(seed: &[u8; 32], offset: usize) -> u32 {
+    let bytes = std::array::from_fn(|index| seed[(offset + index) % seed.len()]);
+    match seed[(offset + 4) % seed.len()] % 5 {
+        0 => 0,
+        1 => u32::MAX,
+        2 => 1,
+        3 => u32::MAX - 1,
+        _ => u32::from_le_bytes(bytes),
+    }
+}
+
+fn finding(seed: &[u8; 32], index: u8) -> Finding {
+    let text = text(seed);
+    let start = integer(seed, 1);
+    let end = integer(seed, 2).max(start);
+    let line = integer(seed, 3);
+    let column = integer(seed, 4);
     let source = SourceSpan {
         site: SiteId {
-            path: "src/owner.rs".into(),
-            start: u32::from(seed[1]),
+            path: text.clone(),
+            start,
         },
-        end: u32::from(seed[1]) + u32::from(seed[2]),
-        line: u32::from(seed[3]) + 1,
-        column: u32::from(seed[4]),
-        end_line: u32::from(seed[3]) + 1,
-        end_column: u32::from(seed[4]) + u32::from(seed[2]),
+        end,
+        line,
+        column,
+        end_line: integer(seed, 8).max(line),
+        end_column: integer(seed, 9).max(column),
         source: text.clone(),
     };
     let mut expansions = Vec::new();
-    if seed[5].is_multiple_of(2) {
+    for expansion in 0..seed[5] % 5 {
         expansions.push(Expansion {
-            macro_name: text.clone(),
+            macro_name: format!("{expansion}:{text}"),
             call_site: text.clone(),
-            definition: Some(text.clone()),
+            definition: seed[usize::from(expansion) + 6]
+                .is_multiple_of(2)
+                .then(|| text.clone()),
         });
     }
-    CompilerReport {
-        compiler: text.clone(),
-        identity: text.clone(),
-        configuration: "ordinary".into(),
-        crate_name: text.clone(),
-        crate_source: "src/lib.rs".into(),
-        arguments: vec![text.clone()],
-        findings: vec![Finding {
-            rule: "data_plane_lock_acquisitions".into(),
-            receiver: text.clone(),
-            receiver_type: text.clone(),
-            receiver_expression: text.clone(),
-            operation: "get".into(),
-            definition: text.clone(),
-            owner: "example::owner".into(),
-            context: seed[13].is_multiple_of(2).then(|| context(seed)),
-            acquisition: match seed[10] % 4 {
-                0 => Acquisition::Shared,
-                1 => Acquisition::Exclusive,
-                2 => Acquisition::TryShared,
-                _ => Acquisition::TryExclusive,
-            },
-            span: source,
-            expansion: expansions,
-        }],
-        excluded_generated: u32::from(seed[6]),
-        excluded_external: u32::from(seed[7]),
-        complete: true,
+    Finding {
+        rule: text.clone(),
+        receiver: text.clone(),
+        receiver_type: text.clone(),
+        receiver_expression: text.clone(),
+        operation: text.clone(),
+        definition: text.clone(),
+        owner: format!("owner_{index}:{text}"),
+        context: seed[13].is_multiple_of(2).then(|| context(seed)),
+        acquisition: match seed[10] % 4 {
+            0 => Acquisition::Shared,
+            1 => Acquisition::Exclusive,
+            2 => Acquisition::TryShared,
+            _ => Acquisition::TryExclusive,
+        },
+        span: source,
+        expansion: expansions,
     }
 }
 
@@ -85,6 +122,26 @@ fn context(seed: &[u8; 32]) -> Context {
 }
 
 #[test]
+fn generated_reports_reach_empty_and_multiple_items_and_integer_boundaries() {
+    let empty = report(&[0; 32]);
+    assert!(empty.findings.is_empty());
+    assert!(empty.arguments.is_empty());
+    let multiple = report(&[4; 32]);
+    assert_eq!(multiple.findings.len(), 4);
+    assert_eq!(multiple.arguments.len(), 4);
+    for finding in &multiple.findings {
+        assert_eq!(finding.expansion.len(), 4);
+        assert!(finding.span.source.contains('🦀'));
+        assert!(finding.span.source.contains('"'));
+        assert!(finding.span.source.contains('\0'));
+    }
+    let boundary = report(&[1; 32]);
+    assert_eq!(boundary.findings[0].span.site.start, u32::MAX);
+    assert_eq!(boundary.excluded_generated, u32::MAX);
+    assert_eq!(boundary.excluded_external, u32::MAX);
+}
+
+#[test]
 fn bolero_compiler_reports_round_trip() {
     bolero::check!().with_type::<[u8; 32]>().for_each(|seed| {
         let original = report(seed);
@@ -93,17 +150,20 @@ fn bolero_compiler_reports_round_trip() {
         let decoded: CompilerReport = serde_json::from_slice(&bytes)
             .assured("the property constructs bounded, complete current values");
         assert_eq!(decoded, original);
-        let encoded = serde_json::to_value(&original.findings[0])
-            .assured("a current finding has its complete field set");
-        let fields = encoded.as_object().assured("findings encode as objects");
-        for field in fields.keys() {
-            let mut incomplete = fields.clone();
-            incomplete.remove(field);
-            let result = serde_json::from_value::<Finding>(serde_json::Value::Object(incomplete));
-            assert!(
-                result.is_err(),
-                "every current finding field is required: {field}"
-            );
+        for finding in &original.findings {
+            let encoded = serde_json::to_value(finding)
+                .assured("a current finding has its complete field set");
+            let fields = encoded.as_object().assured("findings encode as objects");
+            for field in fields.keys() {
+                let mut incomplete = fields.clone();
+                incomplete.remove(field);
+                let result =
+                    serde_json::from_value::<Finding>(serde_json::Value::Object(incomplete));
+                assert!(
+                    result.is_err(),
+                    "every current finding field is required: {field}"
+                );
+            }
         }
     });
 }
@@ -137,29 +197,43 @@ fn bolero_source_contracts_round_trip() {
 #[test]
 fn bolero_authored_sites_preserve_every_configuration() {
     bolero::check!().with_type::<[u8; 32]>().for_each(|seed| {
-        let ordinary = report(seed);
+        let mut ordinary = report(seed);
+        if !ordinary.complete {
+            let failure =
+                aggregate(&[ordinary.clone()]).expect_err("an unfinished pass cannot qualify");
+            assert!(matches!(
+                failure.current_context(),
+                ReportError::IncompleteReport { .. }
+            ));
+        }
+        ordinary.complete = true;
         let mut modeled = ordinary.clone();
         modeled.configuration = "shuttle".into();
-        modeled.findings[0].receiver = "selected modeled receiver".into();
-        modeled.findings[0].owner = "example::modeled_callback".into();
+        for finding in &mut modeled.findings {
+            finding.receiver = format!("modeled:{}", finding.receiver);
+            finding.owner = format!("modeled:{}", finding.owner);
+        }
         let reports = vec![ordinary.clone(), ordinary.clone(), modeled.clone()];
         let aggregated =
             aggregate(&reports).assured("the property constructs bounded, complete current values");
-        assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].site, ordinary.findings[0].span.site);
-        assert_eq!(
-            aggregated[0].configurations,
-            BTreeMap::from([
-                (
-                    format!("ordinary:{}", ordinary.crate_name),
-                    vec![ordinary.findings[0].clone()]
-                ),
-                (
-                    format!("shuttle:{}", modeled.crate_name),
-                    vec![modeled.findings[0].clone()]
-                ),
-            ])
-        );
+        let mut expected: BTreeMap<SiteId, BTreeMap<String, Vec<Finding>>> = BTreeMap::new();
+        for report in [&ordinary, &modeled] {
+            for finding in &report.findings {
+                let configurations = expected.entry(finding.span.site.clone()).or_default();
+                let instances = configurations
+                    .entry(format!("{}:{}", report.configuration, report.crate_name))
+                    .or_default();
+                instances.push(finding.clone());
+            }
+        }
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(site, configurations)| AuthoredSite {
+                site,
+                configurations,
+            })
+            .collect();
+        assert_eq!(aggregated, expected);
     });
 }
 
@@ -335,7 +409,9 @@ fn recognition_requires_actual_definition_and_receiver_identity() {
 
 #[test]
 fn completion_and_expansion_instances_are_preserved() {
-    let first = report(&[0; 32]);
+    let mut seed = [1; 32];
+    seed[14] = 0;
+    let first = report(&seed);
     let mut second = first.clone();
     second.findings[0].owner = "example::first_callback".into();
     let sites = aggregate(&[first.clone(), second.clone(), first.clone()])
@@ -349,7 +425,7 @@ fn completion_and_expansion_instances_are_preserved() {
         &vec![first.findings[0].clone(), second.findings[0].clone()]
     );
     let mut conflicting = first.clone();
-    conflicting.findings[0].acquisition = Acquisition::Exclusive;
+    conflicting.findings[0].acquisition = Acquisition::Shared;
     assert!(matches!(
         aggregate(&[first.clone(), conflicting])
             .err()

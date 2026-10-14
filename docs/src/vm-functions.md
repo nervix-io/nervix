@@ -1130,10 +1130,12 @@ For each batch, the task works through these steps:
 4. For each run, every structure reads one typed value slice and validity bitmap from the shared
    argument columns. Counts use bitmap popcounts; integer sums use exact high and low lane halves;
    float sums use per-lane TwoSum; moments use a compensated mean pass and a centered second pass,
-   falling back to a weighted mean when summing finite inputs overflows before division, then one
+   normalizing by the largest contributing magnitude when summing finite inputs overflows before division, then one
    Chan merge into the branch's aggregate. Histogram indexes are computed for the run and
    scattered into bucket counts. Each retained
    row holds its sequence, its timestamp, and a row view of the Arc'd input and argument batches.
+   The normalized mean is clamped to its operand range before rescaling; a constant finite run
+   keeps its exact mean and zero M2 and cross moment even when its sum overflows.
 5. It emits while the width is met, and then steps the window. Stepped rows are acknowledged.
 
 Tumbling and sliding windows use this same path, with different `WIDTH` and `STEP`.

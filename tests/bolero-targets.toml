@@ -177,7 +177,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "deadlock-evidence"
 invariant = "Every deadlock evidence a diagnostic process can record, with every finding variant at the edges of its bounds, decodes from its own encoding to the complete original value."
@@ -222,7 +222,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_evidence_summary_counts_every_finding_once/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "deadlock-evidence-summary"
 invariant = "The summary of every evidence a diagnostic process can record counts each finding once by kind, keeps repeated deliveries apart from lost findings, agrees with qualification, and prints every count once in its fixed order."
@@ -312,7 +312,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "nspl-statement"
 invariant = "Canonical NSPL of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -342,7 +342,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "nspl-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical NSPL reparses to them."
@@ -597,7 +597,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -837,7 +837,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_compiler_reports_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "typed-report"
 invariant = "Current compiler reports round trip without losing spans, provenance, receiver identity or completion evidence."
@@ -869,7 +869,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_authored_sites_preserve_every_configuration/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "typed-site-union"
 invariant = "Aggregation is idempotent at authored sites and preserves complete findings and source contracts in every compiled configuration."
@@ -1073,7 +1073,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/subscription_row/__fuzz__/subscription_row__properties__bolero_arrow_rows_preserve_exact_values_or_explicit_redaction/corpus"
-domain_version = 1
+domain_version = 2
 features = ["testing"]
 id = "client-arrow-rows"
 invariant = "Arrow selection and frame segmentation preserve original logical values and validity with exact float bits, schema, branches and explicit sensitivity redaction."
@@ -1089,7 +1089,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/subscription_row/__fuzz__/subscription_row__properties__bolero_invalid_arrow_selection_has_no_partial_emission/corpus"
-domain_version = 1
+domain_version = 2
 features = ["testing"]
 id = "client-arrow-selection"
 invariant = "Invalid row order, bounds and branch alignment fail as a whole without partial emission or affecting subsequent valid encoding."
@@ -1525,7 +1525,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_streamed_lifecycle_preserves_complete_current_values/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "restore-native-lifecycle"
 invariant = "Streaming native lifecycle encoding preserves every current typed branch field including nested arrays, vector kinds and float bits, timestamp and incarnation in order."
@@ -1539,7 +1539,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_streamed_kafka_preserves_every_partition_and_offset/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "restore-native-kafka"
 invariant = "Streaming native Kafka encoding preserves the complete ordered current topic, partition and next-offset set, including empty sets and integer boundaries."
@@ -1554,7 +1554,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_captured_lifecycle_streams_its_complete_archive_record/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "backup-native-lifecycle"
 invariant = "A stored native lifecycle streams the archive record of every branch's typed key, nested arrays, vector kinds and float bits, last ingestion and incarnation in LRU order, with its revision and identity."
@@ -2451,6 +2451,21 @@ package = "nervix-simd-kernels"
 random_iterations = 256
 source = "crates/simd-kernels/src/window.rs"
 test = "window::tests::bolero_window_runs_match_scalar_folds_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/window__moment_properties__bolero_window_moments_and_buckets_match_exact_references/corpus"
+domain_version = 1
+features = []
+id = "simd-window-moments"
+invariant = "Counts, means, M2 and cross moments of independently nullable typed runs agree with exact addition and product references within the documented numerical bounds; constant overflow-scale runs retain zero centered moments, and histogram edges, clamps and nulls retain exact bucket placement."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/window_moment_properties.rs"
+test = "window::moment_properties::bolero_window_moments_and_buckets_match_exact_references"
 test_target = "lib"
 
 [[target]]

@@ -419,7 +419,8 @@ pub fn compensated_sum<T: Copy>(
 }
 
 /// Keep the two-pass mean finite when summing finite inputs overflows before division. The
-/// weighted fallback is needed only for magnitudes near the floating-point limit.
+/// scaled fallback is needed only for magnitudes near the floating-point limit. Normalizing by
+/// the largest contributing magnitude also preserves the exact mean of a constant run.
 fn mean_from_sum<T: Copy>(
     values: &[T],
     sum: RunSum,
@@ -430,17 +431,28 @@ fn mean_from_sum<T: Copy>(
     if total.is_finite() {
         return total / sum.count.approx_into::<f64>();
     }
-    let mut mean = 0.0;
-    let mut count = 0_u64;
+    let mut scale = 0.0_f64;
     for (index, &value) in values.iter().enumerate() {
         if contributes(index) {
-            count += 1;
-            let n: f64 = count.approx_into();
-            mean = mean * ((n - 1.0) / n) + convert(value) / n;
+            scale = scale.max(convert(value).abs());
         }
     }
-    debug_assert_eq!(count, sum.count);
-    mean
+    // Callers admit finite values, and a run of zeros cannot overflow its sum.
+    debug_assert!(scale.is_finite() && scale > 0.0);
+    let mut lanes = [RunSum::EMPTY; 8];
+    for (index, &value) in values.iter().enumerate() {
+        if contributes(index) {
+            lanes[index % lanes.len()].add(convert(value) / scale);
+        }
+    }
+    let mut normalized = RunSum::EMPTY;
+    for lane in lanes {
+        normalized.merge(lane);
+    }
+    debug_assert_eq!(normalized.count, sum.count);
+    let mean = (normalized.sum + normalized.compensation) / sum.count.approx_into::<f64>();
+    // Every normalized operand is in [-1, 1]; clamp rounding at those bounds before rescaling.
+    mean.clamp(-1.0, 1.0) * scale
 }
 
 /// The centered mean and second moment of one run.
@@ -575,6 +587,10 @@ pub fn reverse_values<T: Copy>(
         visit(value);
     }
 }
+
+#[cfg(test)]
+#[path = "window_moment_properties.rs"]
+mod moment_properties;
 
 #[cfg(test)]
 mod tests {
@@ -815,7 +831,7 @@ mod tests {
     }
 
     /// `bits` repeated, or a fixed pattern when it is empty, until it holds `needed` bits.
-    fn bitmap_of(bits: &[u8], needed: usize) -> Vec<u8> {
+    pub(super) fn bitmap_of(bits: &[u8], needed: usize) -> Vec<u8> {
         let bytes = needed.div_ceil(8);
         if bits.is_empty() {
             return vec![0b1011_0110; bytes];
@@ -823,12 +839,12 @@ mod tests {
         bits.iter().copied().cycle().take(bytes).collect()
     }
 
-    fn bit(bits: &[u8], position: usize) -> bool {
+    pub(super) fn bit(bits: &[u8], position: usize) -> bool {
         bits[position / 8] & (1 << (position % 8)) != 0
     }
 
     /// The exact sum of `values`, as Shewchuk's non-overlapping partials, which add without error.
-    fn exact_partials(values: impl IntoIterator<Item = f64>) -> Vec<f64> {
+    pub(super) fn exact_partials(values: impl IntoIterator<Item = f64>) -> Vec<f64> {
         let mut partials: Vec<f64> = Vec::new();
         for value in values {
             let mut carried = value;
@@ -853,7 +869,7 @@ mod tests {
     }
 
     /// The value of non-overlapping partials, added from the smallest so it rounds once.
-    fn partials_value(partials: &[f64]) -> f64 {
+    pub(super) fn partials_value(partials: &[f64]) -> f64 {
         partials.iter().sum()
     }
 
