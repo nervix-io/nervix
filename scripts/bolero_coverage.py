@@ -425,11 +425,35 @@ def combine(
     return output
 
 
+@dataclasses.dataclass(frozen=True)
+class FunctionRecord:
+    """A function's `FN` line: its name, the line it starts on, and the line it ends on when the
+    producer records that. LLVM writes `FN:<start>,<name>`; coverage.py writes
+    `FN:<start>,<end>,<name>`."""
+
+    name: str
+    start: int
+    end: int | None
+
+    @classmethod
+    def parse(cls, value: str) -> FunctionRecord:
+        start, _, rest = value.partition(",")
+        end, separator, name = rest.partition(",")
+        if separator and end.isdigit():
+            return cls(name=name, start=int(start), end=int(end))
+        return cls(name=rest, start=int(start), end=None)
+
+    def line(self) -> str:
+        if self.end is None:
+            return f"FN:{self.start},{self.name}"
+        return f"FN:{self.start},{self.end},{self.name}"
+
+
 @dataclasses.dataclass
 class SourceCounts:
     """One source file's counters, summed over every report that measured it."""
 
-    functions: dict[str, int] = dataclasses.field(default_factory=dict)
+    functions: dict[str, FunctionRecord] = dataclasses.field(default_factory=dict)
     function_hits: dict[str, int] = dataclasses.field(default_factory=dict)
     lines: dict[int, int] = dataclasses.field(default_factory=dict)
     branches: dict[tuple[int, str, str], int | None] = dataclasses.field(default_factory=dict)
@@ -441,8 +465,9 @@ SUMMARY_LINES = frozenset({"FNF", "FNH", "LF", "LH", "BRF", "BRH"})
 def merge_lcov(reports: list[pathlib.Path], output: pathlib.Path) -> None:
     """Sum the counters of reports from separate executions into one report.
 
-    Shards run disjoint campaigns, so a line, function or branch was executed the sum of the
-    times each shard executed it. Summary lines are recomputed from the merged counters.
+    Fuzz shards run disjoint campaigns and the ordinary producers run separate processes, so a
+    line, function or branch was executed the sum of the times each report counted it. Summary
+    lines are recomputed from the merged counters.
     """
     sources: dict[str, SourceCounts] = {}
     for report in reports:
@@ -465,8 +490,8 @@ def merge_lcov(reports: list[pathlib.Path], output: pathlib.Path) -> None:
             if current is None:
                 raise native.RunnerError(f"{report}: LCOV line outside a record: {line}")
             if kind == "FN":
-                number, _, name = value.partition(",")
-                current.functions.setdefault(name, int(number))
+                function = FunctionRecord.parse(value)
+                current.functions.setdefault(function.name, function)
             elif kind == "FNDA":
                 hits, _, name = value.partition(",")
                 current.function_hits[name] = current.function_hits.get(name, 0) + int(hits)
@@ -492,12 +517,12 @@ def merge_lcov(reports: list[pathlib.Path], output: pathlib.Path) -> None:
         unknown = set(counts.function_hits) - set(counts.functions)
         if unknown:
             raise native.RunnerError(f"{source}: function counts without a function line: {sorted(unknown)}")
-        functions = sorted(counts.functions.items(), key=lambda item: (item[1], item[0]))
+        functions = sorted(counts.functions.values(), key=lambda function: (function.start, function.name))
         lines.append(f"SF:{source}")
-        lines.extend(f"FN:{number},{name}" for name, number in functions)
-        lines.extend(f"FNDA:{counts.function_hits.get(name, 0)},{name}" for name, _ in functions)
+        lines.extend(function.line() for function in functions)
+        lines.extend(f"FNDA:{counts.function_hits.get(function.name, 0)},{function.name}" for function in functions)
         lines.append(f"FNF:{len(functions)}")
-        lines.append(f"FNH:{sum(1 for name, _ in functions if counts.function_hits.get(name, 0) > 0)}")
+        lines.append(f"FNH:{sum(1 for function in functions if counts.function_hits.get(function.name, 0) > 0)}")
         if counts.branches:
             for (number, block, branch), taken in sorted(counts.branches.items()):
                 lines.append(f"BRDA:{number},{block},{branch},{'-' if taken is None else taken}")
