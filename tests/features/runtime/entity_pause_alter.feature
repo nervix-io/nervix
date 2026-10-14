@@ -20,8 +20,8 @@ Feature: Entity-pause model alterations
       CREATE RELAY outgoing SCHEMA routed_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-entity-swap.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
@@ -124,8 +124,8 @@ Feature: Entity-pause model alterations
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge http-{{test_id}}-entity-timeout.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -236,13 +236,13 @@ Feature: Entity-pause model alterations
       CREATE VHOST disjoint_edge http-{{test_id}}-disjoint-scope.example.com;
       CREATE ENDPOINT affected_ingress ON affected_edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR affected_source
-        FROM ENDPOINT affected_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR affected_source
+        FROM affected_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
         TO affected_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR disjoint_source
-        FROM ENDPOINT disjoint_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR disjoint_source
+        FROM disjoint_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
         TO disjoint_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -323,8 +323,8 @@ Feature: Entity-pause model alterations
       CREATE VHOST edge http-{{test_id}}-parked-gate.example.com;
       CREATE ENDPOINT parked_state_ingress ON edge PATH '/state' TYPE HTTP;
       CREATE ENDPOINT parked_input_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR parked_state_source
-        FROM ENDPOINT parked_state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR parked_state_source
+        FROM parked_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
         TO parked_state
           INHERIT ALL
@@ -333,8 +333,8 @@ Feature: Entity-pause model alterations
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR parked_input_source
-        FROM ENDPOINT parked_input_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR parked_input_source
+        FROM parked_input_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
         TO parked_input
           INHERIT ALL

@@ -2,7 +2,8 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** The body of a Prometheus ingestor source: its client, query, cadence and quiesce mode.
+//! - **Owns.** The body of a `PROMETHEUS QUERY` ingestor: its client, query, cadence, delivery
+//!   mode and quiesce mode.
 //! - **Depends on.** The shared ingestor clauses and the Prometheus vocabulary.
 //! - **Must not know.** The Prometheus HTTP API or how a query is evaluated.
 
@@ -12,29 +13,33 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{IngestSource, PrometheusQuerySource, PrometheusSource};
+use nervix_models::{PrometheusIngestMode, PrometheusQuerySource};
 
-use super::delivery::polling_quiesce_clause;
+use super::delivery::{no_ack, polling_quiesce_clause};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, client_ref, domain_clock_period_lit, kw, string_lit},
 };
 
-pub(super) fn prometheus_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Prometheus)
-        .ignore_then(client_ref())
+/// `FROM <client> QUERY '<promql>' EVERY <period> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …`.
+pub(super) fn query_body<'src>()
+-> impl Parser<'src, &'src [Token], PrometheusQuerySource, extra::Err<ParseError<'src>>> + Clone {
+    client_ref()
         .then_ignore(kw(Identifier::Query))
         .then(string_lit())
         .then_ignore(kw(Identifier::Every))
         .then(domain_clock_period_lit())
+        .then_ignore(kw(Identifier::Mode))
+        .then(no_ack().to(PrometheusIngestMode::NoAck))
         .then(polling_quiesce_clause())
-        .map(|(((client, query), every), quiesce)| {
-            IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
+        .map(
+            |((((client, query), every), mode), quiesce)| PrometheusQuerySource {
                 client,
                 query,
                 every,
+                mode,
                 quiesce,
-            }))
-        })
+            },
+        )
+        .boxed()
 }

@@ -26,16 +26,16 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
     BranchSelection, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
-    CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod,
-    DomainName, EmitterName, EndpointName, Expression, FieldName, FlushPolicy, GeneralErrorPolicy,
+    CollectionName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName, EmitterName,
+    EndpointName, Expression, ExternalNameError, FieldName, FlushPolicy, GeneralErrorPolicy,
     GeneratorName, InferencerName, IngestorName, InputCollectPolicy, InspectionFormat,
     JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
     MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
-    QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, TopicName, TransactionOperationNumber, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, QueueName, ReingestorName, RelayName,
+    ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction,
+    SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
+    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -891,14 +891,6 @@ pub fn topic_ref<'src>()
     parse_name("topic_name", TopicName::parse)
 }
 
-pub fn mqtt_topic_filter<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        string_lit(),
-        parse_name("mqtt_topic_filter", TopicName::parse).map(|topic| topic.as_str().to_string()),
-    ))
-}
-
 pub fn subject_ref<'src>()
 -> impl Parser<'src, &'src [Token], SubjectName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("subject_name", SubjectName::parse)
@@ -914,11 +906,6 @@ pub fn queue_ref<'src>()
     parse_name("queue_name", QueueName::parse)
 }
 
-pub fn nats_queue_group_ref<'src>()
--> impl Parser<'src, &'src [Token], QueueGroupName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("queue_group", QueueGroupName::parse)
-}
-
 pub fn channel_ref<'src>()
 -> impl Parser<'src, &'src [Token], ChannelName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("channel_name", ChannelName::parse)
@@ -929,16 +916,6 @@ pub fn table_ref<'src>()
     parse_name("table_name", TableName::parse)
 }
 
-pub fn consumer_group_ref<'src>()
--> impl Parser<'src, &'src [Token], ConsumerGroupName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("consumer_group", ConsumerGroupName::parse)
-}
-
-pub fn subscription_ref<'src>()
--> impl Parser<'src, &'src [Token], PulsarSubscriptionName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("subscription_name", PulsarSubscriptionName::parse)
-}
-
 pub fn session_subscription_name<'src>()
 -> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("session_subscription_name", SubscriptionName::parse)
@@ -947,6 +924,28 @@ pub fn session_subscription_name<'src>()
 pub fn session_subscription_ref<'src>()
 -> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("ref:session_subscription", SubscriptionName::parse)
+}
+
+/// One string literal as the external name `N`, kept exactly as written and checked by the name
+/// type itself.
+///
+/// An external system names its entities case and punctuation included, so a position that holds
+/// one reads a string literal, and `parse` is the name type's own constructor: the grammar never
+/// restates the rule an entity's names follow. The label goes on the literal itself, so a refused
+/// name keeps the reason its rule gives.
+pub fn external_name<'src, N: Clone + 'static>(
+    label: &'static str,
+    parse: fn(&str) -> Result<N, Report<ExternalNameError>>,
+) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::StringLiteral(value) => value,
+    }
+    .labelled(label)
+    .try_map(move |raw: String, span| {
+        parse(raw.as_str())
+            .map_err(|err| Rich::custom(span, format!("invalid {label} '{raw}': {err:#}")))
+    })
+    .boxed()
 }
 
 pub fn string_lit<'src>()

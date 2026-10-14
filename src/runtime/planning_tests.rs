@@ -1185,7 +1185,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("orders_codec"),
@@ -1325,7 +1325,7 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("metrics_codec"),
@@ -1437,7 +1437,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("features_codec"),
@@ -1621,7 +1621,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("orders_codec"),
@@ -1768,7 +1768,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("notification_codec"),
@@ -1795,7 +1795,7 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("notification_codec"),
@@ -1905,7 +1905,7 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("orders_codec"),
@@ -2016,7 +2016,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                                 client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAckSequential,
+                                mode: ZeroMqIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: named("orders_codec"),

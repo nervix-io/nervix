@@ -2,14 +2,16 @@ use meticulous::ResultExt as _;
 use nonzero_ext::nonzero;
 
 use crate::{
-    AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
+    AckWindow, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
-    AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation, BranchSelection,
-    CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CreateGenerator, CreateIngestor, CreatePlacement, CreateRelay,
-    EndpointEndpointSource, EndpointIngestMode, EndpointSource, Expression, FlushPolicy,
-    GeneralErrorPolicy, IngestQuiesceMode, IngestSource, Literal, MaterializedRelayState,
-    ModelKind, PlacementPolicy, ProcessorOutput, ProcessorOutputs, RelayBranching,
+    AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
+    AlterTransportIngestorOperation, BranchSelection, ClientIngestMode, ClientProducerSource,
+    ClientSourceEntity, CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations,
+    CodecProtobufConfig, CodecWireFormat, CreateGenerator, CreateIngestor, CreatePlacement,
+    CreateRelay, EndpointIngestMode, Expression, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointSource, HttpSourceEntity, IngestQuiesceMode, IngestSourceKind, IngestorAlteration,
+    KafkaSourceEntity, KafkaTopicSource, Literal, MaterializedRelayState, ModelKind,
+    PlacementPolicy, ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy,
 };
 
 fn named<N>(raw: &str) -> N
@@ -18,6 +20,24 @@ where
     for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
 {
     N::try_from(raw).expect("valid name")
+}
+
+/// An HTTP endpoint source that buffers what arrives while its ingestor is quiesced.
+fn http_endpoint(endpoint: &str) -> HttpEndpointSource {
+    HttpEndpointSource {
+        endpoint: named(endpoint),
+        mode: EndpointIngestMode::NoAck,
+        quiesce: IngestQuiesceMode::EndpointBuffer {
+            max_size: "1MiB".to_string(),
+        },
+    }
+}
+
+/// The operations of an `ALTER HTTP ENDPOINT INGESTOR` statement.
+fn http_endpoint_alteration(
+    operations: Vec<AlterTransportIngestorOperation<HttpEndpointSource>>,
+) -> IngestorAlteration {
+    operations.into()
 }
 
 #[test]
@@ -229,13 +249,7 @@ fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
         name: named("event_source"),
         output_routes: ProcessorOutputs::new(vec![route.clone()]),
         input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-            source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
-                endpoint: named("ingress_a"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
-                },
-            })),
+            source: http_endpoint("ingress_a").into(),
             codec: named("event_codec"),
         }),
         timestamp_source: None,
@@ -245,58 +259,50 @@ fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
     ingestor
         .apply_alter(&AlterIngestor {
             ingestor: named("event_source"),
-            operations: vec![
+            alteration: http_endpoint_alteration(vec![
                 AlterIngestorOperation::SetSource {
-                    source: IngestSource::Endpoint(EndpointSource::Endpoint(
-                        EndpointEndpointSource {
-                            endpoint: named("ingress_b"),
-                            mode: EndpointIngestMode::NoAckSequential,
-                            quiesce: IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
-                            },
-                        },
-                    )),
-                },
-                AlterIngestorOperation::SetDecodeUsing {
-                    codec: named("event_codec_v2"),
+                    source: http_endpoint("ingress_b"),
+                }
+                .into(),
+                AlterTransportIngestorOperation::SetDecodeUsing {
+                    codec: named("next_codec"),
                 },
                 AlterIngestorOperation::SetTimestamp {
                     source: super::IngestTimestampSource::Now,
-                },
+                }
+                .into(),
                 AlterIngestorOperation::SetFilterWhere {
                     where_clause: Expression::Literal(Literal::Bool(true)),
-                },
+                }
+                .into(),
                 AlterIngestorOperation::ReplaceRoute {
                     route: ProcessorOutput {
                         relay: named("events"),
                         flush_policy: Some(FlushPolicy::Immediate),
                         ..route.clone()
                     },
-                },
+                }
+                .into(),
                 AlterIngestorOperation::AddRoute {
                     route: ProcessorOutput {
                         relay: named("audit"),
                         ..route.clone()
                     },
-                },
+                }
+                .into(),
                 AlterIngestorOperation::SetGeneralError {
                     policy: GeneralErrorPolicy::Ignore,
-                },
-            ],
+                }
+                .into(),
+            ]),
         })
         .expect("ingestor alter should apply");
 
     assert_eq!(
         ingestor.input,
         crate::IngestorInput::Transport(crate::TransportIngestorInput {
-            source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
-                endpoint: named("ingress_b"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
-                },
-            })),
-            codec: named("event_codec_v2"),
+            source: http_endpoint("ingress_b").into(),
+            codec: named("next_codec"),
         })
     );
     assert_eq!(
@@ -310,14 +316,15 @@ fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
     let error = ingestor
         .apply_alter(&AlterIngestor {
             ingestor: named("event_source"),
-            operations: vec![
-                AlterIngestorOperation::SetDecodeUsing {
-                    codec: named("event_codec_v3"),
+            alteration: http_endpoint_alteration(vec![
+                AlterTransportIngestorOperation::SetDecodeUsing {
+                    codec: named("last_codec"),
                 },
                 AlterIngestorOperation::DropRoute {
                     relay: named("missing"),
-                },
-            ],
+                }
+                .into(),
+            ]),
         })
         .expect_err("missing route target should fail");
     assert_eq!(
@@ -336,13 +343,7 @@ fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
         name: named("event_source"),
         output_routes: ProcessorOutputs::new(vec![route.clone()]),
         input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-            source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
-                endpoint: named("ingress"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
-                },
-            })),
+            source: http_endpoint("ingress").into(),
             codec: named("event_codec"),
         }),
         timestamp_source: None,
@@ -355,7 +356,7 @@ fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
         candidate
             .apply_alter(&AlterIngestor {
                 ingestor: named("other"),
-                operations: Vec::new(),
+                alteration: http_endpoint_alteration(Vec::new()),
             })
             .expect_err("the alteration is rejected")
             .current_context(),
@@ -371,9 +372,12 @@ fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
         candidate
             .apply_alter(&AlterIngestor {
                 ingestor: named("event_source"),
-                operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: named("events"),
-                }],
+                alteration: http_endpoint_alteration(vec![
+                    AlterIngestorOperation::DropRoute {
+                        relay: named("events"),
+                    }
+                    .into(),
+                ]),
             })
             .expect_err("the alteration is rejected")
             .current_context(),
@@ -388,9 +392,12 @@ fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
         ambiguous
             .apply_alter(&AlterIngestor {
                 ingestor: named("event_source"),
-                operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: named("events"),
-                }],
+                alteration: http_endpoint_alteration(vec![
+                    AlterIngestorOperation::DropRoute {
+                        relay: named("events"),
+                    }
+                    .into(),
+                ]),
             })
             .expect_err("the alteration is rejected")
             .current_context(),
@@ -399,6 +406,152 @@ fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
         }
     );
     assert_eq!(ambiguous, before);
+}
+
+#[test]
+fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
+    let base = CreateIngestor {
+        name: named("event_source"),
+        output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("events"))]),
+        input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+            source: http_endpoint("ingress").into(),
+            codec: named("event_codec"),
+        }),
+        timestamp_source: None,
+        general_error_policy: GeneralErrorPolicy::Log,
+        filter_where: None,
+    };
+    let kafka_alteration: IngestorAlteration = vec![AlterTransportIngestorOperation::<
+        KafkaTopicSource,
+    >::Ingestor(
+        AlterIngestorOperation::SetGeneralError {
+            policy: GeneralErrorPolicy::Ignore,
+        },
+    )]
+    .into();
+
+    let mut candidate = base.clone();
+    let error = candidate
+        .apply_alter(&AlterIngestor {
+            ingestor: named("event_source"),
+            alteration: kafka_alteration,
+        })
+        .expect_err("a Kafka topic alteration cannot alter an HTTP endpoint ingestor");
+    assert_eq!(
+        error.current_context(),
+        &AlterIngestorError::KindMismatch {
+            stored: IngestSourceKind::Http(HttpSourceEntity::Endpoint),
+            requested: IngestSourceKind::Kafka(KafkaSourceEntity::Topic),
+        }
+    );
+    assert_eq!(
+        error.current_context().to_string(),
+        "the stored ingestor reads HTTP ENDPOINT, so ALTER KAFKA TOPIC INGESTOR cannot alter it"
+    );
+    assert_eq!(candidate, base);
+
+    let mut candidate = base.clone();
+    let error = candidate
+        .apply_alter(&AlterIngestor {
+            ingestor: named("event_source"),
+            alteration: http_endpoint_alteration(vec![
+                AlterIngestorOperation::SetQuiesce {
+                    quiesce: IngestQuiesceMode::Suspend,
+                }
+                .into(),
+            ]),
+        })
+        .expect_err("an endpoint cannot suspend its callers");
+    assert_eq!(
+        error.current_context().to_string(),
+        "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+    );
+    assert_eq!(candidate, base);
+
+    let mut candidate = base.clone();
+    candidate
+        .apply_alter(&AlterIngestor {
+            ingestor: named("event_source"),
+            alteration: http_endpoint_alteration(vec![
+                AlterIngestorOperation::SetQuiesce {
+                    quiesce: IngestQuiesceMode::Reject {
+                        retry_after: "3s".to_string(),
+                    },
+                }
+                .into(),
+            ]),
+        })
+        .expect("an endpoint can refuse its callers while quiesced");
+    assert_eq!(
+        candidate.input.quiesce(),
+        &IngestQuiesceMode::Reject {
+            retry_after: "3s".to_string(),
+        }
+    );
+}
+
+#[test]
+fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
+    let mode = ClientIngestMode {
+        window: AckWindow::Sequential,
+        ack_timeout: "5s".to_string(),
+        retry_policy: RetryPolicy {
+            backoff: "100ms".to_string(),
+            max_backoff: "1s".to_string(),
+        },
+    };
+    let base = CreateIngestor {
+        name: named("orders_in"),
+        output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("orders"))]),
+        input: crate::IngestorInput::Client(ClientProducerSource {
+            schema: named("order"),
+            mode: mode.clone(),
+        }),
+        timestamp_source: None,
+        general_error_policy: GeneralErrorPolicy::Log,
+        filter_where: None,
+    };
+    let replacement = ClientProducerSource {
+        schema: named("order_next"),
+        mode,
+    };
+
+    let mut candidate = base.clone();
+    candidate
+        .apply_alter(&AlterIngestor {
+            ingestor: named("orders_in"),
+            alteration: vec![
+                AlterIngestorOperation::SetSource {
+                    source: replacement.clone(),
+                },
+                AlterIngestorOperation::SetQuiesce {
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+            ]
+            .into(),
+        })
+        .expect("a client producer alteration applies to a client producer ingestor");
+    assert_eq!(candidate.input, crate::IngestorInput::Client(replacement));
+    assert_eq!(
+        candidate.input.source_kind(),
+        IngestSourceKind::Client(ClientSourceEntity::Producer)
+    );
+
+    let mut candidate = base.clone();
+    let error = candidate
+        .apply_alter(&AlterIngestor {
+            ingestor: named("orders_in"),
+            alteration: vec![AlterIngestorOperation::<ClientProducerSource>::SetQuiesce {
+                quiesce: IngestQuiesceMode::Drop,
+            }]
+            .into(),
+        })
+        .expect_err("a client producer keeps unsent batches with its producer");
+    assert_eq!(
+        error.current_context().to_string(),
+        "CLIENT PRODUCER ingestors do not support ON QUIESCE DROP"
+    );
+    assert_eq!(candidate, base);
 }
 
 #[test]

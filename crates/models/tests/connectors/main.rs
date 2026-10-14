@@ -20,23 +20,23 @@ use nervix_models::{
     BatchMessageLimit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
     ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName, ClientSinkEntity,
     ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind, EmitterBatchPolicy,
-    EmitterBatchRequirement, EmitterPublishingMode, EndpointEndpointSource, EndpointIngestMode,
-    EndpointSource, EndpointSourceEntity, Expression, HttpSinkEntity, HttpSourceEntity,
-    IcebergCatalog, IcebergSink, IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink,
-    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestSourceKind, KafkaIngestMode, KafkaOffsetMode, KafkaSinkEntity, KafkaSourceEntity,
-    KafkaTopicSink, KafkaTopicSource, Literal, Model, ModelKind, MongoDbCollectionSink,
-    MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity, MqttIngestMode, MqttQos, MqttSession,
-    MqttSinkEntity, MqttSourceEntity, MqttTopicSource, MySqlConflictAction, MySqlSink,
-    MySqlSinkEntity, MySqlTableSink, NatsSinkEntity, NatsSourceEntity, OtelLogsSink, OtelMappings,
-    OtelMetric, OtelMetricKind, OtelMetricsSink, OtelSink, OtelSinkEntity, OtelTracesSink,
-    ParseAsType, PostgresConflictAction, PostgresSink, PostgresSinkEntity, PostgresTableSink,
-    PrometheusSourceEntity, PulsarSinkEntity, PulsarSourceEntity, PulsarTopicSink,
-    RabbitMqSinkEntity, RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSink,
-    RedisPubSubSource, RedisSink, RedisSinkEntity, RedisSource, RedisSourceEntity, RetryPolicy,
-    SchemaName, SentryEventSink, SentrySink, SentrySinkEntity, SinkClientReference, SinkReference,
-    SinkValueMapping, SourceMetadataScope, SourceReferenceKind, SqsSinkEntity, SqsSourceEntity,
-    SyslogSinkEntity, SyslogSourceEntity, TableName, WebsocketsSourceEntity, ZeroMqSinkEntity,
+    EmitterBatchRequirement, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
+    HttpEndpointSource, HttpSinkEntity, HttpSource, HttpSourceEntity, IcebergCatalog, IcebergSink,
+    IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, IngestAcknowledgement,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestSourceKind, KafkaIngestMode,
+    KafkaOffsetMode, KafkaSinkEntity, KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource, Literal,
+    Model, ModelKind, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity,
+    MqttIngestMode, MqttQos, MqttSession, MqttSinkEntity, MqttSourceEntity, MqttTopicSource,
+    MySqlConflictAction, MySqlSink, MySqlSinkEntity, MySqlTableSink, NatsSinkEntity,
+    NatsSourceEntity, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink,
+    OtelSink, OtelSinkEntity, OtelTracesSink, ParseAsType, PostgresConflictAction, PostgresSink,
+    PostgresSinkEntity, PostgresTableSink, PrometheusSourceEntity, PulsarSinkEntity,
+    PulsarSourceEntity, PulsarTopicSink, RabbitMqSinkEntity, RabbitMqSourceEntity,
+    RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink, RedisSinkEntity,
+    RedisSource, RedisSourceEntity, RetryPolicy, SchemaName, SentryEventSink, SentrySink,
+    SentrySinkEntity, SinkClientReference, SinkReference, SinkValueMapping, SourceMetadataScope,
+    SourceReferenceKind, SqsSinkEntity, SqsSourceEntity, SyslogSinkEntity, SyslogSourceEntity,
+    TableName, WebsocketsEndpointSource, WebsocketsSourceEntity, ZeroMqSinkEntity,
     ZeroMqSourceEntity,
 };
 use rstest::rstest;
@@ -165,7 +165,6 @@ fn every_connector_kind_is_spelled_as_nspl_spells_it() {
             "CLIENT",
             "HTTP",
             "WEBSOCKETS",
-            "ENDPOINT",
             "KAFKA",
             "PULSAR",
             "RABBITMQ",
@@ -204,6 +203,7 @@ fn the_source_kinds_name_every_pair_once_with_its_phrase() {
         [
             "CLIENT PRODUCER",
             "HTTP REQUEST",
+            "HTTP ENDPOINT",
             "KAFKA TOPIC",
             "PULSAR TOPIC",
             "MQTT TOPIC",
@@ -213,8 +213,8 @@ fn the_source_kinds_name_every_pair_once_with_its_phrase() {
             "PROMETHEUS QUERY",
             "ZEROMQ PULL",
             "SQS QUEUE",
-            "ENDPOINT ENDPOINT",
             "WEBSOCKETS CONNECTION",
+            "WEBSOCKETS ENDPOINT",
             "SYSLOG LISTENER",
         ]
     );
@@ -286,6 +286,7 @@ fn a_source_form_names_its_pair_by_key_and_label() {
     let expected = [
         ("client-producer", "Client batches"),
         ("http-request", "HTTP polling"),
+        ("http-endpoint", "HTTP endpoint"),
         ("kafka-topic", "Kafka"),
         ("pulsar-topic", "Pulsar"),
         ("mqtt-topic", "MQTT"),
@@ -295,8 +296,8 @@ fn a_source_form_names_its_pair_by_key_and_label() {
         ("prometheus-query", "Prometheus"),
         ("zeromq-pull", "ZeroMQ"),
         ("sqs-queue", "SQS"),
-        ("endpoint-endpoint", "Endpoint"),
         ("websockets-connection", "WebSocket client"),
+        ("websockets-endpoint", "WebSocket endpoint"),
         ("syslog-listener", "Syslog"),
     ];
     let expected = expected
@@ -357,15 +358,21 @@ fn source_declaration(kind: IngestSourceKind) -> SourceDeclaration {
             headers_only(false, ConnectorKind::ZeroMq)
         }
         IngestSourceKind::Sqs(SqsSourceEntity::Queue) => headers_only(true, ConnectorKind::Sqs),
-        IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint) => SourceDeclaration {
+        IngestSourceKind::Http(HttpSourceEntity::Endpoint) => SourceDeclaration {
             reads_headers: true,
             metadata: SourceMetadataScope::Headers,
             every_node: true,
-            reference: SourceReferenceKind::Endpoint,
+            reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         },
         IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
             headers_only(false, ConnectorKind::Websockets)
         }
+        IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => SourceDeclaration {
+            reads_headers: true,
+            metadata: SourceMetadataScope::Headers,
+            every_node: true,
+            reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
+        },
         IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => SourceDeclaration {
             reads_headers: false,
             metadata: SourceMetadataScope::Syslog,
@@ -401,13 +408,14 @@ fn a_reference_kind_names_the_kind_of_model_a_body_references() {
     let client = SourceReferenceKind::Client(ConnectorKind::Kafka);
     assert_eq!(client.model_kind(), ModelKind::Client);
     assert_eq!(client.client_connector(), Some(ConnectorKind::Kafka));
-    assert_eq!(
-        SourceReferenceKind::Endpoint.model_kind(),
-        ModelKind::Endpoint
-    );
-    assert_eq!(SourceReferenceKind::Endpoint.client_connector(), None);
+    assert_eq!(client.endpoint_type(), None);
+    let endpoint = SourceReferenceKind::Endpoint(EndpointType::Websockets);
+    assert_eq!(endpoint.model_kind(), ModelKind::Endpoint);
+    assert_eq!(endpoint.client_connector(), None);
+    assert_eq!(endpoint.endpoint_type(), Some(EndpointType::Websockets));
     assert_eq!(SourceReferenceKind::Schema.model_kind(), ModelKind::Schema);
     assert_eq!(SourceReferenceKind::Schema.client_connector(), None);
+    assert_eq!(SourceReferenceKind::Schema.endpoint_type(), None);
 }
 
 #[test]
@@ -422,7 +430,11 @@ fn a_transport_source_states_what_its_pair_declares() {
             let declared = kind.capabilities();
             assert_eq!(source.kind(), kind);
             assert_eq!(source.connector(), kind.connector());
-            assert_eq!(source.transport_label(), kind.connector().keyword());
+            assert_eq!(
+                kind.phrase(),
+                format!("{} {}", kind.connector().keyword(), kind.entity_keyword())
+            );
+            assert_eq!(kind.to_string(), kind.phrase());
             assert_eq!(source.reads_headers(), declared.reads_headers);
             assert_eq!(
                 source.executes_on_every_cluster_node(),
@@ -446,8 +458,9 @@ fn a_transport_source_states_what_its_pair_declares() {
 #[case::prometheus(IngestSourceKind::Prometheus(PrometheusSourceEntity::Query), [true, true, false, false, false])]
 #[case::zeromq(IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull), [true, true, true, false, false])]
 #[case::sqs(IngestSourceKind::Sqs(SqsSourceEntity::Queue), [true, false, false, false, false])]
-#[case::endpoint(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint), [false, false, false, true, true])]
+#[case::http_endpoint(IngestSourceKind::Http(HttpSourceEntity::Endpoint), [false, false, false, true, true])]
 #[case::websockets(IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection), [false, true, true, false, false])]
+#[case::websockets_endpoint(IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint), [false, false, false, true, true])]
 #[case::syslog(IngestSourceKind::Syslog(SyslogSourceEntity::Listener), [true, true, true, false, false])]
 fn a_source_supports_the_quiesce_modes_its_entity_declares(
     #[case] kind: IngestSourceKind,
@@ -487,21 +500,21 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
     let source = |mode| {
         IngestSource::from(MqttTopicSource {
             client: named("broker"),
-            topic: "orders/#".to_owned(),
+            topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
             mode,
             quiesce: IngestQuiesceMode::Drop,
         })
     };
-    let persistent = source(MqttIngestMode::NoAckSequential {
+    let persistent = source(MqttIngestMode::NoAck {
         session: MqttSession::Persistent,
         qos: MqttQos::AtLeastOnce,
     });
-    let clean = source(MqttIngestMode::NoAckSequential {
+    let clean = source(MqttIngestMode::NoAck {
         session: MqttSession::Clean,
         qos: MqttQos::AtLeastOnce,
     });
-    let at_most_once = source(MqttIngestMode::NoAckParallel {
+    let at_most_once = source(MqttIngestMode::NoAck {
         session: MqttSession::Persistent,
         qos: MqttQos::AtMostOnce,
     });
@@ -526,7 +539,7 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         topic: named("orders"),
         offset_mode: KafkaOffsetMode::Domain,
         instances: std::num::NonZeroU64::MIN,
-        mode: KafkaIngestMode::NoAckParallel,
+        mode: KafkaIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Suspend,
     });
     assert_eq!(kafka.source_ref().as_str(), "events");
@@ -536,15 +549,29 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         IngestAcknowledgement::Unacknowledged
     );
 
-    let endpoint = IngestSource::from(EndpointEndpointSource {
+    let endpoint = IngestSource::from(HttpEndpointSource {
         endpoint: named("intake"),
-        mode: EndpointIngestMode::NoAckSequential,
+        mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Reject {
             retry_after: "1s".to_owned(),
         },
     });
     assert_eq!(endpoint.source_ref().as_str(), "intake");
     assert_eq!(endpoint.source_kind(), ModelKind::Endpoint);
+
+    let stream = IngestSource::from(WebsocketsEndpointSource {
+        endpoint: named("stream"),
+        mode: EndpointIngestMode::NoAck,
+        quiesce: IngestQuiesceMode::EndpointBuffer {
+            max_size: "1MiB".to_owned(),
+        },
+    });
+    assert_eq!(stream.source_ref().as_str(), "stream");
+    assert_eq!(stream.source_kind(), ModelKind::Endpoint);
+    assert_eq!(
+        stream.kind(),
+        IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint)
+    );
 }
 
 #[test]
@@ -1089,16 +1116,16 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
         parallel
     );
     assert_eq!(
-        kafka(KafkaIngestMode::NoAckParallel).acknowledgement(),
+        kafka(KafkaIngestMode::NoAck).acknowledgement(),
         IngestAcknowledgement::Unacknowledged
     );
 
     let mqtt_modes = [
-        MqttIngestMode::NoAckSequential {
+        MqttIngestMode::NoAck {
             session: MqttSession::Clean,
             qos: MqttQos::AtMostOnce,
         },
-        MqttIngestMode::NoAckParallel {
+        MqttIngestMode::NoAck {
             session: MqttSession::Persistent,
             qos: MqttQos::AtLeastOnce,
         },
@@ -1123,7 +1150,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
         let acknowledges = mode.is_ack();
         let source = IngestSource::from(MqttTopicSource {
             client: named("broker"),
-            topic: "orders/#".to_owned(),
+            topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
             mode,
             quiesce: IngestQuiesceMode::Drop,
@@ -1142,7 +1169,7 @@ fn an_entity_model_converts_into_every_enum_that_holds_it() {
     let source = RedisPubSubSource {
         client: named("cache"),
         channel: named("orders"),
-        mode: RedisPubSubIngestMode::NoAckSequential,
+        mode: RedisPubSubIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Drop,
     };
     let nested = RedisSource::from(source.clone());
@@ -1190,9 +1217,9 @@ fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
     let buffer = IngestQuiesceMode::EndpointBuffer {
         max_size: "1MiB".to_string(),
     };
-    let mut source = IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+    let mut source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
         endpoint: named("ingress"),
-        mode: EndpointIngestMode::NoAckSequential,
+        mode: EndpointIngestMode::NoAck,
         quiesce: buffer.clone(),
     }));
 
@@ -1203,13 +1230,13 @@ fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
     assert_eq!(
         error.current_context(),
         &AlterIngestorError::UnsupportedQuiesceMode {
-            transport: "ENDPOINT".to_string(),
-            mode: "SUSPEND".to_string(),
+            kind: IngestSourceKind::Http(HttpSourceEntity::Endpoint),
+            mode: "SUSPEND",
         }
     );
     assert_eq!(
         error.to_string(),
-        "ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+        "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
     );
     assert_eq!(source.quiesce(), &buffer);
 }

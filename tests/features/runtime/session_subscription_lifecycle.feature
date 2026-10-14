@@ -12,8 +12,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge redefined-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         SET id = message.id, secret = message.secret
@@ -125,8 +125,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restarted-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -187,8 +187,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge interest-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -305,8 +305,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY probes SCHEMA filler UNBRANCHED;
       CREATE VHOST edge saturated-{{test_id}}.example.com;
       CREATE ENDPOINT seed_endpoint ON edge PATH '/seeds' TYPE HTTP;
-      CREATE INGESTOR seed_ingestor
-        FROM ENDPOINT seed_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR seed_ingestor
+        FROM seed_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING seed_codec
         TIMESTAMP NOW
         TO seeds
@@ -344,8 +344,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge neighbor-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL

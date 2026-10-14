@@ -72,13 +72,13 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE VHOST edge {host};
          CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
          CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
-         CREATE INGESTOR payment_source FROM ENDPOINT payment_ingress MODE NO_ACK SEQUENTIAL ON \
-         QUIESCE BUFFER MAX SIZE 2MiB DECODE USING payment_codec TO payments INHERIT ALL BRANCHED \
-         BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+         CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE NO ACK ON QUIESCE \
+         BUFFER MAX SIZE 2MiB DECODE USING payment_codec TO payments INHERIT ALL BRANCHED BY \
+         by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;
-         CREATE INGESTOR metric_source FROM ENDPOINT metric_ingress MODE NO_ACK SEQUENTIAL ON \
-         QUIESCE BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED \
-         BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+         CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK ON QUIESCE \
+         BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED BY \
+         by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;
          CREATE DEDUPLICATOR unique_key_filter FROM payments DEDUPLICATE ON input.transaction_id, \
          input.amount MAX TIME 30m BRANCHED BY by_tenant TO unique_keys SET tenant = \

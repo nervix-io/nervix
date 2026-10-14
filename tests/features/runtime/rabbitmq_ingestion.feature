@@ -27,8 +27,8 @@ Feature: RabbitMQ ingestion
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_main QUEUE 'notifications_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -89,8 +89,8 @@ Feature: RabbitMQ ingestion
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_main QUEUE notifications_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_main QUEUE 'notifications_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -162,8 +162,8 @@ Feature: RabbitMQ ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-rabbit-redelivery-out-{{test_id}}'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_main QUEUE notifications_redelivery_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_main QUEUE 'notifications_redelivery_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -196,7 +196,7 @@ fn nervix_catalog_workloads_use_a_dedicated_idempotent_kafka_producer() {
         assert!(rendered.contains("CREATE CLIENT kafka_output"));
         assert!(rendered.contains("'enable.idempotence' = 'true'"));
         assert!(rendered.contains("'acks' = 'all'"));
-        assert!(rendered.contains("FROM KAFKA kafka_input"));
+        assert!(rendered.contains("CREATE KAFKA TOPIC INGESTOR kafka_in_0\n  FROM kafka_input\n"));
         assert!(rendered.contains("TO KAFKA kafka_output"));
     }
 }

@@ -37,9 +37,9 @@ use crate::{
     CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
     DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
     DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, IngestQuiesceMode,
-    IngestSource, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
-    PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
+    IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, PlacementName,
+    ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
     SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
     UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
@@ -1965,6 +1965,8 @@ pub struct CreateIngestor {
 }
 
 impl CreateIngestor {
+    /// Applies an alteration whose head names the pair this ingestor reads, operation by
+    /// operation, and keeps the result only when every operation applies.
     pub fn apply_alter(
         &mut self,
         alter: &AlterIngestor,
@@ -1975,56 +1977,73 @@ impl CreateIngestor {
                 requested: alter.ingestor.clone(),
             }));
         }
+        let stored = self.input.source_kind();
+        let requested = alter.alteration.kind();
+        if stored != requested {
+            return Err(Report::new(AlterIngestorError::KindMismatch {
+                stored,
+                requested,
+            }));
+        }
 
         let mut candidate = self.clone();
-        for operation in &alter.operations {
-            candidate.apply_alter_operation(operation)?;
-        }
+        alter.alteration.apply_to(&mut candidate)?;
         *self = candidate;
         Ok(())
     }
 
-    fn apply_alter_operation(
+    /// Applies the operations of an alteration of a transport's pair in order.
+    pub(crate) fn apply_transport_operations<Source>(
         &mut self,
-        operation: &AlterIngestorOperation,
-    ) -> error_stack::Result<(), AlterIngestorError> {
+        operations: &[AlterTransportIngestorOperation<Source>],
+    ) -> error_stack::Result<(), AlterIngestorError>
+    where
+        Source: crate::connector::AlteredIngestorSource,
+    {
+        for operation in operations {
+            match operation {
+                AlterTransportIngestorOperation::Ingestor(operation) => {
+                    self.apply_operation(operation)?;
+                }
+                AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
+                    let held = self
+                        .input
+                        .codec_mut()
+                        .verified(crate::connector::ALTERED_PAIR_CHECKED);
+                    *held = codec.clone();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies the operations of an alteration in order.
+    pub(crate) fn apply_operations<Source>(
+        &mut self,
+        operations: &[AlterIngestorOperation<Source>],
+    ) -> error_stack::Result<(), AlterIngestorError>
+    where
+        Source: crate::connector::AlteredIngestorSource,
+    {
+        for operation in operations {
+            self.apply_operation(operation)?;
+        }
+        Ok(())
+    }
+
+    fn apply_operation<Source>(
+        &mut self,
+        operation: &AlterIngestorOperation<Source>,
+    ) -> error_stack::Result<(), AlterIngestorError>
+    where
+        Source: crate::connector::AlteredIngestorSource,
+    {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
-                let crate::IngestorInput::Transport(input) = &mut self.input else {
-                    return Err(Report::new(AlterIngestorError::InputKindChange {
-                        current: self.input.kind().as_ref().to_string(),
-                        requested: crate::IngestorInputKind::Transport.as_ref().to_string(),
-                    }));
-                };
-                input.source = source.clone();
+                source.set_into(&mut self.input);
             }
-            AlterIngestorOperation::SetClientSource { source } => {
-                let crate::IngestorInput::Client(current) = &mut self.input else {
-                    return Err(Report::new(AlterIngestorError::InputKindChange {
-                        current: self.input.kind().as_ref().to_string(),
-                        requested: crate::IngestorInputKind::Client.as_ref().to_string(),
-                    }));
-                };
-                *current = source.clone();
-            }
-            AlterIngestorOperation::SetQuiesce { quiesce } => match &mut self.input {
-                crate::IngestorInput::Transport(input) => {
-                    input.source.set_quiesce(quiesce.clone())?;
-                }
-                crate::IngestorInput::Client(_) => {
-                    if !self.input.supports_quiesce(quiesce) {
-                        return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
-                            transport: self.input.source_label().to_string(),
-                            mode: quiesce.kind_label().to_string(),
-                        }));
-                    }
-                }
-            },
-            AlterIngestorOperation::SetDecodeUsing { codec } => {
-                let crate::IngestorInput::Transport(input) = &mut self.input else {
-                    return Err(Report::new(AlterIngestorError::CodecWithoutTransport));
-                };
-                input.codec = codec.clone();
+            AlterIngestorOperation::SetQuiesce { quiesce } => {
+                Source::set_quiesce_of(&mut self.input, quiesce.clone())?;
             }
             AlterIngestorOperation::SetTimestamp { source } => {
                 self.timestamp_source = Some(source.clone());
@@ -2083,22 +2102,31 @@ impl CreateIngestor {
     }
 }
 
+/// `ALTER <CONNECTOR> <ENTITY> INGESTOR <name> <operation>, …`: operations on the ingestor the
+/// head names, nested by the pair it names.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct AlterIngestor {
     pub ingestor: IngestorName,
-    pub operations: Vec<AlterIngestorOperation>,
+    pub alteration: crate::IngestorAlteration,
 }
 
+impl AlterIngestor {
+    /// The connector and entity the statement's head names.
+    pub const fn kind(&self) -> crate::IngestSourceKind {
+        self.alteration.kind()
+    }
+}
+
+/// One operation every ingestor accepts, whose `SET FROM` states a source of the entity
+/// `Source`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum AlterIngestorOperation {
-    SetSource { source: IngestSource },
-    SetClientSource { source: crate::ClientProducerSource },
+pub enum AlterIngestorOperation<Source> {
+    SetSource { source: Source },
     SetQuiesce { quiesce: IngestQuiesceMode },
-    SetDecodeUsing { codec: CodecName },
     SetTimestamp { source: IngestTimestampSource },
     DropTimestamp,
     SetFilterWhere { where_clause: crate::Expression },
@@ -2109,6 +2137,22 @@ pub enum AlterIngestorOperation {
     SetGeneralError { policy: GeneralErrorPolicy },
 }
 
+/// One operation of an ingestor that reads a transport: an operation every ingestor accepts, or
+/// the codec that decodes the transport's payloads.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum AlterTransportIngestorOperation<Source> {
+    Ingestor(AlterIngestorOperation<Source>),
+    SetDecodeUsing { codec: CodecName },
+}
+
+impl<Source> From<AlterIngestorOperation<Source>> for AlterTransportIngestorOperation<Source> {
+    fn from(operation: AlterIngestorOperation<Source>) -> Self {
+        Self::Ingestor(operation)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AlterIngestorError {
     #[error("ALTER targets ingestor `{requested}`, but the stored ingestor is `{stored}`")]
@@ -2116,21 +2160,22 @@ pub enum AlterIngestorError {
         stored: IngestorName,
         requested: IngestorName,
     },
+    #[error("the stored ingestor reads {stored}, so ALTER {requested} INGESTOR cannot alter it")]
+    KindMismatch {
+        stored: crate::IngestSourceKind,
+        requested: crate::IngestSourceKind,
+    },
     #[error("route target `{relay}` is not configured")]
     RouteTargetNotFound { relay: RelayName },
     #[error("route target `{relay}` is ambiguous because it is configured more than once")]
     RouteTargetAmbiguous { relay: RelayName },
     #[error("an ingestor must retain at least one route")]
     CannotDropLastRoute,
-    #[error("{transport} ingestors do not support ON QUIESCE {mode}")]
-    UnsupportedQuiesceMode { transport: String, mode: String },
-    #[error(
-        "SET FROM cannot change a {current} source into a {requested} source; drop the ingestor \
-         and create it again"
-    )]
-    InputKindChange { current: String, requested: String },
-    #[error("a CLIENT ingestor decodes no payloads, so it has no codec to SET DECODE USING")]
-    CodecWithoutTransport,
+    #[error("{kind} ingestors do not support ON QUIESCE {mode}")]
+    UnsupportedQuiesceMode {
+        kind: crate::IngestSourceKind,
+        mode: &'static str,
+    },
 }
 
 #[derive(
@@ -2175,12 +2220,14 @@ pub struct CreateEndpoint {
     Copy,
     PartialEq,
     Eq,
+    Hash,
     Serialize,
     Deserialize,
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    strum::Display,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EndpointType {

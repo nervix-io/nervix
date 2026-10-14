@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Pulsar client Model, the topic source and sink Models with their delivery
-//!   mode, and what each entity declares.
+//!   mode, the topic and subscription names a source reads with the rules Pulsar holds them to,
+//!   and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
@@ -21,16 +22,78 @@ use serde::{Deserialize, Serialize};
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    KafkaIngestMode, PulsarSubscriptionName, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    KafkaIngestMode, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Pulsar: unpooled CreateClientPulsar => PulsarConfigEntry);
+
+/// The longest topic Nervix consumes, in bytes.
+const PULSAR_TOPIC_MAX: usize = 1024;
+/// The longest subscription Nervix consumes through, in bytes.
+const PULSAR_SUBSCRIPTION_MAX: usize = 255;
+/// The domains a qualified topic may name, which Pulsar defines.
+const PULSAR_TOPIC_DOMAINS: [&str; 2] = ["persistent", "non-persistent"];
+/// The levels a qualified topic names after its domain: its tenant, its namespace and itself.
+const PULSAR_QUALIFIED_TOPIC_LEVELS: [&str; 3] = ["tenant", "namespace", "topic"];
+
+external_names! {
+    /// A Pulsar topic: a local name, which the connector places in its client's namespace, or a
+    /// qualified `persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`;
+    /// at most 1,024 bytes without whitespace or control characters, and with no empty level.
+    pub struct PulsarTopicName => pulsar_topic_rule;
+    /// A Pulsar subscription: 1 to 255 bytes without control characters.
+    pub struct PulsarSubscriptionName => pulsar_subscription_rule;
+}
+
+fn pulsar_topic_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, PULSAR_TOPIC_MAX)?;
+    if let Some(ch) = text
+        .chars()
+        .find(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    let Some((domain, path)) = text.split_once("://") else {
+        // The connector places a local name in its client's namespace, so a local name is one
+        // level.
+        if text.contains('/') {
+            return Err(ExternalNameError::LevelsWithoutDomain {
+                separator: '/',
+                known: &PULSAR_TOPIC_DOMAINS,
+            });
+        }
+        return Ok(());
+    };
+    // The scan reads the two domains Pulsar defines, a fixed array.
+    if !PULSAR_TOPIC_DOMAINS.contains(&domain) {
+        return Err(ExternalNameError::UnknownDomain {
+            domain: domain.to_string(),
+            known: &PULSAR_TOPIC_DOMAINS,
+        });
+    }
+    if path.split('/').any(str::is_empty) {
+        return Err(ExternalNameError::EmptyLevel { separator: '/' });
+    }
+    let levels = path.split('/').count();
+    if levels != PULSAR_QUALIFIED_TOPIC_LEVELS.len() {
+        return Err(ExternalNameError::QualifiedLevels {
+            levels,
+            expected: &PULSAR_QUALIFIED_TOPIC_LEVELS,
+        });
+    }
+    Ok(())
+}
+
+fn pulsar_subscription_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, PULSAR_SUBSCRIPTION_MAX)?;
+    refuse_control_characters(text)
+}
 
 /// One topic a Pulsar client consumes through a subscription.
 #[derive(
@@ -38,7 +101,7 @@ configured_client!(Pulsar: unpooled CreateClientPulsar => PulsarConfigEntry);
 )]
 pub struct PulsarTopicSource {
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: PulsarTopicName,
     pub subscription: PulsarSubscriptionName,
     pub instances: NonZeroU64,
     pub mode: PulsarIngestMode,
@@ -83,6 +146,8 @@ connector_sources! {
     connector Pulsar = "PULSAR";
     /// What a Pulsar source reads.
     pub enum PulsarSource;
+    /// The alterations of the ingestors that read a Pulsar entity.
+    pub enum PulsarIngestorAlteration;
     /// The entities a Pulsar source reads.
     pub enum PulsarSourceEntity {
         Topic(PulsarTopicSource) = "TOPIC", "Pulsar";

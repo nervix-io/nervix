@@ -29,8 +29,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/telemetry'
         TYPE HTTP;
-        CREATE INGESTOR telemetry_http
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR telemetry_http
+        FROM telemetry_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TIMESTAMP NOW
         TO telemetry
@@ -77,8 +77,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/metrics'
         TYPE HTTP;
-      CREATE INGESTOR metric_http
-        FROM ENDPOINT metric_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_http
+        FROM metric_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TIMESTAMP NOW
         TO metrics
@@ -129,8 +129,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/ratios'
         TYPE HTTP;
-      CREATE INGESTOR ratio_http
-        FROM ENDPOINT ratio_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR ratio_http
+        FROM ratio_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ratio_codec
         TIMESTAMP NOW
         TO ratios
@@ -198,8 +198,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/telemetry'
         TYPE HTTP;
-        CREATE INGESTOR telemetry_http
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR telemetry_http
+        FROM telemetry_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TIMESTAMP NOW
         TO telemetry

@@ -24,8 +24,8 @@ Feature: JAQ transformation
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -80,8 +80,8 @@ Feature: JAQ transformation
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -137,8 +137,8 @@ Feature: JAQ transformation
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_main QUEUE 'notifications_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -194,8 +194,8 @@ Feature: JAQ transformation
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE INGESTOR redis_notifications
-        FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR redis_notifications
+        FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -250,8 +250,8 @@ Feature: JAQ transformation
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -305,8 +305,8 @@ Feature: JAQ transformation
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-        CREATE INGESTOR nats_notifications
-        FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+        CREATE NATS SUBJECT INGESTOR nats_notifications
+        FROM nats_main SUBJECT 'notifications_{{test_id}}' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -360,8 +360,8 @@ Feature: JAQ transformation
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
         };
-        CREATE INGESTOR zeromq_notifications
-        FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
+        CREATE ZEROMQ PULL INGESTOR zeromq_notifications
+        FROM zeromq_main MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -417,8 +417,8 @@ Feature: JAQ transformation
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE INGESTOR sqs_notifications
-        FROM SQS sqs_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE SQS QUEUE INGESTOR sqs_notifications
+        FROM sqs_main QUEUE 'notifications_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -471,8 +471,8 @@ Feature: JAQ transformation
         ON edge
         PATH '/ws'
         TYPE WEBSOCKETS;
-        CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -528,9 +528,9 @@ Feature: JAQ transformation
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_main EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_main EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -579,8 +579,8 @@ Feature: JAQ transformation
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
-        CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+        CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -632,9 +632,9 @@ Feature: JAQ transformation
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR prom_samples
-        FROM PROMETHEUS prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING sample_codec
+        CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples

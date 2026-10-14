@@ -38,8 +38,8 @@ concrete branch per sensor. A reading the ingestor cannot admit becomes a reject
 of an error in a log:
 
 ```nspl
-CREATE INGESTOR simulated_readings
-  FROM CLIENT SCHEMA reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
+CREATE CLIENT PRODUCER INGESTOR simulated_readings
+  FROM SCHEMA reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
   TIMESTAMP AT occurred_at
   TO readings
     INHERIT ALL
@@ -235,7 +235,7 @@ produces and consumes, and prints the ingestor's admission, producers, outstandi
 bytes, and the emitter's consumers and retained batches:
 
 ```text
-INSPECT simulated_readings source=CLIENT schema=reading owner=node-2 status=running admission=open producers=1 outstanding_batches=1 outstanding_bytes=110592 admitted_batches=1
+INSPECT simulated_readings from=CLIENT PRODUCER schema=reading owner=node-2 status=running admission=open producers=1 outstanding_batches=1 outstanding_bytes=110592 admitted_batches=1
 INSPECT emitter=observed_readings consumers=1 retained_batches=2
 ```
 

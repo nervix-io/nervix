@@ -514,8 +514,8 @@ CREATE CLIENT lakehouse_catalog
     'warehouse' = 's3://nervix-iceberg/warehouse'
   };
 
-CREATE INGESTOR iot_device_activity
-  FROM MQTT mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+CREATE MQTT TOPIC INGESTOR iot_device_activity
+  FROM mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 MODE NO ACK ON QUIESCE DROP
   DECODE USING device_activity_cbor_codec
   TIMESTAMP AT ts
   TO device_activity_landing
@@ -529,8 +529,8 @@ CREATE INGESTOR iot_device_activity
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE INGESTOR edge_server_activity
-  FROM NATS nats_edge SUBJECT datalake_edge_activity QUEUE GROUP datalake_edge_servers INSTANCES 2 MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+CREATE NATS SUBJECT INGESTOR edge_server_activity
+  FROM nats_edge SUBJECT 'datalake_edge_activity' QUEUE GROUP 'datalake_edge_servers' INSTANCES 2 MODE NO ACK ON QUIESCE DROP
   DECODE USING edge_activity_protobuf_codec
   TIMESTAMP AT ts
   TO edge_activity_landing
@@ -545,8 +545,8 @@ CREATE INGESTOR edge_server_activity
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE INGESTOR auth_server_activity
-  FROM KAFKA kafka_auth TOPIC datalake_auth_activity OFFSET BY CONSUMER GROUP datalake_demo_auth INSTANCES 4 MODE NO_ACK PARALLEL ON QUIESCE SUSPEND
+CREATE KAFKA TOPIC INGESTOR auth_server_activity
+  FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' INSTANCES 4 MODE NO ACK ON QUIESCE SUSPEND
   DECODE USING auth_activity_json_codec
   TIMESTAMP AT ts
   TO auth_activity_landing

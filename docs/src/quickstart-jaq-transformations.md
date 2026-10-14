@@ -52,8 +52,8 @@ CREATE RELAY partner_orders SCHEMA order_record UNBRANCHED;
 
 CREATE ENDPOINT partner_ingress ON edge PATH '/partner-orders' TYPE HTTP;
 
-CREATE INGESTOR partner_order_source
-  FROM ENDPOINT partner_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR partner_order_source
+  FROM partner_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING partner_order_codec
   TO partner_orders
     INHERIT ALL

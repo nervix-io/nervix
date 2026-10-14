@@ -34,8 +34,8 @@ Feature: Altering schemas on a running domain
       CREATE VHOST edge http-{{test_id}}-alter.example.com;
       CREATE ENDPOINT running_event_ingress ON edge PATH '/alter-running' TYPE HTTP;
 
-      CREATE INGESTOR running_event_source
-        FROM ENDPOINT running_event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR running_event_source
+        FROM running_event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING running_event_codec
         TO running_events
         INHERIT ALL
@@ -121,8 +121,8 @@ Feature: Altering schemas on a running domain
       CREATE VHOST timeout_edge http-{{test_id}}-alter-timeout.example.com;
       CREATE ENDPOINT timeout_ingress
         ON timeout_edge PATH '/alter-timeout' TYPE HTTP;
-      CREATE INGESTOR timeout_source
-        FROM ENDPOINT timeout_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR timeout_source
+        FROM timeout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timeout_event_codec
         TO timeout_events
         INHERIT ALL
@@ -227,8 +227,8 @@ Feature: Altering schemas on a running domain
       CREATE ENDPOINT stable_ingress
         ON state_edge PATH '/stable' TYPE HTTP;
 
-      CREATE INGESTOR mutable_source
-        FROM ENDPOINT mutable_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR mutable_source
+        FROM mutable_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING mutable_event_codec
         TO mutable_state
         INHERIT ALL
@@ -237,8 +237,8 @@ Feature: Altering schemas on a running domain
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR stable_source
-        FROM ENDPOINT stable_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR stable_source
+        FROM stable_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stable_event_codec
         TO stable_state
         INHERIT ALL
@@ -340,8 +340,8 @@ Feature: Altering schemas on a running domain
       CREATE VHOST rollback_edge http-{{test_id}}-rollback.example.com;
       CREATE ENDPOINT rollback_ingress ON rollback_edge PATH '/alter-rollback' TYPE HTTP;
 
-      CREATE INGESTOR rollback_source
-        FROM ENDPOINT rollback_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR rollback_source
+        FROM rollback_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING rollback_event_codec
         TO rollback_events
         INHERIT ALL

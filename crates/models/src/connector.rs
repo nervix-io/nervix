@@ -3,10 +3,12 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The kind of every connector, the union of source Models and the union of sink Models
-//!   nested connector by entity, the kinds that name each connector and entity pair, and what a
-//!   pair declares whatever its statement says: header access, the metadata namespace, where a
-//!   source executes, what a sink requires of its emitter, and what a body references. Each
-//!   connector's own module owns its client Model, its entity Models and their modes.
+//!   nested connector by entity, the kinds that name each connector and entity pair, the
+//!   alterations of the ingestors that read each pair, the shape of the names an external system
+//!   gives the entities a source reads, and what a pair declares whatever its statement says:
+//!   header access, the metadata namespace, where a source executes, what a sink requires of its
+//!   emitter, and what a body references. Each connector's own module owns its client Model, its
+//!   entity Models, their modes and the rules its external names follow.
 //! - **Depends on.** Validated names, expressions, schema types, and the acknowledgement, retry and
 //!   batching vocabulary the entity Models share.
 //! - **Must not know.** How a connector is planned, validated, hosted or driven, or any connector
@@ -25,8 +27,8 @@
 mod clickhouse;
 mod client;
 mod configured_client;
-mod endpoint;
 mod entity_union;
+mod external_name;
 mod http;
 mod iceberg;
 mod kafka;
@@ -49,22 +51,34 @@ mod syslog;
 mod websockets;
 mod zeromq;
 
-use strum::{AsRefStr, EnumIter, IntoStaticStr};
+use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
-    clickhouse::*, client::*, configured_client::*, endpoint::*, http::*, iceberg::*, kafka::*,
-    mongodb::*, mqtt::*, mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*,
-    rabbitmq::*, redis::*, sentry::*, sink::*, source::*, source_metadata::*, sqs::*, syslog::*,
-    websockets::*, zeromq::*,
+    clickhouse::*, client::*, configured_client::*, external_name::ExternalNameError, http::*,
+    iceberg::*, kafka::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*, postgres::*,
+    prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*, sink::*, source::*,
+    source_metadata::*, sqs::*, syslog::*, websockets::*, zeromq::*,
 };
+pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, source::AlteredIngestorSource};
 
 /// The kind of external system, or of Nervix-served boundary, that a client connects to and a
 /// source or sink exchanges data with.
 ///
-/// The keyword of a kind is how NSPL spells it, and it is what `DESCRIBE` and diagnostics name a
-/// source, a sink or a client by.
+/// The keyword of a kind is how NSPL spells it, and it is what diagnostics name a client by and
+/// what the phrase naming a source or a sink starts with. A kind displays as its keyword.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, AsRefStr, IntoStaticStr, EnumIter,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    AsRefStr,
+    IntoStaticStr,
+    EnumIter,
+    Display,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConnectorKind {
@@ -73,9 +87,6 @@ pub enum ConnectorKind {
     Client,
     Http,
     Websockets,
-    /// An endpoint this cluster serves. The endpoint Model states whether it is an HTTP or a
-    /// WebSockets endpoint, so a source that reads one names this kind and the endpoint.
-    Endpoint,
     Kafka,
     Pulsar,
     #[strum(serialize = "RABBITMQ")]

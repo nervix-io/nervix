@@ -2,7 +2,7 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** The body of a ZeroMQ ingestor source: its client, delivery mode and quiesce mode.
+//! - **Owns.** The body of a `ZEROMQ PULL` ingestor: its client, delivery mode and quiesce mode.
 //! - **Depends on.** The shared ingestor clauses and the ZeroMQ vocabulary.
 //! - **Must not know.** The ZeroMQ driver or how a socket is bound or connected.
 
@@ -12,33 +12,25 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{IngestSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource};
+use nervix_models::{ZeroMqIngestMode, ZeroMqPullSource};
 
-use super::delivery::flexible_quiesce_clause;
+use super::delivery::{flexible_quiesce_clause, no_ack};
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, client_ref, kw, sequential_ack_window},
+    parser_support::{ParseError, client_ref, kw},
 };
 
-pub(super) fn zeromq_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], ZeroMqIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(ZeroMqIngestMode::NoAckSequential)
-}
-
-pub(super) fn zeromq_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Zeromq)
-        .ignore_then(client_ref())
+/// `FROM <client> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …|DROP`.
+pub(super) fn pull_body<'src>()
+-> impl Parser<'src, &'src [Token], ZeroMqPullSource, extra::Err<ParseError<'src>>> + Clone {
+    client_ref()
         .then_ignore(kw(Identifier::Mode))
-        .then(zeromq_mode_parser())
+        .then(no_ack().to(ZeroMqIngestMode::NoAck))
         .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| {
-            IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                client,
-                mode,
-                quiesce,
-            }))
+        .map(|((client, mode), quiesce)| ZeroMqPullSource {
+            client,
+            mode,
+            quiesce,
         })
+        .boxed()
 }

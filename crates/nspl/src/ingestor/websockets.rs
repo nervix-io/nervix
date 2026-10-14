@@ -2,9 +2,12 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** The body of a WebSockets ingestor source: its client, delivery mode and quiesce mode.
-//! - **Depends on.** The shared ingestor clauses and the WebSockets vocabulary.
-//! - **Must not know.** The WebSockets driver or how a connection is opened or signaled.
+//! - **Owns.** The bodies of a `WEBSOCKETS CONNECTION` ingestor — its client, delivery mode and
+//!   quiesce mode — and of a `WEBSOCKETS ENDPOINT` ingestor.
+//! - **Depends on.** The shared ingestor clauses, the endpoint intake body and the WebSockets
+//!   vocabulary.
+//! - **Must not know.** The WebSockets driver, how a connection is opened or signaled, or how an
+//!   endpoint is served.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,35 +15,46 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{
-    IngestSource, WebsocketsConnectionSource, WebsocketsIngestMode, WebsocketsSource,
-};
+use nervix_models::{WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode};
 
-use super::delivery::push_quiesce_clause;
+use super::{
+    delivery::{no_ack, push_quiesce_clause},
+    endpoint::{EndpointIntake, intake},
+};
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, client_ref, kw, sequential_ack_window},
+    parser_support::{ParseError, client_ref, kw},
 };
 
-pub(super) fn websockets_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], WebsocketsIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(WebsocketsIngestMode::NoAckSequential)
+/// `FROM <client> MODE NO ACK ON QUIESCE BUFFER …|DROP`.
+pub(super) fn connection_body<'src>()
+-> impl Parser<'src, &'src [Token], WebsocketsConnectionSource, extra::Err<ParseError<'src>>> + Clone
+{
+    client_ref()
+        .then_ignore(kw(Identifier::Mode))
+        .then(no_ack().to(WebsocketsIngestMode::NoAck))
+        .then(push_quiesce_clause())
+        .map(|((client, mode), quiesce)| WebsocketsConnectionSource {
+            client,
+            mode,
+            quiesce,
+        })
+        .boxed()
 }
 
-pub(super) fn websockets_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Websockets)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then(websockets_mode_parser())
-        .then(push_quiesce_clause())
-        .map(|((client, mode), quiesce)| {
-            IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
-                client,
-                mode,
-                quiesce,
-            }))
-        })
+/// The body of an ingestor of a WebSockets endpoint this cluster serves.
+pub(super) fn endpoint_body<'src>()
+-> impl Parser<'src, &'src [Token], WebsocketsEndpointSource, extra::Err<ParseError<'src>>> + Clone
+{
+    intake().map(
+        |EndpointIntake {
+             endpoint,
+             mode,
+             quiesce,
+         }| WebsocketsEndpointSource {
+            endpoint,
+            mode,
+            quiesce,
+        },
+    )
 }

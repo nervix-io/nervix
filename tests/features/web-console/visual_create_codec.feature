@@ -36,7 +36,7 @@ Feature: Web console visual codec and signaling protocol creation
       CREATE RELAY visual_inbox SCHEMA visual_payload UNBRANCHED;
       CREATE VHOST visual_edge http-{{test_id}}.example.com;
       CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR visual_source FROM ENDPOINT visual_ingest MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR visual_source FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:

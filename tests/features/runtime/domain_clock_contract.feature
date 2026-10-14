@@ -28,8 +28,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR http2_clock_source
-        FROM ENDPOINT http2_clock_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http2_clock_source
+        FROM http2_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING http2_clock_request_codec
         TIMESTAMP NOW
         TO http2_clock_observations
@@ -123,8 +123,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR authority_clock_source
-        FROM ENDPOINT authority_clock_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR authority_clock_source
+        FROM authority_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING authority_clock_request_codec
         TIMESTAMP NOW
         TO authority_clock_observations
@@ -373,8 +373,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR joined_clock_source
-        FROM ENDPOINT joined_clock_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR joined_clock_source
+        FROM joined_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING joined_clock_request_codec
         TIMESTAMP NOW
         TO joined_clock_observations
@@ -425,9 +425,9 @@ Feature: Domain clock contract regressions
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR clock_source_reader
-        FROM HTTP clock_source EVERY 1h
-        ON QUIESCE SUSPEND DECODE USING clock_source_codec
+      CREATE HTTP REQUEST INGESTOR clock_source_reader
+        FROM clock_source EVERY 1h
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING clock_source_codec
         TIMESTAMP NOW
         TO clock_source_records
           INHERIT ALL
@@ -478,9 +478,9 @@ Feature: Domain clock contract regressions
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR cadence_source_reader
-        FROM HTTP cadence_source EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING cadence_source_codec
+      CREATE HTTP REQUEST INGESTOR cadence_source_reader
+        FROM cadence_source EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_source_codec
         TIMESTAMP NOW
         TO cadence_source_records
           INHERIT ALL
@@ -537,9 +537,9 @@ Feature: Domain clock contract regressions
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/350',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR cadence_reader
-        FROM PROMETHEUS cadence_prometheus QUERY 'vector(42.5)' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING cadence_sample_codec
+      CREATE PROMETHEUS QUERY INGESTOR cadence_reader
+        FROM cadence_prometheus QUERY 'vector(42.5)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_sample_codec
         TIMESTAMP NOW
         TO cadence_observations
           SET due = message.due,
@@ -596,9 +596,9 @@ Feature: Domain clock contract regressions
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR rebound_reader
-        FROM PROMETHEUS rebound_prometheus QUERY 'vector(42.5)' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING rebound_sample_codec
+      CREATE PROMETHEUS QUERY INGESTOR rebound_reader
+        FROM rebound_prometheus QUERY 'vector(42.5)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING rebound_sample_codec
         TIMESTAMP NOW
         TO rebound_observations
           SET due = message.due,
@@ -654,8 +654,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR clock_request_source
-        FROM ENDPOINT clock_request_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR clock_request_source
+        FROM clock_request_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_request_codec
         TIMESTAMP NOW
         TO clock_observations
@@ -771,8 +771,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR historical_event_source
-        FROM ENDPOINT historical_event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR historical_event_source
+        FROM historical_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING historical_event_codec
         TIMESTAMP AT occurred_at
         TO historical_events
@@ -836,8 +836,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/stamp'
         TYPE HTTP;
-      CREATE INGESTOR stamp_source
-        FROM ENDPOINT stamp_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR stamp_source
+        FROM stamp_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stamp_request_codec
         TIMESTAMP NOW
         TO stamp_requests

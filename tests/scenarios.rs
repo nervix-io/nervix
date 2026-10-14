@@ -4917,30 +4917,40 @@ impl IngestorLogicTransportFixture {
         }
     }
 
+    /// The connector and entity the ingestor's head names.
+    fn head_fragment(self) -> &'static str {
+        match self {
+            Self::HttpEndpoint => "HTTP ENDPOINT",
+            Self::WebsocketEndpoint => "WEBSOCKETS ENDPOINT",
+            Self::Kafka => "KAFKA TOPIC",
+            Self::Mqtt => "MQTT TOPIC",
+            Self::Nats => "NATS SUBJECT",
+            Self::ZeroMq => "ZEROMQ PULL",
+        }
+    }
+
     fn source_fragment(self) -> &'static str {
         match self {
-            Self::HttpEndpoint | Self::WebsocketEndpoint => {
-                "FROM ENDPOINT logic_endpoint MODE NO_ACK SEQUENTIAL"
-            }
+            Self::HttpEndpoint | Self::WebsocketEndpoint => "FROM logic_endpoint MODE NO ACK",
             Self::Kafka => {
-                r#"FROM KAFKA logic_kafka
-        TOPIC logic_notifications_{{test_id}}
+                r#"FROM logic_kafka
+        TOPIC 'logic_notifications_{{test_id}}'
         OFFSET BY DOMAIN
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms"#
             }
             Self::Mqtt => {
-                r#"FROM MQTT logic_mqtt
-        TOPIC logic_notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL"#
+                r#"FROM logic_mqtt
+        TOPIC 'logic_notifications_{{test_id}}'
+        MODE NO ACK"#
             }
             Self::Nats => {
-                r#"FROM NATS logic_nats
-        SUBJECT logic_notifications_{{test_id}}
-        QUEUE GROUP logic_notifications_group_{{test_id}}
+                r#"FROM logic_nats
+        SUBJECT 'logic_notifications_{{test_id}}'
+        QUEUE GROUP 'logic_notifications_group_{{test_id}}'
         INSTANCES 1
-        MODE NO_ACK SEQUENTIAL"#
+        MODE NO ACK"#
             }
-            Self::ZeroMq => "FROM ZEROMQ logic_zeromq MODE NO_ACK SEQUENTIAL",
+            Self::ZeroMq => "FROM logic_zeromq MODE NO ACK",
         }
     }
 
@@ -5648,7 +5658,7 @@ fn build_ingestor_logic_commands(
         TTL 5m;
       CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
       {}
-      CREATE INGESTOR logic_ingestor
+      CREATE {} INGESTOR logic_ingestor
         {}
         ON QUIESCE {}
         DECODE USING {}
@@ -5664,6 +5674,7 @@ fn build_ingestor_logic_commands(
 "#,
         output_schema.schema_name(),
         transport.setup_fragment(),
+        transport.head_fragment(),
         transport.source_fragment(),
         transport.quiesce_fragment(),
         output_schema.input_codec_name(),
@@ -7403,8 +7414,8 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         CREATE RELAY {output_relay} SCHEMA counted_output_event{relay_branching};
         CREATE VHOST edge wasm-reset-{{{{test_id}}}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-        CREATE INGESTOR counted_source
-          FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR counted_source
+          FROM ingress MODE NO ACK
           ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec
           TO counted_input_events
           INHERIT ALL
@@ -16293,45 +16304,58 @@ impl UnacknowledgedSourceFixture {
         }
     }
 
+    /// The connector and entity the ingestor's head names.
+    fn head_fragment(self) -> &'static str {
+        match self {
+            Self::Kafka => "KAFKA TOPIC",
+            Self::Mqtt => "MQTT TOPIC",
+            Self::Nats => "NATS SUBJECT",
+            Self::Pulsar => "PULSAR TOPIC",
+            Self::RedisPubSub => "REDIS PUBSUB",
+            Self::Syslog => "SYSLOG LISTENER",
+            Self::WebsocketClient => "WEBSOCKETS CONNECTION",
+            Self::ZeroMq => "ZEROMQ PULL",
+        }
+    }
+
     /// What the ingestor reads, in the transport's unacknowledged mode, and its quiesce mode.
     fn source_fragment(self) -> &'static str {
         match self {
             Self::Kafka => {
-                "FROM KAFKA unacknowledged_client TOPIC unacknowledged_{{test_id}}
-          OFFSET BY CONSUMER GROUP unacknowledged_group_{{test_id}}
-          MODE NO_ACK PARALLEL
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unacknowledged_group_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::Mqtt => {
-                "FROM MQTT unacknowledged_client TOPIC unacknowledged_{{test_id}} MODE NO_ACK \
-                 SEQUENTIAL
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Nats => {
-                "FROM NATS unacknowledged_client SUBJECT unacknowledged_{{test_id}}
-          QUEUE GROUP unacknowledged_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client SUBJECT 'unacknowledged_{{test_id}}'
+          QUEUE GROUP 'unacknowledged_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Pulsar => {
-                "FROM PULSAR unacknowledged_client TOPIC unacknowledged_{{test_id}}
-          SUBSCRIPTION unacknowledged_{{test_id}} INSTANCES 1 MODE NO_ACK PARALLEL
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
-                "FROM REDIS PUBSUB unacknowledged_client CHANNEL unacknowledged_{{test_id}}
-          MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client CHANNEL 'unacknowledged_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Syslog => {
-                "FROM SYSLOG unacknowledged_client MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::WebsocketClient => {
-                "FROM WEBSOCKETS unacknowledged_client MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::ZeroMq => {
-                "FROM ZEROMQ unacknowledged_client MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client MODE NO ACK
         ON QUIESCE SUSPEND"
             }
         }
@@ -16346,7 +16370,7 @@ impl UnacknowledgedSourceFixture {
       CREATE CODEC unacknowledged_codec FROM JSON TO SCHEMA unacknowledged_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unacknowledged_events SCHEMA unacknowledged_event UNBRANCHED;{client}
-      CREATE INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}
+      CREATE {head} INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}
         {source}
         DECODE USING unacknowledged_codec
         TO unacknowledged_events INHERIT ALL UNBRANCHED
@@ -16354,6 +16378,7 @@ impl UnacknowledgedSourceFixture {
       CREATE SUBSCRIPTION unacknowledged_subscription TO unacknowledged_events;
 "#,
             client = self.client_fragment(),
+            head = self.head_fragment(),
             source = self.source_fragment(),
         )
     }

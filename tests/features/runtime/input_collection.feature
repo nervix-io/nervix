@@ -29,8 +29,8 @@ Feature: Runtime node input collection
       ON edge
       PATH '/input-collection'
       TYPE HTTP;
-      CREATE INGESTOR input_collection_source
-      FROM ENDPOINT input_collection_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR input_collection_source
+      FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL
@@ -115,8 +115,8 @@ Feature: Runtime node input collection
       ON edge
       PATH '/input-collection'
       TYPE HTTP;
-      CREATE INGESTOR input_collection_source
-      FROM ENDPOINT input_collection_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR input_collection_source
+      FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL

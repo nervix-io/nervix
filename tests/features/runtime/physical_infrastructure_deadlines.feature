@@ -30,9 +30,9 @@ Feature: Physical infrastructure deadlines under domain pacing
           'method' = 'GET',
           'timeout_ms' = 30000
         };
-      CREATE INGESTOR physical_poll_reader
-        FROM HTTP physical_poll_source EVERY 1h
-        ON QUIESCE SUSPEND DECODE USING physical_poll_codec
+      CREATE HTTP REQUEST INGESTOR physical_poll_reader
+        FROM physical_poll_source EVERY 1h
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_poll_codec
         TIMESTAMP NOW
         TO physical_poll_records
           INHERIT ALL
@@ -97,9 +97,9 @@ Feature: Physical infrastructure deadlines under domain pacing
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10000',
           'timeout_ms' = 30000
         };
-      CREATE INGESTOR physical_prometheus_reader
-        FROM PROMETHEUS physical_prometheus_source QUERY 'vector(42.5)' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING physical_prometheus_codec
+      CREATE PROMETHEUS QUERY INGESTOR physical_prometheus_reader
+        FROM physical_prometheus_source QUERY 'vector(42.5)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_prometheus_codec
         TIMESTAMP NOW
         TO physical_prometheus_samples
           INHERIT ALL
@@ -149,9 +149,9 @@ Feature: Physical infrastructure deadlines under domain pacing
           'method' = 'GET',
           'timeout_ms' = 250
         };
-      CREATE INGESTOR physical_timeout_reader
-        FROM HTTP physical_timeout_source EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING physical_timeout_codec
+      CREATE HTTP REQUEST INGESTOR physical_timeout_reader
+        FROM physical_timeout_source EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_timeout_codec
         TIMESTAMP NOW
         TO physical_timeout_records
           INHERIT ALL
@@ -239,8 +239,8 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON edge
         PATH '/input'
         TYPE HTTP;
-      CREATE INGESTOR physical_wait_state_source
-        FROM ENDPOINT physical_wait_state_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_state_source
+        FROM physical_wait_state_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec
         TIMESTAMP NOW
         TO physical_wait_preferences
@@ -250,8 +250,8 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR physical_wait_input_source
-        FROM ENDPOINT physical_wait_input_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_input_source
+        FROM physical_wait_input_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_notification_codec
         TIMESTAMP NOW
         TO physical_wait_pending
@@ -341,8 +341,8 @@ Feature: Physical infrastructure deadlines under domain pacing
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR physical_ack_source
-        FROM KAFKA physical_ack_kafka TOPIC physical_ack_in_{{test_id}} OFFSET BY CONSUMER GROUP physical_ack_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+      CREATE KAFKA TOPIC INGESTOR physical_ack_source
+        FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING physical_ack_codec
         TIMESTAMP NOW
         TO physical_ack_records

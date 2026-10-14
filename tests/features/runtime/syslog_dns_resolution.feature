@@ -26,8 +26,8 @@ Feature: Syslog name resolution
         'protocol' = 'udp',
         'addr' = '{{syslog_dns_addr}}'
       };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING syslog_codec
         TO syslog_events
         INHERIT ALL
@@ -85,13 +85,13 @@ Feature: Syslog name resolution
       CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_forwarded_addr}}'
       };
-      CREATE INGESTOR syslog_input_ingestor
-        FROM SYSLOG syslog_input MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND
+      CREATE SYSLOG LISTENER INGESTOR syslog_input_ingestor
+        FROM syslog_input MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING syslog_codec TO input_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR syslog_output_ingestor
-        FROM SYSLOG syslog_output MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND
+      CREATE SYSLOG LISTENER INGESTOR syslog_output_ingestor
+        FROM syslog_output MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING syslog_codec TO delivered_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -148,13 +148,13 @@ Feature: Syslog name resolution
       CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_dns_addr}}', 'framing' = 'octet-counting'
       };
-      CREATE INGESTOR syslog_input_ingestor
-        FROM SYSLOG syslog_input MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND
+      CREATE SYSLOG LISTENER INGESTOR syslog_input_ingestor
+        FROM syslog_input MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING syslog_codec TO input_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR syslog_output_ingestor
-        FROM SYSLOG syslog_output MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND
+      CREATE SYSLOG LISTENER INGESTOR syslog_output_ingestor
+        FROM syslog_output MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING syslog_codec TO delivered_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -220,13 +220,13 @@ Feature: Syslog name resolution
         'tls_key_file' = '{{syslog_tls}}/tls.key',
         'tls_ca_file' = '{{syslog_tls}}/ca.crt'
       };
-      CREATE INGESTOR syslog_input_ingestor
-        FROM SYSLOG syslog_input MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND
+      CREATE SYSLOG LISTENER INGESTOR syslog_input_ingestor
+        FROM syslog_input MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING syslog_codec TO input_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR syslog_output_ingestor
-        FROM SYSLOG syslog_output MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND
+      CREATE SYSLOG LISTENER INGESTOR syslog_output_ingestor
+        FROM syslog_output MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING syslog_codec TO delivered_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

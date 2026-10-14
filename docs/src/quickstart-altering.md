@@ -83,7 +83,9 @@ Two rules worth knowing before you lean on this:
   cannot sneak a schema change past domain quiescing by recreating the relay.
 
 Ingestors and emitters have their own operation sets —
-[Altering Ingestors](ingestors.md#altering-ingestors) (every ingestor change is entity-pause) and
+[Altering Ingestors](ingestors.md#altering-ingestors) (an ingestor's `ALTER` repeats its connector
+and entity, such as `ALTER KAFKA TOPIC INGESTOR kafka_orders`, and every ingestor change is
+entity-pause) and
 [Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; sink, client, and
 codec changes are entity-pause; source-list membership changes are domain-pause). Processor
 operations are covered under

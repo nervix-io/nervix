@@ -200,8 +200,8 @@ impl ScheduledNodeTask {
 )]
 mod tests {
     use nervix_models::{
-        ConsumerGroupName, CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy,
-        IngestQuiesceMode, IngestSource, KafkaIngestMode, KafkaOffsetMode, KafkaSource,
+        CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode,
+        IngestSource, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSource,
         KafkaTopicSource, Model, OutputBranch, ParseAsType, ProcessorOutputs,
     };
     use nonzero_ext::nonzero;
@@ -220,7 +220,7 @@ mod tests {
                     topic: named("events"),
                     offset_mode,
                     instances: nonzero!(1u64),
-                    mode: KafkaIngestMode::NoAckParallel,
+                    mode: KafkaIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 codec: named("payload_codec"),
@@ -253,7 +253,7 @@ mod tests {
                 kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain),
                 kafka_ingestor(
                     "group_offsets",
-                    KafkaOffsetMode::ConsumerGroup(named::<ConsumerGroupName>("group")),
+                    KafkaOffsetMode::ConsumerGroup(named::<KafkaConsumerGroupName>("group")),
                 ),
             ],
         );

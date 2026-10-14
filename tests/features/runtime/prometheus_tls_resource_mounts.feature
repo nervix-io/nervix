@@ -41,9 +41,9 @@ Feature: Prometheus TLS resource mounts
           'addr' = '{{prometheus_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR prom_samples
-        FROM PROMETHEUS prom_tls QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")' EVERY 200ms
-        ON QUIESCE SUSPEND DECODE USING sample_codec
+        CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_tls QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")' EVERY 200ms
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples

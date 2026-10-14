@@ -29,8 +29,8 @@ Feature: Junction metrics
       ON edge
       PATH '/junction-metrics'
       TYPE HTTP;
-      CREATE INGESTOR junction_metrics_source
-      FROM ENDPOINT junction_metrics_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR junction_metrics_source
+      FROM junction_metrics_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL

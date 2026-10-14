@@ -24,7 +24,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     BranchName, CanonicalNsplError, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    EndpointSourceEntity, IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
+    IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
     RequestedResourceVersion, ResourceName, ResourceVersionStatus, SchemaField,
 };
 
@@ -124,7 +124,8 @@ impl<'a> ConfiguredQuery<'a> {
                 );
             }
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
-            ChoiceTarget::IngestHttpSource
+            ChoiceTarget::IngestHttpRequestSource
+            | ChoiceTarget::IngestHttpEndpointSource
             | ChoiceTarget::IngestKafkaSource
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
@@ -134,8 +135,8 @@ impl<'a> ConfiguredQuery<'a> {
             | ChoiceTarget::IngestPrometheusSource
             | ChoiceTarget::IngestZeroMqSource
             | ChoiceTarget::IngestSqsSource
-            | ChoiceTarget::IngestEndpointSource
-            | ChoiceTarget::IngestWebsocketsSource
+            | ChoiceTarget::IngestWebsocketsConnectionSource
+            | ChoiceTarget::IngestWebsocketsEndpointSource
             | ChoiceTarget::IngestSyslogSource => return None,
         };
         let [
@@ -395,20 +396,19 @@ impl ConfiguredChoices {
                         Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_nspl(),
                     )?
                 }
-                (
-                    ConfiguredQuestion::IngestSource(IngestSourceKind::Endpoint(
-                        EndpointSourceEntity::Endpoint,
-                    )),
-                    Model::Endpoint(endpoint),
-                ) => ModelCandidate::new(
-                    NodeRef::new(ModelKind::Endpoint, &endpoint.name),
-                    format!("{:?} endpoint", endpoint.endpoint_type),
-                    "Endpoint source",
-                    model.to_canonical_nspl(),
-                )?,
+                (ConfiguredQuestion::IngestSource(kind), Model::Endpoint(endpoint))
+                    if kind.capabilities().reference.admits(model) =>
+                {
+                    ModelCandidate::new(
+                        NodeRef::new(ModelKind::Endpoint, &endpoint.name),
+                        format!("{} endpoint", endpoint.endpoint_type),
+                        "Endpoint source",
+                        model.to_canonical_nspl(),
+                    )?
+                }
                 (ConfiguredQuestion::IngestSource(kind), model)
                     if model.kind() == ModelKind::Client
-                        && model.connector_kind() == kind.client_connector() =>
+                        && kind.capabilities().reference.admits(model) =>
                 {
                     ModelCandidate::new(
                         model.node_ref(),
@@ -813,13 +813,13 @@ mod tests {
     use nervix_models::{
         AvroType, BranchEviction, BranchName, CodecName, CodecWireFormat, CreateBranch,
         CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWireSchema, DomainName, EndpointSourceEntity, FieldName, HttpSourceEntity, JsonType,
-        KafkaSourceEntity, MaterializedRelayState, Model, ModelKind, ModelName, NodeRef,
-        ParseAsType, RelayBranching, RelayName, RequestedResourceVersion, ResourceName,
-        ResourceUpload, ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState,
-        ResourceUploads, ResourceVersionCounter, ResourceVersionStatus, SchemaField, SchemaName,
-        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat,
-        UserName, VhostName, WireSchemaField, WireSchemaName, WireSchemaStrictness,
+        CreateWireSchema, DomainName, FieldName, HttpSourceEntity, JsonType, KafkaSourceEntity,
+        MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
+        RelayName, RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
+        ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
+        ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
+        WebsocketsSourceEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -1120,6 +1120,13 @@ mod tests {
                 endpoint_type: EndpointType::Http,
                 signaling_protocol: None,
             }),
+            Model::Endpoint(CreateEndpoint {
+                name: EndpointName::parse("socket").assured("valid endpoint"),
+                on_vhost: VhostName::parse("host").assured("valid VHOST"),
+                path: "/ws".into(),
+                endpoint_type: EndpointType::Websockets,
+                signaling_protocol: None,
+            }),
             Model::Codec(CreateCodec {
                 name: CodecName::parse("decode").assured("valid codec"),
                 wire_format: CodecWireFormat::JaqNative {
@@ -1173,10 +1180,16 @@ mod tests {
             ["kafka_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(
-                IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint)
-            )),
+            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http(
+                HttpSourceEntity::Endpoint
+            ))),
             ["listener"]
+        );
+        assert_eq!(
+            labels(ConfiguredQuestion::IngestSource(
+                IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint)
+            )),
+            ["socket"]
         );
         assert_eq!(labels(ConfiguredQuestion::IngestCodecs), ["decode"]);
     }

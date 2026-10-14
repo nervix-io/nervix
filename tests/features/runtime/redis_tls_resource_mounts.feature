@@ -38,8 +38,8 @@ Feature: Redis TLS resource mounts
           'addr' = '{{redis_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR redis_notifications
-        FROM REDIS PUBSUB redis_tls CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR redis_notifications
+        FROM redis_tls CHANNEL 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
