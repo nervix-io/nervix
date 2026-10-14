@@ -1315,6 +1315,8 @@ finish() {
             diagnostics/image-package/result.json diagnostics/image-package/stdout.txt \
             diagnostics/image-package/stderr.txt diagnostics/image-package/inspect.json \
             diagnostics/image-package/inspect.stderr \
+            diagnostics/startup-status/result.json diagnostics/startup-status/stdout.txt \
+            diagnostics/startup-status/stderr.txt public/cluster-status.attempt.txt \
             crash/kill-events.ndjson crash/all-node-events.ndjson \
             crash/killed.json crash/held.json \
             crash/started.json crash/final.json crash/before-all-nodes.json \
@@ -2068,15 +2070,20 @@ if [[ "${node_count}" == "3" ]]; then
     node_hosts+=(nervix-2 nervix-3)
 fi
 wait_for "public cluster status for ${node_count} node(s)" 120 cluster_status_ready
-cp "${artifact_dir}/public/cluster-status.attempt.txt" \
-    "${artifact_dir}/public/cluster-status.txt"
+phase "startup status publication"
+# shellcheck source=startup-status.sh
+source "${script_dir}/startup-status.sh"
+failure_category=controller
+publish_startup_status
+failure_category=unclassified
 
 phase "image identity verification"
-mapfile -t node_containers < <(
-    docker container ls --quiet \
+node_container_ids="$(
+    run_bounded 20 docker container ls --quiet \
         --filter "label=io.nervix.chaos.run=${run_id}" \
         --filter 'label=io.nervix.chaos.role=node'
-)
+)"
+mapfile -t node_containers < <(printf '%s' "${node_container_ids}")
 [[ "${#node_containers[@]}" -eq "${node_count}" ]] \
     || { printf 'expected %d Nervix containers, found %d\n' "${node_count}" "${#node_containers[@]}" >&2; exit 1; }
 for container_id in "${node_containers[@]}"; do

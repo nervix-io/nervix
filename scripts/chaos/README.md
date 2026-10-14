@@ -1348,6 +1348,12 @@ native command and inspection outcomes, timing and the inspected container state
 timeout is a failed observation even when the helper's inspected exit is zero; it is never
 reclassified as missing binaries or silently accepted. Final cleanup removes the retained helper
 through the run's existing labels and budget.
+Startup publishes its validated public status through a byte copy and atomic rename, with a
+30-second controller bound clipped to the remaining whole-run budget. It avoids filesystem
+cloning for this small transcript. `diagnostics/startup-status/` records the operation before
+launch, its command, native outcome and monotonic elapsed seconds; a publication refusal is a
+controller failure and retains the attempted transcript. The following container enumeration is
+also bounded and preserves command failure. Neither operation changes product readiness limits.
 Rolling runs additionally retain a Pumba command and version, each target's before/stop/start
 inspection, stop and observer logs, measured stop and recovery times, per-restart public status and
 metrics, and per-restart offset results. A failed identity, stop, exit, deadline, listener, or
@@ -1410,6 +1416,9 @@ controls without Docker. `just coverage-chaos-output-boundary` retains their she
 `target/chaos-output-boundary-coverage/`. The full self-test runs these controls too.
 `just test-chaos-image-package` exercises package checks and their refused or invalid observations;
 `just coverage-chaos-image-package` retains that owner's shell coverage.
+`just test-chaos-startup-status` exercises real bounded startup publication with a stalled copy,
+a native refusal, exhausted run time and reporting failure. `just coverage-chaos-startup-status`
+retains coverage of that owner and its controls.
 `just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` measures the complete baseline
 controller against the supplied prebuilt image. It keeps coverage under
 `target/chaos-baseline-coverage/` and the actual run under

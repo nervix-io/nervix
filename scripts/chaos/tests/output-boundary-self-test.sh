@@ -76,6 +76,9 @@ begin_case() {
     mkdir -p "${artifact_dir}/traffic" "${artifact_dir}/results"
     : >"${artifact_dir}/limits.txt"
     : >"${artifact_dir}/responses.txt"
+    # Clearing Bash's special timer before assignment makes this the controlled test clock.
+    # Host time must not advance a simulated schedule while evidence commands are executing.
+    unset SECONDS
     SECONDS=0
     overall_deadline="$2"
 }

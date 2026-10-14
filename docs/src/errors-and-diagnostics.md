@@ -1928,6 +1928,12 @@ run cleanup and records the command and container inspection as separate outcome
 Docker client command remains a failed observation even if inspection sees a successfully exited
 helper; a missing or invalid inspection is also a failure. The controller does not reinterpret
 such refusals as missing binaries. Its live Docker event recording begins before this probe.
+Publishing a validated startup status is a controller operation. Its byte copy and atomic rename
+share a bounded command, clipped to the remaining run time, and retain their native outcome and
+monotonic elapsed seconds under `diagnostics/startup-status/`. A refused or expired publication
+keeps the attempted public status and fails without claiming a product readiness defect. A final
+transcript is published only after its copy succeeds; failure to record the operation also refuses
+publication. Subsequent container enumeration preserves failure under its own bounded command.
 
 The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
 failed measurement. Before any warm-up input, its empty-topic preparation retries only the
