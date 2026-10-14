@@ -25,8 +25,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    KafkaIngestMode, PulsarSubscriptionName, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    KafkaIngestMode, PositionClass, PulsarSubscriptionName, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
     SourceReferenceKind, TopicName,
 };
 
@@ -54,6 +54,7 @@ impl SourceEntity for PulsarTopicSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Pulsar),
+        position_class: PositionClass::Replayable,
     };
 }
 

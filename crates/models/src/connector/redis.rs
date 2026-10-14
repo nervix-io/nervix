@@ -23,8 +23,8 @@ use super::{
 use crate::{
     ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Redis: pooled CreateClientRedis => RedisConfigEntry);
@@ -46,6 +46,7 @@ impl SourceEntity for RedisPubSubSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Redis),
+        position_class: PositionClass::None,
     };
 }
 

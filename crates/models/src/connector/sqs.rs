@@ -26,7 +26,7 @@ use super::{
 use crate::{
     ByteSizeUnit, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PayloadSizeLimit, QueueName, RetryPolicy, SinkBody,
+    IngestSourceCapabilities, PayloadSizeLimit, PositionClass, QueueName, RetryPolicy, SinkBody,
     SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
     SourceReference, SourceReferenceKind,
 };
@@ -51,6 +51,7 @@ impl SourceEntity for SqsQueueSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Sqs),
+        position_class: PositionClass::BrokerRedelivered,
     };
 }
 

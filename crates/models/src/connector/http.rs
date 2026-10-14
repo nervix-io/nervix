@@ -24,8 +24,9 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled CreateClientHttp => HttpConfigEntry);
@@ -46,6 +47,7 @@ impl SourceEntity for HttpRequestSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Http),
+        position_class: PositionClass::None,
     };
 }
 

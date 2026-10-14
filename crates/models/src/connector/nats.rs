@@ -25,8 +25,9 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    QueueGroupName, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    PositionClass, QueueGroupName, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    SubjectName,
 };
 
 configured_client!(Nats: unpooled CreateClientNats => NatsConfigEntry);
@@ -50,6 +51,7 @@ impl SourceEntity for NatsSubjectSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Nats),
+        position_class: PositionClass::None,
     };
 }
 

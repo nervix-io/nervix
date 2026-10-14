@@ -27,7 +27,9 @@ use nervix_connector_kafka::{
 use super::{
     super::*,
     IngestorStartError, SourceStartError,
-    source::{BrokerSourceInstance, SourceCompanion, SourceInstance, SourceStart},
+    source::{
+        BrokerSourceInstance, BrokerSourcePolicy, SourceCompanion, SourceInstance, SourceStart,
+    },
 };
 
 struct RuntimeKafkaDomainOffsets {
@@ -342,8 +344,11 @@ impl KafkaIngestorStartPlan {
                 .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
-                acknowledgement,
-                retry,
+                policy: BrokerSourcePolicy {
+                    acknowledgement,
+                    retry,
+                    position_class: source_plan.capabilities.position_class(),
+                },
             }));
         }
         Ok(SourceStart {

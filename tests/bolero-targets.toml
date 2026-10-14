@@ -2872,3 +2872,18 @@ random_iterations = 256
 source = "crates/connectors/kafka/src/source.rs"
 test = "source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
+domain_version = 1
+features = []
+id = "ingestor-describe-envelope"
+invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges and ordered metric lines, survives the describe envelope conversion and the production command response codec unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/describe_output_properties.rs"
+test = "application::describe_output::properties::bolero_ingestor_describe_reports_round_trip"
+test_target = "lib"

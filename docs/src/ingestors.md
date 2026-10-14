@@ -223,7 +223,11 @@ continues to hold at the source.
 
 `DESCRIBE INGESTOR` renders `quiesce:`, `quiesce state: none|entity hold|ownership handoff|domain
 pause|memory pressure`, `status: quiesced` for every active hold, and the four quiesce counters.
-`SHOW CREATE` round-trips the full clause.
+It also renders `nervix_ingestor_transport_redeliveries_total`, the acknowledgements and rejections
+the node discarded after a RabbitMQ, SQS or MQTT source reconnected, because the broker redelivers
+what the lost connection did not acknowledge; see
+[Connector Crates And The Connector Contract](connector-contract.md). `SHOW CREATE` round-trips the
+full clause.
 
 ## When The Extension Workers Are Full
 

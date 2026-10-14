@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use super::entity_union::connector_sources;
 use crate::{
-    EndpointName, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EndpointName, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    PositionClass, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 /// One endpoint this cluster serves, whose requests or messages are the payloads. Every node of
@@ -41,6 +42,7 @@ impl SourceEntity for EndpointEndpointSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Endpoint,
+        position_class: PositionClass::None,
     };
 }
 

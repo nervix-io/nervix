@@ -61,6 +61,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
         quiesce_buffered_bytes: summary.quiesce_counters.buffered_bytes.arch_into(),
         quiesce_dropped_total: summary.quiesce_counters.dropped_total,
         quiesce_rejected_total: summary.quiesce_counters.rejected_total,
+        transport_redeliveries_total: summary.transport_redeliveries_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
         transient_error: summary.transient_error,
         reconnect_backoff: summary.reconnect_backoff,
@@ -101,6 +102,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
                 dropped_total: summary.quiesce_dropped_total,
                 rejected_total: summary.quiesce_rejected_total,
             },
+            transport_redeliveries_total: summary.transport_redeliveries_total,
             memory_backpressure_paused: summary.memory_backpressure_paused,
             transient_error: summary.transient_error,
             reconnect_backoff: summary.reconnect_backoff,
@@ -276,6 +278,10 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!(
             "nervix_ingestor_quiesce_rejected_total: {}",
             summary.quiesce_counters.rejected_total
+        ),
+        format!(
+            "nervix_ingestor_transport_redeliveries_total: {}",
+            summary.transport_redeliveries_total
         ),
     ]);
     if let IngestorInput::Client(_) = &ingestor.input {
@@ -1659,6 +1665,13 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
         })
         .collect()
 }
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
+))]
+#[path = "describe_output_properties.rs"]
+mod properties;
 
 #[cfg(test)]
 mod tests {

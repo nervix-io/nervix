@@ -23,8 +23,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Syslog: unpooled CreateClientSyslog => SyslogConfigEntry);
@@ -45,6 +45,7 @@ impl SourceEntity for SyslogListenerSource {
         metadata: SourceMetadataScope::Syslog,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
+        position_class: PositionClass::None,
     };
 }
 

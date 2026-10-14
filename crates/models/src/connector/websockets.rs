@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use super::entity_union::connector_sources;
 use crate::{
     ClientConfigEntry, ClientName, ClientResourceMount, ConnectorKind, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSourceCapabilities, SignalingProtocolName, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SignalingProtocolName, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 #[derive(
@@ -56,6 +56,7 @@ impl SourceEntity for WebsocketsConnectionSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
+        position_class: PositionClass::None,
     };
 }
 

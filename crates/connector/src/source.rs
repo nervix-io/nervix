@@ -26,7 +26,7 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
-use nervix_models::{SourceMetadataScope, Timestamp};
+use nervix_models::{PositionClass, SourceMetadataScope, Timestamp};
 use nervix_primitives::time::Instant;
 use thiserror::Error;
 
@@ -48,6 +48,7 @@ pub struct SourceCapabilities {
     supports_quiesce: bool,
     instances: NonZeroU64,
     acknowledgement: SourceAcknowledgementSupport,
+    position_class: PositionClass,
 }
 
 impl SourceCapabilities {
@@ -57,6 +58,7 @@ impl SourceCapabilities {
         supports_quiesce: bool,
         instances: NonZeroU64,
         acknowledgement: SourceAcknowledgementSupport,
+        position_class: PositionClass,
     ) -> Self {
         Self {
             reads_headers,
@@ -64,6 +66,7 @@ impl SourceCapabilities {
             supports_quiesce,
             instances,
             acknowledgement,
+            position_class,
         }
     }
 
@@ -85,6 +88,26 @@ impl SourceCapabilities {
 
     pub fn acknowledgement(self) -> SourceAcknowledgementSupport {
         self.acknowledgement
+    }
+
+    /// What the source's positions mean once the connection that delivered them is gone, as its
+    /// entity declares.
+    ///
+    /// The host reads it to decide, once, what to do with an acknowledgement or a rejection a
+    /// broker source could not complete:
+    ///
+    /// - [`PositionClass::Replayable`]: the host suspends and resumes the source, then retries the
+    ///   same rejection before it reads another batch. The retried rejection never depends on a
+    ///   poll, because the source can seek to its positions on any connection.
+    /// - [`PositionClass::BrokerRedelivered`]: the host suspends and resumes the source, then
+    ///   discards the pending positions and counts them as transport redeliveries. The broker
+    ///   redelivers every delivery the lost connection did not acknowledge, so nothing is retried
+    ///   against a connection that no longer exists. An acknowledgement that was in flight when
+    ///   the connection died is treated the same way, so delivery is at least once.
+    /// - [`PositionClass::None`]: nothing is pending, so the host keeps no position and reads
+    ///   again after its retry delay.
+    pub fn position_class(self) -> PositionClass {
+        self.position_class
     }
 }
 
@@ -398,6 +421,8 @@ pub trait SourceHostServices: Send + 'static {
     fn clear_transient_error(&self);
     fn report_error(&self, message: String);
     fn handle_ack_failure(&self, reason: String);
+    /// Counts positions the host discarded after a reconnect because the broker redelivers them.
+    fn record_transport_redeliveries(&self, positions: usize);
 }
 
 /// Task-local host services a source loop drives without exposing a runtime type.
@@ -469,5 +494,9 @@ impl SourceHost {
 
     pub fn handle_ack_failure(&self, reason: String) {
         self.services.handle_ack_failure(reason);
+    }
+
+    pub fn record_transport_redeliveries(&self, positions: usize) {
+        self.services.record_transport_redeliveries(positions);
     }
 }
