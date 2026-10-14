@@ -13,6 +13,10 @@ source "${script_dir}/docker-event-recording.sh"
 source "${script_dir}/require-jq.sh"
 # shellcheck source=image-identity.sh
 source "${script_dir}/image-identity.sh"
+# shellcheck source=output-boundary.sh
+source "${script_dir}/output-boundary.sh"
+# shellcheck source=image-package-check.sh
+source "${script_dir}/image-package-check.sh"
 
 usage() {
     cat <<EOF
@@ -855,7 +859,15 @@ domain_cli_command() {
 }
 
 broker_admin() {
-    compose run --rm --no-deps broker-admin "$@"
+    # Administration has no input stream. Closing it also keeps Compose's attach lifetime out of
+    # the offset observation's deadline, including when its caller holds an open input pipe.
+    compose run --rm --no-deps -T --interactive=false broker-admin "$@" </dev/null
+}
+
+broker_offset_query() {
+    # The running broker already owns the CLI and network. An offset observation borrows one
+    # command execution, with no per-poll container creation or removal in its deadline.
+    compose exec -T broker "$@" </dev/null
 }
 
 kcat() {
@@ -1300,6 +1312,11 @@ finish() {
             diagnostics/docker-events.ndjson diagnostics/docker-events.stderr \
             diagnostics/containers.json \
             diagnostics/compose.log crash/fault-command.json crash/pumba.txt \
+            diagnostics/image-package/result.json diagnostics/image-package/stdout.txt \
+            diagnostics/image-package/stderr.txt diagnostics/image-package/inspect.json \
+            diagnostics/image-package/inspect.stderr \
+            diagnostics/startup-status/result.json diagnostics/startup-status/stdout.txt \
+            diagnostics/startup-status/stderr.txt public/cluster-status.attempt.txt \
             crash/kill-events.ndjson crash/all-node-events.ndjson \
             crash/killed.json crash/held.json \
             crash/started.json crash/final.json crash/before-all-nodes.json \
@@ -1310,12 +1327,19 @@ finish() {
             results/pause-progress.json \
             traffic/observed-output.ndjson results/crash-progress.json \
             results/ledger.json results/ledger.txt results/load-pacing.json \
+            results/output-boundary.json traffic/output-boundary.ndjson \
             results/state-load-pacing.json results/paced-load-pacing.json \
             results/container-images.json; do
             if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
                 evidence_paths+=("${evidence_path}")
             fi
         done
+        if [[ -d "${artifact_dir}/traffic/offsets" ]]; then
+            while IFS= read -r evidence_path; do
+                evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+            done < <(find "${artifact_dir}/traffic/offsets" -mindepth 2 -maxdepth 2 -type f \
+                \( -name 'result.json' -o -name 'stdout.txt' -o -name 'stderr.txt' \) -size +0c | sort)
+        fi
         if [[ -n "${diagnostic_selection}" ]]; then
             for evidence_path in results/diagnostic-evidence.json deadlock/qualification.ndjson \
                 deadlock/verdict.txt; do
@@ -1673,14 +1697,6 @@ describe_owner_ready() {
         && grep -Fq "owner: ${owner}" "${output}"
 }
 
-topic_end_offset() {
-    local topic="$1"
-    local output
-    output="$(broker_admin /opt/kafka/bin/kafka-get-offsets.sh \
-        --bootstrap-server broker:9092 --topic "${topic}" 2>/dev/null)" || return 1
-    awk -F: -v topic="${topic}" '$1 == topic && $2 == "0" { print $3 }' <<<"${output}"
-}
-
 consumer_offsets_at_end() {
     local expected_end="$1"
     local attempt="${artifact_dir}/traffic/consumer-group.attempt.txt"
@@ -1707,32 +1723,6 @@ output_has_all_records() {
     end_offset="$(topic_end_offset chaos_output)" || return 1
     [[ "${end_offset}" =~ ^[0-9]+$ ]] || return 1
     ((end_offset >= expected))
-}
-
-wait_for_stable_output() {
-    local minimum="$1"
-    local deadline=$((SECONDS + 30))
-    local previous=""
-    local stable_polls=0
-    while ((SECONDS < deadline && SECONDS < overall_deadline)); do
-        local current=""
-        current="$(topic_end_offset chaos_output)" || true
-        if [[ "${current}" =~ ^[0-9]+$ ]] && ((current >= minimum)); then
-            if [[ "${current}" == "${previous}" ]]; then
-                stable_polls=$((stable_polls + 1))
-            else
-                stable_polls=0
-            fi
-            if ((stable_polls >= 2)); then
-                printf '%s\n' "${current}"
-                return 0
-            fi
-            previous="${current}"
-        fi
-        sleep 1
-    done
-    printf '%s\n' 'output topic did not reach a stable final boundary' >&2
-    return 124
 }
 
 # Records a continuous load the scenario starts: the Compose SERVICE that runs it, the TOPIC it
@@ -1908,12 +1898,13 @@ update_manifest '.resolved_image_id = $image_id | .resolved_repo_digests = $dige
     | if $replay_match == "" then . else .replay_image_match = $replay_match end' \
     --arg image_id "${image_id}" --arg digests "${image_digest}" --arg replay_match "${replay_image_match}"
 export NERVIX_IMAGE="${image_id}"
-run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
-    'test -x /usr/local/bin/nervix-server; test -x /usr/local/bin/nervix-cli' \
-    || setup_error "image '${image_ref}' does not package executable nervix-server and nervix-cli binaries"
-prepare_diagnostic_evidence
-
 start_run_event_recording
+image_package_status=0
+verify_image_package || image_package_status=$?
+if ((image_package_status != 0)); then
+    setup_error "image-package probe for '${image_ref}' failed with status ${image_package_status}; see diagnostics/image-package"
+fi
+prepare_diagnostic_evidence
 if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     [[ -S /var/run/docker.sock ]] \
         || setup_error "${scenario} requires a local /var/run/docker.sock for Pumba"
@@ -2079,15 +2070,20 @@ if [[ "${node_count}" == "3" ]]; then
     node_hosts+=(nervix-2 nervix-3)
 fi
 wait_for "public cluster status for ${node_count} node(s)" 120 cluster_status_ready
-cp "${artifact_dir}/public/cluster-status.attempt.txt" \
-    "${artifact_dir}/public/cluster-status.txt"
+phase "startup status publication"
+# shellcheck source=startup-status.sh
+source "${script_dir}/startup-status.sh"
+failure_category=controller
+publish_startup_status
+failure_category=unclassified
 
 phase "image identity verification"
-mapfile -t node_containers < <(
-    docker container ls --quiet \
+node_container_ids="$(
+    run_bounded 20 docker container ls --quiet \
         --filter "label=io.nervix.chaos.run=${run_id}" \
         --filter 'label=io.nervix.chaos.role=node'
-)
+)"
+mapfile -t node_containers < <(printf '%s' "${node_container_ids}")
 [[ "${#node_containers[@]}" -eq "${node_count}" ]] \
     || { printf 'expected %d Nervix containers, found %d\n' "${node_count}" "${#node_containers[@]}" >&2; exit 1; }
 for container_id in "${node_containers[@]}"; do
@@ -2309,11 +2305,25 @@ if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}"
         output_wait_timed_out=true
     fi
     # Preserve an exact ledger even when the sink stayed short of the accepted boundary.
-    output_end="$(wait_for_stable_output 0)"
+    output_minimum=0
 else
     wait_for "output topic to contain at least ${input_end} records" 120 \
         output_has_all_records "${input_end}"
-    output_end="$(wait_for_stable_output "${input_end}")"
+    output_minimum="${input_end}"
+fi
+if output_end="$(wait_for_stable_output "${output_minimum}")"; then
+    :
+else
+    boundary_status=$?
+    if boundary_category="$(jq -er '.category | select(. == "controller" or . == "observation")' \
+        "${artifact_dir}/results/output-boundary.json")"; then
+        failure_category="${boundary_category}"
+    else
+        # An incomplete boundary record is a controller reporting failure; the original status
+        # remains the outcome even when its category could not be recorded.
+        failure_category=controller
+    fi
+    exit "${boundary_status}"
 fi
 [[ "${output_end}" =~ ^[0-9]+$ ]] \
     || { printf '%s\n' 'could not determine the output topic final boundary' >&2; exit 1; }
