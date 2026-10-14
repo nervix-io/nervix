@@ -1672,6 +1672,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      pull-requests: write
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
@@ -1685,7 +1686,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker
+          tool: just@latest,toml-cli,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1713,7 +1714,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Configure kache daemon remote
         env:
@@ -1747,10 +1748,38 @@ jobs:
       - name: Turmoil simulations
         run: |
           just toolchains-install
-          just test-turmoil
+          just coverage-native-extras test-turmoil --output target/turmoil.lcov
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check
+
+      - name: Report Turmoil patch line coverage
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          just coverage-patch "$BASE_SHA" target/turmoil.lcov --scope turmoil \
+            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
+            --output target/turmoil-patch-coverage.md
+
+      - name: Upload Turmoil coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-turmoil
+          path: |
+            target/native-coverage/test-turmoil/**/lcov.info
+            target/native-coverage/test-turmoil/**/completion.json
+            target/native-coverage/test-turmoil/**/executions.jsonl
+            target/native-coverage/test-turmoil/**/export.log
+            target/turmoil.lcov
+            target/turmoil-patch-coverage.md
+          if-no-files-found: warn
 
       - name: Publish kache report
         if: always()
@@ -1775,4 +1804,6 @@ jobs:
           path: |
             target/turmoil-failures
             target/turmoil-suite
+            target/native-coverage-build-turmoil/turmoil-failures
+            target/native-coverage-build-turmoil/turmoil-suite
           if-no-files-found: ignore
