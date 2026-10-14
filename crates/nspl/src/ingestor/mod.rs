@@ -15,12 +15,17 @@ use std::num::NonZeroU64;
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AlterIngestor, AlterIngestorOperation, ClientIngestMode, ClientIngestSource, CreateIngestor,
-    CreateStatement, EndpointIngestMode, GeneralErrorPolicy, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorInput, KafkaIngestMode,
-    KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, ShowIngestors, SqsIngestMode,
-    TransportIngestorInput, WebsocketsIngestMode, ZeroMqIngestMode,
+    AlterIngestor, AlterIngestorOperation, ClientIngestMode, ClientProducerSource, CreateIngestor,
+    CreateStatement, EndpointEndpointSource, EndpointIngestMode, EndpointSource,
+    GeneralErrorPolicy, HttpRequestSource, HttpSource, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestTimestampSource, IngestorInput, KafkaIngestMode, KafkaOffsetMode,
+    KafkaSource, KafkaTopicSource, MqttIngestMode, MqttQos, MqttSession, MqttSource,
+    MqttTopicSource, NatsIngestMode, NatsSource, NatsSubjectSource, PrometheusQuerySource,
+    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
+    RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
+    RetryPolicy, ShowIngestors, SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource,
+    SyslogSource, TransportIngestorInput, WebsocketsConnectionSource, WebsocketsIngestMode,
+    WebsocketsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
 };
 
 use crate::{
@@ -464,13 +469,15 @@ fn kafka_ingest_source_parser<'src>()
         .then(mode_parser())
         .then(suspend_only_quiesce_clause())
         .map(
-            |(((((client, topic), offset_mode), instances), mode), quiesce)| IngestSource::Kafka {
-                client,
-                topic,
-                offset_mode,
-                instances,
-                mode,
-                quiesce,
+            |(((((client, topic), offset_mode), instances), mode), quiesce)| {
+                IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                    client,
+                    topic,
+                    offset_mode,
+                    instances,
+                    mode,
+                    quiesce,
+                }))
             },
         )
 }
@@ -494,14 +501,14 @@ fn pulsar_ingest_source_parser<'src>()
         .then(suspend_only_quiesce_clause())
         .map(
             |(((((client, topic), subscription), instances), mode), quiesce)| {
-                IngestSource::Pulsar {
+                IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
                     client,
                     topic,
                     subscription,
                     instances,
                     mode,
                     quiesce,
-                }
+                }))
             },
         )
 }
@@ -521,15 +528,15 @@ fn rabbitmq_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Mode))
         .then(rabbitmq_mode_parser())
         .then(suspend_only_quiesce_clause())
-        .map(
-            |((((client, queue), instances), mode), quiesce)| IngestSource::RabbitMq {
+        .map(|((((client, queue), instances), mode), quiesce)| {
+            IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
                 client,
                 queue,
                 instances,
                 mode,
                 quiesce,
-            },
-        )
+            }))
+        })
 }
 
 fn redis_pubsub_ingest_source_parser<'src>()
@@ -542,14 +549,14 @@ fn redis_pubsub_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Mode))
         .then(redis_pubsub_mode_parser())
         .then(push_quiesce_clause())
-        .map(
-            |(((client, channel), mode), quiesce)| IngestSource::RedisPubSub {
+        .map(|(((client, channel), mode), quiesce)| {
+            IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                 client,
                 channel,
                 mode,
                 quiesce,
-            },
-        )
+            }))
+        })
 }
 
 fn mqtt_ingest_source_parser<'src>()
@@ -565,15 +572,15 @@ fn mqtt_ingest_source_parser<'src>()
                 .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
         )
         .then(mqtt_mode_parser().then_with_ctx(mqtt_quiesce_clause()))
-        .map(
-            |(((client, topic), instances), (mode, quiesce))| IngestSource::Mqtt {
+        .map(|(((client, topic), instances), (mode, quiesce))| {
+            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                 client,
                 topic,
                 instances,
                 mode,
                 quiesce,
-            },
-        )
+            }))
+        })
 }
 
 fn prometheus_ingest_source_parser<'src>()
@@ -585,14 +592,14 @@ fn prometheus_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Every))
         .then(domain_clock_period_lit())
         .then(polling_quiesce_clause())
-        .map(
-            |(((client, query), every), quiesce)| IngestSource::Prometheus {
+        .map(|(((client, query), every), quiesce)| {
+            IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                 client,
                 query,
                 every,
                 quiesce,
-            },
-        )
+            }))
+        })
 }
 
 fn http_ingest_source_parser<'src>()
@@ -602,10 +609,12 @@ fn http_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Every))
         .then(domain_clock_period_lit())
         .then(polling_quiesce_clause())
-        .map(|((client, every), quiesce)| IngestSource::Http {
-            client,
-            every,
-            quiesce,
+        .map(|((client, every), quiesce)| {
+            IngestSource::Http(HttpSource::Request(HttpRequestSource {
+                client,
+                every,
+                quiesce,
+            }))
         })
 }
 
@@ -623,13 +632,15 @@ fn nats_ingest_source_parser<'src>()
         .then(nats_mode_parser())
         .then(push_quiesce_clause())
         .map(
-            |(((((client, subject), queue_group), instances), mode), quiesce)| IngestSource::Nats {
-                client,
-                subject,
-                queue_group,
-                instances,
-                mode,
-                quiesce,
+            |(((((client, subject), queue_group), instances), mode), quiesce)| {
+                IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
+                    client,
+                    subject,
+                    queue_group,
+                    instances,
+                    mode,
+                    quiesce,
+                }))
             },
         )
 }
@@ -641,10 +652,12 @@ fn zeromq_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Mode))
         .then(zeromq_mode_parser())
         .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| IngestSource::ZeroMq {
-            client,
-            mode,
-            quiesce,
+        .map(|((client, mode), quiesce)| {
+            IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+                client,
+                mode,
+                quiesce,
+            }))
         })
 }
 
@@ -656,7 +669,12 @@ fn syslog_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::NoAck))
         .then_ignore(sequential_ack_window())
         .then(flexible_quiesce_clause())
-        .map(|(client, quiesce)| IngestSource::Syslog { client, quiesce })
+        .map(|(client, quiesce)| {
+            IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+                client,
+                quiesce,
+            }))
+        })
 }
 
 fn sqs_ingest_source_parser<'src>()
@@ -674,15 +692,15 @@ fn sqs_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Mode))
         .then(sqs_mode_parser())
         .then(suspend_only_quiesce_clause())
-        .map(
-            |((((client, queue), instances), mode), quiesce)| IngestSource::Sqs {
+        .map(|((((client, queue), instances), mode), quiesce)| {
+            IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
                 client,
                 queue,
                 instances,
                 mode,
                 quiesce,
-            },
-        )
+            }))
+        })
 }
 
 fn endpoint_ingest_source_parser<'src>()
@@ -692,10 +710,12 @@ fn endpoint_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Mode))
         .then(endpoint_mode_parser())
         .then(endpoint_quiesce_clause())
-        .map(|((endpoint, mode), quiesce)| IngestSource::Endpoint {
-            endpoint,
-            mode,
-            quiesce,
+        .map(|((endpoint, mode), quiesce)| {
+            IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+                endpoint,
+                mode,
+                quiesce,
+            }))
         })
 }
 
@@ -706,10 +726,12 @@ fn websockets_ingest_source_parser<'src>()
         .then_ignore(kw(Identifier::Mode))
         .then(websockets_mode_parser())
         .then(push_quiesce_clause())
-        .map(|((client, mode), quiesce)| IngestSource::Websockets {
-            client,
-            mode,
-            quiesce,
+        .map(|((client, mode), quiesce)| {
+            IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
+                client,
+                mode,
+                quiesce,
+            }))
         })
 }
 
@@ -751,14 +773,14 @@ fn client_mode_parser<'src>()
 /// submit through their sessions. Suspension is the only quiesce mode it honors, and it decodes
 /// nothing, so no `DECODE USING` follows.
 fn client_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], ClientIngestSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], ClientProducerSource, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Client)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(client_mode_parser())
         .then_ignore(suspend_only_quiesce_clause())
-        .map(|(schema, mode)| ClientIngestSource { schema, mode })
+        .map(|(schema, mode)| ClientProducerSource { schema, mode })
 }
 
 /// What follows `FROM`: a transport and the codec that decodes its payloads, or a client source.
@@ -956,7 +978,14 @@ pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{FlushPolicy, SchemaName};
+    use nervix_models::{
+        EndpointEndpointSource, EndpointSource, FlushPolicy, HttpRequestSource, HttpSource,
+        KafkaSource, KafkaTopicSource, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
+        PrometheusQuerySource, PrometheusSource, PulsarSource, PulsarTopicSource,
+        RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource, SchemaName,
+        SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource, WebsocketsConnectionSource,
+        WebsocketsSource, ZeroMqPullSource, ZeroMqSource,
+    };
     use nonzero_ext::nonzero;
 
     use super::*;
@@ -1137,7 +1166,7 @@ mod tests {
         assert!(matches!(
             parsed.operations[0],
             AlterIngestorOperation::SetSource {
-                source: IngestSource::Endpoint { .. }
+                source: IngestSource::Endpoint(_)
             }
         ));
         assert!(matches!(
@@ -1244,7 +1273,7 @@ mod tests {
         assert_eq!(parsed.timestamp_source, None);
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Kafka {
+            IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                 client: nervix_models::ClientName::try_from("kafka_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::TopicName::try_from("notifications")
@@ -1264,7 +1293,7 @@ mod tests {
                     },
                 },
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
         assert_eq!(
             parsed.output_routes.routes[0]
@@ -1374,9 +1403,9 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka {
+        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
             instances, mode, ..
-        } = &transport(&parsed).source
+        })) = &transport(&parsed).source
         else {
             panic!("expected kafka ingestor source");
         };
@@ -1406,7 +1435,9 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka { mode, .. } = &transport(&parsed).source else {
+        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource { mode, .. })) =
+            &transport(&parsed).source
+        else {
             panic!("expected kafka ingestor source");
         };
         assert!(matches!(mode, KafkaIngestMode::NoAckParallel));
@@ -1453,7 +1484,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Pulsar {
+            IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
                 client: nervix_models::ClientName::try_from("pulsar_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::TopicName::try_from("notifications")
@@ -1471,7 +1502,7 @@ mod tests {
                     },
                 },
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
     }
 
@@ -1516,7 +1547,7 @@ mod tests {
         );
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::RabbitMq {
+            IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
                 client: nervix_models::ClientName::try_from("rabbit_main")
                     .expect("valid client identifier"),
                 queue: nervix_models::QueueName::try_from("notifications")
@@ -1530,7 +1561,7 @@ mod tests {
                     },
                 },
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
     }
 
@@ -1551,14 +1582,14 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "redis_notifications");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::RedisPubSub {
+            IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                 client: nervix_models::ClientName::try_from("redis_main")
                     .expect("valid client identifier"),
                 channel: nervix_models::ChannelName::try_from("notifications")
                     .expect("valid channel identifier"),
                 mode: RedisPubSubIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
-            }
+            }))
         );
     }
 
@@ -1829,7 +1860,7 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "mqtt_notifications");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Mqtt {
+            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: "notifications".to_string(),
@@ -1839,7 +1870,7 @@ mod tests {
                     qos: MqttQos::AtMostOnce,
                 },
                 quiesce: IngestQuiesceMode::Drop,
-            }
+            }))
         );
     }
 
@@ -1856,13 +1887,13 @@ mod tests {
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
 
-        let IngestSource::Mqtt {
+        let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
             client,
             topic,
             instances,
             mode: MqttIngestMode::NoAckParallel { session, qos, .. },
             ..
-        } = &transport(&parsed).source
+        })) = &transport(&parsed).source
         else {
             panic!("expected parallel NO_ACK MQTT source");
         };
@@ -1892,7 +1923,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Mqtt {
+            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: "devices/+/notifications".to_string(),
@@ -1907,7 +1938,7 @@ mod tests {
                     },
                 },
                 quiesce: IngestQuiesceMode::Drop,
-            }
+            }))
         );
     }
 
@@ -1941,7 +1972,9 @@ mod tests {
         "#;
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
-        let IngestSource::Mqtt { mode, .. } = &transport(&parsed).source else {
+        let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource { mode, .. })) =
+            &transport(&parsed).source
+        else {
             panic!("expected mqtt ingestor source");
         };
 
@@ -2017,7 +2050,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Nats {
+            IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
                 client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
                 subject: nervix_models::SubjectName::try_from("notifications")
@@ -2027,7 +2060,7 @@ mod tests {
                 instances: nonzero!(3u64),
                 mode: NatsIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
-            }
+            }))
         );
     }
 
@@ -2111,7 +2144,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Prometheus {
+            IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
@@ -2119,7 +2152,7 @@ mod tests {
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
     }
 
@@ -2139,14 +2172,14 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Http {
+            IngestSource::Http(HttpSource::Request(HttpRequestSource {
                 client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
                 every: "1s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
     }
 
@@ -2205,14 +2238,14 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Endpoint {
+            IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                 endpoint: nervix_models::EndpointName::try_from("ws_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
                 },
-            }
+            }))
         );
     }
 
@@ -2232,12 +2265,12 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Websockets {
+            IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
                 client: nervix_models::ClientName::try_from("ws_main")
                     .expect("valid client identifier"),
                 mode: WebsocketsIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
-            }
+            }))
         );
     }
 
@@ -2257,12 +2290,12 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::ZeroMq {
+            IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                 client: nervix_models::ClientName::try_from("zmq_main")
                     .expect("valid client identifier"),
                 mode: ZeroMqIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
     }
 
@@ -2281,14 +2314,14 @@ mod tests {
         let parsed = parse_create_ingestor(input).expect("parse should succeed");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Syslog {
+            IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
                 client: nervix_models::ClientName::try_from("syslog_listener")
                     .expect("valid client identifier"),
                 quiesce: IngestQuiesceMode::Buffer {
                     max_size: "1MiB".to_string(),
                     overflow: IngestQuiesceOverflow::DropOldest,
                 },
-            }
+            }))
         );
     }
 
@@ -2337,7 +2370,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Sqs {
+            IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
                 client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
                 queue: nervix_models::QueueName::try_from("notifications")
@@ -2351,7 +2384,7 @@ mod tests {
                     },
                 },
                 quiesce: IngestQuiesceMode::Suspend,
-            }
+            }))
         );
     }
 
@@ -2368,7 +2401,9 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka { instances, .. } = transport(&parsed).source.clone() else {
+        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource { instances, .. })) =
+            transport(&parsed).source.clone()
+        else {
             panic!("expected kafka ingestor source");
         };
         assert_eq!(instances, nonzero!(3u64));
@@ -2387,7 +2422,10 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::RabbitMq { instances, .. } = transport(&parsed).source.clone() else {
+        let IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
+            instances, ..
+        })) = transport(&parsed).source.clone()
+        else {
             panic!("expected rabbitmq ingestor source");
         };
         assert_eq!(instances, nonzero!(2u64));
@@ -2406,7 +2444,9 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Sqs { instances, .. } = transport(&parsed).source.clone() else {
+        let IngestSource::Sqs(SqsSource::Queue(SqsQueueSource { instances, .. })) =
+            transport(&parsed).source.clone()
+        else {
             panic!("expected sqs ingestor source");
         };
         assert_eq!(instances, nonzero!(4u64));
@@ -2522,7 +2562,7 @@ mod tests {
             .expect("a client source should parse");
         assert_eq!(
             parsed.input,
-            IngestorInput::Client(ClientIngestSource {
+            IngestorInput::Client(ClientProducerSource {
                 schema: SchemaName::parse("event").expect("valid schema name"),
                 mode: ClientIngestMode {
                     window: nervix_models::AckWindow::Parallel {

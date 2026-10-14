@@ -596,7 +596,9 @@ callback at a time, in this order:
    of every other input the callback decided: inputs carried into output rows, `acked` inputs,
    handled message errors, and inputs that `ON GLOBAL ERROR IGNORE` accepts after a failed
    callback. Output reaches downstream nodes, and can reach sinks, while its checkpoint is still on
-   its way; only the acknowledgement waits.
+   its way; only the acknowledgement waits. Until the checkpoint ends, Nervix reports the inputs it
+   holds back alive to their source, so a source's `ACK TIMEOUT` shorter than the checkpoint does
+   not deliver them again.
 4. It saves the guest with `nervix_dump_state`. The saved state is **captured** and stamped with the
    branch's next revision.
 5. It writes that revision to the node's stable storage and waits until the storage is

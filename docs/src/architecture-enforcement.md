@@ -124,3 +124,71 @@ The sanitizer compiler adapter preserves the source parser's span contract as de
 [Property Testing And Fuzzing](property-testing-and-fuzzing.md).
 The [concurrency](data-plane-concurrency.md), [error](errors-and-diagnostics.md) and
 [state](typed-states.md) chapters retain those operational owners.
+
+## Auditing Lint Workarounds
+
+A rule that misjudges code invites code shaped around the rule. The textual counters this gate
+replaced matched method spellings inside named files, so lowering a count sometimes meant
+respelling an operation or moving it rather than changing what the rule was about. `just
+lint-audit` finds code shaped like such a workaround and attributes it to the history that
+produced it.
+
+The compiler pass records review candidates beside its acquisition findings in every complete
+analysis, so the audit reads the evidence `just ratchet` uses and runs no second analysis.
+`just lint-audit --inventory` audits with warning levels while the gate still has open
+diagnostics, and `--configuration` selects declared configurations as an inventory. Each
+candidate carries its owning body, that body's execution contract (declared, or recurring by
+reachability from a recurring caller), its spans and macro origins, and the configurations that
+compiled it.
+
+| Kind | Resolved pattern | Controls that are not candidates |
+| --- | --- | --- |
+| `repeated_lookup` | Keyed operations (`get`, `get_mut`, `contains_key`, `insert`, `remove`, `entry`, indexing and their IndexMap forms) of a standard, hashbrown, IndexMap, DashMap or JSON map collection, on one receiver place with one key value, where a later operation can run after an earlier one. `guarded` marks a later operation in a branch the earlier result selected. | Exclusive branches, a receiver or key assigned between the operations, different keys or collections, and another type with map-like method names. |
+| `key_allocation` | A borrowed lookup handed an owned copy of its key, or an `entry` handed a copy that a hit discards. | Borrowed keys, owned insertion keys, `Copy` values, shared-handle clones and formatted keys. |
+| `borrowed_copy` | An owned copy whose only use is a borrow, such as `&value.clone()` or `text.to_string().len()`. | Copies that are moved, `Copy` values, shared-handle clones and text formatted from another value. |
+| `duplicated_branch` | A call or assignment that every branch of one exhaustive `if` chain or `match` repeats, with the same resolved callees, generic arguments and type. | An `if` without `else`, exits, constructed values, and arms that dispatch one spelling over differently typed bindings. |
+| `forwarding_wrapper` | A synchronous function whose whole body passes its parameters unchanged and in order to one local function, with its caller count and whether it carries a source contract, implements a trait method or calls into another file. | Transformed, reordered or partial arguments, library callees and constructors. |
+| `discarded_error` | `Result::ok`, `unwrap_or`, `unwrap_or_default`, `is_ok`, `is_err`, an `unwrap_or_else`, `map_err` or `or_else` closure that ignores its failure, an `Err(_)` arm, `if let Ok` without `else` and `let Ok(..) = .. else`, when the failure carries information. | Unit, uninhabited and zero-sized failures, and failures handed on. |
+| `disguised_clamp` | Checked primitive-integer or `Duration` arithmetic, or a checked integer conversion, whose absence falls back through `unwrap_or`, `unwrap_or_default` or `unwrap_or_else`. | Overflow decided by its own statement. |
+| `relocated_acquisition` | A synchronization acquisition outside the files the textual lock counter read, written by a commit that lowered that count. | Acquisitions in the counter's files, and ones no lowering commit wrote. |
+
+Attribution blames each candidate's lines in the working tree, reads the diff hunk of the commit
+that completed them, and replays the history of `debt-baseline.json`. For every count the
+candidate's kind could have worked around, it records whether that commit introduced or lowered the
+count, whether its hunk, the rest of the candidate's file or the commit's other files removed the
+counter's governed spelling (such as `.entry(` for the lock counter, counted only in the files that
+counter read at the time), and whether the code predates the count. The report keeps the hunk's
+removed and added lines around the candidate's line. When the completing commit only carried the
+pattern forward, the earlier commits of the same lines are read for that evidence and the one found
+is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
+folded away, finding its pull request by the number the subject names or, for a subject without one,
+by the merged commit, and records a commit that removed the spelling while writing one of the
+candidate's own lines.
+
+The suggestion is `suspected` when a count event coincides with a spelling removed from the
+candidate's own hunk or file, or a folded commit rewrote the candidate's lines away from it. A
+removal in another file explains the candidate only for the lock counter, which read named files, so
+moving an operation out of them lowered it. The suggestion is `possible` when only an event or a
+removal is present, or when the code was written into a file the lock counter read before the
+compiler resolved that count, since such code could avoid the spelling without changing the count;
+`unattributed` when the code was written while a count existed without any of these; `pre-existing`
+when it predates every plausible count; and `uncommitted` for lines not yet committed. A suggestion
+is evidence for review, never a classification: chronology alone proves nothing.
+
+Candidate identities hash the kind, file, owner, primary source and pattern facts without byte
+offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal.
+`audit.json` and `audit.md` land in `target/lint-audit/<source identity>/`. They are generated
+evidence: review dispositions, inventories and measurements belong on the owning task, and nothing
+reads them back as policy.
+
+Review classifies each candidate as confirmed lint-caused, suspected, unrelated, pre-existing or
+intentional, recording the source revision, owning rule, before and after code, reason and
+disposition. A repair keeps lazy and fallible initialization, side-effect counts, borrowed-key hit
+behavior, exact equality, lifetimes, reentrancy, error and acknowledgement semantics and ordering.
+An `entry` is not a repair where a hit would discard an allocated key, where a callback runs between
+the lookup and the insertion, or where the miss path needs the whole collection. Fewer searches do
+not make an `entry` faster either: on a small ordered map whose hits dominate, a lookup can cost
+less than building the entry, so the measurement covers hit-heavy and miss-heavy key
+distributions. A performance claim needs measured lookup, comparison and allocation counts and
+same-host Criterion or `just benchmark-ab` evidence; a shorter function or a lower count is not a
+speedup.

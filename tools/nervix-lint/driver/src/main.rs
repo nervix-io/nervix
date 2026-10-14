@@ -29,7 +29,11 @@ use std::{
 
 use anyhow::{Context as _, bail};
 use meticulous::ResultExt as _;
-use nervix_lint_report::{CompilerReport, Expansion, Finding, SiteId, SourceSpan, rules};
+use nervix_lint_report::{
+    CompilerReport, Expansion, Finding, SiteId, SourceSpan,
+    audit::{AuditCandidate, AuditPattern, KeyedOperation},
+    rules,
+};
 use nervix_primitives::sync::{Arc, blocking::Mutex};
 use rustc_data_structures::marker::IntoDynSyncSend;
 use rustc_driver::{Callbacks, Compilation};
@@ -40,6 +44,7 @@ use rustc_lint_defs::impl_lint_pass;
 
 mod api;
 mod architecture;
+mod audit;
 mod contracts;
 mod errors;
 
@@ -59,12 +64,19 @@ struct AcquisitionPass {
     flow: Flow,
     errors: errors::ErrorRules,
     architecture: architecture::ArchitectureRules,
+    audit: audit::Audit,
     authored_files: BTreeMap<String, bool>,
     root: PathBuf,
     report: Arc<Mutex<CompilerReport>>,
 }
 
 impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
+
+/// Why a span has no authored source location.
+enum Exclusion {
+    Generated,
+    External,
+}
 
 struct PassInputs {
     root: PathBuf,
@@ -103,37 +115,39 @@ impl AcquisitionPass {
     }
 
     fn source_span(&self, cx: &LateContext<'_>, span: Span) -> Option<SourceSpan> {
+        match self.locate(cx, span) {
+            Ok(source) => Some(source),
+            Err(Exclusion::Generated) => {
+                self.report.lock().excluded_generated += 1;
+                None
+            }
+            Err(Exclusion::External) => {
+                self.report.lock().excluded_external += 1;
+                None
+            }
+        }
+    }
+
+    /// The authored source of a span; build output and external definitions are excluded.
+    fn locate(&self, cx: &LateContext<'_>, span: Span) -> Result<SourceSpan, Exclusion> {
         let map = cx.tcx.sess.source_map();
         let lo = map.lookup_char_pos(span.lo());
         let hi = map.lookup_char_pos(span.hi());
         let file = lo.file.name.prefer_local_unconditionally().to_string();
-        let absolute = match Path::new(&file).canonicalize() {
-            Ok(path) => path,
-            Err(_) => {
-                self.report.lock().excluded_generated += 1;
-                return None;
-            }
+        let Ok(absolute) = Path::new(&file).canonicalize() else {
+            return Err(Exclusion::Generated);
         };
-        let relative = match absolute.strip_prefix(&self.root) {
-            Ok(path) => path,
-            Err(_) => {
-                self.report.lock().excluded_external += 1;
-                return None;
-            }
+        let Ok(relative) = absolute.strip_prefix(&self.root) else {
+            return Err(Exclusion::External);
         };
         let path = relative.to_string_lossy().replace('\\', "/");
         if path.starts_with("target/") || path.contains("/target/") {
-            self.report.lock().excluded_generated += 1;
-            return None;
+            return Err(Exclusion::Generated);
         }
-        let source = match map.span_to_snippet(span) {
-            Ok(source) => source,
-            Err(_) => {
-                self.report.lock().excluded_generated += 1;
-                return None;
-            }
+        let Ok(source) = map.span_to_snippet(span) else {
+            return Err(Exclusion::Generated);
         };
-        Some(SourceSpan {
+        Ok(SourceSpan {
             site: SiteId {
                 path,
                 start: (span.lo() - lo.file.start_pos).0,
@@ -144,6 +158,128 @@ impl AcquisitionPass {
             end_line: u32::try_from(hi.line).assured("a source file's line offsets fit in BytePos"),
             end_column: u32::try_from(hi.col.0).assured("a source column fits in BytePos"),
             source,
+        })
+    }
+
+    /// Converts collected observations into located candidates with their execution contracts.
+    fn audit_candidates(&mut self, cx: &LateContext<'_>) -> Vec<AuditCandidate> {
+        let recurring = self.flow.recurring_owners(cx.tcx);
+        let observations = std::mem::take(&mut self.audit.observations);
+        let mut candidates = Vec::new();
+        for observation in observations {
+            let Ok(span) = self.locate(cx, observation.span) else {
+                continue;
+            };
+            let Some(pattern) = self.audit_pattern(cx, observation.owner, observation.pattern)
+            else {
+                continue;
+            };
+            candidates.push(AuditCandidate {
+                owner: definition_path(cx.tcx, observation.owner.to_def_id()),
+                context: contracts::effective_context(cx.tcx, observation.owner, &recurring),
+                span,
+                expansion: self.expansions(cx, observation.span),
+                pattern,
+            });
+        }
+        candidates.sort_by(|left, right| left.span.site.cmp(&right.span.site));
+        candidates
+    }
+
+    fn audit_pattern(
+        &self,
+        cx: &LateContext<'_>,
+        owner: rustc_span::def_id::LocalDefId,
+        pattern: audit::Pattern,
+    ) -> Option<AuditPattern> {
+        Some(match pattern {
+            audit::Pattern::RepeatedLookup {
+                collection,
+                receiver,
+                key,
+                guarded,
+                operations,
+            } => {
+                let mut located = Vec::new();
+                for operation in operations {
+                    located.push(KeyedOperation {
+                        operation: operation.name,
+                        span: self.locate(cx, operation.span).ok()?,
+                    });
+                }
+                AuditPattern::RepeatedLookup {
+                    collection,
+                    receiver,
+                    key,
+                    guarded,
+                    operations: located,
+                }
+            }
+            audit::Pattern::KeyAllocation {
+                collection,
+                operation,
+                allocation,
+                key_type,
+            } => AuditPattern::KeyAllocation {
+                collection,
+                operation,
+                allocation,
+                key_type,
+            },
+            audit::Pattern::BorrowedCopy {
+                operation,
+                value_type,
+            } => AuditPattern::BorrowedCopy {
+                operation,
+                value_type,
+            },
+            audit::Pattern::DuplicatedBranch {
+                construct,
+                statement,
+                occurrences,
+            } => {
+                let mut located = Vec::new();
+                for occurrence in occurrences {
+                    located.push(self.locate(cx, occurrence).ok()?);
+                }
+                AuditPattern::DuplicatedBranch {
+                    construct,
+                    statement,
+                    occurrences: located,
+                }
+            }
+            audit::Pattern::ForwardingWrapper {
+                callee,
+                contract,
+                implementation,
+                relocated,
+            } => {
+                let callers = u32::try_from(self.flow.callers(owner))
+                    .assured("a crate's local call graph has fewer than 2^32 callers per body");
+                AuditPattern::ForwardingWrapper {
+                    callee: definition_path(cx.tcx, callee),
+                    callers,
+                    contract,
+                    implementation,
+                    relocated,
+                }
+            }
+            audit::Pattern::DiscardedError {
+                operation,
+                error_type,
+                information,
+            } => AuditPattern::DiscardedError {
+                operation,
+                error_type,
+                information,
+            },
+            audit::Pattern::DisguisedClamp {
+                operation,
+                fallback,
+            } => AuditPattern::DisguisedClamp {
+                operation,
+                fallback,
+            },
         })
     }
 
@@ -205,14 +341,17 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
     }
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
         self.architecture.finish(cx, &mut self.flow);
+        let candidates = self.audit_candidates(cx);
         let mut report = self.report.lock();
         self.flow.finish(cx, &mut report.findings);
+        report.audit = candidates;
         report.complete = true;
     }
     fn check_body(&mut self, cx: &LateContext<'tcx>, body: &rustc_hir::Body<'tcx>) {
         self.flow.body(cx, body);
         if self.authored(cx, body.value.span) {
             self.architecture.parameters(cx, body, &mut self.flow);
+            self.audit.body(cx, body);
         }
     }
     fn check_fn(
@@ -563,6 +702,7 @@ impl Callbacks for Analysis {
                     flow: Flow::default(),
                     errors: errors::ErrorRules::new(inputs.root.clone()),
                     architecture: architecture::ArchitectureRules::default(),
+                    audit: audit::Audit::default(),
                     authored_files: BTreeMap::new(),
                     root: inputs.root.clone(),
                     report: inputs.report.clone(),
@@ -702,6 +842,7 @@ fn main() -> anyhow::Result<()> {
         crate_source: source,
         arguments: arguments.clone(),
         findings: Vec::new(),
+        audit: Vec::new(),
         excluded_generated: 0,
         excluded_external: 0,
         complete: false,

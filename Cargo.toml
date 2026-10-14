@@ -324,6 +324,11 @@ harness = false
 name = "state_replication"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "window_sketches"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",

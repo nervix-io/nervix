@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The ordering invariants one branch's checkpoint is held to while replicas fetch and
-//!   confirm it, while an inspection reads its progress, and while the acknowledgements it holds
-//!   race the deliveries of the same inputs.
+//!   confirm it, while an inspection reads its progress, and while the acknowledgements it holds,
+//!   and reports alive, race the deliveries of the same inputs.
 //! - **Depends on.** The production checkpoint state, checkpoint holds, acknowledgement sets and
 //!   the model harness's Shuttle runner.
 //! - **Must not know.** Guest execution, stable storage, or how a replica reaches the owner.
@@ -251,8 +251,8 @@ enum DeliveryEnd {
 
 /// One input a callback carried into an output row: the processor's own share, the downstream
 /// delivery of the output, and the hold its checkpoint keeps. The delivery resolves concurrently
-/// with the branch finishing the callback and ending its checkpoint, and the input resolves exactly
-/// once: successfully only when the checkpoint completed and the delivery succeeded, and never
+/// with the branch finishing the callback, reporting the held input alive while its checkpoint is
+/// under way, and ending that checkpoint, and the input resolves exactly once: successfully only when the checkpoint completed and the delivery succeeded, and never
 /// before the checkpoint released its hold.
 fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, delivery: DeliveryEnd) {
     shuttle::future::block_on(async {
@@ -282,7 +282,10 @@ fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, deli
         });
         let branch = nervix_primitives::task::spawn(async move {
             processing.ack_success();
-            nervix_primitives::task::yield_now().await;
+            // The checkpoint under way reports the held input alive, racing its delivery's end.
+            holds
+                .keep_alive_while(nervix_primitives::task::yield_now())
+                .await;
             match checkpoint {
                 CheckpointEnd::Completed => {
                     released.store(true, Ordering::SeqCst);

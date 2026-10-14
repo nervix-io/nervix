@@ -770,7 +770,7 @@ impl CompletionSnapshot<'_> {
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
                     }
                     BuiltinFunctionScope::EmitterInvocation(kind)
-                        if kind.capabilities().writes_headers() =>
+                        if kind.capabilities().writes_headers =>
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }

@@ -300,9 +300,9 @@ pub(super) enum IngestorDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        BinaryOperator, CodecName, Expression, FieldName, FieldReference, FieldScope,
-        GeneralErrorPolicy, IngestQuiesceOverflow, IngestSourceKind, Inheritance, Literal,
-        ModelKind, ModelName, NodeRef,
+        BinaryOperator, CodecName, EndpointSourceEntity, Expression, FieldName, FieldReference,
+        FieldScope, GeneralErrorPolicy, IngestQuiesceOverflow, IngestSourceKind, Inheritance,
+        Literal, ModelKind, ModelName, NodeRef,
     };
 
     use super::{IngestorDraft, TimestampDraft};
@@ -321,7 +321,9 @@ mod tests {
             name: "incoming".into(),
             ..Default::default()
         };
-        draft.source.choose_kind(IngestSourceKind::Endpoint);
+        draft
+            .source
+            .choose_kind(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint));
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));
