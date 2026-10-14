@@ -1626,7 +1626,7 @@ one invocation:
 | Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`; ordinary extras and `test-primitives-ordinary` through `just coverage-native-extras` |
 | Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, `just test-primitives-shuttle` | `just coverage-native-extras test-shuttle test-primitives-shuttle`; `just coverage-shuttle <output> [filter]` |
 | Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, `just test-primitives-loom` | `just coverage-native-extras test-loom test-primitives-loom`; `just coverage-loom <output> [filter]` |
-| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | `just coverage-turmoil`; native conformance through `just coverage-native-extras test-primitives-turmoil` |
+| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | The canonical suite through `just coverage-native-extras test-turmoil`, with separate CI artifacts and advisory Turmoil patch feedback; `just coverage-turmoil <output>` copies a complete report; native conformance through `just coverage-native-extras test-primitives-turmoil` |
 | Deloxide | `just cargo-clippy-deloxide`: every diagnostic selection of the boundary, reporting owner, paced driver and server, including probes and scenarios | `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress`, `just test-deloxide-stress-restore`, `just test-primitives-deloxide` and diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; `just coverage-deadlock` collects the `test-deadlock-evidence-order` and ordinary `test-deadlock-report` producers in separate builds with canonical completion records and separately flagged diagnostic-evidence coverage; full diagnostic workloads retain separate evidence |
 
 Model coverage uses the canonical inventories and runners, including per-test process isolation,
@@ -2109,6 +2109,16 @@ for each batch of two interleaved branches. Each of the three runs on one and th
 nodes with a replica, the deduplicator, window and guest-save restore scenarios leave the owner's
 lifecycle and branch checkpoint announcements with the replica's lifecycle handle, where the
 replica task takes them under the same lock.
+
+The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
+the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
+and three nodes. Its paired stress registration reaches the occupancy holders mutex under bounded
+scheduling disturbance. Metadata inspection keeps ONNX's operator concurrency at one, so loading
+and optimization run on the bulk worker the executor admitted. Debug phase events distinguish
+worker queue delay, session initialization and release while the thirty-second product bound stays
+in place. The dependency's own locks and threads remain outside Deloxide; the isolated native owner
+regression measures the live temporary session's process thread count, and the public branch-batch
+scenario retains its exact interleaved-branch output oracle.
 
 Shuttle checks the production handoff's delivery/refusal and close races, including counter drain,
 through the registered replay-capable harness, in the Shuttle build where no detector is installed.

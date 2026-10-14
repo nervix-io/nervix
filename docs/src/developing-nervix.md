@@ -742,7 +742,7 @@ just coverage-native-extras
 ```
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
-`test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`,
+`test-shuttle`, `test-loom`, `test-turmoil`, `test-deadlock-evidence-order`, `test-deadlock-report`,
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
 an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
 `deloxide-order` build; the local report command uses the ordinary build; each diagnostic lane
@@ -755,6 +755,7 @@ selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide exec
 just coverage-native-extras nspl-completion-walk
 just coverage-native-extras test-primitives
 just coverage-native-extras test-shuttle test-loom
+just coverage-native-extras test-turmoil
 just coverage-native-extras test-shuttle --filter cancellation
 just coverage-loom target/loom.lcov execution.cancellation
 ```
@@ -834,14 +835,18 @@ CI's extra-tests job collects native extras and per-mode primitive conformance, 
 compile checks independently. The `shuttle` job, which runs only for a pull request labeled
 `shuttle`, collects its complete inventory, including random/PCT exploration and paired
 nondeterminism checking, and runs schedule replay qualification independently. For a pull
-request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
+request labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once,
+including each fresh-process attempt, and runs failure replay qualification independently.
+For a request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
 loom-qualification jobs split weakening qualification into shards, because it rebuilds the server
 once for each weakening of a server owner. The jobs upload `lcov.info`, `completion.json`,
 `executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
-`coverage-shuttle` and `coverage-loom`, whatever the verdict. The ordinary coverage/CRAP
-gate merges ordinary artifacts only; mode reports describe modeled or diagnostic execution and
-retain separate attribution. `just coverage-shuttle <output> [filter]` and
-`just coverage-loom <output> [filter]` copy a successfully completed canonical report to the
+`coverage-shuttle`, `coverage-loom` and `coverage-turmoil`, whatever the verdict. The
+[ordinary workspace report](#the-ordinary-workspace-report) merges ordinary collections only; mode
+reports describe modeled or diagnostic execution and retain separate attribution.
+`just coverage-shuttle <output> [filter]`,
+`just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a successfully
+completed canonical report to the
 requested path while retaining its attempt evidence. Replay uses the unchanged exact-check
 commands and the failure directory under the matching mode build directory.
 The benchmark bodies run instrumented, so
@@ -853,11 +858,72 @@ is tested with:
 just test-native-coverage
 ```
 
-The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
-selected. CI merges those reports with the native extra reports, checks complexity against that
-complete report, and retains it as the `coverage-merged` artifact. The separate `lcov.info` report selects the server,
-CLI and console for focused inspection; it does not replace the workspace export.
-Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
+### The ordinary workspace report
+
+Every ordinary coverage consumer reads one report, `lcov-workspace.info`: patch line coverage, the
+complexity check and the `coverage-merged` artifact. `just coverage-merge` builds it from the
+ordinary producers' reports, and fails, writing no report, rather than publish an incomplete one.
+
+`just test-coverage` and `just test-scenarios-coverage` export `lcov-workspace.info` from every
+profile they collected with `--no-default-ignore-filename-regex`, which keeps every workspace crate
+and the test sources the run executed. Each writes the absolute checkout path it ran in to
+`coverage-source-root.txt` beside the report. `just coverage-report-workspace` writes the same pair
+from the profiles a focused recipe collected. CI uploads the pair as the `coverage-tests` and
+`coverage-scenarios` artifacts, the second with the Python paced drivers' report, and the
+extra-tests job uploads its native collections and Python tooling reports as
+`coverage-native-extras`. The coverage job then runs:
+
+```bash
+just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
+```
+
+An input is a producer's artifact directory or one report, with the producer's
+`coverage-source-root.txt` in the directory or beside the report. The merge reads the workspace
+export, every Python tooling report named `python.lcov`, and every complete ordinary native
+collection below `native-coverage`. A collection of another mode describes modeled or diagnostic
+execution, so it is never read: the Shuttle, Loom, Turmoil and Deloxide primitive conformance
+collections in the native extras artifact are recorded as left out. The reports of the `shuttle`,
+`loom`, `turmoil`, `deloxide` and Bolero fuzz jobs are not inputs at all.
+
+Every record is mapped onto the repository. The merge strips the producer's checkout root and
+resolves `..` segments lexically, so the record of a `#[path]` module names the file it includes,
+and it keeps a record only when its file is tracked at the tested revision, test sources included.
+It drops the rest and counts the dropped files by class: dependencies below `~/.cargo/registry`,
+`~/.cargo/git` and `/kache/.cargo/registry`, the standard library below `/rustc/<commit>` or a
+local rustup toolchain, files generated below the checkout's Cargo target directory, such as the
+FlatBuffers `OUT_DIR` sources, untracked files, and any other path outside the checkout. The counters of every report that
+measured a file are summed. The report holds line and function counters. Branch records are left
+out: the Rust producers export none, and coverage.py names Python branches in words that LCOV readers
+such as `cargo crap` refuse.
+
+The merge fails with a message naming what to fix when:
+
+- an input is missing, or holds neither a workspace export nor a complete ordinary collection;
+- an input has no root metadata;
+- none of a report's records lies below its producer's checkout root;
+- a report contributes no record of a tracked file;
+- a native report has no complete ordinary completion record beside it, or one producer has two
+  collections;
+- a workspace member that `cargo metadata` lists has no Rust record in the merged report.
+
+Either way it writes its merge record, `target/coverage-merge/record.json`: the verdict and the
+tested revision, every input with its checkout root, each report it read with its record counts and
+its dropped records by class, the collections it left out, the dropped files by class, and the
+workspace members the report measures. CI retains the report and its record as the
+`coverage-merged` artifact.
+
+Without inputs, the merge rewrites in place the `lcov-workspace.info` that `just test-coverage`
+wrote, into the shape CI publishes, and the complexity check and patch line coverage read it:
+
+```bash
+just test-coverage
+just coverage-merge
+just check-coverage
+just coverage-patch origin/main
+```
+
+`just test-coverage-merge` exercises the mapping, every integrity failure and the CI contract, and
+`just coverage-merge-runner` exports the merge's measured Python coverage for CI.
 
 ### Patch line coverage
 
@@ -867,22 +933,34 @@ numbers. The comment names the merge base and tested commit and links to the wor
 Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
 publication does not fail CI. The independent complexity check retains its own verdict.
 
+The label-enabled Turmoil job publishes a separate **Turmoil patch coverage** comment using
+`--scope turmoil` after its canonical instrumented suite and independent replay qualification
+pass. The scope selects a distinct marker, so the two jobs update their own comments regardless
+of completion order. This report describes only the current Turmoil build's product sources;
+it does not merge modeled counters into the ordinary complexity gate. Failed collection keeps
+its verdict and diagnostics without publishing a successful coverage report.
+
 Run the same calculation manually after collecting coverage for the committed source revision:
 
 ```bash
 just coverage-patch origin/main lcov-workspace.info
 just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
+just coverage-turmoil target/turmoil.lcov
+just coverage-patch origin/main target/turmoil.lcov --scope turmoil --output target/turmoil-patch-coverage.md
 ```
 
 The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
 creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
 `--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
-tested commit's line coordinates. For reports collected in another checkout, use
-`--source-root <original-checkout-path>` to remap absolute source paths explicitly. Repeat it when
-reports come from multiple source roots. Ordinary CI inputs retain `coverage-source-root.txt` beside
-their reports, and the reporter receives each producer's metadata with `--source-root-file`.
-This accounts for the different checkout paths of Blacksmith and GitHub-hosted runners without
-guessing a file's origin. The merged artifact retains those source-root files for manual reuse.
+tested commit's line coordinates. The reporter maps sources onto tracked files as
+`just coverage-merge` does, so a `..` segment names the file it reaches, and the merged report,
+already relative to the repository, needs no checkout root. CI's reporter reads that report, so the
+different checkout paths of Blacksmith and GitHub-hosted runners are resolved once, by the merge. A
+focused local report, such as the Backup and Visual Create coverage recipes write, describes the
+local checkout and needs none either. For reports collected in another checkout, use
+`--source-root <original-checkout-path>`, or `--source-root-file` with the producer's
+`coverage-source-root.txt`, to remap absolute source paths explicitly. Repeat either when reports
+come from multiple source roots.
 
 The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
 LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in

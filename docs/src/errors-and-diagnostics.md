@@ -718,6 +718,16 @@ These failures name the owning node and relevant relay, codec, or field. A missi
 lookup file is rejected during candidate binding validation; malformed records remain a loader
 failure when the pinned file is decoded. Neither failure silently selects another resource version.
 
+ONNX binding preflight preserves the distinction between invalid tensor bindings, an ONNX loading
+failure, worker refusal, worker panic and inspection timeout. Worker refusal retains the bounded
+executor's report beneath the inferencer context; it does not classify an uninspected model as
+malformed. The thirty-second inspection bound covers admission to a bulk worker through release of
+the temporary session. Debug events record submission, worker entry, builder initialization, model
+loading and session release. A timeout also records the bulk class's configured workers, running
+jobs and pending jobs, so an operator can correlate queue delay with dependency work. These are
+observations of the run; a successful later inspection does not identify the cause of an earlier
+timeout.
+
 ### Runtime Installation
 
 Installing a domain on a node, whether it builds the domain's execution, applies a schedule delta,
@@ -1907,12 +1917,56 @@ transfer to alter a later measurement. A failed required attempt remains evidenc
 subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
+Network-fault preflight refusals retain the failing stage and original command status, exact
+arguments and bound, elapsed time, helper identities and both raw streams. The operation record
+exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the
+injector's state and logs before removing it and records its own failures independently of the
+original refusal. A sidecar that disappeared between enumeration and inspection is confirmed
+absent and recorded as an ordinary outcome; a failed inspection of a still-present sidecar fails
+cleanup. The public setup error reports the actual refusal rather than inferring that the worker
+lacks netem or iptables capabilities from a Docker client failure. A successful helper exit alone
+does not establish successful Docker-client completion within the inspection bound.
+Only the ping helper's missing-replies outcome qualifies blocked traffic. A Docker execution
+refusal or a probe timeout supplies no effect observation and fails preflight with its own status.
+The real preflight failure controls qualify separately from a scenario's timed verifier self-check.
+They resolve the pinned tool images before starting an injector with automatic pulls disabled.
+Missing-image preparation retains each inspection, pull and confirmation outcome and its raw streams;
+a preparation refusal ends qualification before any fault or product node starts.
+CI retains their raw outcomes before starting the suite; failure to complete that qualification
+fails the shard without consuming a product scenario's execution window.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product
 recovery failed. Burst samples use 400 packets inside the existing observation window, and the
 effect verifier preserves the original received and lost fractions. Failed observations remain
 retained alongside subsequent qualified samples.
+
+Kafka end-offset observations retain their exact command, raw streams, command outcome, parsed
+offset, start time, elapsed time and effective bound before the controller relies on them. Output
+stability requires consecutive successful equal observations above the accepted-input minimum.
+A failed query or a value below that minimum resets the sequence, and an individual query cannot
+outlive the remaining 30-second observation window or the whole-run deadline. The final record
+distinguishes an exhausted whole-run budget (`controller`) from failed observations, insufficient
+output or a moving boundary (`observation`). None of those observations alone proves a missing
+record; the exact ledger owns that verdict. Baseline suite budgets separately account for the full
+600-second verifier preparation allowance and the topology's execution allowance, without
+extending a product deadline.
+Kafka administration borrows no stdin or interactive terminal from the controller. A failed final
+query retains its command failure classification even after earlier successful reads, and a
+refusal to create or finish an evidence record fails the controller instead of accepting an
+unrecorded observation.
+End-offset queries execute in the existing broker, with no ephemeral container lifetime inside
+each observation window. The packaged-binary preflight retains its labeled helper until final
+run cleanup and records the command and container inspection as separate outcomes. An expired
+Docker client command remains a failed observation even if inspection sees a successfully exited
+helper; a missing or invalid inspection is also a failure. The controller does not reinterpret
+such refusals as missing binaries. Its live Docker event recording begins before this probe.
+Publishing a validated startup status is a controller operation. Its byte copy and atomic rename
+share a bounded command, clipped to the remaining run time, and retain their native outcome and
+monotonic elapsed seconds under `diagnostics/startup-status/`. A refused or expired publication
+keeps the attempted public status and fails without claiming a product readiness defect. A final
+transcript is published only after its copy succeeds; failure to record the operation also refuses
+publication. Subsequent container enumeration preserves failure under its own bounded command.
 
 The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
 failed measurement. Before any warm-up input, its empty-topic preparation retries only the

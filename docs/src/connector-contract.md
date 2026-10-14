@@ -928,13 +928,44 @@ sequenceDiagram
   path and query. The source host cancels a pending resume when shutdown or quiesce changes its
   lifecycle state. DNS and connection failures remain infrastructure outcomes for the host to retry;
   a resolved address alone never completes a Syslog record or an input acknowledgement.
+- **WebSocket client source.** The WebSocket connector crate supplies the outbound
+  `WEBSOCKETS CONNECTION` source through `SourceConnector` and `BrokerSourceConnector`. It has
+  no emitter or listening endpoint. Its plan carries resolved client configuration, the node
+  resolver and an optional compiled signaling protocol. `open` prepares local transport and TLS
+  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  signaling handshake, and only then reports readiness. Accepted data from a successful
+  handshake is queued for polling before new socket frames. Text and binary frames become raw
+  payload bytes for the host to decode; protocol control frames remain transport concerns.
+  Suspension drops the connection while retaining queued payloads, and close also clears that
+  queue. Transport failure requires another resume of the retained source.
+  The host composer currently resolves the named signaling protocol and chooses buffered intake,
+  a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
+  the executor. Holding its polling loop would also stop answering the peer's pings. These
+  transport requirements belong in a connector-owned contract declaration; the composer
+  currently hard-codes them instead. The source ownership header names this boundary violation.
+  The source's position carries no external acknowledgement, and its acknowledge and reject operations are
+  no-ops; reconnection supplies no durable replay guarantee. The host owns graph intake, routing,
+  quiesce, admission and retry cadence. Server endpoint listeners use the server's request-scoped
+  source and share only the signaling engine with this outbound connector.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
-  client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
-  frames become payload; the host still owns intake and routing. Domain activation resolves the
-  endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
-  when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
-  The compiler never chooses a graph route or an endpoint listener. A number keeps its value
-  between a frame and the programs that read and write it: a protobuf `double` to its bits.
+  client sources and server endpoint sessions. Its ordered send and wait clauses, acceptance
+  policy, per-connection state and handshake timeout govern when frames become payload; the
+  caller supplies the accepted-data sink, and the host still owns intake and routing. Domain
+  activation resolves the endpoint's VHOST and signaling reference first. The runtime binds the
+  pinned protobuf resource, when present, and hands its send and wait message descriptors to the
+  compiler. The compiled artifact retains the wire format, compiled jaq programs and timeout;
+  each connection owns its handshake state. The compiler never chooses a graph route or an
+  endpoint listener. A number keeps its value between a frame and the programs that read and
+  write it: a protobuf `double` to its bits.
+  The compiler currently also receives the configuration Model's `SignalingWireFormat` and
+  `SignalingProtocolOnConnect`, and parses the latter's timeout text. This contradicts the
+  connector engine's typed-plan input boundary: the decision layer must convert those Model
+  fields and the duration into a typed signaling plan before compilation. The crate and
+  signaling module's ownership headers name this violation; sharing the engine with endpoint
+  sessions does not transfer Model conversion, resource resolution or routing into the connector.
+  The accepted-data callback is currently the crate's own `SignalingDataSink` interface. Its
+  host service belongs in the shared connector contract; the signaling module's header names
+  this separate host-interface ownership violation.
   Registered conversion properties exercise complete messages with explicit scalar presence:
   double and float bits, full-width integers, booleans, strings, ordered repeated fields and
   absent defaults. The generated JSON omits empty repeated fields, which protobuf does not
