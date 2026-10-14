@@ -60,6 +60,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
@@ -308,6 +309,18 @@ responding-node pair while other probes remain healthy. It can also hold one nod
 that node reports a runtime revision prepared, wait until the hold is reached, and release it after
 asserting command completion. These are per-scenario injected conditions; their waits have harness
 bounds and do not shorten the product's completion deadline.
+
+An injected hold is the opposite case: a product deadline races it. The scenario holds a controlled
+operation at a gate for a workload duration, counted from the moment it observes the gate, and the
+node keeps its own deadline running while the operation waits. The backup wait scenarios hold one
+domain's quiesced cut for 12 seconds and the next one's for 14 seconds, each inside its own
+20-second cut budget. The scenario's margin is the part of the budget the hold leaves, and a runner
+task that another scenario's synchronous step stalls for longer than that margin would lengthen a
+hold timed on the runner task until the product deadline expires. `tests/common/injected_hold.rs`
+therefore waits for each gate, holds it for its duration and releases it on a task of its own, and
+the step that injects the holds only awaits that task. A stalled runner delays when the step learns
+of a release, never the release itself. The step still watches the controlled operation, and a
+command that ends before its gates were held fails the step with the command's own outcome.
 
 The boundary between them is kept in four places.
 
@@ -1719,7 +1732,9 @@ contract.
    Failures carry no credentials and no payload values.
 5. **Never block the runner task.** Every scenario and the suite watchdog share it. A synchronous
    loop needs a bound of its own, as the port draw has, and blocking work belongs on a blocking or
-   spawned task.
+   spawned task. A duration a scenario injects for a product deadline to race is timed on a task
+   of its own, as [injected holds](#product-deadlines-and-harness-deadlines) are, because another
+   scenario can still stall the runner task.
 6. **Make cancellation release it.** Whatever a scenario starts belongs to the scenario's world or
    its cluster, so dropping the run releases it: spawned work behind handles that abort on drop,
    child processes killed on drop, and node tasks through the single task owner, which asks a node
@@ -1751,6 +1766,8 @@ The harness guarantees:
 - A cluster's cleanup costs one budget whatever its size, and releases what a node held only after
   that node's task has ended.
 - `finished` is published only after cleanup has completed.
+- A gate a step holds is released its injected duration after the hold observed it, however long
+  the runner task is stalled.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -1763,6 +1780,11 @@ Its limits:
 - Provisioning a Kafka topic's partitions and waiting for a consumer group's members query the
   broker synchronously on the runner task, for up to 5 seconds per query, and every scenario of the
   run waits while one of those queries runs.
+- Backup steps read, rewrite and verify archives, and inspect the databases of stopped nodes,
+  synchronously on the runner task, and every scenario of the run waits while they do. The native
+  metadata restore scenario's archive holds lifecycle and offset records above 32 MiB each: its
+  inspection of three restored nodes has held the runner task for about 30 seconds, and its other
+  archive steps for seconds at a time.
 - Cleanup and stops give back a stopped node's consensus fault registration on the runner task, so
   when no step still holds an observer of the node's consensus state, the node's consensus database
   closes there, and every scenario of the run waits until the close has synchronized the journal and
