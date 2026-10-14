@@ -115,11 +115,10 @@ use crate::common::{
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
-        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR,
-        MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
-        TestDependencies,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR,
+        MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR,
+        PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR,
+        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -22575,7 +22574,10 @@ async fn given_mongodb_collection_with_unique_user_id_exists(
 }
 
 #[given(expr = "MongoDB replica set collection {string} exists")]
-async fn given_mongodb_replica_set_collection_exists(world: &mut ScenarioWorld, collection: String) {
+async fn given_mongodb_replica_set_collection_exists(
+    world: &mut ScenarioWorld,
+    collection: String,
+) {
     prepare_mongodb_collection(world, collection, MongoDbServer::ReplicaSet).await;
 }
 

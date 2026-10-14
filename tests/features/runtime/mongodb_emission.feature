@@ -483,7 +483,7 @@ Feature: MongoDB emission
         "mongodb_action" = LOWER(input.action)
       }
       <conflict_clause>
-      MODE ACK RETRY POLICY BACKOFF 500ms MAX 1s
+      MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
       BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG

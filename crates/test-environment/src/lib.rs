@@ -845,8 +845,8 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let election = format!(
             "try {{ void rs.status(); }} catch (error) {{ if (error.codeName !== \
              'NotYetInitialized') {{ throw error; }} void rs.initiate({{ _id: 'nervix', members: \
-             [{{ _id: 0, host: '127.0.0.1:27017' }}] }}); }} const deadline = Date.now() + {}; while \
-             (!db.hello().isWritablePrimary) {{ if (Date.now() > deadline) {{ throw new \
+             [{{ _id: 0, host: '127.0.0.1:27017' }}] }}); }} const deadline = Date.now() + {}; \
+             while (!db.hello().isWritablePrimary) {{ if (Date.now() > deadline) {{ throw new \
              Error('the only member of the replica set did not become its primary'); }} \
              sleep(100); }}",
             STARTUP_TIMEOUT.as_millis()
@@ -863,10 +863,9 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await
             .map_err(testcontainers_error("MongoDB replica set primary election"))?;
         if exit_code != Some(0) {
-            let output = elected
-                .stderr_to_vec()
-                .await
-                .map_err(testcontainers_error("MongoDB replica set primary election output"))?;
+            let output = elected.stderr_to_vec().await.map_err(testcontainers_error(
+                "MongoDB replica set primary election output",
+            ))?;
             return Err(io::Error::other(format!(
                 "MongoDB replica set primary election exited with {exit_code:?}: {}",
                 String::from_utf8_lossy(&output)

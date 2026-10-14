@@ -915,7 +915,12 @@ destination's limit: a Postgres insert above the largest protocol message the se
 MongoDB document above its 16 MiB document limit, which is rejected before the write that would
 carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
 time, and each row the destination still refuses receives an `external` `publish` error with the
-destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
+destination's reason. A MongoDB write answers for each document even when it fails: a document the
+server refused for good receives an `external` `publish` error with the server's code, a document it
+applied is delivered, and every other document stays unresolved. A write concern the deployment
+could not satisfy is an infrastructure failure the host retries, named with the server's code, such
+as `MongoDB insert_many write concern failed with code 100 (UnsatisfiableWriteConcern)`, and it
+never undoes the documents the server applied, so the retry carries only the rest. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
 `ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
