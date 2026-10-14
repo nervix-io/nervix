@@ -113,7 +113,7 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorWait, DependencyEndpoints,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
         MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
@@ -26545,67 +26545,67 @@ async fn then_otel_collector_receives_split_exports(
     signal: String,
     #[step] step: &Step,
 ) {
-    let (heading, count_key) = match signal.as_str() {
-        "logs" => ("Logs", "log records"),
-        "traces" => ("Traces", "spans"),
-        "metrics" => ("Metrics", "data points"),
-        _ => panic!("unsupported OTEL signal {signal}"),
-    };
+    let signal = signal
+        .parse::<CollectorSignal>()
+        .expect("the step names the logs, traces or metrics signal");
     let expected = expand_placeholders(world, docstring(step));
     let members = expected
         .lines()
         .map(str::trim)
         .filter(|member| !member.is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(members.len(), 3, "the step names exactly three members");
+    let &[first, second, third] = members.as_slice() else {
+        panic!("the step names exactly three members, not {members:?}");
+    };
     let output = world
         .dependencies
         .otel_collector_output()
         .expect("the scenario started the OpenTelemetry Collector")
         .clone();
     let deadline = Instant::now() + OTEL_COLLECTOR_CONTENT_BOUND;
-    let export_boundary = format!("\tinfo\t{heading}\t");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let logs = output.text();
-        let mut two_record_export = None;
-        let mut one_record_export = None;
+        let printed = output.text();
+        let exports = signal.exports(&printed);
+        let mut two_member_export = None;
+        let mut one_member_export = None;
         let mut observed = Vec::new();
-        for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
-            let count = block
-                .lines()
-                .next()
-                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .and_then(|header| header[count_key].as_u64());
-            let carried = members
-                .iter()
-                .filter(|member| block.contains(**member))
+        for (index, export) in exports.iter().enumerate() {
+            let first_at = export.position(first);
+            let second_at = export.position(second);
+            let third_at = export.position(third);
+            let named = [first_at, second_at, third_at]
+                .into_iter()
+                .flatten()
                 .count();
-            if carried > 0 {
-                observed.push(format!(
-                    "export {index}: {count:?} {count_key}, {carried} named"
-                ));
+            if named == 0 {
+                continue;
             }
-            if count == Some(2)
-                && block.find(members[0]).is_some_and(|first| {
-                    block.find(members[1]).is_some_and(|second| first < second)
-                })
+            let records = export.records();
+            observed.push(format!(
+                "export {index}: {records} {}, {named} named",
+                signal.record_noun()
+            ));
+            if records == 2
+                && let (Some(first_at), Some(second_at)) = (first_at, second_at)
+                && first_at < second_at
             {
-                two_record_export = Some(index);
+                two_member_export = Some(index);
             }
-            if count == Some(1) && block.contains(members[2]) {
-                one_record_export = Some(index);
+            if records == 1 && third_at.is_some() {
+                one_member_export = Some(index);
             }
         }
-        if let (Some(first), Some(second)) = (two_record_export, one_record_export)
-            && first < second
+        if let (Some(two_members), Some(one_member)) = (two_member_export, one_member_export)
+            && two_members < one_member
         {
             return;
         }
         assert!(
             Instant::now() < deadline,
             "timed out waiting for ordered two-member and one-member {signal} exports; observed \
-             {observed:?}"
+             {observed:?}; followed {}",
+            output.progress()
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }

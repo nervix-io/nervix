@@ -3,8 +3,8 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Container lifecycle, the in-process DNS authority tests point resolvers at, the
-//!   followed output of the OpenTelemetry Collector, the addresses and TLS material a run is
-//!   given, and the parallelism budget it is allowed.
+//!   followed output of the OpenTelemetry Collector and the exports its debug exporter printed,
+//!   the addresses and TLS material a run is given, and the parallelism budget it is allowed.
 //! - **Depends on.** Container and process management, and the DNS message grammar.
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
@@ -49,6 +49,7 @@ use testcontainers::{
 };
 use thiserror::Error;
 
+pub mod collector_exports;
 pub mod collector_output;
 pub mod dns_authority;
 mod reaper;

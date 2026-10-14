@@ -11,6 +11,7 @@ pub(crate) use nervix_test_environment::{
     NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, PULSAR_ADMIN_ADDR,
     PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR,
     RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    collector_exports::CollectorSignal,
     collector_output::{CollectorOutput, CollectorWait},
 };
 use nervix_test_environment::{
