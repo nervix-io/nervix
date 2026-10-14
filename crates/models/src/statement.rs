@@ -2143,13 +2143,17 @@ pub enum AlterIngestorOperation<Source> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum AlterTransportIngestorOperation<Source> {
-    Ingestor(AlterIngestorOperation<Source>),
-    SetDecodeUsing { codec: CodecName },
+    /// Boxed because a shared operation can carry a whole route, which would otherwise size every
+    /// codec operation like one.
+    Ingestor(Box<AlterIngestorOperation<Source>>),
+    SetDecodeUsing {
+        codec: CodecName,
+    },
 }
 
 impl<Source> From<AlterIngestorOperation<Source>> for AlterTransportIngestorOperation<Source> {
     fn from(operation: AlterIngestorOperation<Source>) -> Self {
-        Self::Ingestor(operation)
+        Self::Ingestor(Box::new(operation))
     }
 }
 

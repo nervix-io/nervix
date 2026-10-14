@@ -421,14 +421,13 @@ fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
         general_error_policy: GeneralErrorPolicy::Log,
         filter_where: None,
     };
-    let kafka_alteration: IngestorAlteration = vec![AlterTransportIngestorOperation::<
-        KafkaTopicSource,
-    >::Ingestor(
-        AlterIngestorOperation::SetGeneralError {
-            policy: GeneralErrorPolicy::Ignore,
-        },
-    )]
-    .into();
+    let kafka_alteration: IngestorAlteration =
+        vec![AlterTransportIngestorOperation::<KafkaTopicSource>::from(
+            AlterIngestorOperation::SetGeneralError {
+                policy: GeneralErrorPolicy::Ignore,
+            },
+        )]
+        .into();
 
     let mut candidate = base.clone();
     let error = candidate

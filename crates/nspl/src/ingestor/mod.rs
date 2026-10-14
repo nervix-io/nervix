@@ -329,9 +329,9 @@ where
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     let operation = choice((
-        set_source(body).map(AlterTransportIngestorOperation::Ingestor),
+        set_source(body).map(AlterTransportIngestorOperation::from),
         set_decode(),
-        shared_operation().map(AlterTransportIngestorOperation::Ingestor),
+        shared_operation().map(AlterTransportIngestorOperation::from),
     ));
     alteration::<S, _, _>(operation)
 }
@@ -752,9 +752,10 @@ mod tests {
             panic!("the head names an HTTP endpoint");
         };
         assert_eq!(operations.len(), 7);
-        let AlterTransportIngestorOperation::Ingestor(AlterIngestorOperation::SetSource { source }) =
-            &operations[0]
-        else {
+        let AlterTransportIngestorOperation::Ingestor(first) = &operations[0] else {
+            panic!("the first operation is one every ingestor accepts");
+        };
+        let AlterIngestorOperation::SetSource { source } = first.as_ref() else {
             panic!("the first operation sets the source");
         };
         assert_eq!(source.endpoint.as_str(), "ingress_b");
@@ -764,13 +765,16 @@ mod tests {
                 codec: CodecName::parse("event_codec_v2").assured("a valid codec name"),
             }
         );
+        let AlterTransportIngestorOperation::Ingestor(fifth) = &operations[4] else {
+            panic!("the fifth operation is one every ingestor accepts");
+        };
         assert!(matches!(
-            operations[4],
-            AlterTransportIngestorOperation::Ingestor(AlterIngestorOperation::ReplaceRoute { .. })
+            fifth.as_ref(),
+            AlterIngestorOperation::ReplaceRoute { .. }
         ));
         assert_eq!(
             operations[6],
-            AlterTransportIngestorOperation::Ingestor(AlterIngestorOperation::SetGeneralError {
+            AlterTransportIngestorOperation::from(AlterIngestorOperation::SetGeneralError {
                 policy: GeneralErrorPolicy::Ignore
             })
         );

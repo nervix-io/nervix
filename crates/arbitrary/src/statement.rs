@@ -1157,9 +1157,7 @@ impl Arbitrary<'_> {
                     codec: arbitrary.name(),
                 }
             } else {
-                AlterTransportIngestorOperation::Ingestor(
-                    arbitrary.alter_ingestor_operation(&source),
-                )
+                AlterTransportIngestorOperation::from(arbitrary.alter_ingestor_operation(&source))
             }
         })
         .into()
