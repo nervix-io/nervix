@@ -10,35 +10,37 @@
     nervix::layer(language, reason = "owns the language boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+mod client;
+mod delivery;
+mod endpoint;
+mod http;
+mod kafka;
+mod mqtt;
+mod nats;
+mod prometheus;
+mod pulsar;
+mod rabbitmq;
+mod redis;
+mod sqs;
+mod syslog;
+mod websockets;
+mod zeromq;
 
 use chumsky::prelude::*;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
-    AlterIngestor, AlterIngestorOperation, ClientIngestMode, ClientProducerSource, CreateIngestor,
-    CreateStatement, EndpointEndpointSource, EndpointIngestMode, EndpointSource,
-    GeneralErrorPolicy, HttpRequestSource, HttpSource, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, IngestorInput, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSource, KafkaTopicSource, MqttIngestMode, MqttQos, MqttSession, MqttSource,
-    MqttTopicSource, NatsIngestMode, NatsSource, NatsSubjectSource, PrometheusQuerySource,
-    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
-    RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
-    RetryPolicy, ShowIngestors, SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource,
-    SyslogSource, TransportIngestorInput, WebsocketsConnectionSource, WebsocketsIngestMode,
-    WebsocketsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
+    AlterIngestor, AlterIngestorOperation, CreateIngestor, CreateStatement, GeneralErrorPolicy,
+    IngestSource, IngestTimestampSource, IngestorInput, ShowIngestors, TransportIngestorInput,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_timeout, ack_window,
-        alter_ingestor_route_body, alter_op_separator, boxed_choice, byte_size_lit, channel_ref,
-        client_ref, codec_ref, consumer_group_ref, domain_clock_period_lit, duration_lit,
-        endpoint_ref, field_ref, filter_where_clause, flushed_ingestor_outputs,
-        general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
-        kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, nonzero_u64_value,
-        parallel_ack_window, queue_ref, relay_ref, retry_policy, schema_ref, sequential_ack_window,
-        string_lit, subject_ref, subscription_ref, suggest_from, tok, topic_ref, where_expression,
+        LexedInput, ParseError, ParseFromSourceError, alter_ingestor_route_body,
+        alter_op_separator, boxed_choice, codec_ref, field_ref, filter_where_clause,
+        flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
+        where_expression,
     },
 };
 
@@ -51,19 +53,6 @@ pub fn show_ingestors_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
-/// The count after `INSTANCES`.
-fn instance_count<'src>()
--> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
-    nonzero_u64_value("instance_count", "instances must be greater than 0")
-}
-
-fn batch_timeout_parser<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Batch)
-        .ignore_then(kw(Identifier::Timeout))
-        .ignore_then(duration_lit())
-}
-
 fn timestamp_source<'src>()
 -> impl Parser<'src, &'src [Token], IngestTimestampSource, extra::Err<ParseError<'src>>> + Clone {
     let at_field = kw(Identifier::At).ignore_then(field_ref().map(IngestTimestampSource::At));
@@ -74,713 +63,23 @@ fn timestamp_source<'src>()
     )))
 }
 
-fn mode_parser<'src>()
--> impl Parser<'src, &'src [Token], KafkaIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    let ack_timeout = ack_timeout();
-    let batch_timeout = batch_timeout_parser();
-    let retry_policy = retry_policy();
-    choice((
-        kw(Identifier::Ack)
-            .ignore_then(parallel_ack_window())
-            .then(batch_timeout)
-            .then(ack_timeout.clone())
-            .then(retry_policy.clone())
-            .map(
-                |(((max, batch_timeout), timeout), retry_policy)| KafkaIngestMode::AckParallel {
-                    max,
-                    batch_timeout,
-                    timeout,
-                    retry_policy,
-                },
-            ),
-        kw(Identifier::Ack)
-            .ignore_then(sequential_ack_window())
-            .ignore_then(ack_timeout)
-            .then(retry_policy)
-            .map(|(timeout, retry_policy)| KafkaIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            }),
-        kw(Identifier::NoAck)
-            .ignore_then(kw(Identifier::Parallel))
-            .to(KafkaIngestMode::NoAckParallel),
-    ))
-}
-
-fn pulsar_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], PulsarIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    mode_parser()
-}
-
-fn rabbitmq_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], RabbitMqIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Ack)
-        .ignore_then(sequential_ack_window())
-        .ignore_then(ack_timeout())
-        .then(retry_policy())
-        .map(
-            |(timeout, retry_policy)| RabbitMqIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            },
-        )
-}
-
-fn redis_pubsub_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], RedisPubSubIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(RedisPubSubIngestMode::NoAckSequential)
-}
-
-#[derive(Clone)]
-enum ParsedMqttIngestMode {
-    NoAckSequential,
-    NoAckParallel,
-    AckSequential {
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-    AckParallel {
-        max: NonZeroU64,
-        batch_timeout: String,
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-}
-
-fn mqtt_session_clause<'src>()
--> impl Parser<'src, &'src [Token], MqttSession, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Session).ignore_then(choice((
-        kw(Identifier::Clean).to(MqttSession::Clean),
-        kw(Identifier::Persistent).to(MqttSession::Persistent),
-    )))
-}
-
-fn mqtt_qos_clause<'src>()
--> impl Parser<'src, &'src [Token], MqttQos, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Qos).ignore_then(
-        select! { Token::NumberLiteral(raw) => raw }
-            .try_map(|raw, span| match raw.as_str() {
-                "0" => Ok(MqttQos::AtMostOnce),
-                "1" => Ok(MqttQos::AtLeastOnce),
-                _ => Err(Rich::custom(span, "MQTT QOS must be 0 or 1")),
-            })
-            .labelled("mqtt_qos"),
-    )
-}
-
-fn mqtt_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    let ack_timeout = ack_timeout();
-    let batch_timeout = batch_timeout_parser();
-    let retry_policy = retry_policy();
-
-    let raw_mode = choice((
-        kw(Identifier::Ack)
-            .ignore_then(parallel_ack_window())
-            .then(batch_timeout)
-            .then(ack_timeout.clone())
-            .then(retry_policy.clone())
-            .map(|(((max, batch_timeout), timeout), retry_policy)| {
-                ParsedMqttIngestMode::AckParallel {
-                    max,
-                    batch_timeout,
-                    timeout,
-                    retry_policy,
-                }
-            }),
-        kw(Identifier::Ack)
-            .ignore_then(sequential_ack_window())
-            .ignore_then(ack_timeout)
-            .then(retry_policy)
-            .map(
-                |(timeout, retry_policy)| ParsedMqttIngestMode::AckSequential {
-                    timeout,
-                    retry_policy,
-                },
-            ),
-        kw(Identifier::NoAck)
-            .ignore_then(kw(Identifier::Parallel))
-            .to(ParsedMqttIngestMode::NoAckParallel),
-        kw(Identifier::NoAck)
-            .ignore_then(sequential_ack_window())
-            .to(ParsedMqttIngestMode::NoAckSequential),
-    ));
-
-    mqtt_session_clause()
-        .or_not()
-        .map(|session| session.unwrap_or(MqttSession::Clean))
-        .then(
-            mqtt_qos_clause()
-                .or_not()
-                .map(|qos| qos.unwrap_or(MqttQos::AtMostOnce)),
-        )
-        .then_ignore(kw(Identifier::Mode))
-        .then(raw_mode)
-        .try_map(|((session, qos), mode), span| match mode {
-            ParsedMqttIngestMode::NoAckSequential => {
-                Ok(MqttIngestMode::NoAckSequential { session, qos })
-            }
-            ParsedMqttIngestMode::NoAckParallel => {
-                Ok(MqttIngestMode::NoAckParallel { session, qos })
-            }
-            ParsedMqttIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => {
-                if session != MqttSession::Persistent {
-                    return Err(Rich::custom(
-                        span,
-                        "MQTT ACK modes require SESSION PERSISTENT",
-                    ));
-                }
-                if qos != MqttQos::AtLeastOnce {
-                    return Err(Rich::custom(span, "MQTT ACK modes require QOS 1"));
-                }
-                Ok(MqttIngestMode::AckSequential {
-                    timeout,
-                    retry_policy,
-                })
-            }
-            ParsedMqttIngestMode::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            } => {
-                if session != MqttSession::Persistent {
-                    return Err(Rich::custom(
-                        span,
-                        "MQTT ACK modes require SESSION PERSISTENT",
-                    ));
-                }
-                if qos != MqttQos::AtLeastOnce {
-                    return Err(Rich::custom(span, "MQTT ACK modes require QOS 1"));
-                }
-                Ok(MqttIngestMode::AckParallel {
-                    max,
-                    batch_timeout,
-                    timeout,
-                    retry_policy,
-                })
-            }
-        })
-}
-
-fn nats_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], NatsIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(NatsIngestMode::NoAckSequential)
-}
-
-fn endpoint_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], EndpointIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(EndpointIngestMode::NoAckSequential)
-}
-
-fn websockets_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], WebsocketsIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(WebsocketsIngestMode::NoAckSequential)
-}
-
-fn zeromq_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], ZeroMqIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::NoAck)
-        .ignore_then(sequential_ack_window())
-        .to(ZeroMqIngestMode::NoAckSequential)
-}
-
-fn sqs_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], SqsIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Ack)
-        .ignore_then(sequential_ack_window())
-        .ignore_then(ack_timeout())
-        .then(retry_policy())
-        .map(|(timeout, retry_policy)| SqsIngestMode::AckSequential {
-            timeout,
-            retry_policy,
-        })
-}
-
-fn positive_quiesce_buffer_size<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    byte_size_lit().try_map(|value, span| {
-        let bytes = value
-            .parse::<ubyte::ByteUnit>()
-            .verified("byte_size_lit only yields text the ByteUnit parser accepts")
-            .as_u64();
-        if bytes == 0 {
-            Err(Rich::custom(
-                span,
-                "quiesce BUFFER MAX SIZE must be greater than 0",
-            ))
-        } else {
-            Ok(value)
-        }
-    })
-}
-
-fn quiesce_buffer_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Buffer)
-        .ignore_then(kw_phrase2(Identifier::Max, Identifier::Size))
-        .ignore_then(positive_quiesce_buffer_size())
-        .then_ignore(kw_phrase2(Identifier::On, Identifier::Overflow))
-        .then(choice((
-            kw_phrase2(Identifier::Drop, Identifier::Oldest).to(IngestQuiesceOverflow::DropOldest),
-            kw_phrase2(Identifier::Drop, Identifier::Newest).to(IngestQuiesceOverflow::DropNewest),
-        )))
-        .map(|(max_size, overflow)| IngestQuiesceMode::Buffer { max_size, overflow })
-}
-
-fn endpoint_quiesce_buffer_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Buffer)
-        .ignore_then(kw_phrase2(Identifier::Max, Identifier::Size))
-        .ignore_then(positive_quiesce_buffer_size())
-        .map(|max_size| IngestQuiesceMode::EndpointBuffer { max_size })
-}
-
-fn quiesce_suspend_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Suspend).to(IngestQuiesceMode::Suspend)
-}
-
-fn quiesce_drop_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Drop).to(IngestQuiesceMode::Drop)
-}
-
-fn quiesce_reject_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Reject)
-        .ignore_then(kw_phrase2(Identifier::Retry, Identifier::After))
-        .ignore_then(duration_lit())
-        .map(|retry_after| IngestQuiesceMode::Reject { retry_after })
-}
-
-fn quiesce_clause<'src, P>(
-    body: P,
-) -> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone
-where
-    P: Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone,
-{
-    kw_phrase2(Identifier::On, Identifier::Quiesce).ignore_then(body)
-}
-
-fn suspend_only_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(quiesce_suspend_parser())
-}
-
-fn push_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(choice((quiesce_buffer_parser(), quiesce_drop_parser())))
-}
-
-fn flexible_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(choice((
-        quiesce_suspend_parser(),
-        quiesce_buffer_parser(),
-        quiesce_drop_parser(),
-    )))
-}
-
-type MqttQuiesceExtra<'src> = extra::Full<ParseError<'src>, (), MqttIngestMode>;
-
-fn with_mqtt_mode_context<'src, O, P>(
-    parser: P,
-) -> impl Parser<'src, &'src [Token], O, MqttQuiesceExtra<'src>> + Clone
-where
-    P: Parser<'src, &'src [Token], O, extra::Err<ParseError<'src>>> + Clone,
-{
-    map_ctx::<_, _, _, MqttQuiesceExtra<'src>, extra::Err<ParseError<'src>>, _>(|_| (), parser)
-}
-
-fn mqtt_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, MqttQuiesceExtra<'src>> + Clone {
-    let suspend = with_mqtt_mode_context(quiesce_suspend_parser())
-        .contextual()
-        .configure(|_, mode: &MqttIngestMode| {
-            mode.session() == MqttSession::Persistent && mode.qos() == MqttQos::AtLeastOnce
-        });
-    let body = choice((
-        suspend,
-        with_mqtt_mode_context(quiesce_buffer_parser()),
-        with_mqtt_mode_context(quiesce_drop_parser()),
-    ));
-
-    with_mqtt_mode_context(kw_phrase2(Identifier::On, Identifier::Quiesce)).ignore_then(body)
-}
-
-fn polling_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(choice((quiesce_suspend_parser(), quiesce_buffer_parser())))
-}
-
-fn endpoint_quiesce_clause<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    quiesce_clause(choice((
-        quiesce_reject_parser(),
-        endpoint_quiesce_buffer_parser(),
-    )))
-}
-
-fn alter_quiesce_body<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    boxed_choice!(
-        quiesce_suspend_parser(),
-        quiesce_buffer_parser(),
-        quiesce_drop_parser(),
-        quiesce_reject_parser(),
-        endpoint_quiesce_buffer_parser(),
-    )
-}
-
-fn kafka_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    let offset_mode = kw(Identifier::Offset)
-        .ignore_then(kw(Identifier::By))
-        .ignore_then(choice((
-            kw_phrase2(Identifier::Consumer, Identifier::Group)
-                .ignore_then(consumer_group_ref())
-                .map(KafkaOffsetMode::ConsumerGroup),
-            kw(Identifier::Domain).to(KafkaOffsetMode::Domain),
-        )));
-    kw(Identifier::Kafka)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Topic))
-        .then(topic_ref())
-        .then(offset_mode)
-        .then(
-            kw(Identifier::Instances)
-                .ignore_then(instance_count())
-                .or_not()
-                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
-        )
-        .then_ignore(kw(Identifier::Mode))
-        .then(mode_parser())
-        .then(suspend_only_quiesce_clause())
-        .map(
-            |(((((client, topic), offset_mode), instances), mode), quiesce)| {
-                IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
-                    client,
-                    topic,
-                    offset_mode,
-                    instances,
-                    mode,
-                    quiesce,
-                }))
-            },
-        )
-}
-
-fn pulsar_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Pulsar)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Topic))
-        .then(topic_ref())
-        .then_ignore(kw(Identifier::Subscription))
-        .then(subscription_ref())
-        .then(
-            kw(Identifier::Instances)
-                .ignore_then(instance_count())
-                .or_not()
-                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
-        )
-        .then_ignore(kw(Identifier::Mode))
-        .then(pulsar_mode_parser())
-        .then(suspend_only_quiesce_clause())
-        .map(
-            |(((((client, topic), subscription), instances), mode), quiesce)| {
-                IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
-                    client,
-                    topic,
-                    subscription,
-                    instances,
-                    mode,
-                    quiesce,
-                }))
-            },
-        )
-}
-
-fn rabbitmq_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Rabbitmq)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Queue))
-        .then(queue_ref())
-        .then(
-            kw(Identifier::Instances)
-                .ignore_then(instance_count())
-                .or_not()
-                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
-        )
-        .then_ignore(kw(Identifier::Mode))
-        .then(rabbitmq_mode_parser())
-        .then(suspend_only_quiesce_clause())
-        .map(|((((client, queue), instances), mode), quiesce)| {
-            IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
-                client,
-                queue,
-                instances,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
-fn redis_pubsub_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Redis)
-        .ignore_then(kw(Identifier::Pubsub))
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Channel))
-        .then(channel_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then(redis_pubsub_mode_parser())
-        .then(push_quiesce_clause())
-        .map(|(((client, channel), mode), quiesce)| {
-            IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
-                client,
-                channel,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
-fn mqtt_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Mqtt)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Topic))
-        .then(mqtt_topic_filter())
-        .then(
-            kw(Identifier::Instances)
-                .ignore_then(instance_count())
-                .or_not()
-                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
-        )
-        .then(mqtt_mode_parser().then_with_ctx(mqtt_quiesce_clause()))
-        .map(|(((client, topic), instances), (mode, quiesce))| {
-            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
-                client,
-                topic,
-                instances,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
-fn prometheus_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Prometheus)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Query))
-        .then(string_lit())
-        .then_ignore(kw(Identifier::Every))
-        .then(domain_clock_period_lit())
-        .then(polling_quiesce_clause())
-        .map(|(((client, query), every), quiesce)| {
-            IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
-                client,
-                query,
-                every,
-                quiesce,
-            }))
-        })
-}
-
-fn http_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Http)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Every))
-        .then(domain_clock_period_lit())
-        .then(polling_quiesce_clause())
-        .map(|((client, every), quiesce)| {
-            IngestSource::Http(HttpSource::Request(HttpRequestSource {
-                client,
-                every,
-                quiesce,
-            }))
-        })
-}
-
-fn nats_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Nats)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Subject))
-        .then(subject_ref())
-        .then_ignore(kw_phrase2(Identifier::Queue, Identifier::Group))
-        .then(nats_queue_group_ref())
-        .then_ignore(kw(Identifier::Instances))
-        .then(instance_count())
-        .then_ignore(kw(Identifier::Mode))
-        .then(nats_mode_parser())
-        .then(push_quiesce_clause())
-        .map(
-            |(((((client, subject), queue_group), instances), mode), quiesce)| {
-                IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
-                    client,
-                    subject,
-                    queue_group,
-                    instances,
-                    mode,
-                    quiesce,
-                }))
-            },
-        )
-}
-
-fn zeromq_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Zeromq)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then(zeromq_mode_parser())
-        .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| {
-            IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                client,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
-fn syslog_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Syslog)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then_ignore(kw(Identifier::NoAck))
-        .then_ignore(sequential_ack_window())
-        .then(flexible_quiesce_clause())
-        .map(|(client, quiesce)| {
-            IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
-                client,
-                quiesce,
-            }))
-        })
-}
-
-fn sqs_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Sqs)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Queue))
-        .then(queue_ref())
-        .then(
-            kw(Identifier::Instances)
-                .ignore_then(instance_count())
-                .or_not()
-                .map(|instances| instances.unwrap_or(NonZeroU64::MIN)),
-        )
-        .then_ignore(kw(Identifier::Mode))
-        .then(sqs_mode_parser())
-        .then(suspend_only_quiesce_clause())
-        .map(|((((client, queue), instances), mode), quiesce)| {
-            IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
-                client,
-                queue,
-                instances,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
-fn endpoint_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Endpoint)
-        .ignore_then(endpoint_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then(endpoint_mode_parser())
-        .then(endpoint_quiesce_clause())
-        .map(|((endpoint, mode), quiesce)| {
-            IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
-                endpoint,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
-fn websockets_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Websockets)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then(websockets_mode_parser())
-        .then(push_quiesce_clause())
-        .map(|((client, mode), quiesce)| {
-            IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
-                client,
-                mode,
-                quiesce,
-            }))
-        })
-}
-
 fn ingest_source_parser<'src>()
 -> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        http_ingest_source_parser(),
-        kafka_ingest_source_parser(),
-        pulsar_ingest_source_parser(),
-        rabbitmq_ingest_source_parser(),
-        redis_pubsub_ingest_source_parser(),
-        mqtt_ingest_source_parser(),
-        nats_ingest_source_parser(),
-        prometheus_ingest_source_parser(),
-        zeromq_ingest_source_parser(),
-        syslog_ingest_source_parser(),
-        sqs_ingest_source_parser(),
-        endpoint_ingest_source_parser(),
-        websockets_ingest_source_parser(),
+        http::http_ingest_source_parser(),
+        kafka::kafka_ingest_source_parser(),
+        pulsar::pulsar_ingest_source_parser(),
+        rabbitmq::rabbitmq_ingest_source_parser(),
+        redis::redis_pubsub_ingest_source_parser(),
+        mqtt::mqtt_ingest_source_parser(),
+        nats::nats_ingest_source_parser(),
+        prometheus::prometheus_ingest_source_parser(),
+        zeromq::zeromq_ingest_source_parser(),
+        syslog::syslog_ingest_source_parser(),
+        sqs::sqs_ingest_source_parser(),
+        endpoint::endpoint_ingest_source_parser(),
+        websockets::websockets_ingest_source_parser(),
     )
-}
-
-/// The acknowledging mode of a client source: its window, its ACK timeout and the retry policy a
-/// producer applies to a batch refused before admission.
-fn client_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], ClientIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Ack)
-        .ignore_then(ack_window())
-        .then(ack_timeout())
-        .then(retry_policy())
-        .map(|((window, ack_timeout), retry_policy)| ClientIngestMode {
-            window,
-            ack_timeout,
-            retry_policy,
-        })
-}
-
-/// `CLIENT SCHEMA <schema> MODE ... ON QUIESCE SUSPEND`: typed batches application clients
-/// submit through their sessions. Suspension is the only quiesce mode it honors, and it decodes
-/// nothing, so no `DECODE USING` follows.
-fn client_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], ClientProducerSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Client)
-        .ignore_then(kw(Identifier::Schema))
-        .ignore_then(schema_ref())
-        .then_ignore(kw(Identifier::Mode))
-        .then(client_mode_parser())
-        .then_ignore(suspend_only_quiesce_clause())
-        .map(|(schema, mode)| ClientProducerSource { schema, mode })
 }
 
 /// What follows `FROM`: a transport and the codec that decodes its payloads, or a client source.
@@ -793,7 +92,7 @@ fn ingestor_input_parser<'src>()
             .map(|(source, codec)| {
                 IngestorInput::Transport(TransportIngestorInput { source, codec })
             }),
-        client_ingest_source_parser().map(IngestorInput::Client),
+        client::client_ingest_source_parser().map(IngestorInput::Client),
     ))
     .boxed()
 }
@@ -804,12 +103,12 @@ pub fn alter_ingestor_parser<'src>()
         .ignore_then(kw(Identifier::From))
         .ignore_then(choice((
             ingest_source_parser().map(|source| AlterIngestorOperation::SetSource { source }),
-            client_ingest_source_parser()
+            client::client_ingest_source_parser()
                 .map(|source| AlterIngestorOperation::SetClientSource { source }),
         )));
     let set_quiesce = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Quiesce))
-        .ignore_then(alter_quiesce_body())
+        .ignore_then(delivery::alter_quiesce_body())
         .map(|quiesce| AlterIngestorOperation::SetQuiesce { quiesce });
     let set_decode = kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Decode, Identifier::Using))
@@ -978,13 +277,18 @@ pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
-        EndpointEndpointSource, EndpointSource, FlushPolicy, HttpRequestSource, HttpSource,
-        KafkaSource, KafkaTopicSource, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
-        PrometheusQuerySource, PrometheusSource, PulsarSource, PulsarTopicSource,
-        RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource, SchemaName,
-        SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource, WebsocketsConnectionSource,
-        WebsocketsSource, ZeroMqPullSource, ZeroMqSource,
+        ClientIngestMode, ClientProducerSource, EndpointEndpointSource, EndpointIngestMode,
+        EndpointSource, FlushPolicy, HttpRequestSource, HttpSource, IngestQuiesceMode,
+        IngestQuiesceOverflow, KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource,
+        MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource, NatsIngestMode,
+        NatsSource, NatsSubjectSource, PrometheusQuerySource, PrometheusSource, PulsarIngestMode,
+        PulsarSource, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource,
+        RedisPubSubIngestMode, RedisPubSubSource, RedisSource, RetryPolicy, SchemaName,
+        SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
+        WebsocketsConnectionSource, WebsocketsIngestMode, WebsocketsSource, ZeroMqIngestMode,
+        ZeroMqPullSource, ZeroMqSource,
     };
     use nonzero_ext::nonzero;
 
