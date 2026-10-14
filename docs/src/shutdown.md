@@ -432,10 +432,11 @@ already written to the node's storage, exactly as after a forced ending.
 A deduplicator or window branch also has a snapshot task, which writes what the branch published
 last on every snapshot interval and once more as the branch stops. That task belongs to the
 runtime, not to its branch task, because it goes on after it: a branch ended at a stop grace
-published nothing as it went, so what it published before is the newest state a restart can
-restore, and the snapshot task still writes it. A branch that stops in time publishes its state
-first and waits for that write itself. Either way the write is finished before terminal teardown
-releases the node's storage, as [Terminal Teardown](#terminal-teardown) describes.
+before its own stop was reached published nothing as it went, so what it published before is the
+newest state a restart can restore, and the snapshot task still writes it. A branch that stops in
+time publishes its state first and waits for that write itself. Either way the write is finished
+before terminal teardown releases the node's storage, as [Terminal Teardown](#terminal-teardown)
+describes.
 
 A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
 resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
