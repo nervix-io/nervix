@@ -1601,7 +1601,7 @@ mod tests {
         CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
         ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
         ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
-        RetryPolicy,
+        RetryPolicy, ZeroMqPushSink, ZeroMqSink,
     };
     use nervix_primitives::{
         sync::{
@@ -2289,9 +2289,9 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),

@@ -29,8 +29,10 @@ mod client_producer;
 mod cluster_node;
 mod command;
 mod completion;
+mod connector;
 mod domain_clock;
 mod duration_text;
+mod emitter;
 mod emitter_batch;
 mod expression;
 mod http_request;
@@ -42,6 +44,7 @@ mod name_spelling;
 mod names;
 mod node_endpoint;
 mod node_ref;
+mod processor;
 mod quiesce;
 mod rebind_resource;
 mod remote;
@@ -49,6 +52,7 @@ mod reset_wasm_state;
 mod resource;
 mod resource_binding;
 mod restore;
+mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod statement;
@@ -86,6 +90,50 @@ pub use command::{
     CommandExecutionReferenceTimestampError,
 };
 pub use completion::{BuiltinFunctionScope, SemanticReference};
+pub use connector::{
+    AzureBlobConfigEntry, ClickHouseConfigEntry, ClickHouseSink, ClickHouseSinkEntity,
+    ClickHouseTableSink, ClickHouseValueMapping, ClientConfigEntry, ClientConsumerSink,
+    ClientIngestMode, ClientPoolBounds, ClientPoolBoundsError, ClientProducerSource,
+    ClientResourceMount, ClientSink, ClientSinkEntity, ClientSourceEntity, ConnectorKind,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, EmitSink, EmitSinkCapabilities, EmitSinkKind,
+    EndpointEndpointSource, EndpointIngestMode, EndpointSource, EndpointSourceEntity,
+    GcsConfigEntry, HttpConfigEntry, HttpRequestSink, HttpRequestSource, HttpSink, HttpSinkEntity,
+    HttpSource, HttpSourceEntity, IcebergCatalog, IcebergRestConfigEntry, IcebergSink,
+    IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, IcebergValueMapping,
+    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestSourceCapabilities, IngestSourceKind, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+    KafkaSink, KafkaSinkEntity, KafkaSource, KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource,
+    MongoDbCollectionSink, MongoDbConfigEntry, MongoDbConflictAction, MongoDbSink,
+    MongoDbSinkEntity, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession,
+    MqttSink, MqttSinkEntity, MqttSource, MqttSourceEntity, MqttTopicSink, MqttTopicSource,
+    MySqlConfigEntry, MySqlConflictAction, MySqlSink, MySqlSinkEntity, MySqlTableSink,
+    MySqlValueMapping, NatsConfigEntry, NatsIngestMode, NatsSink, NatsSinkEntity, NatsSource,
+    NatsSourceEntity, NatsSubjectSink, NatsSubjectSource, OtelAggregationTemporality,
+    OtelConfigEntry, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink,
+    OtelScope, OtelSink, OtelSinkEntity, OtelTracesSink, OtelValueMapping, PostgresConfigEntry,
+    PostgresConflictAction, PostgresSink, PostgresSinkEntity, PostgresTableSink,
+    PostgresValueMapping, PrometheusConfigEntry, PrometheusQuerySource, PrometheusSource,
+    PrometheusSourceEntity, PulsarConfigEntry, PulsarIngestMode, PulsarSink, PulsarSinkEntity,
+    PulsarSource, PulsarSourceEntity, PulsarTopicSink, PulsarTopicSource, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink, RabbitMqSinkEntity,
+    RabbitMqSource, RabbitMqSourceEntity, RedisConfigEntry, RedisPubSubIngestMode, RedisPubSubSink,
+    RedisPubSubSource, RedisSink, RedisSinkEntity, RedisSource, RedisSourceEntity, S3ConfigEntry,
+    SentryConfigEntry, SentryEventSink, SentrySink, SentrySinkEntity, SinkBody,
+    SinkClientReference, SinkEntity, SinkEntityKind, SinkReference, SinkValueMapping,
+    SinkValueMappings, SourceBody, SourceEntity, SourceEntityKind, SourceMetadataScope,
+    SourceReference, SourceReferenceKind, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
+    SqsQueueSink, SqsQueueSource, SqsSink, SqsSinkEntity, SqsSource, SqsSourceEntity,
+    SyslogCollectorSink, SyslogConfigEntry, SyslogListenerSource, SyslogSink, SyslogSinkEntity,
+    SyslogSource, SyslogSourceEntity, WebsocketsConfigEntry, WebsocketsConnectionSource,
+    WebsocketsIngestMode, WebsocketsSource, WebsocketsSourceEntity, ZeroMqConfigEntry,
+    ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, ZeroMqSinkEntity, ZeroMqSource,
+    ZeroMqSourceEntity,
+};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockObservation,
@@ -93,6 +141,10 @@ pub use domain_clock::{
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
 pub use duration_text::{DurationTextError, parse_duration_text};
+pub use emitter::{
+    AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
+    EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
+};
 pub use emitter_batch::{
     BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
     EmitterBatchRequirement, PayloadSizeLimit,
@@ -107,9 +159,7 @@ pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
     HttpRequestFieldError, HttpTarget,
 };
-pub use ingestor_input::{
-    ClientIngestMode, ClientIngestSource, IngestorInput, IngestorInputKind, TransportIngestorInput,
-};
+pub use ingestor_input::{IngestorInput, IngestorInputKind, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
@@ -129,6 +179,19 @@ pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use processor::{
+    AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterJunction,
+    AlterJunctionError, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
+    AlterReingestorError, AlterReorderer, AlterReordererError, AlterReordererOperation,
+    CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCorrelator,
+    CreateDeduplicator, CreateInferencer, CreateJunction, CreateReingestor, CreateReorderer,
+    CreateWasmProcessor, CreateWindowProcessor, FlushPolicy, InferencerExecutionMode,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
+    WindowStateLimit,
+};
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
@@ -174,6 +237,11 @@ pub use restore::{
     RestoreScope, RestoreState, RestoreStateAuthority, RestoreStep, RestoreStepOutcome,
     RestoreStepReport, RestoredDomain, RestoredUsers,
 };
+pub use schedule::{
+    ClusterSchedule, DomainSchedule, KafkaPartitionSchedule, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, PlacementGroupSchedule, ScheduledModel, ScheduledNode, ScheduledNodes,
+};
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
     AlterWireSchemaOperation, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
@@ -182,62 +250,28 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{
-    AckMode, AckWindow, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
-    AlterDomain, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
-    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
-    AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterPlacement, AlterPlacementError,
-    AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
-    AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
-    AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry, BranchEviction,
-    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, ClientConfigEntry,
-    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule,
-    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-    CodecProtobufConfig, CodecWireFormat, CordonNode, CorrelationTimeoutAction,
-    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
-    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
-    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSignalingProtocol,
-    CreateStatement, CreateSubscription, CreateUser, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitSinkKind,
-    EmitterBatchContractError, EmitterBody, EmitterPublishingMode, EndpointIngestMode,
-    EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
-    IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestSourceKind, IngestTimestampSource,
-    InputCollectPolicy, InspectionFormat, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model,
-    ModelKind, MongoDbConfigEntry, MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping,
-    NatsConfigEntry, NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
-    OwnershipTransition, PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry,
-    PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
+    AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
+    AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
+    AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation, BranchEviction,
+    BranchSelection, CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch,
+    CreateCodec, CreateDomain, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup,
+    CreatePlacement, CreateRelay, CreateResource, CreateSignalingProtocol, CreateStatement,
+    CreateSubscription, CreateUser, CreateVhost, DeleteSubscription, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
+    DomainTick, DrainNode, DropModel, DropNode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
+    IngestTimestampSource, InspectionFormat, LookupQuery, MaterializedRelayState,
+    MessageErrorPolicy, Model, ModelKind, PlacementPolicy, RelayBranching, Relocation,
+    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy,
     ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
     ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
-    SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
-    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
-    WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    SignalingWaitStep, SignalingWireFormat, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

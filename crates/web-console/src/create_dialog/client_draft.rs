@@ -18,9 +18,9 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClientConfigEntry, ClientName, ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    ConnectorKind, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, Model, ModelKind, NodeRef,
@@ -35,8 +35,8 @@ use super::{
 
 macro_rules! declare_transports {
     (
-        unpooled { $($variant:ident => $model:ident($ty:ident) [$key:literal, $label:literal],)+ }
-        pooled { $($pooled:ident => $pooled_model:ident($pooled_ty:ident) [$pooled_key:literal, $pooled_label:literal],)+ }
+        unpooled { $($variant:ident => $model:ident($ty:ident) [$key:literal],)+ }
+        pooled { $($pooled:ident => $pooled_model:ident($pooled_ty:ident) [$pooled_key:literal],)+ }
     ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub(super) enum ClientTransport {
@@ -60,12 +60,18 @@ macro_rules! declare_transports {
                 }
             }
 
-            pub(super) fn label(self) -> &'static str {
+            /// The connector a client of this transport configures.
+            pub(super) fn connector(self) -> ConnectorKind {
                 match self {
-                    $(Self::$variant => $label,)+
-                    $(Self::$pooled => $pooled_label,)+
-                    Self::Websockets => "WEBSOCKETS",
+                    $(Self::$variant => ConnectorKind::$variant,)+
+                    $(Self::$pooled => ConnectorKind::$pooled,)+
+                    Self::Websockets => ConnectorKind::Websockets,
                 }
+            }
+
+            /// How NSPL spells the client's type.
+            pub(super) fn label(self) -> &'static str {
+                self.connector().keyword()
             }
 
             pub(super) fn pooled(self) -> bool {
@@ -103,29 +109,29 @@ macro_rules! declare_transports {
 
 declare_transports! {
     unpooled {
-        Kafka => ClientKafka(CreateClientKafka) ["kafka", "KAFKA"],
-        Pulsar => ClientPulsar(CreateClientPulsar) ["pulsar", "PULSAR"],
-        Http => ClientHttp(CreateClientHttp) ["http", "HTTP"],
-        Sentry => ClientSentry(CreateClientSentry) ["sentry", "SENTRY"],
-        Otel => ClientOtel(CreateClientOtel) ["otel", "OTEL"],
-        Prometheus => ClientPrometheus(CreateClientPrometheus) ["prometheus", "PROMETHEUS"],
-        Mqtt => ClientMqtt(CreateClientMqtt) ["mqtt", "MQTT"],
-        Nats => ClientNats(CreateClientNats) ["nats", "NATS"],
-        RabbitMq => ClientRabbitMq(CreateClientRabbitMq) ["rabbitmq", "RABBITMQ"],
-        ZeroMq => ClientZeroMq(CreateClientZeroMq) ["zeromq", "ZEROMQ"],
-        Sqs => ClientSqs(CreateClientSqs) ["sqs", "SQS"],
-        Syslog => ClientSyslog(CreateClientSyslog) ["syslog", "SYSLOG"],
-        ClickHouse => ClientClickHouse(CreateClientClickHouse) ["clickhouse", "CLICKHOUSE"],
-        S3 => ClientS3(CreateClientS3) ["s3", "S3"],
-        Gcs => ClientGcs(CreateClientGcs) ["gcs", "GCS"],
-        AzureBlob => ClientAzureBlob(CreateClientAzureBlob) ["azure-blob", "AZURE_BLOB"],
-        IcebergRest => ClientIcebergRest(CreateClientIcebergRest) ["iceberg-rest", "ICEBERG_REST"],
+        Kafka => ClientKafka(CreateClientKafka) ["kafka"],
+        Pulsar => ClientPulsar(CreateClientPulsar) ["pulsar"],
+        Http => ClientHttp(CreateClientHttp) ["http"],
+        Sentry => ClientSentry(CreateClientSentry) ["sentry"],
+        Otel => ClientOtel(CreateClientOtel) ["otel"],
+        Prometheus => ClientPrometheus(CreateClientPrometheus) ["prometheus"],
+        Mqtt => ClientMqtt(CreateClientMqtt) ["mqtt"],
+        Nats => ClientNats(CreateClientNats) ["nats"],
+        RabbitMq => ClientRabbitMq(CreateClientRabbitMq) ["rabbitmq"],
+        ZeroMq => ClientZeroMq(CreateClientZeroMq) ["zeromq"],
+        Sqs => ClientSqs(CreateClientSqs) ["sqs"],
+        Syslog => ClientSyslog(CreateClientSyslog) ["syslog"],
+        ClickHouse => ClientClickHouse(CreateClientClickHouse) ["clickhouse"],
+        S3 => ClientS3(CreateClientS3) ["s3"],
+        Gcs => ClientGcs(CreateClientGcs) ["gcs"],
+        AzureBlob => ClientAzureBlob(CreateClientAzureBlob) ["azure-blob"],
+        IcebergRest => ClientIcebergRest(CreateClientIcebergRest) ["iceberg-rest"],
     }
     pooled {
-        Redis => ClientRedis(CreateClientRedis) ["redis", "REDIS"],
-        Postgres => ClientPostgres(CreateClientPostgres) ["postgres", "POSTGRES"],
-        MySql => ClientMySql(CreateClientMySql) ["mysql", "MYSQL"],
-        MongoDb => ClientMongoDb(CreateClientMongoDb) ["mongodb", "MONGODB"],
+        Redis => ClientRedis(CreateClientRedis) ["redis"],
+        Postgres => ClientPostgres(CreateClientPostgres) ["postgres"],
+        MySql => ClientMySql(CreateClientMySql) ["mysql"],
+        MongoDb => ClientMongoDb(CreateClientMongoDb) ["mongodb"],
     }
 }
 
@@ -381,8 +387,8 @@ mod tests {
                 .build()
                 .assured("the transport's required fields are set");
             assert_eq!(
-                completed.actual.client_type_label(),
-                Some(transport.label())
+                completed.actual.connector_kind(),
+                Some(transport.connector())
             );
             let statement =
                 Statement::Create(CreateStatement::new(Box::new(completed.actual), false));

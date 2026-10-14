@@ -7,11 +7,21 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BatchMessageLimit, ByteSizeUnit, ClickHouseValueMapping, CreateEmitter, EmitSink,
-    EmitterBatchPolicy, EmitterBatchRequirement, EmitterBody, EmitterPublishingMode, Expression,
-    IcebergCatalog, IcebergStorageBackend, MongoDbConflictAction, MySqlConflictAction,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    PayloadSizeLimit, PostgresConflictAction, SqsFifoGroup,
+    BatchMessageLimit, ByteSizeUnit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
+    ClickHouseValueMapping, ClientConsumerSink, ClientSink, ClientSinkEntity, CreateEmitter,
+    EmitSink, EmitSinkKind, EmitterBatchPolicy, EmitterBatchRequirement, EmitterBody,
+    EmitterPublishingMode, Expression, HttpRequestSink, HttpSink, HttpSinkEntity, IcebergCatalog,
+    IcebergSink, IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, KafkaSink,
+    KafkaSinkEntity, KafkaTopicSink, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
+    MongoDbSinkEntity, MqttSink, MqttSinkEntity, MqttTopicSink, MySqlConflictAction, MySqlSink,
+    MySqlSinkEntity, MySqlTableSink, NatsSink, NatsSinkEntity, NatsSubjectSink,
+    OtelAggregationTemporality, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind,
+    OtelMetricsSink, OtelScope, OtelSinkEntity, OtelTracesSink, PayloadSizeLimit,
+    PostgresConflictAction, PostgresSink, PostgresSinkEntity, PostgresTableSink, PulsarSink,
+    PulsarSinkEntity, PulsarTopicSink, RabbitMqQueueSink, RabbitMqSink, RabbitMqSinkEntity,
+    RedisPubSubSink, RedisSink, RedisSinkEntity, SentryEventSink, SentrySink, SentrySinkEntity,
+    SqsFifoGroup, SqsQueueSink, SqsSink, SqsSinkEntity, SyslogCollectorSink, SyslogSink,
+    SyslogSinkEntity, ZeroMqPushSink, ZeroMqSink, ZeroMqSinkEntity,
 };
 
 use crate::{Arbitrary, Domain, route::RouteShape};
@@ -19,91 +29,19 @@ use crate::{Arbitrary, Domain, route::RouteShape};
 /// The most items a generated value mapping or conflict target holds.
 const ITEMS: usize = 3;
 
-/// Every variant of [`EmitSink`], so a property reaches each sink as often as any other and a
-/// coverage check can ask for each one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
-pub enum SinkVariant {
-    Client,
-    Http,
-    Kafka,
-    Pulsar,
-    RabbitMq,
-    Redis,
-    Mqtt,
-    Nats,
-    ZeroMq,
-    Sqs,
-    Sentry,
-    Syslog,
-    Otel,
-    ClickHouse,
-    Postgres,
-    MySql,
-    MongoDb,
-    Iceberg,
-}
-
-impl SinkVariant {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 18] = [
-        Self::Client,
-        Self::Http,
-        Self::Kafka,
-        Self::Pulsar,
-        Self::RabbitMq,
-        Self::Redis,
-        Self::Mqtt,
-        Self::Nats,
-        Self::ZeroMq,
-        Self::Sqs,
-        Self::Sentry,
-        Self::Syslog,
-        Self::Otel,
-        Self::ClickHouse,
-        Self::Postgres,
-        Self::MySql,
-        Self::MongoDb,
-        Self::Iceberg,
-    ];
-
-    /// The variant `sink` is. The match is exhaustive, so a new sink does not compile until the
-    /// generator is taught to build it.
-    pub fn of(sink: &EmitSink) -> Self {
-        match sink {
-            EmitSink::Client { .. } => Self::Client,
-            EmitSink::Http { .. } => Self::Http,
-            EmitSink::Kafka { .. } => Self::Kafka,
-            EmitSink::Pulsar { .. } => Self::Pulsar,
-            EmitSink::RabbitMq { .. } => Self::RabbitMq,
-            EmitSink::Redis { .. } => Self::Redis,
-            EmitSink::Mqtt { .. } => Self::Mqtt,
-            EmitSink::Nats { .. } => Self::Nats,
-            EmitSink::ZeroMq { .. } => Self::ZeroMq,
-            EmitSink::Sqs { .. } => Self::Sqs,
-            EmitSink::Sentry { .. } => Self::Sentry,
-            EmitSink::Syslog { .. } => Self::Syslog,
-            EmitSink::Otel { .. } => Self::Otel,
-            EmitSink::ClickHouse { .. } => Self::ClickHouse,
-            EmitSink::Postgres { .. } => Self::Postgres,
-            EmitSink::MySql { .. } => Self::MySql,
-            EmitSink::MongoDb { .. } => Self::MongoDb,
-            EmitSink::Iceberg { .. } => Self::Iceberg,
-        }
-    }
-}
-
 impl Arbitrary<'_> {
     /// An emitter publishing to any sink, in a publishing mode and with a body that sink accepts,
     /// batching where the sink requires it and optionally where it allows it.
     pub fn create_emitter(&mut self) -> CreateEmitter {
-        let count = NonZeroUsize::new(SinkVariant::ALL.len()).assured("there are sinks");
-        let variant = SinkVariant::ALL[self.entropy.index(count)];
-        self.create_emitter_to(variant)
+        let kinds = EmitSinkKind::all().collect::<Vec<_>>();
+        let count = NonZeroUsize::new(kinds.len()).assured("the vocabulary declares sinks");
+        let kind = kinds[self.entropy.index(count)];
+        self.create_emitter_to(kind)
     }
 
-    /// An emitter publishing to a sink of the requested variant.
-    pub fn create_emitter_to(&mut self, variant: SinkVariant) -> CreateEmitter {
-        let sink = self.emit_sink_of(variant);
+    /// An emitter publishing to a sink of the requested connector and entity.
+    pub fn create_emitter_to(&mut self, kind: EmitSinkKind) -> CreateEmitter {
+        let sink = self.emit_sink_of(kind);
         let body = self.emitter_body(&sink);
         let construction_shape = match body {
             EmitterBody::Codec { .. } | EmitterBody::Client => RouteShape::Transforming,
@@ -115,7 +53,7 @@ impl Arbitrary<'_> {
         // each, even though the vocabulary lets its sink batch.
         let batch = match (sink.batch_requirement(), &sink) {
             (EmitterBatchRequirement::Required, _) => Some(self.batch_policy()),
-            (EmitterBatchRequirement::Optional, EmitSink::Http { .. })
+            (EmitterBatchRequirement::Optional, EmitSink::Http(_))
                 if self.domain == Domain::Nspl =>
             {
                 None
@@ -145,13 +83,13 @@ impl Arbitrary<'_> {
 
     fn emitter_body(&mut self, sink: &EmitSink) -> EmitterBody {
         // A client consumer receives native columns built against its schema, never a payload.
-        if let EmitSink::Client { .. } = sink {
+        if let EmitSink::Client(_) = sink {
             return EmitterBody::Client;
         }
         if sink.requires_codec() {
             return EmitterBody::Codec { codec: self.name() };
         }
-        if let EmitSink::Http { .. } = sink {
+        if let EmitSink::Http(_) = sink {
             return if self.entropy.flag() {
                 EmitterBody::Codec { codec: self.name() }
             } else {
@@ -247,162 +185,207 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A sink of the requested variant, with every clause it declares.
-    pub fn emit_sink_of(&mut self, variant: SinkVariant) -> EmitSink {
-        match variant {
-            SinkVariant::Http => EmitSink::Http {
+    /// A sink of the requested connector and entity, with every clause it declares.
+    ///
+    /// The match is exhaustive, so a new pair does not compile until the generator is taught to
+    /// build it.
+    pub fn emit_sink_of(&mut self, kind: EmitSinkKind) -> EmitSink {
+        match kind {
+            EmitSinkKind::Http(HttpSinkEntity::Request) => {
+                EmitSink::Http(HttpSink::Request(HttpRequestSink {
+                    client: self.name(),
+                    method: self.expression(),
+                    path: self.expression(),
+                }))
+            }
+            EmitSinkKind::Kafka(KafkaSinkEntity::Topic) => {
+                EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+                    client: self.name(),
+                    topic: self.name(),
+                }))
+            }
+            EmitSinkKind::Pulsar(PulsarSinkEntity::Topic) => {
+                EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+                    client: self.name(),
+                    topic: self.name(),
+                }))
+            }
+            EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue) => {
+                EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
+                    client: self.name(),
+                    queue: self.name(),
+                }))
+            }
+            EmitSinkKind::Redis(RedisSinkEntity::PubSub) => {
+                EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
+                    client: self.name(),
+                    channel: self.name(),
+                }))
+            }
+            EmitSinkKind::Mqtt(MqttSinkEntity::Topic) => {
+                EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
+                    client: self.name(),
+                    topic: self.name(),
+                }))
+            }
+            EmitSinkKind::Nats(NatsSinkEntity::Subject) => {
+                EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+                    client: self.name(),
+                    subject: self.name(),
+                }))
+            }
+            EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push) => {
+                EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                    client: self.name(),
+                }))
+            }
+            EmitSinkKind::Sqs(SqsSinkEntity::Queue) => {
+                EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                    client: self.name(),
+                    queue: self.sqs_queue(),
+                    fifo_group: match self.entropy.byte() % 3 {
+                        0 => None,
+                        1 => Some(SqsFifoGroup::FromBranch),
+                        _ => Some(SqsFifoGroup::Expression(self.expression())),
+                    },
+                }))
+            }
+            EmitSinkKind::Sentry(SentrySinkEntity::Event) => {
+                EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+                    client: self.name(),
+                }))
+            }
+            EmitSinkKind::Syslog(SyslogSinkEntity::Collector) => {
+                EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
+                    client: self.name(),
+                }))
+            }
+            EmitSinkKind::Otel(OtelSinkEntity::Logs) => EmitSink::from(OtelLogsSink {
                 client: self.name(),
-                method: self.expression(),
-                path: self.expression(),
-            },
-            SinkVariant::Kafka => EmitSink::Kafka {
+                mappings: self.otel_mappings(),
+            }),
+            EmitSinkKind::Otel(OtelSinkEntity::Traces) => EmitSink::from(OtelTracesSink {
                 client: self.name(),
-                topic: self.name(),
-            },
-            SinkVariant::Pulsar => EmitSink::Pulsar {
+                mappings: self.otel_mappings(),
+            }),
+            EmitSinkKind::Otel(OtelSinkEntity::Metrics) => EmitSink::from(OtelMetricsSink {
                 client: self.name(),
-                topic: self.name(),
-            },
-            SinkVariant::RabbitMq => EmitSink::RabbitMq {
-                client: self.name(),
-                queue: self.name(),
-            },
-            SinkVariant::Redis => EmitSink::Redis {
-                client: self.name(),
-                channel: self.name(),
-            },
-            SinkVariant::Mqtt => EmitSink::Mqtt {
-                client: self.name(),
-                topic: self.name(),
-            },
-            SinkVariant::Nats => EmitSink::Nats {
-                client: self.name(),
-                subject: self.name(),
-            },
-            SinkVariant::ZeroMq => EmitSink::ZeroMq {
-                client: self.name(),
-            },
-            SinkVariant::Sqs => EmitSink::Sqs {
-                client: self.name(),
-                queue: self.sqs_queue(),
-                fifo_group: match self.entropy.byte() % 3 {
-                    0 => None,
-                    1 => Some(SqsFifoGroup::FromBranch),
-                    _ => Some(SqsFifoGroup::Expression(self.expression())),
-                },
-            },
-            SinkVariant::Sentry => EmitSink::Sentry {
-                client: self.name(),
-            },
-            SinkVariant::Syslog => EmitSink::Syslog {
-                client: self.name(),
-            },
-            SinkVariant::Otel => EmitSink::Otel {
-                client: self.name(),
-                signal: self.otel_signal(),
-                values: self.value_mappings(1),
-                attributes: self.value_mappings(0),
-                resource: self.literal_mappings(),
-                scope: if self.entropy.flag() {
-                    Some(OtelScope {
-                        name: self.string(),
-                        version: if self.entropy.flag() {
-                            Some(self.string())
-                        } else {
-                            None
-                        },
-                    })
-                } else {
-                    None
-                },
-            },
-            SinkVariant::ClickHouse => EmitSink::ClickHouse {
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-            },
-            SinkVariant::Postgres => {
+                metric: self.otel_metric(),
+                mappings: self.otel_mappings(),
+            }),
+            EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table) => {
+                EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
+                    client: self.name(),
+                    table: self.name(),
+                    values: self.value_mappings(1),
+                }))
+            }
+            EmitSinkKind::Postgres(PostgresSinkEntity::Table) => {
                 let client = self.name();
                 let table = self.name();
                 let values = self.value_mappings(1);
                 let conflict_action = self.postgres_conflict_action(&values);
-                EmitSink::Postgres {
+                EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
                     client,
                     table,
                     values,
                     conflict_action,
-                }
+                }))
             }
-            SinkVariant::MySql => EmitSink::MySql {
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-                conflict_action: self.entropy.pick([
-                    MySqlConflictAction::None,
-                    MySqlConflictAction::DoNothing,
-                    MySqlConflictAction::DoUpdate,
-                ]),
-            },
-            SinkVariant::MongoDb => {
+            EmitSinkKind::MySql(MySqlSinkEntity::Table) => {
+                EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
+                    client: self.name(),
+                    table: self.name(),
+                    values: self.value_mappings(1),
+                    conflict_action: self.entropy.pick([
+                        MySqlConflictAction::None,
+                        MySqlConflictAction::DoNothing,
+                        MySqlConflictAction::DoUpdate,
+                    ]),
+                }))
+            }
+            EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => {
                 let values = self.value_mappings(1);
                 let conflict_action = self.mongodb_conflict_action(&values);
-                EmitSink::MongoDb {
+                EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
                     client: self.name(),
                     collection: self.name(),
                     values,
                     conflict_action,
-                }
+                }))
             }
-            SinkVariant::Client => EmitSink::Client {
-                schema: self.name(),
-            },
-            SinkVariant::Iceberg => EmitSink::Iceberg {
-                backend: self.entropy.pick([
-                    IcebergStorageBackend::S3,
-                    IcebergStorageBackend::Gcs,
-                    IcebergStorageBackend::AzureBlob,
-                ]),
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-                location: self.string(),
-                catalog: IcebergCatalog::Rest {
+            EmitSinkKind::Client(ClientSinkEntity::Consumer) => {
+                EmitSink::Client(ClientSink::Consumer(ClientConsumerSink {
+                    schema: self.name(),
+                }))
+            }
+            EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => {
+                EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
+                    backend: self.entropy.pick([
+                        IcebergStorageBackend::S3,
+                        IcebergStorageBackend::Gcs,
+                        IcebergStorageBackend::AzureBlob,
+                    ]),
                     client: self.name(),
-                },
-                commit_each: self.duration(),
-                max_commit_size: self.byte_size(),
-            },
+                    table: self.name(),
+                    values: self.value_mappings(1),
+                    location: self.string(),
+                    catalog: IcebergCatalog::Rest {
+                        client: self.name(),
+                    },
+                    commit_each: self.duration(),
+                    max_commit_size: self.byte_size(),
+                }))
+            }
         }
     }
 
-    fn otel_signal(&mut self) -> OtelSignal {
-        match self.entropy.byte() % 3 {
-            0 => OtelSignal::Logs,
-            1 => OtelSignal::Traces,
-            _ => {
-                let temporality = self.entropy.pick([
-                    OtelAggregationTemporality::Delta,
-                    OtelAggregationTemporality::Cumulative,
-                ]);
-                let kind = match self.entropy.byte() % 3 {
-                    0 => OtelMetricKind::Gauge,
-                    1 => OtelMetricKind::Sum {
-                        monotonic: self.entropy.flag(),
-                        temporality,
-                    },
-                    _ => OtelMetricKind::Histogram { temporality },
-                };
-                OtelSignal::Metric(OtelMetric {
-                    name: self.string(),
-                    unit: self.string(),
-                    description: if self.entropy.flag() {
-                        Some(self.string())
-                    } else {
-                        None
-                    },
-                    kind,
-                })
-            }
+    /// The mappings every OTEL signal shares, with an optional instrumentation scope.
+    fn otel_mappings(&mut self) -> OtelMappings {
+        let values = self.value_mappings(1);
+        let attributes = self.value_mappings(0);
+        let resource = self.literal_mappings();
+        let scope = if self.entropy.flag() {
+            let name = self.string();
+            let version = if self.entropy.flag() {
+                Some(self.string())
+            } else {
+                None
+            };
+            Some(OtelScope { name, version })
+        } else {
+            None
+        };
+        OtelMappings {
+            values,
+            attributes,
+            resource,
+            scope,
+        }
+    }
+
+    fn otel_metric(&mut self) -> OtelMetric {
+        let temporality = self.entropy.pick([
+            OtelAggregationTemporality::Delta,
+            OtelAggregationTemporality::Cumulative,
+        ]);
+        let kind = match self.entropy.byte() % 3 {
+            0 => OtelMetricKind::Gauge,
+            1 => OtelMetricKind::Sum {
+                monotonic: self.entropy.flag(),
+                temporality,
+            },
+            _ => OtelMetricKind::Histogram { temporality },
+        };
+        OtelMetric {
+            name: self.string(),
+            unit: self.string(),
+            description: if self.entropy.flag() {
+                Some(self.string())
+            } else {
+                None
+            },
+            kind,
         }
     }
 

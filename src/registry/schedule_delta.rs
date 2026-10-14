@@ -264,11 +264,12 @@ mod tests {
         AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CommandExecutionReference,
         CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
         CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
-        GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch,
-        PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-        RelayBranching, ResolvedBranching, RetryPolicy, RouteConstruction, ScheduledNode,
-        SchemaFingerprint, VhostTlsResource, WasmProcessorLimits, WasmStateResetScope,
+        EmitterPublishingMode, EndpointEndpointSource, EndpointIngestMode, EndpointSource,
+        ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy, IngestSource, Literal, Model,
+        ModelKind, NodeRef, OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy,
+        RouteConstruction, ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
+        WasmStateResetScope, ZeroMqPushSink, ZeroMqSink,
     };
     use nonzero_ext::nonzero;
 
@@ -350,13 +351,15 @@ mod tests {
                         }]),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint {
-                                    endpoint: named(endpoint),
-                                    mode: EndpointIngestMode::NoAckSequential,
-                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                        max_size: "1MiB".to_string(),
+                                source: IngestSource::Endpoint(EndpointSource::Endpoint(
+                                    EndpointEndpointSource {
+                                        endpoint: named(endpoint),
+                                        mode: EndpointIngestMode::NoAckSequential,
+                                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                            max_size: "1MiB".to_string(),
+                                        },
                                     },
-                                },
+                                )),
                                 codec: named("event_codec"),
                             },
                         ),
@@ -624,9 +627,9 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink_a"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "30s".to_string(),
@@ -672,9 +675,9 @@ mod tests {
         );
 
         let mut swapped_emitter = emitter;
-        swapped_emitter.sink = Box::new(EmitSink::ZeroMq {
+        swapped_emitter.sink = Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
             client: named("sink_b"),
-        });
+        })));
         let mut swapped = existing.clone();
         *swapped.nodes[0].config = Model::Emitter(swapped_emitter);
         swapped.nodes[0].schema_fingerprint = SchemaFingerprint::from_digest([2; 32]);

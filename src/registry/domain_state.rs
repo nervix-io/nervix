@@ -16,8 +16,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    DomainName, EndpointType, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
-    RelayName, parse_duration_text,
+    ConnectorKind, DomainName, EndpointType, IngestSource, IngestorInput, Model, ModelIndex,
+    ModelKind, NodeRef, RelayName, SourceReference, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -573,29 +573,8 @@ impl DomainState {
                                 expect_codec_model(domain, identifier, models, &input.codec)?;
                             ensure_codec_supports_decoding(domain, identifier, codec_model)?;
 
-                            match &input.source {
-                                IngestSource::Http { client, .. }
-                                | IngestSource::Kafka { client, .. }
-                                | IngestSource::Pulsar { client, .. }
-                                | IngestSource::Prometheus { client, .. }
-                                | IngestSource::RabbitMq { client, .. }
-                                | IngestSource::RedisPubSub { client, .. }
-                                | IngestSource::Mqtt { client, .. }
-                                | IngestSource::Nats { client, .. }
-                                | IngestSource::ZeroMq { client, .. }
-                                | IngestSource::Sqs { client, .. }
-                                | IngestSource::Websockets { client, .. } => {
-                                    let client = expect_kind(
-                                        domain,
-                                        identifier,
-                                        models,
-                                        &indices,
-                                        client,
-                                        ModelKind::Client,
-                                    )?;
-                                    graph.add_edge(client, source, EdgeKind::RequiredBy);
-                                }
-                                IngestSource::Syslog { client, .. } => {
+                            match input.source.reference() {
+                                SourceReference::Client(client) => {
                                     let client_node = expect_kind(
                                         domain,
                                         identifier,
@@ -604,31 +583,33 @@ impl DomainState {
                                         client,
                                         ModelKind::Client,
                                     )?;
-                                    let client_model = models
-                                        .get(&NodeRef::new(ModelKind::Client, client.clone()))
-                                        .verified(
-                                            "expect_kind above resolved this client reference \
-                                             against the same model set",
+                                    if let IngestSource::Syslog(_) = &input.source {
+                                        let client_model = models
+                                            .get(&NodeRef::new(ModelKind::Client, client.clone()))
+                                            .verified(
+                                                "expect_kind above resolved this client reference \
+                                                 against the same model set",
+                                            );
+                                        let found = client_model.connector_kind().verified(
+                                            "this model was resolved as a client above, and every \
+                                             client model configures a connector",
                                         );
-                                    if let Model::ClientSyslog(_) = client_model {
-                                    } else {
-                                        return Err(Report::new(RegistryError::InvalidModel {
-                                            domain: domain.as_str().to_string(),
-                                            identifier: identifier.as_str().to_string(),
-                                            reason: format!(
-                                                "SYSLOG ingestor requires a SYSLOG client, found \
-                                                 {} client '{}'",
-                                                client_model.client_type_label().verified(
-                                                    "this model was resolved as a client above, \
-                                                     and every client model carries a type label"
+                                        if found != ConnectorKind::Syslog {
+                                            return Err(Report::new(RegistryError::InvalidModel {
+                                                domain: domain.as_str().to_string(),
+                                                identifier: identifier.as_str().to_string(),
+                                                reason: format!(
+                                                    "SYSLOG ingestor requires a SYSLOG client, \
+                                                     found {} client '{}'",
+                                                    found.keyword(),
+                                                    client.as_str(),
                                                 ),
-                                                client.as_str(),
-                                            ),
-                                        }));
+                                            }));
+                                        }
                                     }
                                     graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                                 }
-                                IngestSource::Endpoint { endpoint, .. } => {
+                                SourceReference::Endpoint(endpoint) => {
                                     let endpoint = expect_kind(
                                         domain,
                                         identifier,
@@ -1429,26 +1410,29 @@ impl DomainState {
                                 "expect_kind above resolved this client reference against the \
                                  same model set",
                             );
-                        if !emitter.sink.accepts_client(client_model) {
+                        let expected = emitter.sink.client_connector().verified(
+                            "this sink names a client, so it states the connector that client \
+                             configures",
+                        );
+                        let found = client_model.connector_kind().verified(
+                            "this model was resolved as a client above, and every client model \
+                             configures a connector",
+                        );
+                        if found != expected {
                             return Err(Report::new(RegistryError::InvalidModel {
                                 domain: domain.as_str().to_string(),
                                 identifier: identifier.as_str().to_string(),
                                 reason: format!(
                                     "{} emitter requires a {} client, found {} client '{}'",
                                     emitter.sink.transport_label(),
-                                    emitter.sink.expected_client_type(),
-                                    client_model.client_type_label().verified(
-                                        "this model was resolved as a client above, and every \
-                                         client model carries a type label"
-                                    ),
+                                    expected.keyword(),
+                                    found.keyword(),
                                     client_name.as_str(),
                                 ),
                             }));
                         }
-                        if let (
-                            nervix_models::EmitSink::Http { .. },
-                            Model::ClientHttp(http_client),
-                        ) = (emitter.sink.as_ref(), client_model)
+                        if let (nervix_models::EmitSink::Http(_), Model::ClientHttp(http_client)) =
+                            (emitter.sink.as_ref(), client_model)
                         {
                             http_origin = Some(validate_http_emitter_client(
                                 domain,
@@ -1459,37 +1443,36 @@ impl DomainState {
                         graph.add_edge(client, source, EdgeKind::RequiredBy);
                     }
 
-                    if let Some(catalog_client_name) = emitter.sink.catalog_client() {
+                    if let Some(catalog) = emitter.sink.catalog_client() {
                         let catalog_client = expect_kind(
                             domain,
                             identifier,
                             models,
                             &indices,
-                            catalog_client_name,
+                            catalog.client,
                             ModelKind::Client,
                         )?;
                         let catalog_client_model = models
-                            .get(&NodeRef::new(
-                                ModelKind::Client,
-                                catalog_client_name.clone(),
-                            ))
+                            .get(&NodeRef::new(ModelKind::Client, catalog.client.clone()))
                             .verified(
                                 "expect_kind above resolved this client reference against the \
                                  same model set",
                             );
-                        if let Model::ClientIcebergRest(_) = catalog_client_model {
-                        } else {
+                        let found = catalog_client_model.connector_kind().verified(
+                            "this model was resolved as a client above, and every client model \
+                             configures a connector",
+                        );
+                        if found != catalog.connector {
                             return Err(Report::new(RegistryError::InvalidModel {
                                 domain: domain.as_str().to_string(),
                                 identifier: identifier.as_str().to_string(),
                                 reason: format!(
-                                    "ICEBERG emitter requires an ICEBERG_REST catalog client, \
-                                     found {} client '{}'",
-                                    catalog_client_model.client_type_label().verified(
-                                        "this model was resolved as a client above, and every \
-                                         client model carries a type label"
-                                    ),
-                                    catalog_client_name.as_str(),
+                                    "{} emitter requires an {} catalog client, found {} client \
+                                     '{}'",
+                                    emitter.sink.transport_label(),
+                                    catalog.connector.keyword(),
+                                    found.keyword(),
+                                    catalog.client.as_str(),
                                 ),
                             }));
                         }
@@ -1497,7 +1480,9 @@ impl DomainState {
                     }
 
                     let output_schema = match emitter.sink.as_ref() {
-                        nervix_models::EmitSink::Client { schema } => {
+                        nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
+                            nervix_models::ClientConsumerSink { schema },
+                        )) => {
                             let schema_node = expect_kind(
                                 domain,
                                 identifier,

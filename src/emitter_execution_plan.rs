@@ -137,7 +137,7 @@ impl EmitterExecutionPlan {
         };
         let catalog_client = match emitter.sink.catalog_client() {
             Some(catalog) => nodes
-                .get(&NodeRef::new(ModelKind::Client, catalog))
+                .get(&NodeRef::new(ModelKind::Client, catalog.client))
                 .map(|node| node.config.as_ref()),
             None => None,
         };
@@ -189,7 +189,9 @@ impl EmitterExecutionPlan {
         })?;
         let codec = emitter.body.codec().cloned();
         let output_schema = match emitter.sink.as_ref() {
-            nervix_models::EmitSink::Client { schema } => activation
+            nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
+                nervix_models::ClientConsumerSink { schema },
+            )) => activation
                 .schemas
                 .get(schema)
                 .ok_or_else(|| {
@@ -251,12 +253,12 @@ impl EmitterExecutionPlan {
         let codec_route = emitter.body.codec().is_some()
             || matches!(emitter.body, nervix_models::EmitterBody::Client);
         if emitter.construction.is_empty()
-            && !matches!(emitter.sink.as_ref(), nervix_models::EmitSink::Http { .. })
+            && !matches!(emitter.sink.as_ref(), nervix_models::EmitSink::Http(_))
         {
             return Ok(None);
         }
         let construction = match emitter.sink.as_ref() {
-            nervix_models::EmitSink::Http { .. } => RouteConstruction {
+            nervix_models::EmitSink::Http(_) => RouteConstruction {
                 invocations: Vec::new(),
                 ..emitter.construction.clone()
             },
@@ -287,7 +289,7 @@ impl EmitterExecutionPlan {
             .invoke
             .iter()
             .any(|invocation| invocation.inner.function == FunctionName::WriteHeader)
-            && !emitter.sink.capabilities().writes_headers()
+            && !emitter.sink.capabilities().writes_headers
         {
             return Err(Report::new(EmitterExecutionPlanError::Headers {
                 emitter: emitter.name.clone(),
@@ -314,7 +316,10 @@ impl EmitterExecutionPlan {
     fn http_request(
         emitter: &CreateEmitter,
     ) -> error_stack::Result<Option<SpannedNode<Program>>, EmitterExecutionPlanError> {
-        let nervix_models::EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+        let nervix_models::EmitSink::Http(nervix_models::HttpSink::Request(
+            nervix_models::HttpRequestSink { method, path, .. },
+        )) = emitter.sink.as_ref()
+        else {
             return Ok(None);
         };
         let method_field = FieldName::parse("method").assured("method is a valid field literal");
@@ -347,10 +352,12 @@ impl EmitterExecutionPlan {
         emitter: &CreateEmitter,
         input: &arrow_schema::Schema,
     ) -> error_stack::Result<Option<EmitterOrderingGroupPlan>, EmitterExecutionPlanError> {
-        let nervix_models::EmitSink::Sqs {
-            fifo_group: Some(group),
-            ..
-        } = emitter.sink.as_ref()
+        let nervix_models::EmitSink::Sqs(nervix_models::SqsSink::Queue(
+            nervix_models::SqsQueueSink {
+                fifo_group: Some(group),
+                ..
+            },
+        )) = emitter.sink.as_ref()
         else {
             return Ok(None);
         };
@@ -436,7 +443,8 @@ impl EmitterExecutionPlans {
 mod tests {
     use nervix_models::{
         AckMode, ClientName, EmitSink, EmitterBody, EmitterPublishingMode, ErrorPolicies,
-        FlushPolicy, ProcessorInputs, RetryPolicy,
+        FlushPolicy, HttpRequestSink, HttpSink, ProcessorInputs, RetryPolicy, SqsQueueSink,
+        SqsSink, ZeroMqPushSink, ZeroMqSink,
     };
 
     use super::*;
@@ -485,11 +493,11 @@ mod tests {
     #[test]
     fn direct_emitter_lowers_only_its_filter_and_codec_emitter_preserves_empty_route() {
         let mut direct = emitter(
-            EmitSink::Http {
+            EmitSink::Http(HttpSink::Request(HttpRequestSink {
                 client: named::<ClientName>("api"),
                 method: expression("'POST'"),
                 path: expression("'/events'"),
-            },
+            })),
             EmitterBody::WithoutBody,
         );
         direct.construction.where_clause = Some(expression("input.seq > 0"));
@@ -500,9 +508,9 @@ mod tests {
         assert!(route.program.inner.filter.is_some());
         assert_eq!(route.inherited_count, 0);
 
-        *direct.sink = EmitSink::ZeroMq {
+        *direct.sink = EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
             client: named("sink"),
-        };
+        }));
         direct.body = EmitterBody::Codec {
             codec: named("codec"),
         };
@@ -517,11 +525,11 @@ mod tests {
     #[test]
     fn http_request_fields_are_lowered_beside_the_route() {
         let http = emitter(
-            EmitSink::Http {
+            EmitSink::Http(HttpSink::Request(HttpRequestSink {
                 client: named("api"),
                 method: expression("'POST'"),
                 path: expression("'/events'"),
-            },
+            })),
             EmitterBody::WithoutBody,
         );
         let request = EmitterExecutionPlan::http_request(&http)
@@ -540,11 +548,11 @@ mod tests {
     #[test]
     fn sqs_ordering_group_is_lowered_or_reads_the_branch() {
         let mut sqs = emitter(
-            EmitSink::Sqs {
+            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                 client: named("queue_client"),
                 queue: "events.fifo".to_string(),
                 fifo_group: Some(SqsFifoGroup::Expression(expression("'group'"))),
-            },
+            })),
             EmitterBody::Codec {
                 codec: named("codec"),
             },
@@ -556,7 +564,8 @@ mod tests {
             panic!("the group is an expression");
         };
         assert_eq!(program.inner.set[0].0.field, ORDERING_GROUP_FIELD);
-        let EmitSink::Sqs { fifo_group, .. } = sqs.sink.as_mut() else {
+        let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) = sqs.sink.as_mut()
+        else {
             panic!("the fixture sink is SQS");
         };
         *fifo_group = Some(SqsFifoGroup::FromBranch);

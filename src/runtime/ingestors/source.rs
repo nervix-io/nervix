@@ -74,10 +74,10 @@ impl IngestorSpec {
         Report::new(cause).change_context(self.initialize_failure())
     }
 
-    /// The metadata namespace this ingestor's messages expose to its programs, which its source's
-    /// transport class decides.
-    pub(in crate::runtime) fn metadata_kind(&self) -> IngestMetadataKind {
-        IngestMetadataKind::from(self.declared_input.source_kind())
+    /// The metadata namespace this ingestor's messages expose to its programs, which the entity
+    /// its source reads declares.
+    pub(in crate::runtime) fn metadata_scope(&self) -> SourceMetadataScope {
+        self.declared_input.source_kind().capabilities().metadata
     }
 
     /// The capabilities this ingestor's source runs with, derived from the source vocabulary.
@@ -88,7 +88,7 @@ impl IngestorSpec {
     ) -> SourceCapabilities {
         SourceCapabilities::new(
             self.reads_headers(),
-            self.metadata_kind().source_scope(),
+            self.metadata_scope(),
             self.declared_input
                 .supports_quiesce(self.declared_input.quiesce_mode()),
             instances,
@@ -392,7 +392,7 @@ impl Runtime {
                 shutdown: shutdown_tx.subscribe(),
                 instance_index,
                 readiness,
-                metadata_kind: ingestor.metadata_kind(),
+                metadata_scope: ingestor.metadata_scope(),
                 buffered_intake,
                 flush_each_intake,
                 unacknowledged_admission,
@@ -465,7 +465,7 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) shutdown: watch::Receiver<bool>,
     pub(super) instance_index: u64,
     pub(super) readiness: ingestor_quiesce::SourceInstanceReadiness,
-    pub(super) metadata_kind: IngestMetadataKind,
+    pub(super) metadata_scope: SourceMetadataScope,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
     pub(super) unacknowledged_admission: QueueAdmission,
@@ -514,7 +514,7 @@ impl RuntimeSourceHost {
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
         let collector = IngestRouteCollector::new(
-            spec.metadata_kind,
+            spec.metadata_scope,
             INGEST_GROUP_MAX_ROWS,
             spec.metrics.clone(),
         );
@@ -758,7 +758,7 @@ impl RuntimeSourceHost {
         messages: Vec<SourceIntakeMessage<'_>>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         let mut collector = IngestRouteCollector::new(
-            self.collector.kind,
+            self.collector.scope,
             messages.len().max(1),
             self.metrics.clone(),
         );
