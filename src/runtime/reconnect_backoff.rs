@@ -11,6 +11,26 @@ use super::*;
 )]
 pub(in crate::runtime) trait AcknowledgementKeepalive {
     fn keep_alive(&self);
+
+    /// Await `future` while reporting these acknowledgements alive every
+    /// `REMOTE_ACK_ALIVE_INTERVAL`, as a remote receiver reports the acknowledgements it holds, so
+    /// a source's `ACK TIMEOUT` does not expire while work done on their behalf is still under
+    /// way.
+    async fn keep_alive_while<F>(&self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let mut future = std::pin::pin!(future);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            self.keep_alive();
+            nervix_primitives::select! {
+                biased;
+                result = &mut future => return result,
+                _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
+            }
+        }
+    }
 }
 
 impl AcknowledgementKeepalive for AckSet {
