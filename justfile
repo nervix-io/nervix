@@ -2708,6 +2708,63 @@ test-chaos-rate-probe:
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
 
+# Pin baseline preparation accounting and the production output-boundary observations.
+test-chaos-output-boundary selection="all":
+    exec bash scripts/chaos/tests/output-boundary-self-test.sh {{ quote(selection) }}
+
+# Preserve the package probe's native refusal and exact retained container lifetime.
+test-chaos-image-package:
+    exec bash scripts/chaos/tests/image-package-self-test.sh
+
+# Bound startup artifact publication by the controller's actual remaining budget.
+test-chaos-startup-status:
+    exec bash scripts/chaos/tests/startup-status-self-test.sh
+
+# Measure successful publication and decisive native/deadline/reporting refusals.
+coverage-chaos-startup-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-startup-status-coverage") }} scripts/chaos/tests/startup-status-self-test.sh
+
+# Requires kcov; retains coverage of the output-boundary owner and its focused controls.
+coverage-chaos-output-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    # kcov's Bash descriptor exchange cannot handle an inherited limit near INT_MAX.
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-output-boundary-coverage") }} scripts/chaos/tests/output-boundary-self-test.sh
+
+# Measure package-command refusals, retained state and successful probes without Docker.
+coverage-chaos-image-package:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-image-package-coverage") }} scripts/chaos/tests/image-package-self-test.sh
+
+# Measure the full baseline controller against a supplied immutable image, including its self-check.
+coverage-chaos-baseline image nodes="3" timeout="840" run_id="baseline-coverage":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-baseline-coverage") }} scripts/chaos/run-baseline.sh --scenario baseline --image {{ quote(image) }} --nodes {{ quote(nodes) }} --timeout {{ quote(timeout) }} --artifacts {{ quote(cargo_target_dir / "chaos-baseline-coverage-runs") }} --run-id {{ quote(run_id) }}
+
 # Retain shell coverage of packet sampling, evidence parsing and effect controls.
 coverage-chaos-degraded-evidence:
     #!/usr/bin/env bash
