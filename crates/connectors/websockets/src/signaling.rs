@@ -1,3 +1,20 @@
+//! Signaling compilation and per-connection handshake execution.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Compiled wire formats and ordered jaq clauses, handshake state and timeout, frame
+//!   encoding and matching, and accepted-data delivery through the caller's sink.
+//! - **Depends on.** The connector contract, typed signaling plans and host services, vocabulary
+//!   values, jaq, protobuf reflection, execution primitives, WebSocket transport, and contextual errors.
+//! - **Must not know.** Configuration Models, NSPL, registry or resource-store state, graph
+//!   routing, relays, collectors, endpoint selection, or host intake and retry policy.
+//!
+//! Current boundary violation: `compile_parts` takes `SignalingWireFormat` and
+//! `SignalingProtocolOnConnect` from the configuration Model and parses its timeout text.
+//! The decision layer owns conversion to a typed signaling plan before this engine compiles it.
+//! The module also defines `SignalingDataSink`; the accepted-data host service belongs to the
+//! shared connector contract, not an interface owned by this integration.
+
 use std::{future::Future, time::Duration};
 
 use error_stack::{AttachmentKind, FrameKind, Report};
