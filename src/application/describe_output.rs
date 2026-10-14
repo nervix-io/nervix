@@ -24,15 +24,21 @@ use nervix_interconnect::{
     DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
 };
 use nervix_models::{
-    BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateWindowProcessor, EmitSink, EmitterBody, IcebergCatalog, IngestSource,
-    IngestTimestampSource, IngestorInput, KafkaOffsetMode, Model, ModelKind, ModelName,
-    MongoDbConflictAction, MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy,
-    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
-    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_nspl,
-    ingest_quiesce_to_nspl,
+    BranchSelection, CanonicalNsplError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
+    ClientSink, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
+    CreateWindowProcessor, EmitSink, EmitterBody, HttpRequestSink, HttpSink, IcebergCatalog,
+    IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource, IngestorInput,
+    KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, Model, ModelKind,
+    ModelName, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MqttSink, MqttTopicSink,
+    MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink, NatsSubjectSink, NodeRef,
+    OtelMetricsSink, OtelSink, PlacementName, PlacementPolicy, PostgresConflictAction,
+    PostgresSink, PostgresTableSink, ProcessorInputs, ProcessorOutputs, PulsarSink, PulsarSource,
+    PulsarTopicSink, PulsarTopicSource, RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink,
+    RedisSink, RelayName, RequestedResourceVersion, ResourceDescription, ResourceEntryContent,
+    ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode, SentryEventSink,
+    SentrySink, SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink, WasmStateInspection,
+    ZeroMqPushSink, ZeroMqSink, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 
@@ -296,12 +302,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     };
     lines.push(format!("reconnect wait: {reconnect_wait}"));
 
-    if let Some(IngestSource::Kafka {
+    if let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
         topic,
         offset_mode,
         instances,
         ..
-    }) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_source()
     {
         lines.push(format!("kafka topic: {}", topic.as_str()));
         lines.push(format!(
@@ -341,12 +347,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
-    } else if let Some(IngestSource::Pulsar {
+    } else if let Some(IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
         topic,
         subscription,
         instances,
         ..
-    }) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_source()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
         lines.push(format!("pulsar subscription: {}", subscription.as_str()));
@@ -881,54 +887,60 @@ pub(in crate::application) fn format_emitter_describe_output(
 
 fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(match sink {
-        EmitSink::Client { schema } => format!("CLIENT schema={}", schema.as_str()),
-        EmitSink::Http {
+        EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })) => {
+            format!("CLIENT schema={}", schema.as_str())
+        }
+        EmitSink::Http(HttpSink::Request(HttpRequestSink {
             client,
             method,
             path,
-        } => format!(
+        })) => format!(
             "HTTP client={} method={} path={}",
             client.as_str(),
             expression_to_nspl(method)?,
             expression_to_nspl(path)?
         ),
-        EmitSink::Kafka { client, topic } => {
+        EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })) => {
             format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())
         }
-        EmitSink::Pulsar { client, topic } => {
+        EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink { client, topic })) => {
             format!("PULSAR client={} topic={}", client.as_str(), topic.as_str())
         }
-        EmitSink::RabbitMq { client, queue } => {
+        EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue })) => {
             format!(
                 "RABBITMQ client={} queue={}",
                 client.as_str(),
                 queue.as_str()
             )
         }
-        EmitSink::Redis { client, channel } => {
+        EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink { client, channel })) => {
             format!(
                 "REDIS client={} channel={}",
                 client.as_str(),
                 channel.as_str()
             )
         }
-        EmitSink::Mqtt { client, topic } => {
+        EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink { client, topic })) => {
             format!("MQTT client={} topic={}", client.as_str(), topic.as_str())
         }
-        EmitSink::Nats { client, subject } => {
+        EmitSink::Nats(NatsSink::Subject(NatsSubjectSink { client, subject })) => {
             format!(
                 "NATS client={} subject={}",
                 client.as_str(),
                 subject.as_str()
             )
         }
-        EmitSink::ZeroMq { client } => format!("ZEROMQ client={}", client.as_str()),
-        EmitSink::Syslog { client } => format!("SYSLOG client={}", client.as_str()),
-        EmitSink::Sqs {
+        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client })) => {
+            format!("ZEROMQ client={}", client.as_str())
+        }
+        EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client })) => {
+            format!("SYSLOG client={}", client.as_str())
+        }
+        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
             client,
             queue,
             fifo_group,
-        } => {
+        })) => {
             let fifo = match fifo_group.as_ref() {
                 Some(group) => {
                     let value = match group {
@@ -949,28 +961,32 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
                 fifo
             )
         }
-        EmitSink::Sentry { client } => format!("SENTRY client={}", client.as_str()),
-        EmitSink::Otel { client, signal, .. } => {
-            let signal = match signal {
-                nervix_models::OtelSignal::Logs => "logs".to_string(),
-                nervix_models::OtelSignal::Traces => "traces".to_string(),
-                nervix_models::OtelSignal::Metric(metric) => {
+        EmitSink::Sentry(SentrySink::Event(SentryEventSink { client })) => {
+            format!("SENTRY client={}", client.as_str())
+        }
+        EmitSink::Otel(sink) => {
+            let signal = match sink {
+                OtelSink::Logs(_) => "logs".to_string(),
+                OtelSink::Traces(_) => "traces".to_string(),
+                OtelSink::Metrics(OtelMetricsSink { metric, .. }) => {
                     format!("metric {}", metric.name)
                 }
             };
-            format!("OTEL client={} signal={signal}", client.as_str())
+            format!("OTEL client={} signal={signal}", sink.client().as_str())
         }
-        EmitSink::ClickHouse { client, table, .. } => format!(
+        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
+            client, table, ..
+        })) => format!(
             "CLICKHOUSE client={} table={}",
             client.as_str(),
             table.as_str(),
         ),
-        EmitSink::Postgres {
+        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
             client,
             table,
             conflict_action,
             ..
-        } => {
+        })) => {
             let conflict = match conflict_action {
                 PostgresConflictAction::None => String::new(),
                 PostgresConflictAction::DoNothing { target } => {
@@ -997,12 +1013,12 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
                 conflict,
             )
         }
-        EmitSink::MySql {
+        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
             client,
             table,
             conflict_action,
             ..
-        } => {
+        })) => {
             let conflict = match conflict_action {
                 MySqlConflictAction::None => String::new(),
                 MySqlConflictAction::DoNothing => " conflict=ON CONFLICT DO NOTHING".to_string(),
@@ -1015,12 +1031,12 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
                 conflict,
             )
         }
-        EmitSink::MongoDb {
+        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
             client,
             collection,
             conflict_action,
             ..
-        } => {
+        })) => {
             let conflict = match conflict_action {
                 MongoDbConflictAction::None => String::new(),
                 MongoDbConflictAction::DoNothing { target } => {
@@ -1037,7 +1053,7 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
                 conflict,
             )
         }
-        EmitSink::Iceberg {
+        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
             backend,
             client,
             table,
@@ -1046,7 +1062,7 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
             catalog,
             commit_each,
             max_commit_size,
-        } => {
+        })) => {
             let catalog = match catalog {
                 IcebergCatalog::Rest { client } => format!("rest client={}", client.as_str()),
             };
@@ -1560,7 +1576,7 @@ fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
         | Model::Emitter(_) => true,
         Model::Ingestor(ingestor) => !matches!(
             ingestor.input.transport_source(),
-            Some(IngestSource::Endpoint { .. })
+            Some(IngestSource::Endpoint(_))
         ),
         Model::Relay(_) => true,
         _ => false,

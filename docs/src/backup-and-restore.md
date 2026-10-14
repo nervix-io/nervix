@@ -1013,7 +1013,13 @@ Deloxide selections, which additionally exercise the tracked blocking locks on t
 The guest-save scenario uses two 40 MiB branch saves in both one- and three-node clusters. It
 measures every owner's bulk reservations during public backup, interrupts a guest section after
 two chunks and verifies that no archive appears, then retries, restores with `--resume`, compares
-the guest bytes exactly and checks the next even output of each branch.
+the guest bytes exactly and checks the next even output of each branch. A mismatch names each
+differing save with its lengths, digests, first differing offset and the bytes there, never the
+whole saves. A resumed restore replays the inputs whose acknowledgements its archive does not hold,
+so the exact comparison relies on every input of the source cut being acknowledged; a checkpoint of
+a save this large can outlast the source's `ACK TIMEOUT` under load, which the branch's keepalive
+of the inputs that checkpoint holds prevents from becoming a replay. See
+[WASM State And Recovery](wasm-state.md#stages).
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication

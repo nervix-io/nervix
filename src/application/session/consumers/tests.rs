@@ -7,9 +7,9 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AckWindow, Assignment, AssignmentTarget, EmitterBody, EmitterPublishingMode,
-    ErrorPolicies, Expression, Float64Literal, Literal, ParseAsType, ProcessorInputs, RetryPolicy,
-    RouteConstruction,
+    AckMode, AckWindow, Assignment, AssignmentTarget, ClientConsumerSink, ClientSink, EmitterBody,
+    EmitterPublishingMode, ErrorPolicies, Expression, Float64Literal, Literal, ParseAsType,
+    ProcessorInputs, RetryPolicy, RouteConstruction,
 };
 
 use super::*;
@@ -27,9 +27,9 @@ impl Default for EndpointFixture {
                 name: named("output"),
                 from: ProcessorInputs::single(named("input")),
                 body: EmitterBody::Client,
-                sink: Box::new(EmitSink::Client {
+                sink: Box::new(EmitSink::Client(ClientSink::Consumer(ClientConsumerSink {
                     schema: named("output_schema"),
-                }),
+                }))),
                 batch: None,
                 flush_policy: FlushPolicy::Immediate,
                 error_policies: ErrorPolicies::handled_by_log(),

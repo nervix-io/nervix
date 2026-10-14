@@ -289,6 +289,12 @@ it would save is the state the reset discards.
    callback held back are released. Only then does the branch run its next callback.
 
 The whole checkpoint, from the guest's save to the last replica's confirmation, has ninety seconds.
+While it is under way, the branch reports every input the callback holds back alive to its source
+every 100 milliseconds, as a remote receiver reports an acknowledgement it holds. A checkpoint is
+progress of those inputs: a source whose `ACK TIMEOUT` is shorter than the checkpoint does not time
+them out and send them again while the checkpoint can still commit them, whether the source runs on
+the owner's node or on another. Input the guest keeps undecided past its callback is not held for a
+checkpoint and is not reported alive.
 The replica first receives a small revision, length, and digest description, then fetches that
 revision through the bulk pool in 64 KiB chunks. It verifies the complete byte count and digest
 before writing the checkpoint to its own storage. A save up to the host's 64 MiB guest buffer can
@@ -767,6 +773,7 @@ branches.
 | --- | --- |
 | Crash windows and replay | `wasm_state_qualification.feature`: the four checkpoint windows on a single-node restart, owner loss at the windows it can tell apart, a cluster stopped while its owner holds a checkpoint, and a reset committed but not usable across a cluster restart |
 | No acknowledgement before durability | `wasm_checkpoint_durability.feature`, and the Shuttle checks of `ReplicatedWasmProcessorState`, `WasmCheckpointHolds`, and `DurabilityBarrier` under random, PCT, and DFS schedules |
+| No replay while a checkpoint is under way | `wasm_checkpoint_durability.feature`: a checkpoint held past its source's `ACK TIMEOUT` on one node and on three nodes with one replica commits its input without the source sending it again, and the `WasmCheckpointHolds` Shuttle checks race its keepalive with the input's delivery |
 | No resurrection, no double reset | `wasm_state_reset.feature`: failover, retry, a lost reply across a leader change, an expired identity, and rebinding |
 | Recovery budget | `wasm_state_recovery.feature`: preserve, recover once, and a failed fresh initialization that spends the attempt across a restart |
 | Restart | `wasm_processor.feature`: guest state restored after a cluster restart and not resurrected by a returning former owner |

@@ -19,9 +19,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    EmitterName, IngestorInput, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitterName,
+    IngestorInput, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
 };
 
 mod commit;
@@ -1331,7 +1331,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_sink.client() != candidate_sink.client() {
         changes.push(ModelChangeAspect::EmitterClient);
     }
-    if !emitter_sink_definition_eq(base_sink, candidate_sink) {
+    if !base_sink.same_definition(candidate_sink) {
         changes.push(ModelChangeAspect::EmitterSink);
     }
     if base_body != candidate_body {
@@ -1370,247 +1370,6 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     changes
 }
 
-fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
-    match (base, candidate) {
-        (
-            EmitSink::Client {
-                schema: base_schema,
-            },
-            EmitSink::Client {
-                schema: candidate_schema,
-            },
-        ) => base_schema == candidate_schema,
-        (
-            EmitSink::Http {
-                method: base_method,
-                path: base_path,
-                ..
-            },
-            EmitSink::Http {
-                method: candidate_method,
-                path: candidate_path,
-                ..
-            },
-        ) => base_method == candidate_method && base_path == candidate_path,
-        (
-            EmitSink::Kafka {
-                client: _,
-                topic: base_topic,
-            },
-            EmitSink::Kafka {
-                client: _,
-                topic: candidate_topic,
-            },
-        )
-        | (
-            EmitSink::Pulsar {
-                client: _,
-                topic: base_topic,
-            },
-            EmitSink::Pulsar {
-                client: _,
-                topic: candidate_topic,
-            },
-        )
-        | (
-            EmitSink::Mqtt {
-                client: _,
-                topic: base_topic,
-            },
-            EmitSink::Mqtt {
-                client: _,
-                topic: candidate_topic,
-            },
-        ) => base_topic == candidate_topic,
-        (
-            EmitSink::RabbitMq {
-                client: _,
-                queue: base_queue,
-            },
-            EmitSink::RabbitMq {
-                client: _,
-                queue: candidate_queue,
-            },
-        ) => base_queue == candidate_queue,
-        (
-            EmitSink::Sqs {
-                client: _,
-                queue: base_queue,
-                fifo_group: base_fifo_group,
-            },
-            EmitSink::Sqs {
-                client: _,
-                queue: candidate_queue,
-                fifo_group: candidate_fifo_group,
-            },
-        ) => base_queue == candidate_queue && base_fifo_group == candidate_fifo_group,
-        (
-            EmitSink::Redis {
-                client: _,
-                channel: base_channel,
-            },
-            EmitSink::Redis {
-                client: _,
-                channel: candidate_channel,
-            },
-        ) => base_channel == candidate_channel,
-        (
-            EmitSink::Nats {
-                client: _,
-                subject: base_subject,
-            },
-            EmitSink::Nats {
-                client: _,
-                subject: candidate_subject,
-            },
-        ) => base_subject == candidate_subject,
-        (EmitSink::ZeroMq { client: _ }, EmitSink::ZeroMq { client: _ })
-        | (EmitSink::Syslog { client: _ }, EmitSink::Syslog { client: _ })
-        | (EmitSink::Sentry { client: _ }, EmitSink::Sentry { client: _ }) => true,
-        (
-            EmitSink::Otel {
-                client: _,
-                signal: base_signal,
-                values: base_values,
-                attributes: base_attributes,
-                resource: base_resource,
-                scope: base_scope,
-            },
-            EmitSink::Otel {
-                client: _,
-                signal: candidate_signal,
-                values: candidate_values,
-                attributes: candidate_attributes,
-                resource: candidate_resource,
-                scope: candidate_scope,
-            },
-        ) => {
-            base_signal == candidate_signal
-                && base_values == candidate_values
-                && base_attributes == candidate_attributes
-                && base_resource == candidate_resource
-                && base_scope == candidate_scope
-        }
-        (
-            EmitSink::ClickHouse {
-                client: _,
-                table: base_table,
-                values: base_values,
-            },
-            EmitSink::ClickHouse {
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-            },
-        ) => base_table == candidate_table && base_values == candidate_values,
-        (
-            EmitSink::Postgres {
-                client: _,
-                table: base_table,
-                values: base_values,
-                conflict_action: base_conflict,
-            },
-            EmitSink::Postgres {
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-                conflict_action: candidate_conflict,
-            },
-        ) => {
-            base_table == candidate_table
-                && base_values == candidate_values
-                && base_conflict == candidate_conflict
-        }
-        (
-            EmitSink::MySql {
-                client: _,
-                table: base_table,
-                values: base_values,
-                conflict_action: base_conflict,
-            },
-            EmitSink::MySql {
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-                conflict_action: candidate_conflict,
-            },
-        ) => {
-            base_table == candidate_table
-                && base_values == candidate_values
-                && base_conflict == candidate_conflict
-        }
-        (
-            EmitSink::MongoDb {
-                client: _,
-                collection: base_collection,
-                values: base_values,
-                conflict_action: base_conflict,
-            },
-            EmitSink::MongoDb {
-                client: _,
-                collection: candidate_collection,
-                values: candidate_values,
-                conflict_action: candidate_conflict,
-            },
-        ) => {
-            base_collection == candidate_collection
-                && base_values == candidate_values
-                && base_conflict == candidate_conflict
-        }
-        (
-            EmitSink::Iceberg {
-                backend: base_backend,
-                client: _,
-                table: base_table,
-                values: base_values,
-                location: base_location,
-                catalog: base_catalog,
-                commit_each: base_commit_each,
-                max_commit_size: base_max_commit_size,
-            },
-            EmitSink::Iceberg {
-                backend: candidate_backend,
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-                location: candidate_location,
-                catalog: candidate_catalog,
-                commit_each: candidate_commit_each,
-                max_commit_size: candidate_max_commit_size,
-            },
-        ) => {
-            base_backend == candidate_backend
-                && base_table == candidate_table
-                && base_values == candidate_values
-                && base_location == candidate_location
-                && base_catalog == candidate_catalog
-                && base_commit_each == candidate_commit_each
-                && base_max_commit_size == candidate_max_commit_size
-        }
-        (
-            EmitSink::Client { .. }
-            | EmitSink::Http { .. }
-            | EmitSink::Kafka { .. }
-            | EmitSink::Pulsar { .. }
-            | EmitSink::RabbitMq { .. }
-            | EmitSink::Redis { .. }
-            | EmitSink::Mqtt { .. }
-            | EmitSink::Nats { .. }
-            | EmitSink::ZeroMq { .. }
-            | EmitSink::Sqs { .. }
-            | EmitSink::Sentry { .. }
-            | EmitSink::Syslog { .. }
-            | EmitSink::Otel { .. }
-            | EmitSink::ClickHouse { .. }
-            | EmitSink::Postgres { .. }
-            | EmitSink::MySql { .. }
-            | EmitSink::MongoDb { .. }
-            | EmitSink::Iceberg { .. },
-            _,
-        ) => false,
-    }
-}
-
 fn wire_schema_change_aspects<T>(
     base: &CreateWireSchema<T>,
     candidate: &CreateWireSchema<T>,
@@ -1633,12 +1392,13 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterBody, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy,
-        GeneralErrorPolicy, IngestSource, IngestTimestampSource, InputCollectPolicy, Literal,
-        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ProcessorInputWhere,
+        EmitterBody, EmitterPublishingMode, EndpointEndpointSource, EndpointIngestMode,
+        EndpointSource, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, IngestSource,
+        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
+        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+        ModelChangeAspect, ModelKind, NatsSink, NatsSubjectSink, ProcessorInputWhere,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        RetryPolicy,
+        RetryPolicy, ZeroMqPushSink, ZeroMqSink,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1724,9 +1484,9 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
@@ -1791,13 +1551,13 @@ mod tests {
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint {
+                source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                     endpoint: named("ingress_a"),
                     mode: EndpointIngestMode::NoAckSequential,
                     quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
-                },
+                })),
                 codec: named("event_codec"),
             }),
             timestamp_source: None,
@@ -2092,9 +1852,9 @@ mod tests {
         assert_eq!(dynamic.dynamic_updates().len(), 1);
 
         let mut client = base.clone();
-        client.sink = Box::new(EmitSink::ZeroMq {
+        client.sink = Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
             client: named("sink_two"),
-        });
+        })));
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(client),
@@ -2103,10 +1863,10 @@ mod tests {
         );
 
         let mut sink = base.clone();
-        sink.sink = Box::new(EmitSink::Nats {
+        sink.sink = Box::new(EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
             client: named("sink"),
             subject: named("events"),
-        });
+        })));
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(sink),
@@ -2221,13 +1981,14 @@ mod tests {
                     let crate::IngestorInput::Transport(input) = &mut candidate.input else {
                         panic!("the fixture ingestor reads an endpoint");
                     };
-                    input.source = IngestSource::Endpoint {
-                        endpoint: named("ingress_b"),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
-                        },
-                    };
+                    input.source =
+                        IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+                            endpoint: named("ingress_b"),
+                            mode: EndpointIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
+                        }));
                     candidate
                 },
                 ModelChangeAspect::IngestorSource,

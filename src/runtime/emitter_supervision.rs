@@ -476,7 +476,7 @@ mod tests {
 
     use nervix_models::{
         AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitSink, EmitterPublishingMode,
-        ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy,
+        ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
     };
     use nervix_primitives::{
         sync::{atomic::AtomicBool, mpsc, oneshot, watch},
@@ -496,9 +496,9 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),

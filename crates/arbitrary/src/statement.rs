@@ -1034,8 +1034,9 @@ impl Arbitrary<'_> {
                 // emitter's own payload selection.
                 let emitter = self.create_emitter();
                 let body = match emitter.sink.as_ref() {
-                    nervix_models::EmitSink::Http { .. }
-                    | nervix_models::EmitSink::Client { .. } => Some(emitter.body),
+                    nervix_models::EmitSink::Http(_) | nervix_models::EmitSink::Client(_) => {
+                        Some(emitter.body)
+                    }
                     _ => None,
                 };
                 AlterEmitterOperation::SetSink {

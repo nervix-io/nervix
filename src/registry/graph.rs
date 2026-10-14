@@ -870,7 +870,7 @@ fn ingestor_subtype(model: &Model) -> &str {
         return "INGESTOR";
     };
     if let IngestorInput::Transport(input) = &ingestor.input
-        && let IngestSource::Endpoint { .. } = input.source
+        && let IngestSource::Endpoint(_) = input.source
     {
         return "INGESTOR";
     }
