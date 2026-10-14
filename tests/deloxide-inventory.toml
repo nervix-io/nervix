@@ -514,6 +514,14 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
 [[workload]]
+coverage = "Remote acknowledgement silence sweeps whose ticks are already due when runtime teardown cancels them, and the registry's final resolution, under tracked position guards."
+id = "owner.remote-ack-silence-sweeps"
+invariant = "One fresh diagnostic process ends overrunning silence sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
+
+[[workload]]
 coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
 examples = 2
 feature = "tests/features/cluster/deadlock_diagnostics.feature"
@@ -2070,6 +2078,7 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
 workloads = [
+  "owner.remote-ack-silence-sweeps",
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",

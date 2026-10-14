@@ -2542,6 +2542,77 @@ mod tests {
         );
         sweeps.abort();
     }
+
+    /// Runtime teardown cancels the silence sweeps while a sweep that overran its interval runs, so
+    /// the next tick is already due when that sweep returns. The sweeps still end there: teardown's
+    /// join waits for the sweep in progress and for no other, and the acknowledgement that sweep
+    /// left pending ends with the registry rather than by a later sweep.
+    ///
+    /// A paused clock does not advance while a synchronous sweep runs, and a current-thread runtime
+    /// fires a timer only between polls, so no sweep here can make the next tick due itself. The
+    /// sweeps start a thousand intervals late instead and keep every tick they missed, so each tick
+    /// they reach is already due: the state an overrunning sweep leaves the node's own cadence in
+    /// when the node's other workers keep its timers current.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interrupts() {
+        use nervix_primitives::{
+            sync::atomic::{AtomicUsize, Ordering},
+            time::{MissedTickBehavior, advance, interval},
+        };
+
+        use crate::runtime::remote_ack_owner::SilenceSweeps;
+
+        let runtime = Runtime::default();
+        let registry = runtime.inner.remote_dispatch.clone();
+        let (acks, completion) = AckSet::root();
+        let ack_id = registry
+            .register_ack(receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
+        registry.admit_ack(ack_id);
+        let mut ticks = interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Burst);
+        advance(REMOTE_ACK_SILENCE_SWEEP_INTERVAL * 1000).await;
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let teardown = runtime.inner.remote_ack_watcher_shutdown.clone();
+        let swept = sweeps.clone();
+        let cancelling = teardown.clone();
+        runtime.spawn_remote_ack_watcher_task(async move {
+            SilenceSweeps::ticking(ticks)
+                .run(|| {
+                    registry.fail_silent_acks();
+                    swept.fetch_add(1, Ordering::Relaxed);
+                    // Teardown cancels the sweeps while this sweep runs.
+                    cancelling.cancel();
+                })
+                .await;
+        });
+        teardown.cancelled().await;
+
+        runtime.shutdown().await;
+
+        assert_eq!(
+            sweeps.load(Ordering::Relaxed),
+            1,
+            "teardown cancelled the sweeps during their first sweep"
+        );
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck("remote correlation owner ended".to_string()),
+            "the registry, not a later sweep, ends the acknowledgement the interrupted sweep kept"
+        );
+    }
+
+    /// One fresh diagnostic process installs its detector before constructing the registry's
+    /// tracked position guards, then ends overrunning silence sweeps through runtime teardown.
+    #[cfg(feature = "deloxide")]
+    #[test]
+    fn deloxide_remote_ack_silence_sweeps() {
+        let directory = std::env::var_os("NERVIX_DEADLOCK_EVIDENCE")
+            .map(nervix_deadlock::EvidenceDirectory::new);
+        nervix_deadlock::DiagnosticRun::start(directory)
+            .assured("the silence sweep diagnostic process starts its detector once");
+        teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interrupts();
+    }
 }
 
 #[cfg(all(test, feature = "shuttle"))]

@@ -1523,8 +1523,9 @@ a 40-CPU host whose one-minute load was 47 at the median and between 28 and 75.
   task with is observed only when the task waits. The run's first cleanups show it: four nodes that
   had served for under ten seconds logged nothing through 59 seconds of terminal teardown while the
   process kept three CPUs busy. The sweep now visits only the positions a node's deliveries and
-  admissions have claimed, which keeps it far inside its second; see
-  [Terminal Teardown](./shutdown.md#terminal-teardown).
+  admissions have claimed, which keeps it far inside its second, and its task returns to its
+  executor after every sweep, so teardown's cancellation ends it after the sweep in progress even
+  when that sweep overruns; see [Terminal Teardown](./shutdown.md#terminal-teardown).
 - **Nodes the harness gave up on kept running.** A cleanup that reached its deadline aborted the
   node's root task, which ended that one future and left every task the node had spawned, its
   sweep among them, running for the rest of the process. A node aborted this way never reported
