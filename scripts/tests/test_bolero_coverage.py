@@ -385,6 +385,15 @@ class ReportMergeTests(unittest.TestCase):
         ))
         self.assertIn("BRDA:4,0,0,-\n", self.merge("SF:x\nBRDA:4,0,0,-\nend_of_record\n"))
 
+    def test_function_records_that_name_their_end_line_merge_by_name(self) -> None:
+        first = ("SF:scripts/tool.py\nFN:3,4,Tool.run\nFN:7,9,Tool.stop\nFNDA:1,Tool.run\nFNDA:0,Tool.stop\n"
+                 "FNF:2\nFNH:1\nDA:3,1\nDA:4,1\nDA:7,0\nLF:3\nLH:2\nend_of_record\n")
+        second = "SF:scripts/tool.py\nFN:3,4,Tool.run\nFNDA:2,Tool.run\nDA:3,2\nDA:4,0\nend_of_record\n"
+        self.assertEqual(self.merge(first, second), (
+            "SF:scripts/tool.py\nFN:3,4,Tool.run\nFN:7,9,Tool.stop\nFNDA:3,Tool.run\nFNDA:0,Tool.stop\n"
+            "FNF:2\nFNH:1\nDA:3,3\nDA:4,1\nDA:7,0\nLF:3\nLH:2\nend_of_record\n"
+        ))
+
     def test_malformed_reports_are_refused(self) -> None:
         for text, reason in (
             ("DA:1,1\n", "outside a record"),
