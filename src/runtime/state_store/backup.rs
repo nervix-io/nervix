@@ -139,6 +139,11 @@ impl RuntimeStateStore {
                 ));
             }
             let receipt_key = placement_key.clone();
+            // An earlier attempt at this checkpoint is about to be removed, whole or cut short,
+            // and nothing tells how much of it there is.
+            if self.holds_staged_attempt(&placement_key)? {
+                self.restore_staging_usage.forget();
+            }
             // A failed retry cannot leave the receipt of a different byte stream marked complete.
             self.restore_staging
                 .remove(&receipt_key)
@@ -162,13 +167,16 @@ impl RuntimeStateStore {
                 |_| Ok(true),
                 &mut check,
             )?;
-            self.admit_restore_checkpoint(
+            let staged = self.admit_restore_checkpoint(
                 &placement_key,
                 metadata,
                 header.len(),
                 encoded.len(),
                 &mut check,
             )?;
+            // From its first chunk until its receipt is committed this checkpoint is entries no
+            // measurement accounts for, and a write cut short leaves them behind.
+            self.restore_staging_usage.forget();
             let prefix = chunk_prefix(&placement_key, lsm);
             let mut buffer = vec![0; RESTORE_STATE_CHUNK_BYTES];
             let mut offset = 0_u64;
@@ -211,8 +219,38 @@ impl RuntimeStateStore {
             batch.insert(&self.restore_staging, receipt_key, encoded.to_vec());
             batch
                 .commit()
-                .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))
+                .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))?;
+            // The admitted footprint is exactly the keys and values written above.
+            self.restore_staging_usage.keep(staged);
+            Ok(())
         })
+    }
+
+    /// Whether an earlier attempt left anything staged under `placement_key`: a receipt, a header,
+    /// or index and chunk entries.
+    fn holds_staged_attempt(
+        &self,
+        placement_key: &[u8],
+    ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        for whole in [&self.restore_staging, &self.latest] {
+            if whole
+                .contains_key(placement_key)
+                .change_context(RuntimePersistenceError::ReadValue)?
+            {
+                return Ok(true);
+            }
+        }
+        let mut entries = placement_key.to_vec();
+        entries.push(0);
+        for prefixed in [&self.lsm_index, &self.checkpoint_chunks] {
+            if let Some(entry) = prefixed.prefix(&entries).next() {
+                entry
+                    .key()
+                    .change_context(RuntimePersistenceError::ReadValue)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn validate_restore_inventory(
@@ -313,6 +351,9 @@ impl RuntimeStateStore {
     ) -> error_stack::Result<(), RuntimePersistenceError> {
         self.latest_snapshot_writer().with_installation(|| {
             check()?;
+            // Selecting this generation ends its place in unpublished staging, and the cleanup
+            // below removes what the selection supersedes. Either can be cut short.
+            self.restore_staging_usage.forget();
             match self.check_restore_authority(domain, authority)? {
                 Some(record) if record.authority == *authority => {
                     if record.inventory != expected {

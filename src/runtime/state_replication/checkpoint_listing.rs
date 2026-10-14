@@ -111,3 +111,10 @@ impl CheckpointPage {
         })
     }
 }
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
+))]
+#[path = "checkpoint_listing_properties.rs"]
+mod properties;

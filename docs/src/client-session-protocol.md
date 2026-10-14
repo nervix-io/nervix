@@ -1251,14 +1251,20 @@ reports the gap as an interruption when the session ends, clears its previous ti
 every clock it followed again on its next session. An attach that session refuses is reported as a
 restoration failure and sent again on the same session after a growing wait; an attach it leaves
 unanswered past the request timeout ends that session instead, and the next session attaches the
-clock again. A reply that the session already follows the clock moves the attachment to that
-session: the caller keeps the clock the previous session last reported, without a tick, until that
-session's later state or tick frames arrive. When the new session's attach reply arrives before
-the old session ends, as after a leader redirect, the attachment moves without an interruption,
-and the client reports the clock only if it changed. A detach the client sends while a clock waits
-to be restored reaches the current session: a closed session is opened again first, which attaches
-the clock before the detach releases it, and an open session that has not restored it answers
-`DomainClockNotAttached`, after which the client no longer follows the clock. After
+clock again, which a caller already waiting for clock events opens at once. A reply that the
+session already follows the clock moves the attachment to that session: the caller keeps the clock
+the previous session last reported, without a tick, until that session's later state or tick
+frames arrive. When the new session's attach reply arrives before the old session ends, as after a
+leader redirect, the attachment moves without an interruption: the client reports the clock only
+if it changed, keeps the newest tick of a clock still paced in the same generation, and reports a
+tick of the new session only when it is newer. A detach the client sends while a clock waits to be
+restored reaches the current session: a closed session is opened again first, which attaches the
+clock before the detach releases it, and an open session that has not restored it answers
+`DomainClockNotAttached`, after which the client no longer follows the clock. The client sends no
+restoration attach of a clock behind a detach of it: a detach waits until every restoration attach
+already decided for the clock is sent, so each reaches its session first, and a restoration that
+would attach the clock while the detach is in flight waits for the detach to end and attaches it
+only if the client still follows it. After
 `DomainClockAttachmentEnded`, a detach is answered `DomainClockNotAttached` and an attach is served
 as a new attachment. The shared binding exposes this event stream through
 `nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle, and the clock the

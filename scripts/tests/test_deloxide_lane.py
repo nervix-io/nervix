@@ -480,6 +480,7 @@ class InventoryTests(unittest.TestCase):
         # checkpoint-transfer features in the restore selection, and each under its own `stress.`
         # identity with the scenario, examples and invariant of its active-only counterpart.
         restore_features = {
+            "tests/features/cluster/backup_stored_branch_capture.feature",
             "tests/features/cluster/backup.feature",
             "tests/features/cluster/backup_generation.feature",
             "tests/features/cluster/backup_branch_state.feature",
@@ -523,7 +524,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(set(stressed), expected)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 44)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 47)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 48)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):

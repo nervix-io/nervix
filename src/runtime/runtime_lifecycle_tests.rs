@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Focused tests for how long stopping one domain's execution may take when its tasks
-//!   outlast their stop grace.
+//!   outlast their stop grace, and for the tasks a stopping runtime waits for after it.
 //! - **Depends on.** The runtime lifecycle and its test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
@@ -15,10 +15,22 @@
 use std::time::Duration;
 
 use ahash::HashMap;
-use nervix_models::{DomainName, GeneratorName, ModelKind, NodeRef, ReingestorName};
-use nervix_primitives::{sync::watch, task::JoinHandle, time::Instant};
+use arrow_array::{ArrayRef, Int64Array};
+use fjall::Database;
+use nervix_execution::{CpuClass, MemoryClass};
+use nervix_models::{
+    DomainName, GeneratorName, ModelKind, NodeRef, ParseAsType, ReingestorName, SchemaFingerprint,
+};
+use nervix_primitives::{
+    sync::{StdArc, blocking, mpsc, watch},
+    task::JoinHandle,
+    time::{Instant, timeout},
+};
 
 use super::*;
+
+/// How long a check waits for a task or a worker to reach the state it names.
+const REACHED_WITHIN: Duration = Duration::from_secs(60);
 
 /// How many tasks of one kind each check leaves running past the stop. More than one is what
 /// tells a grace the tasks share from a grace each of them is given in turn.
@@ -164,4 +176,192 @@ async fn tasks_that_stop_at_once_cost_no_grace() {
         *stopped.borrow_and_update(),
         "stopping the execution publishes its stop to every task"
     );
+}
+
+/// A runtime that persists its state, with one window a branch has published and not yet written.
+struct PublishedWindow {
+    runtime: Runtime,
+    placement: RuntimeStatePlacement,
+    state: Arc<ReplicatedWindowProcessorState>,
+    _directory: tempfile::TempDir,
+}
+
+impl PublishedWindow {
+    async fn new() -> Self {
+        let directory = tempfile::tempdir().expect("the test host provides a temporary directory");
+        let database = Database::builder(directory.path())
+            .open()
+            .expect("a new directory opens as a database");
+        let runtime = Runtime::with_persistence(Some(database), Duration::from_secs(3_600))
+            .expect("the runtime opens its state store");
+        let placement = RuntimeStatePlacement {
+            domain: domain("default"),
+            state: RuntimeState::WindowProcessor {
+                schema: SchemaFingerprint::from_digest([8; 32]),
+            },
+            kind: ModelKind::WindowProcessor,
+            identifier: named("latency_window"),
+            branch_key: None,
+        };
+        let state = runtime
+            .replicated_window_processor_state(placement.clone())
+            .expect("the window state initializes");
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.latency)",
+            &[OptionalTestField {
+                name: "latency",
+                ty: ParseAsType::I64,
+                optional: false,
+            }],
+            &[OptionalTestField {
+                name: "total",
+                ty: ParseAsType::I64,
+                optional: true,
+            }],
+        );
+        let latencies: ArrayRef = StdArc::new(Int64Array::from(vec![10, 20]));
+        let refused = window.admit(vec![latencies], &[1, 2]).await;
+        assert!(refused.is_empty(), "the window admits both rows");
+        state
+            .replace_state(&window.state)
+            .expect("the branch publishes its window");
+        Self {
+            runtime,
+            placement,
+            state,
+            _directory: directory,
+        }
+    }
+
+    /// The revision of this window the runtime's state store holds.
+    fn persisted_revision(&self) -> Option<u64> {
+        let persisted = self
+            .runtime
+            .inner
+            .state_store
+            .as_ref()
+            .expect("the test runtime has a state store")
+            .latest_snapshot(&self.placement)
+            .expect("the snapshot lookup succeeds");
+        persisted.map(|snapshot| snapshot.lsm)
+    }
+}
+
+/// A window branch whose task was ended at its stop grace leaves its snapshot task writing what
+/// the branch published last. That task holds the runtime and its storage, so a runtime that stops
+/// waits for it: here the write waits for a bulk worker, and the runtime finishes stopping only
+/// once the worker is given back and the window is on disk.
+#[nervix_primitives::test]
+async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gone() {
+    let window = PublishedWindow::new().await;
+    let runtime = window.runtime.clone();
+
+    // Every bulk worker is held, so encoding the published window waits for one.
+    let executor = runtime.executor().clone();
+    let workers = executor.snapshot().bulk_cpu.workers;
+    let mut holders = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let (holder, held) = blocking::mpsc::channel::<()>();
+        holders.push(holder);
+        let reservation = executor
+            .try_reserve(MemoryClass::Bulk, 0)
+            .expect("bulk admission accepts a zero charge");
+        let occupying = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            occupying
+                .run_cpu(CpuClass::Bulk, reservation, move |_, _| {
+                    held.recv()
+                        .discarded("dropping the holder is how the test releases this worker");
+                })
+                .await
+                .discarded("the job only holds a worker until the test releases it");
+        });
+    }
+    timeout(REACHED_WITHIN, async {
+        while executor.snapshot().bulk_cpu.running < workers {
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every bulk worker is held");
+
+    let (branch_stop, _) = watch::channel(false);
+    let (snapshot_requests, branch_requests) = mpsc::channel(1);
+    let snapshot_task = runtime
+        .spawn_published_branch_state_snapshot_task(
+            &branch_stop,
+            PublishedBranchState::WindowProcessor(window.state.clone()),
+            snapshot_requests,
+        )
+        .expect("a persisting runtime starts a snapshot task");
+    // A branch task ended at its stop grace is dropped with everything it held, without telling
+    // its snapshot task anything.
+    drop(branch_requests);
+    drop(branch_stop);
+    drop(snapshot_task);
+    timeout(REACHED_WITHIN, async {
+        while executor.snapshot().bulk_cpu.pending == 0 {
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the snapshot task's write waits for a bulk worker");
+
+    let stopping = nervix_primitives::task::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.shutdown().await }
+    });
+    let told_to_stop = runtime.inner.branch_snapshot_tasks.stopping();
+    timeout(REACHED_WITHIN, told_to_stop.cancelled())
+        .await
+        .expect("the stopping runtime reaches its snapshot tasks");
+    assert!(
+        !stopping.is_finished(),
+        "the runtime stopped while a snapshot task still held its storage"
+    );
+    assert_eq!(window.persisted_revision(), None);
+
+    drop(holders);
+    timeout(REACHED_WITHIN, stopping)
+        .await
+        .expect("the runtime stops once the snapshot is written")
+        .expect("the stopping task does not panic");
+    assert_eq!(
+        window.persisted_revision(),
+        Some(1),
+        "the window the branch published is on disk when the runtime has stopped"
+    );
+}
+
+/// A snapshot task whose branch never tells it to stop still ends with its runtime: the stopping
+/// runtime tells it to write what the branch published last, and waits for that write.
+#[nervix_primitives::test]
+async fn a_stopping_runtime_has_the_snapshot_task_of_a_silent_branch_write_and_end() {
+    let window = PublishedWindow::new().await;
+    let runtime = window.runtime.clone();
+    let (branch_stop, _) = watch::channel(false);
+    let (snapshot_requests, _branch_requests) = mpsc::channel(1);
+    let snapshot_task = runtime
+        .spawn_published_branch_state_snapshot_task(
+            &branch_stop,
+            PublishedBranchState::WindowProcessor(window.state.clone()),
+            snapshot_requests,
+        )
+        .expect("a persisting runtime starts a snapshot task");
+    assert_eq!(window.persisted_revision(), None);
+
+    timeout(REACHED_WITHIN, runtime.shutdown())
+        .await
+        .expect("the runtime stops without its branch's stop");
+
+    timeout(REACHED_WITHIN, snapshot_task)
+        .await
+        .expect("the snapshot task has ended with its runtime")
+        .expect("the snapshot task does not panic");
+    assert_eq!(
+        window.persisted_revision(),
+        Some(1),
+        "the window the branch published is on disk when the runtime has stopped"
+    );
+    drop(branch_stop);
 }

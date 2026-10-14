@@ -3,7 +3,8 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Container lifecycle, the in-process DNS authority tests point resolvers at, the
-//!   addresses and TLS material a run is given, and the parallelism budget it is allowed.
+//!   followed output of the OpenTelemetry Collector and the exports its debug exporter printed,
+//!   the addresses and TLS material a run is given, and the parallelism budget it is allowed.
 //! - **Depends on.** Container and process management, and the DNS message grammar.
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
@@ -48,9 +49,12 @@ use testcontainers::{
 };
 use thiserror::Error;
 
+pub mod collector_exports;
+pub mod collector_output;
 pub mod dns_authority;
 mod reaper;
 
+use collector_output::{CollectorFollower, CollectorOutput};
 use reaper::ResourceReaper;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -291,6 +295,8 @@ pub fn configure_process_lifecycle(mode: ContainerMode) {
 pub struct DependencyEnvironment {
     running: BTreeSet<&'static str>,
     containers: Vec<RunningContainer>,
+    /// The follower of the OpenTelemetry Collector's output, once the Collector started.
+    otel_collector_output: Option<CollectorFollower>,
     endpoints: DependencyEndpoints,
     tls: Option<TlsMaterials>,
     tls_configuration_hash: Option<String>,
@@ -308,6 +314,7 @@ impl DependencyEnvironment {
         Self {
             running: BTreeSet::new(),
             containers: Vec::new(),
+            otel_collector_output: None,
             endpoints: DependencyEndpoints::default(),
             tls: None,
             tls_configuration_hash: None,
@@ -1251,32 +1258,16 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             OTEL_COLLECTOR_HTTP_ADDR,
             format!("http://127.0.0.1:{http_port}"),
         );
-        self.containers
-            .push(RunningContainer::OtelCollector(container));
+        self.otel_collector_output = Some(CollectorFollower::start(&container));
+        self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
 
-    pub async fn otel_collector_logs(&self) -> io::Result<String> {
-        let container = self
-            .containers
-            .iter()
-            .find_map(RunningContainer::otel_collector)
-            .ok_or_else(|| io::Error::other("OpenTelemetry Collector is not running"))?;
-        let stdout = container
-            .stdout_to_vec()
-            .await
-            .map_err(testcontainers_error("OpenTelemetry Collector stdout"))?;
-        let stderr = container
-            .stderr_to_vec()
-            .await
-            .map_err(testcontainers_error("OpenTelemetry Collector stderr"))?;
-        let mut logs = String::from_utf8_lossy(&stdout).into_owned();
-        logs.push_str(&String::from_utf8_lossy(&stderr));
-        Ok(logs)
-    }
-
-    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
-        Ok(self.otel_collector_logs().await?.contains(needle))
+    /// The OpenTelemetry Collector's followed output, once the Collector started.
+    pub fn otel_collector_output(&self) -> Option<CollectorOutput> {
+        self.otel_collector_output
+            .as_ref()
+            .map(CollectorFollower::output)
     }
 
     pub async fn start_jaeger(&mut self) -> io::Result<()> {
@@ -1421,10 +1412,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
     }
 
-    /// Stops and removes every container this environment started, then its Ryuk cleanup
-    /// container. A container that fails to tear down does not stop the others from being torn
-    /// down, and its failure is kept with the rest.
+    /// Stops following the Collector's output, then stops and removes every container this
+    /// environment started, then its Ryuk cleanup container. A container that fails to tear down
+    /// does not stop the others from being torn down, and its failure is kept with the rest.
     pub async fn shutdown(&mut self) -> Result<(), TeardownFailures> {
+        if let Some(follower) = self.otel_collector_output.take() {
+            follower.stop().await;
+        }
         let mut failures = Vec::new();
         for container in std::mem::take(&mut self.containers).into_iter().rev() {
             if self.mode.is_reusable() {
@@ -2042,19 +2036,10 @@ fn run_openssl(arguments: Vec<OsString>, operation: &str) -> io::Result<()> {
 enum RunningContainer {
     Generic(ContainerAsync<GenericImage>),
     Kafka(ContainerAsync<KafkaImage>),
-    OtelCollector(ContainerAsync<GenericImage>),
     Sentry(ContainerAsync<GenericImage>),
 }
 
 impl RunningContainer {
-    fn otel_collector(&self) -> Option<&ContainerAsync<GenericImage>> {
-        if let Self::OtelCollector(container) = self {
-            Some(container)
-        } else {
-            None
-        }
-    }
-
     fn sentry(&self) -> Option<&ContainerAsync<GenericImage>> {
         if let Self::Sentry(container) = self {
             Some(container)
@@ -2065,18 +2050,14 @@ impl RunningContainer {
 
     fn id(&self) -> String {
         match self {
-            Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
-                container.id().to_string()
-            }
+            Self::Generic(container) | Self::Sentry(container) => container.id().to_string(),
             Self::Kafka(container) => container.id().to_string(),
         }
     }
 
     async fn stop_and_remove(self) -> error_stack::Result<(), ContainerTeardownError> {
         match self {
-            Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
-                stop_and_remove(container).await
-            }
+            Self::Generic(container) | Self::Sentry(container) => stop_and_remove(container).await,
             Self::Kafka(container) => stop_and_remove(container).await,
         }
     }

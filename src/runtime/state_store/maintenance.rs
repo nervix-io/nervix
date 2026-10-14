@@ -47,7 +47,76 @@ impl MaintenanceKeyspace {
     }
 }
 
+/// The keys of the unpublished restore namespaces and the bytes of those keys and their values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct StagedUsage {
+    pub(super) bytes: u64,
+    pub(super) keys: u64,
+}
+
+impl StagedUsage {
+    fn with(self, added: Self) -> error_stack::Result<Self, RuntimePersistenceError> {
+        let bytes = self
+            .bytes
+            .checked_add(added.bytes)
+            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+        let keys = self
+            .keys
+            .checked_add(added.keys)
+            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+        Ok(Self { bytes, keys })
+    }
+}
+
+/// The last measurement of unpublished restore staging, kept for as long as it is exact.
+///
+/// Measuring reads every staged entry, so it costs what the staging holds, and it runs under the
+/// installation barrier that every checkpoint writer of the node takes. Everything that writes or
+/// removes a key the measurement counts runs under that barrier too and forgets the measurement
+/// first; a checkpoint that stages completely then keeps the usage it was admitted to. An
+/// admission or a sweep that finds a measurement here therefore reads no staged entry, however
+/// much another restore left unpublished.
+#[derive(Default)]
+pub(super) struct StagedUsageMeasurement {
+    kept: ArcSwapOption<StagedUsage>,
+}
+
+impl StagedUsageMeasurement {
+    fn kept(&self) -> Option<StagedUsage> {
+        let kept = self.kept.load();
+        kept.as_deref().copied()
+    }
+
+    /// Keep `usage` as what the unpublished namespaces hold now: a fresh measurement, or the one
+    /// kept before a checkpoint was staged with that checkpoint's footprint added.
+    pub(super) fn keep(&self, usage: StagedUsage) {
+        self.kept.store(Some(StdArc::new(usage)));
+    }
+
+    /// Drop the measurement because counted keys are about to be removed, to change what they
+    /// count, or to be written. The next reader measures again unless the writer keeps the usage
+    /// its completed write leaves.
+    pub(super) fn forget(&self) {
+        self.kept.store(None);
+    }
+}
+
 impl RuntimeStateStore {
+    /// The unpublished key and value bytes, measured when no exact measurement is kept. The caller
+    /// holds the installation barrier, so no counted key changes between a measurement and the
+    /// moment it is kept.
+    fn staged_usage(
+        &self,
+        check: &mut impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<StagedUsage, RuntimePersistenceError> {
+        if let Some(kept) = self.restore_staging_usage.kept() {
+            return Ok(kept);
+        }
+        let measured = self.measure_staged_usage(check)?;
+        self.restore_staging_usage.keep(measured);
+        Ok(measured)
+    }
+
     /// Measure unpublished key and value sizes from one view, seeking past selected namespaces.
     #[cfg_attr(
         nervix_lint,
@@ -55,21 +124,14 @@ impl RuntimeStateStore {
             reason = "the admitted storage caller checks cancellation between cursor entries"
         )
     )]
-    pub(in crate::runtime) fn restore_staging_observation(
+    fn measure_staged_usage(
         &self,
         check: &mut impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
-    ) -> error_stack::Result<RestoreStagingObservation, RuntimePersistenceError> {
+    ) -> error_stack::Result<StagedUsage, RuntimePersistenceError> {
         let view = self.db.snapshot();
-        let mut observation = RestoreStagingObservation {
-            limit_bytes: self.restore_staging_max_bytes,
-            ..RestoreStagingObservation::default()
-        };
+        let mut usage = StagedUsage::default();
         for kind in MaintenanceKeyspace::ALL {
             let keyspace = kind.keyspace(self);
-            observation.disk_bytes = observation
-                .disk_bytes
-                .checked_add(keyspace.disk_space())
-                .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
             let mut cursor = Vec::new();
             while let Some((namespace, domain, next)) = next_namespace(&view, keyspace, &cursor)? {
                 check()?;
@@ -82,36 +144,54 @@ impl RuntimeStateStore {
                 }
                 for item in view.prefix(keyspace, namespace.prefix(&domain)) {
                     check()?;
-                    let key = item
-                        .key()
+                    // The cursor already holds the entry it stands on, so its value is not read
+                    // from the keyspace a second time for its length.
+                    let (key, value) = item
+                        .into_inner()
                         .change_context(RuntimePersistenceError::ReadValue)?;
                     physical_namespace(&key)?;
-                    let value_bytes = view
-                        .size_of(keyspace, &key)
-                        .change_context(RuntimePersistenceError::ReadValue)?;
-                    let Some(value_bytes) = value_bytes else {
-                        return Err(Report::new(RuntimePersistenceError::ReadValue));
-                    };
-                    let bytes = u64::try_from(key.len())
-                        .verified("database keys fit u64")
-                        .checked_add(u64::from(value_bytes))
+                    let key_bytes = u64::try_from(key.len()).verified("database keys fit u64");
+                    let value_bytes =
+                        u64::try_from(value.len()).verified("database values fit u64");
+                    let entry_bytes = key_bytes
+                        .checked_add(value_bytes)
                         .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
-                    observation.staged_bytes = observation
-                        .staged_bytes
-                        .checked_add(bytes)
-                        .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
-                    observation.staged_keys = observation
-                        .staged_keys
-                        .checked_add(1)
-                        .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+                    usage = usage.with(StagedUsage {
+                        bytes: entry_bytes,
+                        keys: 1,
+                    })?;
                 }
             }
         }
-        observation.disk_bytes = observation
-            .disk_bytes
-            .checked_add(self.restore_publications.disk_space())
-            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
-        Ok(observation)
+        Ok(usage)
+    }
+
+    /// What the unpublished restore namespaces hold and what the shared keyspaces occupy on disk.
+    /// The caller holds the installation barrier.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the admitted storage caller checks cancellation between cursor entries"
+        )
+    )]
+    pub(in crate::runtime) fn restore_staging_observation(
+        &self,
+        check: &mut impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<RestoreStagingObservation, RuntimePersistenceError> {
+        let usage = self.staged_usage(check)?;
+        let mut disk_bytes = self.restore_publications.disk_space();
+        for kind in MaintenanceKeyspace::ALL {
+            disk_bytes = disk_bytes
+                .checked_add(kind.keyspace(self).disk_space())
+                .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+        }
+        Ok(RestoreStagingObservation {
+            staged_bytes: usage.bytes,
+            staged_keys: usage.keys,
+            limit_bytes: self.restore_staging_max_bytes,
+            disk_bytes,
+            ..RestoreStagingObservation::default()
+        })
     }
 
     fn restore_key_domain(tail: &[u8]) -> error_stack::Result<DomainName, RuntimePersistenceError> {
@@ -169,6 +249,9 @@ impl RuntimeStateStore {
                         !retains(&domain, generation)
                     };
                     if reclaim {
+                        // These are keys the kept measurement counts, and a removal cut short
+                        // has still removed some of them.
+                        self.restore_staging_usage.forget();
                         let bytes = remove_bounded(
                             &self.db,
                             keyspace,
@@ -244,6 +327,9 @@ impl RuntimeStateStore {
         Ok(reclaimed)
     }
 
+    /// Admit one checkpoint's complete footprint against the staging allowance, and return the
+    /// usage staging it completely leaves: what the unpublished namespaces hold now and the keys
+    /// and bytes this checkpoint writes, which is what a measurement would count afterwards.
     pub(super) fn admit_restore_checkpoint(
         &self,
         placement_key: &[u8],
@@ -251,7 +337,7 @@ impl RuntimeStateStore {
         header_bytes: usize,
         receipt_bytes: usize,
         check: &mut impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
-    ) -> error_stack::Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<StagedUsage, RuntimePersistenceError> {
         let key_bytes = u64::try_from(placement_key.len()).verified("bounded keys fit u64");
         let chunk_key_bytes = key_bytes
             .checked_add(
@@ -285,18 +371,23 @@ impl RuntimeStateStore {
         let requested = requested
             .checked_add(encoded_metadata)
             .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
-        let used = self.restore_staging_observation(check)?.staged_bytes;
-        let total = used
-            .checked_add(requested)
+        let used = self.staged_usage(check)?;
+        // The chunks, and the header, index entry and receipt committed after them.
+        let keys = chunks
+            .checked_add(3)
             .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
-        if total > self.restore_staging_max_bytes {
+        let staged = used.with(StagedUsage {
+            bytes: requested,
+            keys,
+        })?;
+        if staged.bytes > self.restore_staging_max_bytes {
             return Err(Report::new(RuntimePersistenceError::RestoreStagingQuota {
                 limit: self.restore_staging_max_bytes,
-                used,
+                used: used.bytes,
                 requested,
             }));
         }
-        Ok(())
+        Ok(staged)
     }
 }
 
@@ -341,6 +432,14 @@ mod active_chunk_tests;
 )]
 #[path = "namespace_properties_tests.rs"]
 mod namespace_properties;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "staged_usage_properties_tests.rs"]
+mod staged_usage_properties;
 
 #[cfg(test)]
 #[cfg_attr(
@@ -682,12 +781,187 @@ pub(in crate::runtime::state_store) mod tests {
     #[cfg(feature = "deloxide")]
     pub(in crate::runtime::state_store) fn diagnostic_restore_reclamation() {
         quota_measures_all_checkpoint_keys_and_exact_retry_reuses_its_allowance();
+        sweeps_and_staging_beside_a_retained_generation_read_none_of_its_entries_again();
+        a_kept_measurement_stays_exact_through_retries_failures_publication_and_reclamation();
         partial_chunks_without_a_receipt_are_accounted_and_reclaimed_after_reopen();
         reclamation_preserves_publication_live_generations_and_snapshot_readers();
         interrupted_bounded_reclamation_resumes_from_remaining_keys_after_restart();
         cancelled_maintenance_and_unrepresentable_admission_preserve_the_store();
         maintenance_work_tracks_namespaces_in_a_published_store();
         super::active_chunk_tests::diagnostic_active_chunk_reclamation();
+    }
+
+    /// The usage the store answers admission and sweeps with is the one a fresh read of every
+    /// staged entry gives.
+    fn assert_kept_measurement_is_exact(store: &RuntimeStateStore) {
+        let answered = store
+            .staged_usage(&mut || Ok(()))
+            .assured("the store answers with its staging usage");
+        let measured = store
+            .measure_staged_usage(&mut || Ok(()))
+            .assured("the staged entries are measurable");
+        assert_eq!(answered, measured);
+    }
+
+    /// A restore that stopped after staging keeps its generation unpublished until its command
+    /// ends. Once a node has measured it, the sweeps that follow and another restore staging
+    /// beside it answer from that measurement: neither reads the retained entries again, under
+    /// the barrier every checkpoint writer of the node waits for.
+    #[test]
+    fn sweeps_and_staging_beside_a_retained_generation_read_none_of_its_entries_again() {
+        let directory = tempfile::tempdir().assured("the test directory opens");
+        let retained = placement("retained");
+        let retained_payload = vec![3; RESTORE_STATE_CHUNK_BYTES * 32];
+        let staged = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        stage(&staged, 19, &retained, &retained_payload);
+        drop(staged);
+        // A node that starts knows nothing yet of what its database holds unpublished.
+        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let retained_keys = 32 + 3;
+
+        let mut first_units = 0_u64;
+        let first = store
+            .reclaim_restore_staging(
+                |_, _| true,
+                || {
+                    first_units += 1;
+                    Ok(())
+                },
+            )
+            .assured("the first sweep measures the retained generation");
+        assert_eq!(first.staged_keys, retained_keys);
+        assert!(
+            first_units >= retained_keys,
+            "the first sweep after a start reads every retained entry once"
+        );
+
+        let mut idle_units = 0_u64;
+        let idle = store
+            .reclaim_restore_staging(
+                |_, _| true,
+                || {
+                    idle_units += 1;
+                    Ok(())
+                },
+            )
+            .assured("an idle sweep completes");
+        assert_eq!(idle.staged_bytes, first.staged_bytes);
+        assert_eq!(idle.staged_keys, retained_keys);
+        assert!(
+            idle_units < 16,
+            "an idle sweep visits namespaces, and read {idle_units} units of a retained generation"
+        );
+
+        let beside = placement("beside");
+        let payload = vec![5; RESTORE_STATE_CHUNK_BYTES * 2 + 1];
+        let mut staging_units = 0_u64;
+        store
+            .stage_restored_checkpoint(
+                &authority(20),
+                &beside,
+                CheckpointMetadata {
+                    lsm: 3,
+                    length: u64::try_from(payload.len()).verified("test payload fits u64"),
+                    digest: *blake3::hash(&payload).as_bytes(),
+                },
+                payload.as_slice(),
+                || {
+                    staging_units += 1;
+                    Ok(())
+                },
+            )
+            .assured("another restore stages beside the retained generation");
+        assert!(
+            staging_units < 16,
+            "staging three chunks read {staging_units} units of a retained generation"
+        );
+        assert_eq!(
+            observe(&store).staged_keys,
+            retained_keys + 6,
+            "three chunks, header, index and receipt joined the retained generation"
+        );
+        assert_kept_measurement_is_exact(&store);
+    }
+
+    /// The measurement a store keeps stays the one a fresh read gives through a retry that removes
+    /// its own earlier attempt, a stream that fails its digest and leaves chunks without a receipt,
+    /// the retry that replaces those chunks, a publication, and a sweep that reclaims what was
+    /// never published.
+    #[test]
+    fn a_kept_measurement_stays_exact_through_retries_failures_publication_and_reclamation() {
+        let directory = tempfile::tempdir().assured("the test directory opens");
+        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let orders = placement("orders");
+        let payload = vec![7; RESTORE_STATE_CHUNK_BYTES + 5];
+        stage(&store, 19, &orders, &payload);
+        assert_eq!(observe(&store).staged_keys, 5);
+        assert_kept_measurement_is_exact(&store);
+
+        let retried = &payload[..9];
+        stage(&store, 19, &orders, retried);
+        assert_eq!(
+            observe(&store).staged_keys,
+            4,
+            "a retry removes its earlier attempt before it stages one chunk"
+        );
+        assert_kept_measurement_is_exact(&store);
+
+        let invoices = placement("invoices");
+        let Err(error) = store.stage_restored_checkpoint(
+            &authority(19),
+            &invoices,
+            CheckpointMetadata {
+                lsm: 3,
+                length: u64::try_from(payload.len()).verified("test payload fits u64"),
+                digest: [9; 32],
+            },
+            payload.as_slice(),
+            || Ok(()),
+        ) else {
+            panic!("a stream that differs from its declared digest does not stage");
+        };
+        assert!(matches!(
+            error.current_context(),
+            RuntimePersistenceError::InvalidCheckpointChunks
+        ));
+        assert_eq!(
+            observe(&store).staged_keys,
+            6,
+            "the refused stream left its two chunks without a receipt"
+        );
+        assert_kept_measurement_is_exact(&store);
+
+        stage(&store, 19, &invoices, &payload);
+        assert_eq!(
+            observe(&store).staged_keys,
+            9,
+            "the retry replaced the two orphaned chunks with a complete checkpoint"
+        );
+        assert_kept_measurement_is_exact(&store);
+
+        store
+            .publish_restored_state(
+                &orders.domain,
+                &authority(19),
+                RestoreStateInventory {
+                    checkpoints: 1,
+                    payload_bytes: u64::try_from(retried.len()).verified("test payload fits u64"),
+                },
+                || Ok(()),
+            )
+            .assured("the complete generation publishes");
+        assert_eq!(
+            observe(&store).staged_keys,
+            5,
+            "a published generation and its receipt leave unpublished staging"
+        );
+        assert_kept_measurement_is_exact(&store);
+
+        let swept = store
+            .reclaim_restore_staging(|_, _| false, || Ok(()))
+            .assured("a sweep reclaims what no restore retains");
+        assert_eq!(swept.staged_keys, 0);
+        assert_kept_measurement_is_exact(&store);
     }
 
     #[test]

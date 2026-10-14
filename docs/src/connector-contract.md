@@ -15,7 +15,7 @@ outbound request, from Arrow preparation to response and recovery.
 
 | Layer | Responsibility |
 | --- | --- |
-| Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The registry names no connector crate. |
+| Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The vocabulary nests every source and sink Model by connector and entity, and each pair declares its capabilities once there. The registry names no connector crate. |
 | Decision and composition | Convert a validated Model into a typed source or sink start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define source and sink operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the source contract, the sink contract, or both. |
@@ -330,7 +330,11 @@ producer policy of window, ACK timeout, and retry backoff, and the endpoint cont
 attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
 The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
-partition, offset, and headers; Syslog carries the peer address. Transport headers are visited
+partition, offset, and headers; Syslog carries the peer address. The scopes, and the fields of
+each with their exact types, are declared once in the vocabulary, and each source entity names the
+scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
+programs may name, the host builds its metadata columns from the same fields, and a connector's
+metadata row names the scope it carries, so the three cannot disagree. Transport headers are visited
 from the borrowed message in arrival order. The host copies them only when the quiesce control
 decides on a payload, which may retain it, or a WebSocket session must retain them after the source
 message ends. Header support and each
@@ -868,7 +872,10 @@ sequenceDiagram
   turns the admitted bytes into the request body without validating them again; invalid UTF-8
   outranks an excluded character, and either is a record rejection. Attribute values pass through
   the same character classifier. The OTEL sink decodes trace and span identifiers with
-  `faster-hex` after checking their exact length.
+  `faster-hex` after checking their exact length and refuses all-zero identifiers. The registered
+  `otel-hex-ids` property compares all bytes and acceptance with an independent per-digit scalar
+  decoder for trace, span and parent-span keys, including lowercase, uppercase, mixed case,
+  arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
   prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
   host measures from staging, ends or its staged files reach the maximum commit size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
@@ -920,13 +927,50 @@ sequenceDiagram
   path and query. The source host cancels a pending resume when shutdown or quiesce changes its
   lifecycle state. DNS and connection failures remain infrastructure outcomes for the host to retry;
   a resolved address alone never completes a Syslog record or an input acknowledgement.
+- **WebSocket client source.** The WebSocket connector crate supplies the outbound
+  `WEBSOCKETS CONNECTION` source through `SourceConnector` and `BrokerSourceConnector`. It has
+  no emitter or listening endpoint. Its plan carries resolved client configuration, the node
+  resolver and an optional compiled signaling protocol. `open` prepares local transport and TLS
+  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  signaling handshake, and only then reports readiness. Accepted data from a successful
+  handshake is queued for polling before new socket frames. Text and binary frames become raw
+  payload bytes for the host to decode; protocol control frames remain transport concerns.
+  Suspension drops the connection while retaining queued payloads, and close also clears that
+  queue. Transport failure requires another resume of the retained source.
+  The host composer currently resolves the named signaling protocol and chooses buffered intake,
+  a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
+  the executor. Holding its polling loop would also stop answering the peer's pings. These
+  transport requirements belong in a connector-owned contract declaration; the composer
+  currently hard-codes them instead. The source ownership header names this boundary violation.
+  The source's position carries no external acknowledgement, and its acknowledge and reject operations are
+  no-ops; reconnection supplies no durable replay guarantee. The host owns graph intake, routing,
+  quiesce, admission and retry cadence. Server endpoint listeners use the server's request-scoped
+  source and share only the signaling engine with this outbound connector.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
-  client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
-  frames become payload; the host still owns intake and routing. Domain activation resolves the
-  endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
-  when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
-  The compiler never chooses a graph route or an endpoint listener. A number keeps its value
-  between a frame and the programs that read and write it: a protobuf `double` to its bits.
+  client sources and server endpoint sessions. Its ordered send and wait clauses, acceptance
+  policy, per-connection state and handshake timeout govern when frames become payload; the
+  caller supplies the accepted-data sink, and the host still owns intake and routing. Domain
+  activation resolves the endpoint's VHOST and signaling reference first. The runtime binds the
+  pinned protobuf resource, when present, and hands its send and wait message descriptors to the
+  compiler. The compiled artifact retains the wire format, compiled jaq programs and timeout;
+  each connection owns its handshake state. The compiler never chooses a graph route or an
+  endpoint listener. A number keeps its value between a frame and the programs that read and
+  write it: a protobuf `double` to its bits.
+  The compiler currently also receives the configuration Model's `SignalingWireFormat` and
+  `SignalingProtocolOnConnect`, and parses the latter's timeout text. This contradicts the
+  connector engine's typed-plan input boundary: the decision layer must convert those Model
+  fields and the duration into a typed signaling plan before compilation. The crate and
+  signaling module's ownership headers name this violation; sharing the engine with endpoint
+  sessions does not transfer Model conversion, resource resolution or routing into the connector.
+  The accepted-data callback is currently the crate's own `SignalingDataSink` interface. Its
+  host service belongs in the shared connector contract; the signaling module's header names
+  this separate host-interface ownership violation.
+  Registered conversion properties exercise complete messages with explicit scalar presence:
+  double and float bits, full-width integers, booleans, strings, ordered repeated fields and
+  absent defaults. The generated JSON omits empty repeated fields, which protobuf does not
+  distinguish from absent ones. A separate malformed-frame property refuses invalid field tags,
+  truncated fixed-width and length-delimited fields, oversized varints and incomplete packed
+  float elements through the production decoder.
 - **Server endpoint intake.** The endpoint source binds one prepared intake lifetime to all of its
   configured routes before reporting readiness. Domain definitions and bound lifetimes share one
   immutable publication. HTTP resolves it once per request; a WebSocket retains its route and

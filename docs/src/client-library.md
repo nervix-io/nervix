@@ -281,7 +281,11 @@ Domains are reported in the order of their first unread event. While a clock is 
 session before the clock is restored reports no second interruption. After a reconnect, the client
 attaches every followed clock again on the new session before any other request, and the clock
 that attachment reports follows the interruption as an `Observed` event; changes in between are not
-reported. A new session
+reported. When the new session answers that attach while the old session still holds the
+attachment, as after a redirect to the leader, the attachment moves without an interruption: a
+clock that stays paced in the same generation keeps its newest tick, so `domain_clock` is never
+older than a tick event already taken, and a `Ticked` event of the new session follows only for a
+newer tick. A new session
 that answers the attach with the domain not found ends the attachment with `Ended`, as the server
 would. A node that is still starting answers that attach only once it has installed the cluster's
 committed domains, so a restart never ends an attachment. When the new session refuses that attach
@@ -289,12 +293,16 @@ for any other reason, the event is `RestorationFailed` with the server's message
 before the client sends the attach again on the same session; the wait starts at one second on
 each new session and doubles up to thirty seconds. An attach the session leaves unanswered past
 `request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
-next event reopens a closed session when a followed clock waits for it; a failure to open one is
-returned while the clock keeps waiting, and the next call tries again. A detach, or an end, stops
-following the domain, and `domain_clock` returns `None` for it afterwards. A detach while a clock
-waits to be restored reaches the current session: a closed session is opened again first, which
-attaches the clock before the detach releases it, and an open session that has not restored the
-clock answers `NotAttached`, after which the client no longer follows it either.
+next event reopens a closed session when a followed clock waits for it, including a call already
+waiting when the unanswered attach ends its session; a failure to open one is returned while the
+clock keeps waiting, and the next call tries again. A detach, or an end, stops following the
+domain, and `domain_clock` returns `None` for it afterwards. A detach while a clock waits to be
+restored reaches the current session: a closed session is opened again first, which attaches the
+clock before the detach releases it, and an open session that has not restored the clock answers
+`NotAttached`, after which the client no longer follows it either. The client never attaches the
+clock again behind the detach: an attach it already decided to send to restore the clock is sent
+first, and the detach releases what it attached, while a restoration that would attach the clock
+during the detach waits for it to end and attaches the clock only if the client still follows it.
 
 ### Through The Shared C Binding
 
@@ -332,7 +340,8 @@ It never blocks. Right after `ATTACH DOMAIN CLOCK;` completes it is the clock th
 carried, so a host that attaches to a running paced clock reads its `START` generation and
 committed mapping before it uses the first tick. Every later observation and accepted tick replaces
 it in the order the session received them, so a read is never older than an event the host has
-already taken. Once the session holding the attachment ends, which `NX_CLOCK_EVENT_INTERRUPTED`
+already taken, including after a redirect moves the attachment to another session without an
+interruption. Once the session holding the attachment ends, which `NX_CLOCK_EVENT_INTERRUPTED`
 reports, it keeps the clock that session reported last, without a tick, until the restored
 attachment reports the clock again. A read never
 changes once taken, stays valid after the session is freed, and is counted with

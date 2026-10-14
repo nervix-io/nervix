@@ -347,6 +347,11 @@ test-admission-kernels *args:
 bench-window-admission *args:
     cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
 
+# Measure admitting a window's retained rows into its distinct, quantile and top-k pane sketches,
+# from a new pane for every row to a thousand rows per pane.
+bench-window-sketches *args: build-web-console
+    cargo bench --package nervix-server --bench window_sketches --features benchmarks -- {{ args }}
+
 # Measure the checked integer SIMD kernels beside the lane loop they replaced, over one 1,024-lane
 # run each. Extra arguments are forwarded to Criterion.
 bench-checked-lanes *args:
@@ -366,6 +371,11 @@ bench-byte-classes-x86-64-v3 *args:
 # Measure RFC 6587 stream framing over a mebibyte of frames read in a connection's 8 KiB reads.
 bench-syslog-framing *args:
     cargo bench --package nervix-connector-syslog --bench stream_framing --features benchmarks -- {{ args }}
+
+# Measure folding one acknowledgement batch's Kafka positions to each partition's latest offset and
+# a rejection's to each partition's earliest message, over repeated and distinct partitions.
+bench-kafka-offsets *args:
+    cargo bench --package nervix-connector-kafka --bench partition_offsets --features benchmarks -- {{ args }}
 
 bench-constant-division-x86-64-v3 *args:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-simd-kernels --bench constant_division -- {{ args }}
@@ -405,6 +415,11 @@ test-harness-liveness *args: tests-deps
 # Measure native consensus transport regressions through the configured compiler cache.
 coverage-consensus output *args:
     cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure the Rust client library's unit tests, for a patch confined to it, through the configured
+# compiler cache.
+coverage-client-core output *args:
+    cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
@@ -1052,8 +1067,8 @@ test-coverage: tests-deps
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
-        --package nervix-server --lcov --output-path lcov.info
+    # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
+    pwd -P > coverage-source-root.txt
 
 test-scenarios-coverage: tests-deps
     #!/usr/bin/env bash
@@ -1080,8 +1095,7 @@ test-scenarios-coverage: tests-deps
     uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
         -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
-        --package nervix-server --lcov --output-path lcov.info
+    pwd -P > coverage-source-root.txt
 
 # Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
 # Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
@@ -1089,10 +1103,34 @@ test-scenarios-coverage: tests-deps
 coverage-clean-workspace:
     cargo llvm-cov clean --workspace
 
-# Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
-# workspace package, so crate lines the server's tests executed are measured as CI measures them.
+# Rewrite lcov-workspace.info and its checkout path from the profiles the last coverage recipe
+# collected, over the sources of every workspace package, so crate lines the server's tests executed
+# are measured as CI measures them. `coverage-merge` then maps it onto the repository.
 coverage-report-workspace *args:
-    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info {{ args }}
+    pwd -P > coverage-source-root.txt
+
+# Merge ordinary coverage into the one repository-relative lcov-workspace.info that every coverage
+# consumer reads, and record its inputs, counts and dropped records in
+# target/coverage-merge/record.json. An input is a producer's artifact directory or one report, each
+# with the coverage-source-root.txt its producer wrote; CI names the three ordinary artifacts, and
+# without inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
+# writing no report, when the report would be incomplete.
+coverage-merge *inputs:
+    python3 -m scripts.coverage_merge --output lcov-workspace.info --record {{ quote(cargo_target_dir + "/coverage-merge/record.json") }} {{ inputs }}
+
+# Exercise the merge's source mapping, its integrity failures and its CI contract.
+test-coverage-merge:
+    python3 -m unittest scripts.tests.test_coverage_merge
+
+# Retain the merge's own measured line coverage beside the other Python tooling reports.
+coverage-merge-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/coverage-merge"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" --branch --source=scripts.coverage_merge,scripts.tests.test_coverage_merge -m unittest scripts.tests.test_coverage_merge
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
 
 # Check the same merged workspace coverage and complexity limit locally as CI does.
 check-coverage report="lcov-workspace.info":
@@ -1666,26 +1704,13 @@ coverage-cli-process output="target/cli-process.lcov":
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
         --instr-profile="$coverage_dir/merged.profdata" --format=lcov > {{ quote(output) }}
 
-# Measure the Turmoil runner's changed lines without running the full scenario suite.
+# Collect the canonical Turmoil suite's product-source coverage with retained attempt evidence.
 coverage-turmoil output:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
-    cargo llvm-cov --no-report \
-        --package nervix-primitives --features 'turmoil native' --lib -- \
-        simulated_host turmoil_mode --test-threads=1
-    cargo llvm-cov --no-report \
-        --package nervix-execution --features turmoil --lib
-    cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --lib -- \
-        wire::simulation_checks authentication::simulation_tests --test-threads=1
-    cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
-    cargo llvm-cov report --no-default-ignore-filename-regex \
-        --lcov --output-path {{ quote(output) }}
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run test-turmoil --output {{ quote(output) }}
 
 # Run the eligible native extras in their declared modes, with the canonical Shuttle and Loom
-# runners and each primitive conformance mode. `test-primitives` selects all native conformance.
+# runners, the canonical Turmoil suite, and each primitive conformance mode.
+# `test-primitives` selects all native conformance.
 # Prerequisites build outside instrumentation. Compile/browser checks and weakening qualification
 # run independently. Each producer
 # writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
@@ -1697,7 +1722,11 @@ coverage-native-extras *producers:
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
 test-native-coverage:
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage scripts.tests.test_model_coverage
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_turmoil_coverage
+
+# Focused CI contract and patch-publication regressions for the Turmoil coverage producer.
+test-turmoil-coverage-runner:
+    python3 -m unittest scripts.tests.test_turmoil_coverage scripts.tests.test_patch_coverage
 
 # Exercise the Deloxide lane runner: its inventory, discovery, supervision of real processes,
 # accounting, record, replay, qualification classes, applicability check and CI contract.
@@ -1705,14 +1734,14 @@ test-deloxide-lane-runner:
     python3 -m unittest --quiet scripts.tests.test_deloxide_lane
 
 # Line coverage of collection and canonical runner changes, with actual command/artifact fixtures,
-# including the Deloxide lane's supervision of real processes.
+# including Turmoil's CI contract and the Deloxide lane's supervision of real processes.
 coverage-model-runner:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/model-coverage
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/model-coverage/python.coverage"
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_turmoil_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/model-coverage/python.lcov"
     "${coverage[@]}" report
 
@@ -1743,10 +1772,12 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench task_handles --features benchmarks -- target/task-handles-smoke.json
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench window_sketches --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench constant_division -- --test
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-connector-kafka --bench partition_offsets --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
     just bench-remote-owners-bodies
@@ -2174,7 +2205,7 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
 test-ratchet-units: typed-ratchet-source-build
-    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries
+    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
 
 # Structural Rust properties use a stable source parser, without the compiler driver.
 typed-ratchet-source-build:
@@ -2195,11 +2226,19 @@ typed-ratchet *args: typed-ratchet-build
 typed-ratchet-turmoil *args:
     RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}" python3 -m scripts.typed_ratchet {{ args }}
 
+# Report review candidates for code shaped around inaccurate lints: repeated keyed lookups, key
+# allocations, borrowed copies, duplicated branches, forwarding wrappers, discarded errors,
+# disguised clamps and relocated acquisitions, each attributed to the commits and lint history
+# that introduced it. It reads the complete compiler evidence `just ratchet` uses and writes
+# audit.json and audit.md under target/lint-audit; `--inventory` audits despite open diagnostics.
+lint-audit *args: typed-ratchet-build
+    python3 -m scripts.lint_audit {{ args }}
+
 test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
     python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
-test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks": typed-ratchet-build
+test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks scripts.tests.compiler_audit_checks": typed-ratchet-build
     python3 -m unittest {{ tests }}
 
 # Error propagation uses the actual node startup and DNS hooks, plus both simulation drivers.
@@ -2285,7 +2324,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-com
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2669,6 +2708,63 @@ test-chaos-rate-probe:
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
+
+# Pin baseline preparation accounting and the production output-boundary observations.
+test-chaos-output-boundary selection="all":
+    exec bash scripts/chaos/tests/output-boundary-self-test.sh {{ quote(selection) }}
+
+# Preserve the package probe's native refusal and exact retained container lifetime.
+test-chaos-image-package:
+    exec bash scripts/chaos/tests/image-package-self-test.sh
+
+# Bound startup artifact publication by the controller's actual remaining budget.
+test-chaos-startup-status:
+    exec bash scripts/chaos/tests/startup-status-self-test.sh
+
+# Measure successful publication and decisive native/deadline/reporting refusals.
+coverage-chaos-startup-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-startup-status-coverage") }} scripts/chaos/tests/startup-status-self-test.sh
+
+# Requires kcov; retains coverage of the output-boundary owner and its focused controls.
+coverage-chaos-output-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    # kcov's Bash descriptor exchange cannot handle an inherited limit near INT_MAX.
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-output-boundary-coverage") }} scripts/chaos/tests/output-boundary-self-test.sh
+
+# Measure package-command refusals, retained state and successful probes without Docker.
+coverage-chaos-image-package:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-image-package-coverage") }} scripts/chaos/tests/image-package-self-test.sh
+
+# Measure the full baseline controller against a supplied immutable image, including its self-check.
+coverage-chaos-baseline image nodes="3" timeout="840" run_id="baseline-coverage":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-baseline-coverage") }} scripts/chaos/run-baseline.sh --scenario baseline --image {{ quote(image) }} --nodes {{ quote(nodes) }} --timeout {{ quote(timeout) }} --artifacts {{ quote(cargo_target_dir / "chaos-baseline-coverage-runs") }} --run-id {{ quote(run_id) }}
 
 # Retain shell coverage of packet sampling, evidence parsing and effect controls.
 coverage-chaos-degraded-evidence:

@@ -906,8 +906,9 @@ mod tests {
 
     use nervix_models::{
         AlterIngestor, AlterIngestorOperation, AlterPlacement, AlterPlacementOperation,
-        ClusterNodeName, DropModel, IngestSource, MaterializedRelayState,
-        MaterializedStateDependency, MaterializedStatePolicy,
+        ClusterNodeName, DropModel, EndpointEndpointSource, EndpointSource, IngestSource,
+        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+        SyslogListenerSource, SyslogSource,
     };
     use nonzero_ext::nonzero;
 
@@ -1211,13 +1212,14 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Endpoint {
-            endpoint: named("ingest_http"),
-            mode: nervix_models::EndpointIngestMode::NoAckSequential,
-            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                max_size: "1MiB".to_string(),
-            },
-        };
+        transport.source =
+            IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+                endpoint: named("ingest_http"),
+                mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
+            }));
         endpoint_models.extend([
             vhost("public", &["events.example.com"]),
             endpoint(
@@ -1257,10 +1259,10 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Syslog {
+        transport.source = IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
             client: named("syslog_listener"),
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        };
+        }));
         syslog_models.extend([
             syslog_client("syslog_listener"),
             placement(
@@ -1410,13 +1412,15 @@ mod tests {
                 &[RegistryMutation::AlterIngestor(AlterIngestor {
                     ingestor: named("ing"),
                     operations: vec![AlterIngestorOperation::SetSource {
-                        source: IngestSource::Endpoint {
-                            endpoint: named("ingest_http"),
-                            mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
+                        source: IngestSource::Endpoint(EndpointSource::Endpoint(
+                            EndpointEndpointSource {
+                                endpoint: named("ingest_http"),
+                                mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                    max_size: "1MiB".to_string(),
+                                },
                             },
-                        },
+                        )),
                     }],
                 })],
             )

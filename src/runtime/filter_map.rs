@@ -1482,8 +1482,8 @@ mod tests {
     use ahash::HashMap;
     use nervix_models::{
         AckMode, CreateEmitter, CreateSchema, EmitSink, EmitterPublishingMode, ErrorPolicies,
-        FieldPath, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
-        ProcessorInputs, RetryPolicy, Timestamp,
+        FieldPath, KafkaSink, KafkaTopicSink, MessageErrorCode, MessageErrorOperation, ModelName,
+        ParseAsType, ProcessorInputs, RetryPolicy, Timestamp, ZeroMqPushSink, ZeroMqSink,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -1607,7 +1607,7 @@ mod tests {
             }
         );
 
-        let empty_ingest_metadata = ingest_metadata_for_test(IngestMetadataKind::Headers, &[]);
+        let empty_ingest_metadata = ingest_metadata_for_test(SourceMetadataScope::Headers, &[]);
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
             &program,
@@ -2284,10 +2284,10 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("notification_codec"),
             },
-            sink: Box::new(EmitSink::Kafka {
+            sink: Box::new(EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
@@ -2334,9 +2334,9 @@ mod tests {
         .expect("emitter filter-map must compile")
         .expect("program must exist");
         let mut unsupported_emitter = emitter.clone();
-        *unsupported_emitter.sink = EmitSink::ZeroMq {
+        *unsupported_emitter.sink = EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
             client: named("zeromq_main"),
-        };
+        }));
         let error = EmitterExecutionPlan::route(
             &unsupported_emitter,
             input_schema.arrow_schema().as_ref(),
@@ -2607,7 +2607,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            IngestMetadataKind::Headers,
+            SourceMetadataScope::Headers,
             true,
             &construction(
                 "INHERIT tenant SET u8_next = input.u8 + (1 AS U8), i8_abs = abs(input.i8), \

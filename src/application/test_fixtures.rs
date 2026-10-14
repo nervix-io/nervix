@@ -26,9 +26,10 @@ use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
     DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource,
-    KafkaOffsetMode, Model, ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl,
-    PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
-    TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
+    KafkaOffsetMode, KafkaSource, KafkaTopicSource, Model, ModelKind, ModelName, NodeEndpoint,
+    NodeRef, NodeServiceUrl, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs,
+    ScheduledNode, SchemaFingerprint, SyslogCollectorSink, SyslogSink, TransactionLifecycle,
+    TransactionPosition, WasmProcessorLimits,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -363,7 +364,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             output_routes: ProcessorOutputs::new(Vec::new()),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka {
+                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
@@ -376,7 +377,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
                         },
                     },
                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                },
+                })),
                 codec: named("events_codec"),
             }),
             timestamp_source: None,
@@ -387,9 +388,11 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,
-            sink: Box::new(EmitSink::Syslog {
-                client: named("syslog_forwarder"),
-            }),
+            sink: Box::new(EmitSink::Syslog(SyslogSink::Collector(
+                SyslogCollectorSink {
+                    client: named("syslog_forwarder"),
+                },
+            ))),
             batch: None,
             flush_policy: nervix_models::FlushPolicy::Immediate,
             error_policies: nervix_models::ErrorPolicies::handled_by_log(),

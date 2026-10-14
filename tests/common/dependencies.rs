@@ -11,6 +11,8 @@ pub(crate) use nervix_test_environment::{
     NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, PULSAR_ADMIN_ADDR,
     PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR,
     RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    collector_exports::CollectorSignal,
+    collector_output::{CollectorOutput, CollectorWait},
 };
 use nervix_test_environment::{
     ContainerMode, DependencyEnvironment, TeardownFailures, configure_process_lifecycle,
@@ -22,6 +24,8 @@ static SUITE_DEPENDENCIES: OnceLock<Mutex<DependencyEnvironment>> = OnceLock::ne
 pub(crate) struct TestDependencies {
     endpoints: DependencyEndpoints,
     tls_dir: Option<PathBuf>,
+    /// The suite's view of the OpenTelemetry Collector's output, once the Collector started.
+    otel_collector_output: Option<CollectorOutput>,
 }
 
 impl fmt::Debug for TestDependencies {
@@ -30,6 +34,10 @@ impl fmt::Debug for TestDependencies {
             .debug_struct("TestDependencies")
             .field("endpoints", &self.endpoints)
             .field("tls_materials_generated", &self.tls_dir.is_some())
+            .field(
+                "otel_collector_followed",
+                &self.otel_collector_output.is_some(),
+            )
             .finish()
     }
 }
@@ -203,24 +211,14 @@ impl TestDependencies {
         Ok(body.contains(needle))
     }
 
-    pub(crate) async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
-        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
+    /// The OpenTelemetry Collector's followed output, once this scenario started the Collector.
+    pub(crate) fn otel_collector_output(&self) -> io::Result<&CollectorOutput> {
+        self.otel_collector_output.as_ref().ok_or_else(|| {
             io::Error::other(
                 "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
                  running'",
             )
-        })?;
-        suite.lock().await.otel_collector_contains(needle).await
-    }
-
-    pub(crate) async fn otel_collector_logs(&self) -> io::Result<String> {
-        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
-            io::Error::other(
-                "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
-                 running'",
-            )
-        })?;
-        suite.lock().await.otel_collector_logs().await
+        })
     }
 
     pub(crate) async fn shutdown_suite() -> Result<(), TeardownFailures> {
@@ -248,6 +246,7 @@ impl TestDependencies {
     fn refresh_from(&mut self, environment: &DependencyEnvironment) {
         self.endpoints = environment.endpoints().clone();
         self.tls_dir = environment.tls_dir().ok().map(Path::to_path_buf);
+        self.otel_collector_output = environment.otel_collector_output();
     }
 }
 

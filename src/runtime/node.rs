@@ -145,6 +145,11 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
     /// after domain drain cancels each announcer, including a pending dispatch or retry wait.
     pub(in crate::runtime) state_replication_tasks: state_replication::CheckpointAnnouncementTasks,
+    /// Owns the snapshot task of every deduplicator and window branch, which writes what its
+    /// branch published last after that branch's task is gone. Closing it after domain drain has
+    /// each task write that state, and waiting for it keeps this runtime's storage from being
+    /// released under one of them.
+    pub(in crate::runtime) branch_snapshot_tasks: state_replication::BranchSnapshotTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:

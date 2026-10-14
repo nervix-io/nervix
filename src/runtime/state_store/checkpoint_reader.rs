@@ -17,10 +17,12 @@
 
 use std::io::{self, Cursor, Read};
 
+#[cfg(any(test, feature = "testing"))]
+use super::generation::read_checkpoint;
 use super::{
     generation::{
         ArchivedStoredCheckpoint, CheckpointMetadata, RESTORE_STATE_CHUNK_BYTES, StoredCheckpoint,
-        chunk_prefix, read_checkpoint,
+        chunk_prefix,
     },
     *,
 };
@@ -259,6 +261,7 @@ impl ListedCheckpoint {
     }
 
     /// The whole checkpoint and its revision.
+    #[cfg(any(test, feature = "testing"))]
     pub(in crate::runtime) fn read_entry(
         &self,
     ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {

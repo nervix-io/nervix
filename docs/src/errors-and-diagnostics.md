@@ -1020,6 +1020,10 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
+  Window statistics reject non-finite arguments or results at their respective boundaries.
+  Overflow of a finite-input intermediate sum is handled by the moment kernel's normalized mean,
+  so it does not itself classify the window as failed; constant overflow-scale runs keep zero
+  centered moments. [SIMD Kernels](./simd-kernels.md) owns that numerical path and its reference bounds.
 - `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
   work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
   that cannot be read, a branch that cannot be instantiated, a branch task that is gone or whose
@@ -1563,6 +1567,13 @@ retries within one 30-second opening deadline. The typed capacity classification
 retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
 admitted or partially consumed response is never reopened by this admission retry.
 
+Stored branch capture keeps storage and admission failures beneath `BackupStateCaptureError`,
+with `Keyspace` or `Window` naming the entity at native conversion. Mapping admission is decided
+before a file is mapped and before a group allocates its owned values. Keyspace execution refusal
+uses `DeduplicatorArchiveError::Admission` with the executor report beneath it; it does not
+classify an unexamined checkpoint as undecodable. A cancelled or refused reader releases its view,
+staged files and reservations, and the capture owner discards the incomplete section inventory.
+
 ### Restore
 
 A restore's failures are owned where they are decided, in the order the restore meets them. The
@@ -1906,6 +1917,33 @@ lost or too few replies remained; it does not assert that the fault was absent o
 recovery failed. Burst samples use 400 packets inside the existing observation window, and the
 effect verifier preserves the original received and lost fractions. Failed observations remain
 retained alongside subsequent qualified samples.
+
+Kafka end-offset observations retain their exact command, raw streams, command outcome, parsed
+offset, start time, elapsed time and effective bound before the controller relies on them. Output
+stability requires consecutive successful equal observations above the accepted-input minimum.
+A failed query or a value below that minimum resets the sequence, and an individual query cannot
+outlive the remaining 30-second observation window or the whole-run deadline. The final record
+distinguishes an exhausted whole-run budget (`controller`) from failed observations, insufficient
+output or a moving boundary (`observation`). None of those observations alone proves a missing
+record; the exact ledger owns that verdict. Baseline suite budgets separately account for the full
+600-second verifier preparation allowance and the topology's execution allowance, without
+extending a product deadline.
+Kafka administration borrows no stdin or interactive terminal from the controller. A failed final
+query retains its command failure classification even after earlier successful reads, and a
+refusal to create or finish an evidence record fails the controller instead of accepting an
+unrecorded observation.
+End-offset queries execute in the existing broker, with no ephemeral container lifetime inside
+each observation window. The packaged-binary preflight retains its labeled helper until final
+run cleanup and records the command and container inspection as separate outcomes. An expired
+Docker client command remains a failed observation even if inspection sees a successfully exited
+helper; a missing or invalid inspection is also a failure. The controller does not reinterpret
+such refusals as missing binaries. Its live Docker event recording begins before this probe.
+Publishing a validated startup status is a controller operation. Its byte copy and atomic rename
+share a bounded command, clipped to the remaining run time, and retain their native outcome and
+monotonic elapsed seconds under `diagnostics/startup-status/`. A refused or expired publication
+keeps the attempted public status and fails without claiming a product readiness defect. A final
+transcript is published only after its copy succeeds; failure to record the operation also refuses
+publication. Subsequent container enumeration preserves failure under its own bounded command.
 
 The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
 failed measurement. Before any warm-up input, its empty-topic preparation retries only the

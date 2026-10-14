@@ -24,13 +24,19 @@ use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckWindow, ClientConfigEntry, ClientEndpointContract, ClientIngestSource, ClientName,
-    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, ConsumerGroupName,
-    CreateIngestor, CreateSchema, DomainName, EndpointName, FlushPolicy, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput,
-    IngestorName, KafkaIngestMode, KafkaOffsetMode, MessageErrorOperation, Model, ModelName,
-    MqttIngestMode, PulsarIngestMode, RabbitMqIngestMode, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, parse_duration_text,
+    AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerPolicy,
+    ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, ConsumerGroupName,
+    CreateIngestor, CreateSchema, DomainName, EndpointEndpointSource, EndpointName, EndpointSource,
+    FlushPolicy, HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
+    KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model,
+    ModelName, MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
+    PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource,
+    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
+    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
+    WebsocketsConnectionSource, WebsocketsSource, ZeroMqPullSource, ZeroMqSource,
+    parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -416,7 +422,7 @@ impl IngestorInputPlan {
 impl ClientIngestorStartPlan {
     fn decide(
         ingestor: &CreateIngestor,
-        client: &ClientIngestSource,
+        client: &ClientProducerSource,
         source_model: &Model,
         activation: &DomainActivationPlan,
     ) -> Result<Self, Report<EntrypointPlanError>> {
@@ -544,11 +550,11 @@ impl SourceStartPlan {
     ) -> Result<Self, Report<EntrypointPlanError>> {
         match (source, source_model) {
             (
-                IngestSource::Http {
+                IngestSource::Http(HttpSource::Request(HttpRequestSource {
                     client: expected,
                     every,
                     ..
-                },
+                })),
                 Model::ClientHttp(resolved),
             ) => Ok(Self::Http(HttpIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -561,14 +567,14 @@ impl SourceStartPlan {
                 every: *every,
             })),
             (
-                IngestSource::Kafka {
+                IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                     client: expected,
                     topic,
                     offset_mode,
                     instances,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientKafka(resolved),
             ) => {
                 let offsets = match offset_mode {
@@ -596,14 +602,14 @@ impl SourceStartPlan {
                 }))
             }
             (
-                IngestSource::Pulsar {
+                IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
                     client: expected,
                     topic,
                     subscription,
                     instances,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientPulsar(resolved),
             ) => Ok(Self::Pulsar(PulsarIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -619,13 +625,13 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Mqtt {
+                IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                     client: expected,
                     topic,
                     instances,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientMqtt(resolved),
             ) => Ok(Self::Mqtt(MqttIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -640,14 +646,14 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Nats {
+                IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
                     client: expected,
                     subject,
                     queue_group,
                     instances,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientNats(resolved),
             ) => Ok(Self::Nats(NatsIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -663,13 +669,13 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::RabbitMq {
+                IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
                     client: expected,
                     queue,
                     instances,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientRabbitMq(resolved),
             ) => Ok(Self::RabbitMq(RabbitMqIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -684,12 +690,12 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::RedisPubSub {
+                IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                     client: expected,
                     channel,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientRedis(resolved),
             ) => Ok(Self::RedisPubSub(RedisPubSubIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -703,12 +709,12 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Prometheus {
+                IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                     client: expected,
                     query,
                     every,
                     ..
-                },
+                })),
                 Model::ClientPrometheus(resolved),
             ) => Ok(Self::Prometheus(PrometheusIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -722,11 +728,11 @@ impl SourceStartPlan {
                 every: *every,
             })),
             (
-                IngestSource::ZeroMq {
+                IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                     client: expected,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientZeroMq(resolved),
             ) => Ok(Self::ZeroMq(ZeroMqIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -739,13 +745,13 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Sqs {
+                IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
                     client: expected,
                     queue,
                     instances,
                     mode,
                     ..
-                },
+                })),
                 Model::ClientSqs(resolved),
             ) => Ok(Self::Sqs(SqsIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -760,11 +766,11 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Endpoint {
+                IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                     endpoint: expected,
                     mode,
                     ..
-                },
+                })),
                 Model::Endpoint(resolved),
             ) => {
                 if expected != &resolved.name {
@@ -780,11 +786,13 @@ impl SourceStartPlan {
                 }))
             }
             (
-                IngestSource::Websockets {
-                    client: expected,
-                    mode,
-                    ..
-                },
+                IngestSource::Websockets(WebsocketsSource::Connection(
+                    WebsocketsConnectionSource {
+                        client: expected,
+                        mode,
+                        ..
+                    },
+                )),
                 Model::ClientWebsockets(resolved),
             ) => Ok(Self::Websockets(WebsocketsIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -798,9 +806,10 @@ impl SourceStartPlan {
                 signaling_protocol: resolved.signaling_protocol.clone(),
             })),
             (
-                IngestSource::Syslog {
-                    client: expected, ..
-                },
+                IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+                    client: expected,
+                    ..
+                })),
                 Model::ClientSyslog(resolved),
             ) => Ok(Self::Syslog(SyslogIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
@@ -925,11 +934,11 @@ mod tests {
 
     fn http_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Http {
+            source: IngestSource::Http(HttpSource::Request(HttpRequestSource {
                 client: named("upstream"),
                 every: cadence(),
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientHttp(CreateClientHttp {
                 name: named("upstream"),
                 mount: None,
@@ -945,14 +954,14 @@ mod tests {
 
     fn kafka_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Kafka {
+            source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                 client: named("upstream"),
                 topic: named("events"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(named("nervix")),
                 instances: nonzero!(1u64),
                 mode: KafkaIngestMode::NoAckParallel,
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientKafka(CreateClientKafka {
                 name: named("upstream"),
                 mount: None,
@@ -971,14 +980,14 @@ mod tests {
 
     fn pulsar_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Pulsar {
+            source: IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
                 client: named("upstream"),
                 topic: named("events"),
                 subscription: named("nervix"),
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::NoAckParallel,
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientPulsar(CreateClientPulsar {
                 name: named("upstream"),
                 mount: None,
@@ -1004,13 +1013,13 @@ mod tests {
 
     fn mqtt_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Mqtt {
+            source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                 client: named("upstream"),
                 topic: "events/#".to_string(),
                 instances: nonzero!(1u64),
                 mode: mqtt_mode(),
                 quiesce: IngestQuiesceMode::Drop,
-            },
+            })),
             source_model: Model::ClientMqtt(CreateClientMqtt {
                 name: named("upstream"),
                 mount: None,
@@ -1028,14 +1037,14 @@ mod tests {
 
     fn nats_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Nats {
+            source: IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
                 client: named("upstream"),
                 subject: named("events"),
                 queue_group: named("nervix"),
                 instances: nonzero!(1u64),
                 mode: nervix_models::NatsIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
-            },
+            })),
             source_model: Model::ClientNats(CreateClientNats {
                 name: named("upstream"),
                 mount: None,
@@ -1061,13 +1070,13 @@ mod tests {
 
     fn rabbitmq_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::RabbitMq {
+            source: IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
                 client: named("upstream"),
                 queue: named("events"),
                 instances: nonzero!(1u64),
                 mode: rabbitmq_mode(),
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientRabbitMq(CreateClientRabbitMq {
                 name: named("upstream"),
                 mount: None,
@@ -1085,12 +1094,12 @@ mod tests {
 
     fn redis_pubsub_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::RedisPubSub {
+            source: IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                 client: named("upstream"),
                 channel: named("events"),
                 mode: nervix_models::RedisPubSubIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Drop,
-            },
+            })),
             source_model: Model::ClientRedis(CreateClientRedis {
                 name: named("upstream"),
                 pool: pool_bounds(),
@@ -1108,12 +1117,12 @@ mod tests {
 
     fn prometheus_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Prometheus {
+            source: IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                 client: named("upstream"),
                 query: "up".to_string(),
                 every: cadence(),
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientPrometheus(CreateClientPrometheus {
                 name: named("upstream"),
                 mount: None,
@@ -1130,11 +1139,11 @@ mod tests {
 
     fn zeromq_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::ZeroMq {
+            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                 client: named("upstream"),
                 mode: nervix_models::ZeroMqIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientZeroMq(CreateClientZeroMq {
                 name: named("upstream"),
                 mount: None,
@@ -1157,13 +1166,13 @@ mod tests {
 
     fn sqs_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Sqs {
+            source: IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
                 client: named("upstream"),
                 queue: named("events"),
                 instances: nonzero!(1u64),
                 mode: sqs_mode(),
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientSqs(CreateClientSqs {
                 name: named("upstream"),
                 mount: None,
@@ -1181,13 +1190,13 @@ mod tests {
 
     fn endpoint_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Endpoint {
+            source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
                 endpoint: named("upstream"),
                 mode: nervix_models::EndpointIngestMode::NoAckSequential,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
                 },
-            },
+            })),
             source_model: Model::Endpoint(CreateEndpoint {
                 name: named("upstream"),
                 on_vhost: named("public"),
@@ -1205,11 +1214,13 @@ mod tests {
 
     fn websockets_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Websockets {
-                client: named("upstream"),
-                mode: nervix_models::WebsocketsIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::Drop,
-            },
+            source: IngestSource::Websockets(WebsocketsSource::Connection(
+                WebsocketsConnectionSource {
+                    client: named("upstream"),
+                    mode: nervix_models::WebsocketsIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::Drop,
+                },
+            )),
             source_model: Model::ClientWebsockets(CreateClientWebsockets {
                 name: named("upstream"),
                 mount: None,
@@ -1227,10 +1238,10 @@ mod tests {
 
     fn syslog_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Syslog {
+            source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
                 client: named("upstream"),
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             source_model: Model::ClientSyslog(CreateClientSyslog {
                 name: named("upstream"),
                 mount: None,
@@ -1273,10 +1284,7 @@ mod tests {
         assert_eq!(transport.codec, named("json"));
         assert_eq!(plan.ingestor.name, named("source"));
         assert_eq!(plan.ingestor.routes[0].relay, named("events"));
-        assert_eq!(
-            plan.ingestor.declared_input.source_kind(),
-            declared.transport_kind()
-        );
+        assert_eq!(plan.ingestor.declared_input.source_kind(), declared.kind());
         assert_eq!(plan.ingestor.reads_headers(), reads_headers);
         assert_eq!(
             plan.ingestor.declared_input.quiesce_mode(),
@@ -1291,14 +1299,14 @@ mod tests {
 
     #[test]
     fn plans_kafka_domain_offsets_for_the_scheduled_primary() {
-        let source = IngestSource::Kafka {
+        let source = IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
             client: named("upstream"),
             topic: named("events"),
             offset_mode: KafkaOffsetMode::Domain,
             instances: nonzero!(2u64),
             mode: KafkaIngestMode::NoAckParallel,
             quiesce: IngestQuiesceMode::Suspend,
-        };
+        }));
         let domain = named::<DomainName>("sales");
         let mut nodes = unplaced_schedule(domain_models(source, kafka_case().source_model));
         nodes
@@ -1399,7 +1407,7 @@ mod tests {
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
-            input: nervix_models::IngestorInput::Client(nervix_models::ClientIngestSource {
+            input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerSource {
                 schema: named("payload"),
                 mode: nervix_models::ClientIngestMode {
                     window: AckWindow::Parallel {

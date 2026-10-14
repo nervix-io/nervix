@@ -26,6 +26,25 @@ const BULK_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 /// Every large key's transaction identifier and every large window row's note are padded to this.
 const LARGE_VALUE_BYTES: usize = 1024 * 1024;
 
+#[then("the measured backup admits a stored branch checkpoint above 32 MiB")]
+fn then_stored_branch_capture_is_admitted(world: &mut ScenarioWorld) {
+    let sampled = world
+        .backup_memory
+        .take()
+        .assured("the preceding step measured a stored-state backup");
+    sampled.assert_bulk_within_budget();
+    sampled.assert_no_bulk_refusal("stored checkpoint capture uses bounded bulk groups");
+    let threshold = f64::from(32 * 1024 * 1024);
+    assert!(
+        sampled
+            .metadata_peaks
+            .values()
+            .any(|peak| *peak > threshold),
+        "the selected stored checkpoint holds an admitted metadata view: {:?}",
+        sampled.metadata_peaks,
+    );
+}
+
 #[when(expr = "a large branch state restore workload is created")]
 async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) {
     let domain = world.domain.clone();
