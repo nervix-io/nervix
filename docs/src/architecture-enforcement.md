@@ -163,7 +163,9 @@ pattern forward, the earlier commits of the same lines are read for that evidenc
 is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
 folded away, finding its pull request by the number the subject names or, for a subject without one,
 by the merged commit, and records a commit that removed the spelling while writing one of the
-candidate's own lines.
+candidate's own lines. A read that ends with a server error or a dropped connection is attempted up
+to four times with a doubling backoff; a failure that persists, or any other failure, ends the audit
+without a report.
 
 The suggestion is `suspected` when a count event coincides with a spelling removed from the
 candidate's own hunk or file, or a folded commit rewrote the candidate's lines away from it. A
