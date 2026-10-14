@@ -1020,6 +1020,10 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
+  Window statistics reject non-finite arguments or results at their respective boundaries.
+  Overflow of a finite-input intermediate sum is handled by the moment kernel's normalized mean,
+  so it does not itself classify the window as failed; constant overflow-scale runs keep zero
+  centered moments. [SIMD Kernels](./simd-kernels.md) owns that numerical path and its reference bounds.
 - `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
   work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
   that cannot be read, a branch that cannot be instantiated, a branch task that is gone or whose
@@ -1562,6 +1566,13 @@ A captured-section opening refused only for Snapshot request capacity retains it
 retries within one 30-second opening deadline. The typed capacity classification determines this
 retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
 admitted or partially consumed response is never reopened by this admission retry.
+
+Stored branch capture keeps storage and admission failures beneath `BackupStateCaptureError`,
+with `Keyspace` or `Window` naming the entity at native conversion. Mapping admission is decided
+before a file is mapped and before a group allocates its owned values. Keyspace execution refusal
+uses `DeduplicatorArchiveError::Admission` with the executor report beneath it; it does not
+classify an unexamined checkpoint as undecodable. A cancelled or refused reader releases its view,
+staged files and reservations, and the capture owner discards the incomplete section inventory.
 
 ### Restore
 

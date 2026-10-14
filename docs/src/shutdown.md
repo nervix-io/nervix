@@ -429,6 +429,15 @@ continue a checkpoint, or settle acknowledgements after the node stopped. Its un
 acknowledgements are negatively acknowledged, and a restart finds whatever that checkpoint had
 already written to the node's storage, exactly as after a forced ending.
 
+A deduplicator or window branch also has a snapshot task, which writes what the branch published
+last on every snapshot interval and once more as the branch stops. That task belongs to the
+runtime, not to its branch task, because it goes on after it: a branch ended at a stop grace
+before its own stop was reached published nothing as it went, so what it published before is the
+newest state a restart can restore, and the snapshot task still writes it. A branch that stops in
+time publishes its state first and waits for that write itself. Either way the write is finished
+before terminal teardown releases the node's storage, as [Terminal Teardown](#terminal-teardown)
+describes.
+
 A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
 resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
 shutdown interrupts a preparation before reset publication, the old generation remains
@@ -735,6 +744,37 @@ sessions and commands started until the shutdown deadline and cancels whatever s
 stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
 releases the node's storage.
 
+Runtime teardown stops one domain at a time. It publishes the domain's stop to its processors,
+emitters, generators, reingestors, and placement tasks at once, and then waits for the domain's
+tasks kind by kind: relay owners and materialized relay state, each of which is told to stop when
+its turn comes, then processors, emitters, generators, reingestors, and the placement tasks that
+checkpoint and replicate state. A task that has not ended when its stop grace runs out is aborted.
+The node logs `shutdown task exceeded grace period; aborting` at `warn` with the domain, the task's
+kind, and its name, or `relay owner task did not stop cleanly` and
+`relay state task did not stop cleanly` for a relay's tasks. The grace is two seconds, except that
+a relay owner and an emitter are given the domain drain timeout first.
+
+Generators and reingestors share their grace. A generator reads its source relay from the node that
+owns it, and both kinds publish to the node that owns their output relay, so while they work they
+wait on other nodes. When every node of a cluster stops at once those peers stop answering, and
+every generator and reingestor caught in such a call outlasts the grace at the same moment. Neither
+kind owns state that the node persists or replicates, so the waits of one kind run together. Each
+task still has the whole grace to release what its routes buffered, and a domain's generators cost
+its teardown one grace and its reingestors one more, however many of them a stopping peer holds up.
+The other kinds persist or replicate state they own, or drain a sink, as they stop, and are waited
+for one after another, each with a grace of its own.
+
+Once every domain's tasks have ended, runtime teardown tells the snapshot task of every
+deduplicator and window branch that is still waiting for its branch to write what that branch
+published last, and waits for all of them. A snapshot task holds the runtime and its storage, so
+this wait is what keeps the node database from being released under a write: it has no grace and
+cancels nothing, and lasts as long as the slowest of those writes. A window whose retained rows
+exceed one snapshot section is sealed and published in bounded pieces through the storage and
+bulk workers, so its write waits for those workers like any other job. The node logs nothing for
+this wait; a write that fails is logged at `warn` as
+`failed to flush branch state snapshot during shutdown`, and a restart then finds the checkpoint
+written before it.
+
 Runtime teardown ends each resolved replication route before clearing its state registry. A
 retained route cannot attach to replacement state; a request already admitted through a borrowed
 checkpoint handle may finish on that exact state. After domain drain, closing the replication task
@@ -778,10 +818,16 @@ is unadmitted, so that cancellation ends its hold, and so does the end of the re
 when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
 queues, and negatively resolves remaining volatile correlations exactly once. The once-a-second
-silence sweep is one of the joined tasks and observes the cancellation between sweeps, so the join
-waits for at most the sweep in progress; that sweep, like the resolution that follows, visits only
-the correlation positions the node's deliveries and admissions have claimed, never its fixed
-capacity. No ACK owner state is stored for restart. The interconnect also retires the pool
+silence sweep is one of the joined tasks. A sweep is synchronous, so its task cannot observe the
+cancellation while one runs, and a sweep that overran the second between sweeps finds the next tick
+already due, which does not suspend the task. The task therefore returns to its executor after every
+sweep and observes the cancellation there, whatever the sweep took, so the join waits for the sweep
+in progress and for no other. The receiver-side acknowledgement watchers the same join waits for
+have no cadence that can fall behind: each of their steps takes one row's progress and awaits its
+delivery to the forwarding node, so they return to the executor within their cooperative budget. A
+sweep, like the resolution that follows, visits only the correlation positions the node's deliveries
+and admissions have claimed, never its fixed capacity, which is what keeps it inside that second. No
+ACK owner state is stored for restart. The interconnect also retires the pool
 connections the node opened, giving their leased streams up to ten seconds before closing whatever
 remains. Connections that peers opened to the node close at once, together with the handlers still
 serving their streams, so a peer's request the node has not answered fails instead of completing.
@@ -826,7 +872,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Committed control-plane state: models, schedules, domain lifecycle, cordons, users, resources | Reopens from the committed generation | Reopens from the last committed generation; nothing acknowledged is lost |
 | Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
-| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
+| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop; a deduplicator or window branch ended at its stop grace has what it published last written before terminal teardown ends; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
@@ -1089,6 +1135,14 @@ node itself when it leads, and carry the leader's account of each moved unit as 
 `timed out clearing shutdown drain cordon` carries the `timeout` the release waited. Each phase
 record carries its outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
 or forced one.
+
+Runtime teardown records every domain task it had to abort, at `warn`:
+`shutdown task exceeded grace period; aborting` carries the `domain`, the task's entity as
+`ingestor`, its `task_kind` (`scheduled node`, `scheduled emitter`, `generator`, `reingestor`, or
+`scheduled node placement`) and the `grace_period` it outlasted, and
+`relay owner task did not stop cleanly` and `relay state task did not stop cleanly` carry the
+`domain`, the `relay` and the `reason`. The generators and the reingestors of a domain that outlast
+their shared grace are recorded at the same moment, one record for each.
 
 Existing metric families move during shutdown without naming it. Interconnect stream resets count
 `reason="shutdown"`. The ingestor quiesce families change as intake stops, but they carry no cause

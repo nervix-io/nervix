@@ -54,6 +54,16 @@ impl WasmCheckpointHolds {
     }
 }
 
+/// A checkpoint in progress is progress of the inputs it holds: their source must not time them
+/// out and send them again while the checkpoint is still on its way to its boundary.
+impl AcknowledgementKeepalive for WasmCheckpointHolds {
+    fn keep_alive(&self) {
+        for held in &self.held {
+            held.ack_alive();
+        }
+    }
+}
+
 /// What a WASM guest callback reports its failures through.
 #[derive(Clone, Copy)]
 pub(super) struct WasmCallbackReporting<'a> {
@@ -137,8 +147,14 @@ impl WasmCallbackReporting<'_> {
             holds.release();
             return;
         };
-        let checkpoint =
-            checkpoint_wasm_instance(self.runtime, replicated_state, live, execution_now).await;
+        let checkpoint = holds
+            .keep_alive_while(checkpoint_wasm_instance(
+                self.runtime,
+                replicated_state,
+                live,
+                execution_now,
+            ))
+            .await;
         match checkpoint {
             Ok(()) => holds.release(),
             Err(failure) => {
@@ -314,7 +330,7 @@ mod tests {
     use nervix_primitives::time::timeout;
 
     use super::*;
-    use crate::runtime_ack::AckOutcome;
+    use crate::runtime_ack::{AckOutcome, AckProgress};
 
     /// A held input stays unresolved after every other share of it succeeded, and resolves only
     /// when the hold is released.
@@ -336,6 +352,41 @@ mod tests {
             .await
             .expect("releasing the hold resolves the input")
             .expect("the completion task must not panic");
+        assert_eq!(outcome, AckOutcome::Ack);
+    }
+
+    /// A checkpoint still under way reports the inputs it holds alive to their source, so the
+    /// source's `ACK TIMEOUT` does not send them again, and leaves them unresolved until it ends.
+    #[nervix_primitives::test]
+    async fn a_checkpoint_under_way_keeps_its_held_inputs_alive() {
+        let (acks, mut completion) = AckSet::root();
+        let mut holds = WasmCheckpointHolds::default();
+        holds.hold(&acks);
+        acks.ack_success();
+        let (finish_checkpoint, checkpoint_finished) =
+            nervix_primitives::sync::oneshot::channel::<()>();
+
+        {
+            let checkpoint = holds.keep_alive_while(checkpoint_finished);
+            let mut checkpoint = std::pin::pin!(checkpoint);
+            let progress = nervix_primitives::select! {
+                biased;
+                _ = &mut checkpoint => panic!("the checkpoint has not finished"),
+                progress = completion.wait_for_progress() => progress,
+            };
+            assert_eq!(progress, AckProgress::Alive);
+
+            finish_checkpoint
+                .send(())
+                .assured("the checkpoint future is still awaited above");
+            checkpoint
+                .await
+                .assured("the checkpoint finished through its sender above");
+        }
+        holds.release();
+        let outcome = timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("releasing the hold resolves the input");
         assert_eq!(outcome, AckOutcome::Ack);
     }
 

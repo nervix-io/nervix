@@ -154,7 +154,7 @@ fn two_ingest_rows() -> IngestGroupRows {
             RuntimeRecordMetadata::test(),
         ]),
         ingest_metadata: ingest_metadata_for_test(
-            IngestMetadataKind::Headers,
+            SourceMetadataScope::Headers,
             &[
                 IngestMetadataRow::Headers {
                     headers: &NoIngestHeaders,
@@ -198,7 +198,7 @@ fn expect_failure<T, E>(result: Result<T, E>, reason: &str) -> E {
 async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -261,7 +261,7 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
 async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         3,
         grouped_event_ingestor_metrics(),
     );
@@ -307,7 +307,7 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
 async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -380,7 +380,7 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
 async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_ack_share() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -444,7 +444,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
 async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let codec = unfolding_event_codec(".[] | select(.keep)");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -486,7 +486,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
 async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_unfolding() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -551,7 +551,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
 async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty_group() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -597,7 +597,7 @@ fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
     let headers = NoIngestHeaders;
     let metadata = [IngestMetadataRow::Headers { headers: &headers }];
     let ingested_at = Timestamp::from_unix_nanos(1);
-    let mut pending = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
+    let mut pending = PendingIngestGroup::new(SourceMetadataScope::Headers, 1);
 
     let missing_ack = expect_failure(
         pending.append(&metadata, Vec::new(), ingested_at),
@@ -626,7 +626,7 @@ fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
 
 #[test]
 fn pending_ingest_group_reports_structural_close_errors() {
-    let mut timestamp_mismatch = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
+    let mut timestamp_mismatch = PendingIngestGroup::new(SourceMetadataScope::Headers, 1);
     timestamp_mismatch.acks.push(AckSet::empty());
     let timestamp_error = expect_failure(
         timestamp_mismatch.into_rows(),
@@ -641,7 +641,7 @@ fn pending_ingest_group_reports_structural_close_errors() {
     ));
 
     let missing_metadata = expect_failure(
-        PendingIngestGroup::new(IngestMetadataKind::Headers, 1).into_rows(),
+        PendingIngestGroup::new(SourceMetadataScope::Headers, 1).into_rows(),
         "a closed group must have opened metadata builders",
     );
     assert!(matches!(
@@ -649,8 +649,8 @@ fn pending_ingest_group_reports_structural_close_errors() {
         IngestGroupError::MissingMetadataBuilders
     ));
 
-    let mut missing_records = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
-    missing_records.metadata = Some(IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1));
+    let mut missing_records = PendingIngestGroup::new(SourceMetadataScope::Headers, 1);
+    missing_records.metadata = Some(IngestMetadataBuilders::new(SourceMetadataScope::Headers, 1));
     let missing_record_error = expect_failure(
         missing_records.into_rows(),
         "a closed group must have opened a record builder",
@@ -660,8 +660,8 @@ fn pending_ingest_group_reports_structural_close_errors() {
         IngestGroupError::MissingRecordBuilder
     ));
 
-    let mut metadata_mismatch = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1);
+    let mut metadata_mismatch = PendingIngestGroup::new(SourceMetadataScope::Headers, 1);
+    let mut metadata = IngestMetadataBuilders::new(SourceMetadataScope::Headers, 1);
     metadata
         .append(&IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
@@ -680,8 +680,8 @@ fn pending_ingest_group_reports_structural_close_errors() {
         }
     ));
 
-    let mut decoded_mismatch = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1);
+    let mut decoded_mismatch = PendingIngestGroup::new(SourceMetadataScope::Headers, 1);
+    let mut metadata = IngestMetadataBuilders::new(SourceMetadataScope::Headers, 1);
     metadata
         .append(&IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
@@ -772,7 +772,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
 async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     let codec = grouped_event_codec();
     let mut undispatched = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -796,7 +796,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     assert_eq!(undispatched.pending.undispatched_payloads(), 0);
 
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         2,
         grouped_event_ingestor_metrics(),
     );
@@ -873,7 +873,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
     };
 
     let mut missing_schema_collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -907,7 +907,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
             ..DomainRoutingSnapshot::default()
         }));
     let mut missing_entrypoint_collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -1425,7 +1425,7 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
     let executor = Executor::default();
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -1490,7 +1490,7 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
     let codec = unfolding_event_codec(".[]");
     let payload = br#"[{"user_id":1},{"user_id":2}]"#;
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        SourceMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );

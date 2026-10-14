@@ -130,6 +130,10 @@ class InventoryTests(unittest.TestCase):
             "relay-channel-lifetimes",
             "interconnect-slot-lifetimes",
             "runtime-checkpoint-description-wire",
+            "runtime-state-replication-wire",
+            "runtime-state-replication-malformed",
+            "runtime-checkpoint-listing-owner",
+            "runtime-checkpoint-listing-malformed",
             "remote-correlation-lifetimes",
             "relay-admission-owners",
             "client-emitter-wire",
@@ -165,8 +169,12 @@ class InventoryTests(unittest.TestCase):
             "client-ffi-field-descriptors-malformed",
             "branch-membership",
             "restore-installation-wire",
+            "backup-capture-wire",
+            "backup-capture-wire-malformed",
+            "backup-section-mapping",
             "stopping-node-drain-wire",
             "restore-installation-storage",
+            "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax",
             "nspl-statement",
             "nspl-statement-text",
@@ -282,6 +290,7 @@ class InventoryTests(unittest.TestCase):
             "simd-elapsed-histograms",
             "simd-flag-packing",
             "simd-window-runs",
+            "simd-window-moments",
             "columnar-json-rows",
             "bounded-write-limits",
             "connector-row-request-division",
@@ -293,9 +302,14 @@ class InventoryTests(unittest.TestCase):
             "sqs-batch-requests",
             "mqtt-publish-packets",
             "postgres-insert-measures",
+            "websocket-signaling-protobuf-values",
+            "websocket-signaling-protobuf-malformed",
+            "otel-hex-ids",
             "console-pending-backups",
             "console-pending-backups-malformed",
             "console-restore-drafts",
+            "runtime-window-sketch-panes",
+            "kafka-partition-offsets",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -314,6 +328,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
+            "nervix-connector-kafka",
             "nervix-paced-simulation",
             "nervix-wasm-protocol",
             "nervix-wasm",
@@ -328,6 +343,8 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-sqs",
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
+            "nervix-connector-websockets",
+            "nervix-connector-otel",
             "nervix-web-console",
         })
         for target in inventory.targets:
@@ -814,28 +831,33 @@ class ExecutionTests(unittest.TestCase):
                                 "import time; time.sleep(5)"], timeout=1, log=log)
             self.assertIn("timeout after 1s", log.read_text())
 
-    def test_ordinary_counts_require_random_and_corpus_cases(self) -> None:
-        good = subprocess.CompletedProcess(
-            [], 0, "corpus inputs: 2 | rng inputs: 256\n"
+    def ordinary_result(self, target: bolero.Target) -> subprocess.CompletedProcess[str]:
+        corpus_count = sum(
+            seed.is_file() and not seed.name.startswith(".")
+            for seed in target.corpus.iterdir()
+        )
+        return subprocess.CompletedProcess(
+            [], 0, f"corpus inputs: {corpus_count} | rng inputs: {target.random_iterations}\n"
             "test result: ok. 1 passed; 0 failed\n", ""
         )
+
+    def test_ordinary_counts_require_random_and_corpus_cases(self) -> None:
+        good = self.ordinary_result(self.target)
+        iterations = self.target.random_iterations
         with mock.patch.object(bolero, "command", return_value=good):
             bolero.test_targets(self.inventory, (self.target,))
         missing_cases = subprocess.CompletedProcess(
-            [], 0, good.stdout.replace("rng inputs: 256", "rng inputs: 0"), ""
+            [], 0, good.stdout.replace(f"rng inputs: {iterations}", "rng inputs: 0"), ""
         )
         with mock.patch.object(bolero, "command", return_value=missing_cases):
-            with self.assertRaisesRegex(bolero.BoleroError, "expected 256"):
+            with self.assertRaisesRegex(bolero.BoleroError, f"expected {iterations}"):
                 bolero.test_targets(self.inventory, (self.target,))
 
     def test_ordinary_prepares_each_exact_harness_before_bounded_execution(self) -> None:
         target = dataclasses.replace(self.target, package="nervix-server", features=())
         repeated = dataclasses.replace(target, id="another-target", test="tests::bolero_another")
         with_features = dataclasses.replace(target, id="feature-target", features=("testing",))
-        good = subprocess.CompletedProcess(
-            [], 0, "corpus inputs: 2 | rng inputs: 256\n"
-            "test result: ok. 1 passed; 0 failed\n", ""
-        )
+        good = self.ordinary_result(target)
         with mock.patch.object(bolero, "command", return_value=good) as command:
             bolero.test_targets(self.inventory, (target, repeated, with_features))
         builds = [call for call in command.call_args_list if "--no-run" in call.args[0]]

@@ -221,8 +221,10 @@ typedef enum nx_clock_event_kind {
        next session, and the clock that attachment reports follows as a STATE event; changes in
        between are not reported. */
     NX_CLOCK_EVENT_INTERRUPTED = 4,
-    /* The session refused to attach the interrupted clock again, or did not answer; the
-       attachment stays interrupted and the session tries again later. */
+    /* The session refused to attach the interrupted clock again; the attachment stays interrupted
+       and the session tries again later. An attach the session leaves unanswered past the request
+       timeout is not reported this way: it ends that session, and the next session attaches the
+       clock again. */
     NX_CLOCK_EVENT_RESTORATION_FAILED = 5
 } nx_clock_event_kind;
 
@@ -620,9 +622,9 @@ void nx_clock_event_release(nx_clock_event *event);
    attachment ends, which an NX_CLOCK_EVENT_INTERRUPTED event reports, it is the clock that session
    reported last, without a tick, until the restored attachment reports the clock again. `out` is
    set to NULL when the session follows no clock of the domain: before it attaches, when the server
-   refused every attach, once a detach completes, and once the server ends the attachment, which an
-   NX_CLOCK_EVENT_ENDED event reports. A domain name that is not valid fails with
-   NX_ERROR_INVALID_ARGUMENT. */
+   refused every attach, once a detach is answered detached or not attached, and once the server
+   ends the attachment, which an NX_CLOCK_EVENT_ENDED event reports. A domain name that is not
+   valid fails with NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_session_domain_clock(const nx_session *session, const uint8_t *domain,
                                   size_t domain_len, nx_domain_clock **out);
 

@@ -22,7 +22,8 @@ use nervix_models::{
     EmitterPublishingMode, ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy,
     ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, WasmStateReset, WasmStateResetReason, WasmStateResetScope,
+    SchemaName, WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqPushSink,
+    ZeroMqSink,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -552,9 +553,9 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
+            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: named("sink"),
-            }),
+            }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),

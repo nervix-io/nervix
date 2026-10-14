@@ -11,6 +11,7 @@ pub(crate) mod kafka_group_member;
 pub(crate) mod materialized_state_diagnostics;
 pub(crate) mod node_liveness;
 pub(crate) mod node_startup;
+pub(crate) mod node_stop;
 pub(crate) mod node_trace_export;
 pub(crate) mod peer_addressing;
 pub(crate) mod phase_deadline;

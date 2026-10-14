@@ -8,8 +8,18 @@
 )]
 
 use error_stack::ResultExt as _;
+use futures_util::future::join_all;
 
 use super::*;
+
+/// How long a stopping task is waited for once its stop is signalled, before it is aborted.
+const TASK_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// One task of a stopping domain, with the entity it runs for.
+struct StoppingTask {
+    owner: IngestorName,
+    task: JoinHandle<()>,
+}
 
 impl Runtime {
     pub(crate) fn new() -> Self {
@@ -171,6 +181,7 @@ impl Runtime {
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
+                branch_snapshot_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
@@ -597,26 +608,31 @@ impl Runtime {
             )
             .await;
         }
+        // A generator reads its source relay from the node that owns it, and generators and
+        // reingestors publish to the node that owns their output relay, so a peer that stops with
+        // this node holds all of them up at the same moment. Neither kind owns state the node
+        // persists or replicates, so the waits of one kind run together: each task keeps the whole
+        // stop grace, and the kind costs the domain that grace once however many of its tasks
+        // outlast it. The kinds around them persist or replicate state they own, or drain a sink,
+        // as they stop, and are waited for in turn, each with a grace of its own.
+        let mut generators = Vec::with_capacity(execution.generator_tasks.len());
         for (entity, task) in execution.generator_tasks {
-            Self::await_shutdown_task(
+            generators.push(StoppingTask {
+                owner: IngestorName::from(&entity.identifier),
                 task,
-                domain,
-                Some(&IngestorName::from(&entity.identifier)),
-                "generator",
-            )
-            .await;
+            });
         }
+        Self::await_shutdown_tasks_together(generators, domain, "generator").await;
+        let mut reingestors = Vec::new();
         for (entity, tasks) in execution.reingestor_tasks {
             for task in tasks {
-                Self::await_shutdown_task(
+                reingestors.push(StoppingTask {
+                    owner: IngestorName::from(&entity.identifier),
                     task,
-                    domain,
-                    Some(&IngestorName::from(&entity.identifier)),
-                    "reingestor",
-                )
-                .await;
+                });
             }
         }
+        Self::await_shutdown_tasks_together(reingestors, domain, "reingestor").await;
         for (entity, tasks) in execution.placement_tasks {
             for task in tasks {
                 Self::await_shutdown_task(
@@ -711,6 +727,12 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
+        // Every branch task has ended, in time or at a stop grace, and the snapshot task of each
+        // deduplicator and window branch is writing what its branch published last. Those tasks
+        // hold this runtime and its storage, so the runtime waits for each of them here, while
+        // the replication routes their checkpoints are offered through are still installed.
+        self.inner.branch_snapshot_tasks.close();
+        self.inner.branch_snapshot_tasks.wait().await;
         self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
@@ -777,16 +799,26 @@ impl Runtime {
         ingestor: Option<&IngestorName>,
         task_kind: &str,
     ) {
-        const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
+        Self::await_shutdown_task_with_grace(task, domain, ingestor, task_kind, TASK_STOP_GRACE)
+            .await;
+    }
 
-        Self::await_shutdown_task_with_grace(
-            task,
-            domain,
-            ingestor,
-            task_kind,
-            SHUTDOWN_GRACE_PERIOD,
-        )
-        .await;
+    /// Waits for tasks of one kind, to which their domain's stop has already been published, all
+    /// inside one stop grace.
+    ///
+    /// The waits run together, so tasks that outlast the grace at the same moment cost their
+    /// domain that grace once. Waited for in turn, each of them adds a grace of its own, and a
+    /// node whose peers stop with it holds up every task that was calling one of them.
+    async fn await_shutdown_tasks_together(
+        tasks: Vec<StoppingTask>,
+        domain: &DomainName,
+        task_kind: &str,
+    ) {
+        let stops = tasks.into_iter().map(|stopping| async move {
+            Self::await_shutdown_task(stopping.task, domain, Some(&stopping.owner), task_kind)
+                .await;
+        });
+        join_all(stops).await;
     }
 
     pub(super) async fn await_shutdown_task_with_grace(
@@ -840,3 +872,7 @@ impl Runtime {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_lifecycle_tests.rs"]
+mod tests;

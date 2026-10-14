@@ -206,15 +206,19 @@ impl InterconnectRequest for InstallRestoredStateRequest {
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod capture_properties;
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
 mod wire_properties {
     use meticulous::ResultExt as _;
-    use nervix_execution::{CpuClass, Executor, MemoryClass};
+    use nervix_execution::Executor;
     use nervix_models::{
         ClusterNodeName, CommandExecutionReference, ModelKind, ModelName, RemoteRuntimeField,
         RemoteRuntimeValue, SchemaFingerprint, WasmStateGeneration,
     };
 
-    use super::*;
+    use super::{capture_properties::assert_round_trip, *};
+    use crate::{RemoteOperationSubject, RuntimeState};
 
     #[derive(Debug, bolero::TypeGenerator)]
     struct RestoreWireCase {
@@ -225,7 +229,8 @@ mod wire_properties {
         value: i64,
         byte: u8,
         length: u8,
-        branched: bool,
+        declared_length: u64,
+        digest: [u8; 32],
     }
 
     #[test]
@@ -261,33 +266,60 @@ mod wire_properties {
                             .assured("the authority decodes"),
                         authority
                     );
-                    let branch_key = case.branched.then(|| {
-                        vec![RemoteRuntimeField {
-                            name: "tenant".to_string(),
-                            value: RemoteRuntimeValue::I64(case.value),
-                        }]
-                    });
-                    let actions = [
-                        InstallRestoredStateAction::Begin {
-                            placement: StatePlacementEnvelope {
-                                domain: domain.clone(),
-                                state: crate::RuntimeState::WasmProcessor {
-                                    schema: SchemaFingerprint::from_digest([case.byte; 32]),
-                                    generation: WasmStateGeneration::try_from(
-                                        case.generation.max(1),
-                                    )
-                                    .assured("the generated state generation is positive"),
-                                },
-                                kind: ModelKind::WasmProcessor,
-                                identifier: ModelName::parse("accumulator")
-                                    .assured("the processor name is valid"),
-                                branch_key,
-                            },
-                            branch_fingerprint: case.branched.then_some([case.byte; 32]),
-                            revision: case.revision,
-                            length: u64::from(case.length),
-                            digest: [case.byte; 32],
+                    let schema = SchemaFingerprint::from_digest(case.digest);
+                    let states = [
+                        RuntimeState::BranchAggregated,
+                        RuntimeState::Correlator { schema },
+                        RuntimeState::Deduplicator { schema },
+                        RuntimeState::KafkaOffset,
+                        RuntimeState::MaterializedRelay { schema },
+                        RuntimeState::WasmProcessor {
+                            schema,
+                            generation: WasmStateGeneration::try_from(case.generation.max(1))
+                                .assured("the generated state generation is positive"),
                         },
+                        RuntimeState::WindowProcessor { schema },
+                        RuntimeState::BranchLru { schema },
+                    ];
+                    let mut actions = Vec::new();
+                    for state in states {
+                        nervix_primitives::task::consume_budget().await;
+                        let kind = match state {
+                            RuntimeState::BranchAggregated
+                            | RuntimeState::MaterializedRelay { .. }
+                            | RuntimeState::BranchLru { .. } => ModelKind::Relay,
+                            RuntimeState::Correlator { .. } => ModelKind::Correlator,
+                            RuntimeState::Deduplicator { .. } => ModelKind::Deduplicator,
+                            RuntimeState::KafkaOffset => ModelKind::Ingestor,
+                            RuntimeState::WasmProcessor { .. } => ModelKind::WasmProcessor,
+                            RuntimeState::WindowProcessor { .. } => ModelKind::WindowProcessor,
+                        };
+                        for branched in [false, true] {
+                            let branch_key = branched.then(|| {
+                                vec![RemoteRuntimeField {
+                                    name: "tenant".to_string(),
+                                    value: RemoteRuntimeValue::I64(case.value),
+                                }]
+                            });
+                            for length in [0, u64::MAX, case.declared_length] {
+                                actions.push(InstallRestoredStateAction::Begin {
+                                    placement: StatePlacementEnvelope {
+                                        domain: domain.clone(),
+                                        state,
+                                        kind,
+                                        identifier: ModelName::parse("accumulator")
+                                            .assured("the processor name is valid"),
+                                        branch_key: branch_key.clone(),
+                                    },
+                                    branch_fingerprint: branched.then_some(case.digest),
+                                    revision: case.revision,
+                                    length,
+                                    digest: case.digest,
+                                });
+                            }
+                        }
+                    }
+                    actions.extend([
                         InstallRestoredStateAction::Chunk {
                             offset: case.revision,
                             payload: vec![case.byte; usize::from(case.length)],
@@ -299,7 +331,7 @@ mod wire_properties {
                                 payload_bytes: u64::from(case.length),
                             },
                         },
-                    ];
+                    ]);
                     for action in actions {
                         nervix_primitives::task::consume_budget().await;
                         let request = InstallRestoredStateRequest {
@@ -312,24 +344,20 @@ mod wire_properties {
                             authority: authority.clone(),
                             action,
                         };
-                        let encoded = crate::wire::encode_rkyv(
-                            &executor,
-                            MemoryClass::Bulk,
-                            CpuClass::Bulk,
-                            4096,
-                            request.clone(),
-                        )
-                        .await
-                        .assured("the bounded current request encodes");
-                        let decoded = crate::wire::decode_rkyv::<InstallRestoredStateRequest>(
-                            &executor,
-                            MemoryClass::Bulk,
-                            CpuClass::Bulk,
-                            encoded,
-                        )
-                        .await
-                        .assured("the bounded current request decodes");
-                        assert_eq!(decoded.into_value(), request);
+                        assert_round_trip(&executor, InstallRestoredStateRequest::CLASS, request)
+                            .await;
+                    }
+                    let class = InstallRestoredStateRequest::CLASS;
+                    assert_round_trip(&executor, class, Ok::<(), RemoteOperationFailure>(())).await;
+                    let subject = RemoteOperationSubject::domain(&domain);
+                    for failure in [
+                        RemoteOperationFailure::rejected(subject.clone()),
+                        RemoteOperationFailure::unavailable(subject.clone()),
+                        RemoteOperationFailure::not_ready(subject.clone()),
+                        RemoteOperationFailure::failed(subject, format!("restore-{}", case.value)),
+                    ] {
+                        nervix_primitives::task::consume_budget().await;
+                        assert_round_trip(&executor, class, Err::<(), _>(failure)).await;
                     }
                 });
             });

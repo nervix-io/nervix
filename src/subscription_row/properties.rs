@@ -29,13 +29,13 @@ use nervix_models::{ParseAsType, SchemaField, Timestamp};
 use nervix_primitives::sync::StdArc;
 
 use super::{SubscriptionRowEncodingError, SubscriptionRowOpening, SubscriptionRowSelection};
-use crate::{runtime::BranchKey, runtime_schema::RuntimeValue};
+use crate::runtime::BranchKey;
 
 struct ArrowCase {
     schema: nervix_client_wire::RowSchema,
     batch: RecordBatch,
     branches: Vec<Option<BranchKey>>,
-    tenants: Vec<String>,
+    branch_columns: Vec<ArrayRef>,
     selected: Vec<usize>,
     rows_per_frame: NonZeroUsize,
     handle: SubscriptionHandle,
@@ -200,39 +200,77 @@ impl ArrowCase {
         let batch = RecordBatch::try_new(StdArc::new(Schema::new(arrow_fields)), columns)
             .assured("generated columns have exactly three rows and declared types");
         let branched = arbitrary.entropy().flag();
+        let mut branch_fields = Vec::new();
+        let mut branch_columns = Vec::new();
+        let finite32 = if f32::from_bits(f32_bits).is_finite() {
+            f32_bits
+        } else {
+            f32_bits & 0xff7f_ffff
+        };
+        let finite64 = if f64::from_bits(f64_bits).is_finite() {
+            f64_bits
+        } else {
+            f64_bits & 0xffef_ffff_ffff_ffff
+        };
+        for (field, array) in fields.iter().zip(batch.columns()) {
+            if field.ty.contains_bytes() {
+                continue;
+            }
+            let array: ArrayRef = match field.ty {
+                ParseAsType::F32 => StdArc::new(Float32Array::from(vec![
+                    f32::from_bits(finite32),
+                    0.0,
+                    -0.0,
+                ])),
+                ParseAsType::F64 => StdArc::new(Float64Array::from(vec![
+                    f64::from_bits(finite64),
+                    0.0,
+                    -0.0,
+                ])),
+                _ => array.clone(),
+            };
+            branch_fields.push(SchemaField {
+                name: field.name.clone(),
+                ty: field.ty.clone(),
+                optional: false,
+                sensitive: field.sensitive,
+            });
+            branch_columns.push(array);
+        }
         let branch = if branched {
             Some(
                 nervix_client_wire::RowBranch::new(
                     "by_tenant".parse().assured("a branch name"),
-                    vec![SchemaField {
-                        name: "tenant".parse().assured("a field name"),
-                        ty: ParseAsType::String,
-                        optional: false,
-                        sensitive: false,
-                    }],
+                    branch_fields.clone(),
                 )
                 .assured("a nonempty branch"),
             )
         } else {
             None
         };
-        let tenants = vec![text.clone(), format!("other_{text}"), text];
-        let branches = tenants
-            .iter()
-            .map(|tenant| {
-                if branched {
-                    Some(
-                        BranchKey::from_fields([(
-                            "tenant".parse().assured("a field name"),
-                            RuntimeValue::String(tenant.clone()),
-                        )])
-                        .assured("one typed branch field"),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut branches = Vec::new();
+        for row in [0, 2, 0] {
+            if !branched {
+                branches.push(None);
+                continue;
+            }
+            let mut key = Vec::new();
+            for (field, array) in branch_fields.iter().zip(&branch_columns) {
+                let value = crate::runtime_schema::runtime_value_from_arrow_array(
+                    array.as_ref(),
+                    &field.ty,
+                    false,
+                    row,
+                    field.name.as_str(),
+                )
+                .assured("present, finite branch columns hold exact declared types");
+                let value = value.assured("the selected branch rows are present");
+                key.push((field.name.clone(), value));
+            }
+            branches.push(Some(BranchKey::from_fields(key).assured(
+                "a complete nonempty key of every supported branch field type",
+            )));
+        }
         let mut selected = Vec::new();
         for row in 0..3 {
             if arbitrary.entropy().flag() {
@@ -245,7 +283,7 @@ impl ArrowCase {
             schema: nervix_client_wire::RowSchema { fields, branch },
             batch,
             branches,
-            tenants,
+            branch_columns,
             selected,
             rows_per_frame,
             handle: SubscriptionHandle {
@@ -316,14 +354,19 @@ impl ArrowCase {
             assert_eq!(batch.len(), encoded.rows.get());
             for cells in batch.rows() {
                 let row = selected[position];
-                if self.schema.branch.is_some() {
-                    assert_eq!(
-                        batch
-                            .branch_key()
-                            .assured("a concrete branch is present")
-                            .get(0),
-                        Some(CellView::String(&self.tenants[row]))
-                    );
+                if let Some(branch) = &self.schema.branch {
+                    let key = batch.branch_key().assured("a concrete branch is present");
+                    assert_eq!(key.len(), branch.fields().len());
+                    for (index, array) in self.branch_columns.iter().enumerate() {
+                        let cell = key
+                            .get(index)
+                            .assured("every declared branch cell is present");
+                        if branch.fields()[index].sensitive {
+                            assert_eq!(cell, CellView::Redacted);
+                        } else {
+                            assert_arrow_cell(array.as_ref(), [0, 2, 0][row], cell);
+                        }
+                    }
                 } else {
                     assert!(batch.branch_key().is_none());
                 }

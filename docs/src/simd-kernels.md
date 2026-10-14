@@ -109,6 +109,11 @@ refolds survivors rather than subtracting floating statistics. Window ownership,
 and branch isolation remain defined by
 [Window Aggregates And Sketches](./vm-functions.md#window-aggregates-and-sketches).
 
+When a sum of finite operands overflows, the mean is computed from compensated operands divided
+by their largest contributing magnitude, then rescaled. Clamping the normalized mean to `[-1, 1]`
+keeps it finite at the representable limit. Constant finite runs retain their exact mean and zero
+centered moments in this path; ordinary finite sums keep the existing compensated division.
+
 Output storage scales with the input run, or with a validated fixed histogram layout. Local
 padding, lane reductions, and block masks have bounded sizes. Tails are masked before publication;
 a padding value is never an extra admitted row or failure. Byte scanning uses overlapping loads
@@ -137,7 +142,7 @@ route errors, ACK attribution, and branch ownership.
 | SYSLOG header and structured-data scanning | `ByteClass::first_in`, `ByteScanner` | Compiled SYSLOG fields retain names and Arrow types; byte classes find header refusals and structured-data syntax before scalar parsing at those positions |
 | Syslog TCP framing | memchr, retained read cursor, typed `FrameProgress` | The connector retains parsed octet counts and searches newly read bytes of split lines, with one compaction per read |
 | SQS XML character admission | `XmlChars::into_string` and `XmlChars::admits`, with simdutf8 | The SQS sink validates bodies and string attributes; its integration owns size limits and reporting |
-| OTEL trace/span identifiers | faster-hex | The OTEL connector decodes fixed-length hexadecimal IDs; malformed identifiers keep their connector outcome |
+| OTEL trace/span identifiers | faster-hex | The OTEL connector decodes fixed-length nonzero hexadecimal IDs; `otel-hex-ids` compares every byte and each typed refusal with a per-digit scalar reference in ordinary and sanitizer execution |
 
 ### JSON Boundaries
 
@@ -268,9 +273,18 @@ Registered Bolero targets use the same production path and complete assertion in
 randomized/corpus runs and sanitizer-backed libFuzzer. Current targets include
 `simd-checked-lanes`, `simd-constant-division`, `simd-byte-classes`, `simd-xml-chars`,
 `simd-json-escapes`, `simd-paced-admission`, `simd-elapsed-histograms`, `simd-flag-packing`, and
-`simd-window-runs`; `syslog-stream-framing`, `syslog-structured-data`, and `columnar-json-rows`
+`simd-window-runs` and `simd-window-moments`; `syslog-stream-framing`, `syslog-structured-data`, and `columnar-json-rows`
 cover the connector/codec consumers. Elapsed buckets are compared with HdrHistogram's lowest
 equivalent values, and float window sums with an exact sum within the compensated-summation bound.
+
+The moment reference uses exact addition partials and fused-product residuals for runs of at most
+128 finite values with exponents from −200 through 200. Counts and histogram placement are exact.
+For `ε = f64::EPSILON`, `n = max(count, 1)`, input absolute sum `S`, and reference mean `μ`, its
+mean error bound is `B = 4ε|μ| + [2(n + 16)ε]² S/n`. The M2 bound is
+`16(n + 16)ε M2 + 4n B²`; the cross-moment bound is `32(n + 16)ε Σ|centered products| + 4n B₁B₂`.
+Independent sliced null masks select paired contributions. Separate constant runs at `1e308`,
+`-1e308`, and `f64::MAX` check that overflow of an intermediate sum preserves the exact constant
+mean and zero centered moments. Histogram cases check each edge, both clamps and null positions.
 Every applicable property must remain registered in `tests/bolero-targets.toml`. Ordinary runs
 remain required on PRs; sanitizer CI runs only for PRs labeled `fuzz`. Scheduled,
 `workflow_dispatch`, and unlabeled PR runs expect a sanitizer skip. A skip is neither execution
