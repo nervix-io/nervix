@@ -1,13 +1,17 @@
-//! WebSocket source transport and signaling protocol execution.
+//! Outbound WebSocket source transport and shared signaling execution.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** WebSocket client connections and the compiled signaling protocol shared by client
-//!   sources and server endpoint sessions.
-//! - **Depends on.** The connector contract, WebSocket transport, jaq engine, protobuf reflection,
-//!   vocabulary values, `error-stack`, and Tokio.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, endpoint
-//!   routing, or another connector implementation.
+//! - **Owns.** The outbound client's transport requirements, source lifecycle, configuration and
+//!   frames, and signaling compilation and execution shared with server endpoint sessions.
+//! - **Depends on.** The connector contract, typed plans and host services, vocabulary values,
+//!   execution primitives, WebSocket transport, jaq, protobuf reflection, and contextual errors.
+//! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
+//!   schedules, registry state, endpoint routing or listeners, or another connector implementation.
+//!
+//! Current boundary violation: the signaling compiler consumes configuration Model steps and
+//! parses their timeout text. Converting those inputs into a typed signaling plan belongs to the
+//! decision layer; this engine's ownership contract does not grant permission to consume Models.
 
 #![cfg_attr(
     nervix_lint,
