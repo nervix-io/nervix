@@ -1167,6 +1167,13 @@ build and the existing tests, and nothing in it changes behavior.
   exceeds `debt-baseline.json`.
   A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
   and commit the baseline; `just ratchet --show <count>` lists its sites.
+- A rule that misjudges code is repaired in the rule, or the operation it misjudges carries a
+  narrow reviewed exception; correct code is never reshaped only to satisfy it. Respelling an
+  operation, splitting one lookup into two, moving code into a helper or another file, or
+  defaulting a failure to lower a finding is a workaround, and the owner it degraded keeps the
+  repair. `just lint-audit` reports resolved candidates for such workarounds, attributed to the
+  commits and counts that introduced them; its report is review input under `target/`, and review
+  dispositions and measurements belong on the owning task.
 - Model consumption, language dependencies, recurring cluster awaits, declared node identities,
   installation state, synchronization, failure signatures, discarded outcomes, canonical panic APIs,
   integer/Duration clamped arithmetic and Option/Result adapter control flow use real Nervix
@@ -1296,7 +1303,8 @@ build and the existing tests, and nothing in it changes behavior.
   fails validation.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
-  `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
+  `test-shuttle` and `test-loom` runners, the canonical `test-turmoil` suite,
+  each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
   `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes, which
   export only from a complete `lane.json` and instrument only
@@ -1325,6 +1333,8 @@ build and the existing tests, and nothing in it changes behavior.
   authenticated publisher's marked PR comment, after verifying the current PR head. CI uses the
   same command with the tested merge commit's coordinates and a separate PR head fence. Coverage
   percentages and reporting failures never fail a build; the complexity check remains independent.
+  The Turmoil job publishes its current-source report with `--scope turmoil` under a separate
+  comment marker; those counters remain outside the ordinary coverage and CRAP gate.
   `just test-patch-coverage` exercises accounting and publication, and
   `just coverage-patch-runner` collects its Python line coverage.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the

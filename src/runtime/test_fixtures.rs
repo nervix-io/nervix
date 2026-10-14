@@ -119,14 +119,14 @@ impl nervix_connector::IngestMessageHeaders for TestIngestHeaders<'_> {
 
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 pub(super) fn ingest_metadata_for_test(
-    kind: super::IngestMetadataKind,
+    scope: super::SourceMetadataScope,
     rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
-    let mut builders = super::IngestMetadataBuilders::new(kind, rows.len());
+    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len());
     for row in rows {
         builders
             .append(row)
-            .expect("test metadata row must match the group's source kind");
+            .expect("test metadata row must match the group's metadata scope");
     }
     builders.finish().expect("test metadata must build")
 }
@@ -866,7 +866,7 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 /// tests whose subject is the bound route program.
 pub(super) fn bind_ingestor_route_for_test(
     identifier: &ModelName,
-    metadata_kind: IngestMetadataKind,
+    metadata_scope: SourceMetadataScope,
     allow_header_reads: bool,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
@@ -880,7 +880,7 @@ pub(super) fn bind_ingestor_route_for_test(
     .assured("the fixture route lowers against its schemas");
     bind_ingestor_filter_map_program(
         identifier,
-        metadata_kind,
+        metadata_scope,
         allow_header_reads,
         &lowered,
         schemas,

@@ -203,7 +203,7 @@ impl SessionConsumers {
                 "emitter is not scheduled",
             ));
         };
-        if !matches!(model.sink.as_ref(), EmitSink::Client { .. }) {
+        if !matches!(model.sink.as_ref(), EmitSink::Client(_)) {
             return Err(refuse(
                 EmitterOpenRefusal::NotClientEmitter,
                 "emitter has an external sink",

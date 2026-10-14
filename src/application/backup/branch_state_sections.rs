@@ -72,11 +72,12 @@ impl SessionServiceImpl {
             }
             let schema = node.schema_fingerprint;
             let sections = match captured.state {
-                CapturedBranchStateKind::Deduplicator(_) => {
+                CapturedBranchStateKind::Deduplicator(_)
+                | CapturedBranchStateKind::StoredDeduplicator(_) => {
                     self.stage_deduplicator_sections(captured, schema, &schemas, request)
                         .await?
                 }
-                CapturedBranchStateKind::Window(_) => {
+                CapturedBranchStateKind::Window(_) | CapturedBranchStateKind::StoredWindow(_) => {
                     self.stage_window_sections(captured, schema, &schemas, request)
                         .await?
                 }
@@ -94,15 +95,25 @@ impl SessionServiceImpl {
         request: &CaptureDomainStateRequest,
     ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let domain = &request.domain;
-        let CapturedBranchStateKind::Deduplicator(keyspace) = captured.state else {
-            return Ok(Vec::new());
-        };
         let entity = captured.placement.identifier.clone();
         let Some(key_schema) = schemas.deduplicator(&entity) else {
             return Err(failed(
                 domain,
                 &format!("deduplicator '{entity}' has no archive key shape"),
             ));
+        };
+        let keyspace = match captured.state {
+            CapturedBranchStateKind::Deduplicator(keyspace) => keyspace,
+            CapturedBranchStateKind::StoredDeduplicator(checkpoint) => checkpoint
+                .open_keyspace(&self.inner.runtime)
+                .await
+                .map_err(|error| {
+                    failed(
+                        domain,
+                        &format!("stored keyspace of '{entity}' could not be read: {error:#}"),
+                    )
+                })?,
+            _ => return Ok(Vec::new()),
         };
         let branch = captured.branch_fingerprint;
         let groups = keyspace.groups(BRANCH_STATE_GROUP_BYTES / 2);
@@ -156,9 +167,6 @@ impl SessionServiceImpl {
         request: &CaptureDomainStateRequest,
     ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let domain = &request.domain;
-        let CapturedBranchStateKind::Window(window) = captured.state else {
-            return Ok(Vec::new());
-        };
         let entity = captured.placement.identifier.clone();
         let Some(window_schemas) = schemas.window(&entity) else {
             return Err(failed(
@@ -167,10 +175,23 @@ impl SessionServiceImpl {
             ));
         };
         let executor = self.inner.runtime.executor();
-        let window = window
-            .open(executor, &window_schemas.input, &window_schemas.arguments)
-            .await
-            .map_err(|error| failed(domain, &format!("{error:#}")))?;
+        let window = match captured.state {
+            CapturedBranchStateKind::Window(window) => window.open(),
+            CapturedBranchStateKind::StoredWindow(checkpoint) => checkpoint
+                .open_window(
+                    &self.inner.runtime,
+                    &window_schemas.input,
+                    &window_schemas.arguments,
+                )
+                .await
+                .map_err(|error| {
+                    failed(
+                        domain,
+                        &format!("stored window of '{entity}' could not be read: {error:#}"),
+                    )
+                })?,
+            _ => return Ok(Vec::new()),
+        };
         // A window without a branch lifetime has never retained a row; it restores empty.
         let Some(window) = window else {
             return Ok(Vec::new());

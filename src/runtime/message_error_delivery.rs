@@ -233,17 +233,15 @@ impl MessageErrorRouteTask {
                 return;
             }
         };
-        if await_message_error_ack_alive(
-            &pending_acks,
-            self.runtime.ingest_stream_boundary_message(
+        if pending_acks
+            .keep_alive_while(self.runtime.ingest_stream_boundary_message(
                 &self.route.domain,
                 &self.route.error_relay,
                 &self.target.services,
                 &batch,
-            ),
-        )
-        .await
-        .is_err()
+            ))
+            .await
+            .is_err()
         {
             self.report_failure(
                 &source_acks,
@@ -491,29 +489,6 @@ impl MessageErrorRouteTask {
     }
 }
 
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "a routed message error retains and observes its own acknowledgement roots"
-    )
-)]
-async fn await_message_error_ack_alive<F>(acks: &AckSet, future: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    tokio::pin!(future);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        acks.ack_alive();
-        nervix_primitives::select! {
-            biased;
-            result = &mut future => return result,
-            _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
-        }
-    }
-}
-
 impl Runtime {
     /// Prepared routes bind their worker before the domain publishes the revision. Replacement
     /// ends the exact preceding worker and drains what it already accepted.
@@ -599,13 +574,11 @@ impl Runtime {
                 sent = route.sender.send(delivery) => sent.map_err(|_| ()),
             }
         };
-        await_message_error_ack_alive(&source_acks, admitted)
-            .await
-            .map_err(|()| {
-                Report::new(MessageErrorHandlingError::DeliveryStopped {
-                    route: plan.key.clone(),
-                })
+        source_acks.keep_alive_while(admitted).await.map_err(|()| {
+            Report::new(MessageErrorHandlingError::DeliveryStopped {
+                route: plan.key.clone(),
             })
+        })
     }
 
     pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {

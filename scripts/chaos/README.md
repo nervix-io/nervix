@@ -21,6 +21,13 @@ Run the same workload on one node:
 just chaos run baseline --image nervix:debian --nodes 1
 ```
 
+The baseline checks its external verifiers before deploying traffic. Its suite budget explicitly
+funds that preparation: the full self-check keeps its 600-second cap, plus 180 seconds for the
+one-node baseline or 240 seconds for the three-node baseline. The resulting suite bounds are 13
+and 14 minutes. `--timeout` still bounds the complete run, including preparation; a smaller
+explicit bound can end before traffic finishes. These controller allowances do not change any
+product deadline, the 30-second output-stability window or the exact ledger assertions.
+
 Run a quiesced domain backup during continuous acknowledged Kafka traffic:
 
 ```bash
@@ -1315,6 +1322,38 @@ image identities, rendered Compose configuration, phase ledger, public cluster a
 output, listener and metrics probes, broker offsets, accepted and observed traffic, verifier
 reports, logs, Docker events, and container inspection. The default baseline fixture has 24
 records and accepts at most 1,000 with `--records`.
+Every Kafka end-offset read keeps a separate `traffic/offsets/<topic>.<attempt>/` directory with
+raw stdout/stderr and `result.json`: exact command, requested/effective bounds, start time,
+elapsed time, command exit code, parsed offset and observation outcome. A missing, malformed or
+ambiguous partition-zero offset is an observation refusal, even if the command exited successfully.
+The output-stability window caps each command by its own remaining time and the whole-run budget.
+It requires three consecutive successful equal reads at or above the accepted-input minimum;
+a failed or below-minimum read resets that sequence. `traffic/output-boundary.ndjson` keeps the
+polls and `results/output-boundary.json` records their final result. Its reason distinguishes
+`overall-deadline`, `observations-failed`, `below-minimum` and `unstable-output`, with remaining
+overall time and valid observation counts. An exhausted controller budget is a controller failure;
+failure to establish the output boundary is an observation failure, which does not by itself
+establish missing records. Failed operations retain their exact status and raw evidence.
+Broker administration runs without an interactive terminal or stdin attachment. It cannot borrow
+an input stream held open by the controller's caller. A failed final query remains
+`observations-failed` even when an earlier query returned a valid offset; it does not establish a
+moving boundary. Evidence-directory and reporting failures refuse the observation rather than
+starting a broker command without its record.
+End-offset reads execute the pinned Kafka CLI inside the already running broker. They do not
+create or remove a helper container within each observation's deadline. The image-package check
+also keeps its named, run-labeled helper until final cleanup; its predicate owns a 30-second
+command bound and state inspection owns a separate 20-second bound. The live event subscriber
+starts before that helper. `diagnostics/image-package/` retains command argv, raw streams,
+native command and inspection outcomes, timing and the inspected container state. A client
+timeout is a failed observation even when the helper's inspected exit is zero; it is never
+reclassified as missing binaries or silently accepted. Final cleanup removes the retained helper
+through the run's existing labels and budget.
+Startup publishes its validated public status through a byte copy and atomic rename, with a
+30-second controller bound clipped to the remaining whole-run budget. It avoids filesystem
+cloning for this small transcript. `diagnostics/startup-status/` records the operation before
+launch, its command, native outcome and monotonic elapsed seconds; a publication refusal is a
+controller failure and retains the attempted transcript. The following container enumeration is
+also bounded and preserves command failure. Neither operation changes product readiness limits.
 Rolling runs additionally retain a Pumba command and version, each target's before/stop/start
 inspection, stop and observer logs, measured stop and recovery times, per-restart public status and
 metrics, and per-restart offset results. A failed identity, stop, exit, deadline, listener, or
@@ -1379,8 +1418,9 @@ controls cover an abrupt rules-inspection refusal, a real 30-second Docker-clien
 inspection helper exited, a failed injector-state inspection, failed log retrieval, failed cleanup,
 a Docker launch that created a canary before refusing, an injector that cannot start its nettools
 image, sidecar disappearance versus inspection failure while still present, and a refused
-Docker execution of the blocked-traffic probe. The same controls run in `just chaos self-test`; `just coverage-chaos-network-preflight`
-retains their shell coverage under `target/chaos-network-preflight-coverage/`.
+Docker execution of the blocked-traffic probe. The same controls run in `just chaos self-test`;
+`just coverage-chaos-network-preflight` retains their shell coverage under
+`target/chaos-network-preflight-coverage/`.
 Each scenario keeps its existing verifier self-check. The full command adds the real network
 refusal controls afterward; they do not consume a scenario's execution budget. CI runs the controls
 once before each shard's timed suite and retains their raw evidence beside the suite evidence.
@@ -1399,9 +1439,9 @@ record exists before its command starts, so an interrupted command remains ident
 partial streams. Injector inspection and raw Pumba logs are saved before cleanup removes a helper;
 failed log retrieval and cleanup retain their own command outcomes and cannot replace the primary
 failure. A sidecar that disappeared after enumeration is confirmed absent and recorded; an
-inspection failure while it still exists fails cleanup. Launch cidfiles keep helpers identifiable even when the Docker client fails after creating
-them. Cleanup removes only the run's canary, injector and Pumba sidecars joined to run-owned
-namespaces.
+inspection failure while it still exists fails cleanup. Launch cidfiles keep helpers identifiable
+even when the Docker client fails after creating them. Cleanup removes only the run's canary,
+injector and Pumba sidecars joined to run-owned namespaces.
 
 The runner reports the actual preflight refusal and links these records. A Docker launch,
 inspection or timeout failure does not establish that the worker lacks fault capabilities. The
@@ -1412,6 +1452,19 @@ deadlines. Only BusyBox ping's missing-replies status qualifies blocked traffic;
 execution refusal or command timeout provides no effect observation and fails with its own status.
 Pass a control name to `just test-chaos-network-preflight`, such as `probe-refusal`, for a focused
 control plus the live installation/effect/healing check; omission runs every control.
+
+`just test-chaos-output-boundary` runs the focused preparation-budget and production observation
+controls without Docker. `just coverage-chaos-output-boundary` retains their shell coverage under
+`target/chaos-output-boundary-coverage/`. The full self-test runs these controls too.
+`just test-chaos-image-package` exercises package checks and their refused or invalid observations;
+`just coverage-chaos-image-package` retains that owner's shell coverage.
+`just test-chaos-startup-status` exercises real bounded startup publication with a stalled copy,
+a native refusal, exhausted run time and reporting failure. `just coverage-chaos-startup-status`
+retains coverage of that owner and its controls.
+`just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` measures the complete baseline
+controller against the supplied prebuilt image. It keeps coverage under
+`target/chaos-baseline-coverage/` and the actual run under
+`target/chaos-baseline-coverage-runs/<run-id>/`; use a fresh run ID for each collection.
 
 `just test-chaos-rate-probe` exercises the production probe with a six-second Docker launch delay
 that stays outside transfer time, a real healthy/256kbit twofold effect, a two-second connect delay,

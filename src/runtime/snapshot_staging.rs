@@ -24,6 +24,7 @@
 )]
 
 mod encoding;
+mod mapped;
 mod pieces;
 
 use std::{
@@ -39,6 +40,7 @@ use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Stor
 use nervix_primitives::sync::OwnedSemaphorePermit;
 use thiserror::Error;
 
+pub(in crate::runtime) use self::mapped::MappedArtifact;
 pub(crate) use self::pieces::{StagedPieces, StagedPiecesMark};
 
 /// Why a snapshot or an artifact could not be staged or read back.

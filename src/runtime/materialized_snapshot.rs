@@ -31,6 +31,8 @@ use std::{
     ops::Range,
 };
 
+pub(in crate::runtime) mod column_index;
+
 use arch_into::ArchInto as _;
 use arrow_schema::Schema as ArrowSchema;
 pub(crate) use checkpoint_reader::CapturedMaterializedCheckpoint;
@@ -379,24 +381,9 @@ pub(in crate::runtime) fn inspect_sealed_container(
             SealedSectionKind::RecordIdentities,
             SealedSectionKind::RecordColumns,
         ] {
-            let kind = cursor.take(1, "section kind")?;
-            let Some(&kind) = kind.first() else {
-                return Err(Report::new(MaterializedSnapshotError::Truncated {
-                    section: "section kind",
-                }));
-            };
-            if SealedSectionKind::from_repr(kind) != Some(expected) {
-                return Err(Report::new(MaterializedSnapshotError::UnexpectedSection {
-                    kind,
-                    expected: expected.into(),
-                }));
-            }
-            let length = usize::try_from(cursor.take_u32("section length")?).map_err(|_| {
-                Report::new(MaterializedSnapshotError::Truncated {
-                    section: "section body",
-                })
-            })?;
-            cursor.take(length, "section body")?;
+            // Inspection imposes only the actual container bounds, preserving its truncation
+            // outcome. Selective decoding separately supplies the configured section limit.
+            cursor.section_range(expected, u64::MAX)?;
         }
     }
     if cursor.offset != payload.len() {
@@ -421,6 +408,31 @@ struct SliceCursor<'a> {
 }
 
 impl<'a> SliceCursor<'a> {
+    fn section_range(
+        &mut self,
+        expected: SealedSectionKind,
+        limit: u64,
+    ) -> Result<Range<usize>, Report<MaterializedSnapshotError>> {
+        let kind = self.take(1, "section kind")?[0];
+        if SealedSectionKind::from_repr(kind) != Some(expected) {
+            return Err(Report::new(MaterializedSnapshotError::UnexpectedSection {
+                kind,
+                expected: expected.into(),
+            }));
+        }
+        let length = u64::from(self.take_u32("section length")?);
+        if length > limit {
+            return Err(Report::new(MaterializedSnapshotError::SectionTooLarge {
+                size: length,
+                limit,
+            }));
+        }
+        let length = usize::try_from(length).map_err(MaterializedSnapshotError::decoding)?;
+        let start = self.offset;
+        self.take(length, "section body")?;
+        Ok(start..self.offset)
+    }
+
     fn take(
         &mut self,
         length: usize,

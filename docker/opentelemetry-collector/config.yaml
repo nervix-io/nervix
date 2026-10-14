@@ -11,6 +11,13 @@ exporters:
     verbosity: detailed
 
 service:
+  telemetry:
+    logs:
+      # The suite reads every export the debug exporter prints. By default the Collector's logger
+      # prints only the first ten entries that share a message in each ten-second interval, and
+      # every hundredth after that, which drops the summaries of exports that arrive together.
+      sampling:
+        enabled: false
   pipelines:
     logs:
       receivers: [otlp]

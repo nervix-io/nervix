@@ -40,6 +40,9 @@ use nervix_models::{
 };
 use thiserror::Error;
 
+pub(in crate::runtime) mod stored_branch;
+use stored_branch::StoredBranchCheckpoint;
+
 use super::{
     BranchInstanceSnapshotEntry, BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow,
     MaterializedGeneration, OwnershipHandoffError, OwnershipHandoffResult,
@@ -283,6 +286,8 @@ pub(crate) struct CapturedBranchState {
 pub(crate) enum CapturedBranchStateKind {
     Deduplicator(CapturedDeduplicatorKeyspace),
     Window(CapturedWindow),
+    StoredDeduplicator(StoredBranchCheckpoint),
+    StoredWindow(StoredBranchCheckpoint),
 }
 
 /// A branch-local state's entity and branch, which names it once in a cut.
@@ -371,6 +376,8 @@ pub enum BackupStateCaptureError {
     Placement,
     #[error("the deduplicator keyspace of '{entity}' could not be read")]
     Keyspace { entity: ModelName },
+    #[error("the window checkpoint of '{entity}' could not be read")]
+    Window { entity: ModelName },
     #[error("the Kafka domain offsets of ingestor '{entity}' could not be read")]
     KafkaOffsets { entity: ModelName },
     #[error("reading the state of '{entity}' could not be admitted")]
@@ -701,7 +708,12 @@ impl Runtime {
             needed.insert(identity);
         }
         let keys = self.lifecycle_keys(&current, &needed, cancellation)?;
-        let mut branch_states = self.capture_published_branch_states(domain, &keys);
+        let mut branch_states = match status {
+            DomainStatus::Stopped => Vec::new(),
+            DomainStatus::Running | DomainStatus::Paused => {
+                self.capture_published_branch_states(domain, &keys)
+            }
+        };
         let mut published = ahash::HashSet::default();
         for captured in &branch_states {
             published.insert(BranchStateIdentity {
@@ -761,31 +773,21 @@ impl Runtime {
                     });
                 }
                 RuntimeStateKind::Deduplicator => {
-                    let snapshot = checkpoint
-                        .read_entry()
-                        .change_context(BackupStateCaptureError::Storage)?;
-                    let keyspace =
-                        CapturedDeduplicatorKeyspace::stored(snapshot.lsm, &snapshot.payload)
-                            .change_context_lazy(|| BackupStateCaptureError::Keyspace {
-                                entity: placement.identifier.clone(),
-                            })?;
                     branch_states.push(CapturedBranchState {
                         placement: placement.to_remote(),
                         branch_fingerprint,
-                        state: CapturedBranchStateKind::Deduplicator(keyspace),
+                        state: CapturedBranchStateKind::StoredDeduplicator(
+                            StoredBranchCheckpoint::new(checkpoint)?,
+                        ),
                     });
                 }
                 RuntimeStateKind::WindowProcessor => {
-                    let snapshot = checkpoint
-                        .read_entry()
-                        .change_context(BackupStateCaptureError::Storage)?;
                     branch_states.push(CapturedBranchState {
                         placement: placement.to_remote(),
                         branch_fingerprint,
-                        state: CapturedBranchStateKind::Window(CapturedWindow::stored(
-                            snapshot.lsm,
-                            snapshot.payload,
-                        )),
+                        state: CapturedBranchStateKind::StoredWindow(StoredBranchCheckpoint::new(
+                            checkpoint,
+                        )?),
                     });
                 }
                 RuntimeStateKind::MaterializedRelay => {
@@ -1222,6 +1224,219 @@ mod tests {
             ),
             incarnation,
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cut_keeps_stored_branch_payloads_unopened_until_archive_conversion() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let runtime = persisted_runtime(dir.path());
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("state store is configured");
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let schema = SchemaFingerprint::from_digest([4; 32]);
+        struct BranchCheckpoint {
+            kind: ModelKind,
+            state: RuntimeState,
+            name: &'static str,
+        }
+        for checkpoint in [
+            BranchCheckpoint {
+                kind: ModelKind::Deduplicator,
+                state: RuntimeState::Deduplicator { schema },
+                name: "keys",
+            },
+            BranchCheckpoint {
+                kind: ModelKind::WindowProcessor,
+                state: RuntimeState::WindowProcessor { schema },
+                name: "window",
+            },
+        ] {
+            let entity = ModelName::parse(checkpoint.name).assured("processor is valid");
+            schedule(&runtime, &domain, checkpoint.kind, &entity);
+            let lifecycle = lifecycle_of(&domain, checkpoint.kind, &entity);
+            store
+                .publish_sealed_snapshot(
+                    &lifecycle,
+                    9,
+                    &encode_branch_lru_snapshot(&[branch("alpha", 3)]).assured("lifecycle encodes"),
+                )
+                .assured("lifecycle persists");
+            let placement = RuntimeStatePlacement {
+                state: checkpoint.state,
+                branch_key: super::super::string_branch_key("tenant", "alpha"),
+                ..lifecycle
+            };
+            // A malformed current payload is diagnosed only by the admitted reader of its
+            // selected archive section. Listing a cut must not decode any branch payload.
+            store
+                .publish_sealed_snapshot(&placement, 8, b"invalid checkpoint payload")
+                .assured("the checkpoint envelope persists");
+        }
+        let captured = capture(&runtime, &domain)
+            .await
+            .assured("the cut retains unopened branch checkpoints");
+        assert_eq!(captured.branch_states.len(), 2);
+        assert_eq!(captured.native_metadata.len(), 2);
+        let budget = runtime
+            .executor()
+            .snapshot()
+            .restore_metadata_memory
+            .capacity_bytes;
+        let occupied = runtime
+            .executor()
+            .try_reserve(MemoryClass::RestoreMetadata, budget)
+            .assured("the test occupies conversion admission");
+        let alpha = super::super::string_branch_key("tenant", "alpha");
+        for state in captured.branch_states {
+            assert_eq!(state.placement.branch_key, BranchKey::to_remote_key(&alpha));
+            assert_eq!(
+                state.branch_fingerprint,
+                alpha.as_ref().map(BranchKey::fingerprint)
+            );
+            let checkpoint = match state.state {
+                CapturedBranchStateKind::StoredDeduplicator(checkpoint)
+                | CapturedBranchStateKind::StoredWindow(checkpoint) => checkpoint,
+                _ => panic!("the stopped cut retains its unopened stored checkpoint"),
+            };
+            let refusal = match checkpoint.open(&runtime).await {
+                Ok(_) => panic!("an occupied conversion budget refuses before opening bytes"),
+                Err(refusal) => refusal,
+            };
+            assert!(matches!(refusal.current_context(),
+                BackupStateCaptureError::Admission { entity }
+                    if entity == &state.placement.identifier
+            ));
+            assert_eq!(
+                runtime
+                    .executor()
+                    .snapshot()
+                    .restore_metadata_memory
+                    .reserved_bytes,
+                budget
+            );
+        }
+        drop(occupied);
+        assert_eq!(
+            runtime
+                .executor()
+                .snapshot()
+                .restore_metadata_memory
+                .reserved_bytes,
+            0
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_running_cut_selects_an_inactive_windows_checkpoint_then_its_live_publication() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let runtime = persisted_runtime(dir.path());
+        let local =
+            nervix_models::ClusterNodeName::parse("capture-node").assured("the node name is valid");
+        super::super::attach_loopback_cluster(&runtime, &local).await;
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let entity = ModelName::parse("window").assured("processor is valid");
+        let kind = ModelKind::WindowProcessor;
+        runtime.publish_state_assignment(
+            nervix_models::DomainNodeRef::node_in(domain.clone(), kind, entity.clone()),
+            super::super::ScheduledStateAssignment {
+                identity: super::super::ScheduledStateIdentity {
+                    schema_fingerprint: SchemaFingerprint::from_digest([4; 32]),
+                    wasm_state_generations: None,
+                },
+                checkpoint_owners: Some(super::super::state_assignment::CheckpointOwners {
+                    primary: Some(local.clone()),
+                    executors: [local].into_iter().collect(),
+                    replicas: Default::default(),
+                }),
+            },
+        );
+        let lifecycle = lifecycle_of(&domain, kind, &entity);
+        let placement = RuntimeStatePlacement {
+            state: RuntimeState::WindowProcessor {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+            },
+            branch_key: super::super::string_branch_key("tenant", "alpha"),
+            ..lifecycle.clone()
+        };
+        let loading = runtime.clone();
+        let state = in_storage_job(&runtime, move |_| {
+            let store = loading
+                .inner
+                .state_store
+                .as_ref()
+                .assured("store is configured");
+            store
+                .publish_sealed_snapshot(
+                    &lifecycle,
+                    9,
+                    &encode_branch_lru_snapshot(&[branch("alpha", 3)])
+                        .assured("current lifecycle encodes"),
+                )
+                .assured("lifecycle persists");
+            store
+                .publish_sealed_snapshot(&placement, 8, b"invalid checkpoint payload")
+                .assured("the current checkpoint envelope persists");
+            loading
+                .replicated_window_processor_state(placement)
+                .assured("the inactive branch retains its sealed publication")
+        })
+        .await;
+        let capture_running = || {
+            let capturing = runtime.clone();
+            let domain = domain.clone();
+            in_storage_job(&runtime, move |cancellation| {
+                capturing.capture_backup_state(&domain, true, DomainStatus::Running, cancellation)
+            })
+        };
+        let inactive = capture_running()
+            .await
+            .assured("an inactive branch is listed lazily");
+        assert_eq!(inactive.branch_states.len(), 1);
+        assert!(matches!(
+            inactive.branch_states[0].state,
+            CapturedBranchStateKind::StoredWindow(_)
+        ));
+        let revision = state.generations.publish(Some(
+            super::super::window_state::WindowPublishedSnapshot::Live(
+                super::super::WindowProcessorStateSnapshot {
+                    entries: Vec::new(),
+                    next_sequence: 0,
+                    incarnation: Some(3),
+                    accumulators: Vec::new(),
+                },
+            ),
+        ));
+        let live = capture_running()
+            .await
+            .assured("the live publication supersedes unread stored bytes");
+        assert_eq!(live.branch_states.len(), 1);
+        let CapturedBranchStateKind::Window(window) = live
+            .branch_states
+            .into_iter()
+            .next()
+            .assured("one live publication was captured")
+            .state
+        else {
+            panic!("the running cut shares the live window");
+        };
+        let opened = window
+            .open()
+            .assured("the live window carries its branch lifetime");
+        assert_eq!(opened.revision(), revision);
+        assert_eq!(opened.incarnation(), 3);
+        assert!(opened.groups(1024).is_empty());
+        let stopped = capture(&runtime, &domain)
+            .await
+            .assured("a stopped cut lists stored bytes even while a live handle is retained");
+        assert_eq!(stopped.branch_states.len(), 1);
+        assert!(matches!(
+            stopped.branch_states[0].state,
+            CapturedBranchStateKind::StoredWindow(_)
+        ));
+        runtime.shutdown().await;
     }
 
     #[nervix_primitives::test]
