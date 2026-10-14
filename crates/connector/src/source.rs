@@ -5,8 +5,8 @@
 //! - **Owns.** The typed source plan, broker and paced-polling connector traits, source messages,
 //!   acknowledgement policies, lifecycle operations, typed source failures, and the opaque host
 //!   handle through which a source delivers messages and reports lifecycle state.
-//! - **Depends on.** Typed ingest metadata and timestamps, `error-stack`, and Tokio's monotonic
-//!   clock.
+//! - **Depends on.** Typed ingest metadata, the vocabulary's metadata scopes and timestamps,
+//!   `error-stack`, and Tokio's monotonic clock.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
@@ -26,19 +26,11 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
-use nervix_models::Timestamp;
+use nervix_models::{SourceMetadataScope, Timestamp};
 use nervix_primitives::time::Instant;
 use thiserror::Error;
 
 use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
-
-/// The metadata namespace a source message makes available to ingest expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceMetadataScope {
-    Headers,
-    Kafka,
-    Syslog,
-}
 
 /// The acknowledgement behavior a source transport supports for the selected plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

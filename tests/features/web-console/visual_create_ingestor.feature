@@ -19,7 +19,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "visual_ingest_source"
-    And selector ".create-ingestor-source [data-source='endpoint']" is clicked
+    And selector ".create-ingestor-source [data-source='endpoint-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_ingest_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_ingest_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_ingest_endpoint']" is clicked
@@ -75,7 +75,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "source type"
     And selector ".create-name" has value "incomplete_source"
-    When selector ".create-ingestor-source [data-source='endpoint']" is clicked
+    When selector ".create-ingestor-source [data-source='endpoint-endpoint']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "source client or endpoint"
 
@@ -97,7 +97,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "scoped_source"
-    And selector ".create-ingestor-source [data-source='endpoint']" is clicked
+    And selector ".create-ingestor-source [data-source='endpoint-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_scope_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_scope_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_scope_endpoint']" is clicked
@@ -140,7 +140,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "visual_tx_source"
-    And selector ".create-ingestor-source [data-source='endpoint']" is clicked
+    And selector ".create-ingestor-source [data-source='endpoint-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_tx_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_tx_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_tx_endpoint']" is clicked
@@ -195,7 +195,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "visual_reconnected_source"
-    And selector ".create-ingestor-source [data-source='endpoint']" is clicked
+    And selector ".create-ingestor-source [data-source='endpoint-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_reconnect_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_reconnect_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_reconnect_endpoint']" is clicked
@@ -247,7 +247,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "visual_branch_source"
-    And selector ".create-ingestor-source [data-source='endpoint']" is clicked
+    And selector ".create-ingestor-source [data-source='endpoint-endpoint']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_branch_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_branch_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_branch_endpoint']" is clicked
@@ -323,7 +323,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "visual_http_source"
-    And selector ".create-ingestor-source [data-source='http']" is clicked
+    And selector ".create-ingestor-source [data-source='http-request']" is clicked
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_http_client"
     Then selector ".create-ingestor-source-ref [data-value='visual_http_client']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_http_client']" is clicked

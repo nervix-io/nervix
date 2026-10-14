@@ -459,6 +459,7 @@ All paths are relative to the repository root.
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
+| `benches/window_sketches.rs` | The cost of admitting retained rows into pane sketches, from a new pane for every row to a thousand rows per pane |
 | `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
@@ -1180,6 +1181,12 @@ At emission the window merges every live pane into a fresh sketch:
 - Misra-Gries adds weighted counts.
 
 Each top-k value is sliced from the earliest retained row with that key.
+
+The first row admitted into a pane creates its sketch, found or inserted by one search of the
+window's ordered pane map; every later row of the pane updates that sketch in place. A row whose
+argument is absent admits nothing, so a pane holding only such rows keeps no sketch.
+`just bench-window-sketches` measures admission at one, 16 and 1,024 rows per pane for each
+sketch.
 
 A sketch cannot subtract a row. When a window steps, every pane is cleared, and every surviving row
 is admitted again. This rebuilds the whole window rather than one pane, so a row that left the

@@ -70,6 +70,10 @@ pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
 pub use peer_resolver::PeerResolver;
 pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
+// This is already the public supertrait and response bound of the typed request contracts.
+// Keep that same bounded codec nameable by callers crossing the engine boundary.
+#[doc(hidden)]
+pub use request::RkyvMessage;
 pub use request::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationHealthProbe,
     ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,

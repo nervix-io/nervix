@@ -3,8 +3,8 @@
 //!
 //! - **Owns.** The domains the client asked to follow, their latest clock and accepted tick,
 //!   which attachments wait to be restored on a new exchange and why an attempt to restore one
-//!   failed, the pending clock events coalesced per domain, and the helper that projects an
-//!   attached clock.
+//!   failed, whether a restoration attaches a clock now or waits for a detach of it, the pending
+//!   clock events coalesced per domain, and the helper that projects an attached clock.
 //! - **Depends on.** The vocabulary's clock models and arithmetic, and the wire contract's clock
 //!   replies and frames.
 //! - **Must not know.** How a request is transported, how an exchange routes its frames, or relay
@@ -15,12 +15,19 @@
 //! reader up: pending events are coalesced per domain, so they are bounded by the domains the
 //! client follows. The newest state and tick of a domain replace older unread ones, and an
 //! interruption or an end replaces the observations before it.
+//!
+//! A restoration attach and a detach of the same clock are ordered here, because a session serves
+//! them in the order it receives them and an attach it receives after the detach would attach the
+//! clock again. A detach registers its release of the clock before it is sent, and no restoration
+//! decides to attach the clock while a release is registered. A restoration attach decided before
+//! the release is sent first: the detach waits for it, and so reaches its session behind it.
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
+use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
@@ -49,8 +56,10 @@ pub enum DomainClockEvent {
     /// next session, and the clock that attachment reports follows as an observation; changes in
     /// between are not reported.
     Interrupted(DomainClockInterruption),
-    /// The current session refused to attach the interrupted clock again, or did not answer. The
-    /// attachment stays interrupted, and the client tries again later.
+    /// The current session refused to attach the interrupted clock again. The attachment stays
+    /// interrupted, and the client tries again on that session later. An attach the session leaves
+    /// unanswered past the request timeout is not reported here: it ends that session, and the
+    /// next session attaches the clock again.
     RestorationFailed(DomainClockRestorationFailure),
 }
 
@@ -73,13 +82,12 @@ pub struct DomainClockInterruption {
     pub domain: DomainName,
 }
 
-/// An attempt to attach an interrupted clock again that the current session refused or did not
-/// answer. The client tries again after `retry_after` for as long as it follows the clock and the
-/// session stays open.
+/// An attempt to attach an interrupted clock again that the current session refused. The client
+/// tries again after `retry_after` for as long as it follows the clock and the session stays open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainClockRestorationFailure {
     pub domain: DomainName,
-    /// The server's refusal, or why the request got no answer.
+    /// The server's refusal, or the failure that left the attempt without a reply it could use.
     pub message: String,
     /// How long the client waits before its next attempt.
     pub retry_after: Duration,
@@ -226,6 +234,62 @@ struct FollowedClock {
     interrupted: bool,
 }
 
+impl FollowedClock {
+    /// Takes `clock` as the clock the attachment reports. The newest tick belongs to its
+    /// generation, so it stays only while the clock keeps that generation paced.
+    fn observe(&mut self, clock: DomainClockObservation) {
+        let same_generation = self.clock.generation == clock.generation;
+        let paced = matches!(clock.state, DomainClockObservedState::Paced(_));
+        if !same_generation || !paced {
+            self.tick = None;
+        }
+        self.clock = clock;
+    }
+}
+
+/// How many guards of one kind each domain holds. A domain that holds none is absent.
+#[derive(Default)]
+struct GuardCounts {
+    counts: HashMap<DomainName, NonZeroUsize>,
+}
+
+impl GuardCounts {
+    fn holds(&self, domain: &DomainName) -> bool {
+        self.counts.contains_key(domain)
+    }
+
+    fn add(&mut self, domain: &DomainName) {
+        let Some(count) = self.counts.get_mut(domain) else {
+            self.counts
+                .insert(domain.clone(), NonZeroUsize::MIN)
+                .discarded("the domain held no guard of this kind");
+            return;
+        };
+        *count = count
+            .checked_add(1)
+            .assured("each count is one live guard, and guards are far fewer than usize::MAX");
+    }
+
+    fn remove(&mut self, domain: &DomainName) {
+        let count = self
+            .counts
+            .get_mut(domain)
+            .assured("a guard removes the count it added when it was made, once");
+        let remaining = count
+            .get()
+            .checked_sub(1)
+            .assured("a nonzero count is at least one");
+        match NonZeroUsize::new(remaining) {
+            Some(remaining) => *count = remaining,
+            None => {
+                self.counts
+                    .remove(domain)
+                    .discarded("the count removed is the one that reached zero above");
+            }
+        }
+    }
+}
+
 /// What a caller has not read yet about one domain's clock, in the order it happened.
 #[derive(Default)]
 struct PendingClockEvents {
@@ -287,6 +351,12 @@ struct State {
     /// Domains with events the caller has not read, in the order their first pending event
     /// happened.
     pending: IndexMap<DomainName, PendingClockEvents>,
+    /// The detaches in flight, by the domain whose clock they release. No restoration attaches a
+    /// clock while a detach of it is in flight.
+    releases: GuardCounts,
+    /// The restoration attaches decided and not sent yet, by domain. A detach waits for them
+    /// before it is sent.
+    attempts: GuardCounts,
 }
 
 impl State {
@@ -305,6 +375,72 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct DomainClockAttachments {
     inner: Arc<Inner>,
+}
+
+/// Which followed clocks a restoration attaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClockRestorationScope {
+    /// Every followed clock: a new exchange moves the attachments the previous one holds and
+    /// restores the interrupted ones.
+    Followed,
+    /// Only a clock that waits to be attached again because the exchange holding it ended.
+    Interrupted,
+}
+
+/// What a restoration does next about one followed clock.
+pub(crate) enum ClockRestorationStep {
+    /// Send the attach. The attempt is dropped once the attach is on its exchange.
+    Attach(ClockRestorationAttempt),
+    /// A detach of the clock is in flight: decide again once it has ended.
+    AwaitRelease,
+    /// Nothing to attach: the client no longer follows the clock, or the clock needs no attach.
+    Done,
+}
+
+/// A restoration attach of one clock, decided while no detach of the clock was in flight. A
+/// detach of the clock waits until the attempt is dropped, which its sender does once the attach
+/// is on its exchange, so the detach reaches that exchange's session behind the attach.
+pub(crate) struct ClockRestorationAttempt {
+    clocks: DomainClockAttachments,
+    domain: DomainName,
+}
+
+impl Drop for ClockRestorationAttempt {
+    fn drop(&mut self) {
+        self.clocks.attempt_ended(&self.domain);
+    }
+}
+
+/// A detach of one clock that the caller is sending. While it lives, no restoration decides to
+/// attach the clock again; it is dropped once the detach has its answer or has failed.
+pub(crate) struct ClockRelease {
+    clocks: DomainClockAttachments,
+    domain: DomainName,
+}
+
+impl ClockRelease {
+    /// Waits until every restoration attach of the clock decided before this release was
+    /// registered is on its exchange. A detach sent afterwards follows each of them on the
+    /// exchange the client then uses, or finds the exchange that received one ended.
+    pub(crate) async fn settled(&self) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let mut changed = self.clocks.watch();
+            if !self.clocks.attempted(&self.domain) {
+                return;
+            }
+            changed
+                .changed()
+                .await
+                .assured("the attachments hold the sender of their own notifications");
+        }
+    }
+}
+
+impl Drop for ClockRelease {
+    fn drop(&mut self) {
+        self.clocks.release_ended(&self.domain);
+    }
 }
 
 impl DomainClockAttachments {
@@ -339,13 +475,73 @@ impl DomainClockAttachments {
         state.followed.values().any(|followed| followed.interrupted)
     }
 
-    /// Whether the client follows the clock of `domain` and waits to attach it again.
-    pub(crate) fn awaits_restoration_of(&self, domain: &DomainName) -> bool {
-        let state = self.inner.state.lock();
-        match state.followed.get(domain) {
-            Some(followed) => followed.interrupted,
-            None => false,
+    /// Decides whether a restoration sends the attach of the clock of `domain` within `scope`.
+    ///
+    /// The decision and the attempt it returns are taken together, so a detach of the clock either
+    /// registered its release first, and the restoration waits for it, or waits for this attempt.
+    pub(crate) fn restoration_step(
+        &self,
+        domain: &DomainName,
+        scope: ClockRestorationScope,
+    ) -> ClockRestorationStep {
+        let mut state = self.inner.state.lock();
+        let Some(followed) = state.followed.get(domain) else {
+            return ClockRestorationStep::Done;
+        };
+        let needs_attach = match scope {
+            ClockRestorationScope::Followed => true,
+            ClockRestorationScope::Interrupted => followed.interrupted,
+        };
+        if !needs_attach {
+            return ClockRestorationStep::Done;
         }
+        if state.releases.holds(domain) {
+            return ClockRestorationStep::AwaitRelease;
+        }
+        state.attempts.add(domain);
+        drop(state);
+        ClockRestorationStep::Attach(ClockRestorationAttempt {
+            clocks: self.clone(),
+            domain: domain.clone(),
+        })
+    }
+
+    /// Registers a detach of the clock of `domain` that the caller is about to send. Until the
+    /// release is dropped, no restoration decides to attach the clock.
+    pub(crate) fn release(&self, domain: &DomainName) -> ClockRelease {
+        self.inner.state.lock().releases.add(domain);
+        ClockRelease {
+            clocks: self.clone(),
+            domain: domain.clone(),
+        }
+    }
+
+    /// Whether a restoration attach of the clock of `domain` was decided and is not sent yet.
+    fn attempted(&self, domain: &DomainName) -> bool {
+        self.inner.state.lock().attempts.holds(domain)
+    }
+
+    /// Ends a restoration attempt and wakes a detach that waits for it.
+    fn attempt_ended(&self, domain: &DomainName) {
+        self.inner.state.lock().attempts.remove(domain);
+        self.inner.changed.send_replace(());
+    }
+
+    /// Ends a release and wakes a restoration that waits for it.
+    fn release_ended(&self, domain: &DomainName) {
+        self.inner.state.lock().releases.remove(domain);
+        self.inner.changed.send_replace(());
+    }
+
+    /// Wakes a caller waiting for clock events once the exchange that was restoring a clock takes
+    /// no more requests while its reader goes on, as a restoration that outlives the request
+    /// timeout leaves it. The caller then finds the session closed and opens another, which
+    /// attaches the clock again; an exchange whose reader ended woke it already.
+    pub(crate) fn restoration_abandoned(&self) {
+        if !self.awaits_restoration() {
+            return;
+        }
+        self.inner.changed.send_replace(());
     }
 
     /// Every followed domain, in the order the client attached to its clock.
@@ -388,26 +584,32 @@ impl DomainClockAttachments {
     /// frame, and the server queues an attachment's frames only after its reply, so every frame of
     /// the attachment finds it here. A reply for a clock the client already follows moves the
     /// attachment to a new exchange. It reports the clock as an observation when the attachment
-    /// was interrupted or the clock changed, because no caller waits for that reply. A reply that
-    /// the session already follows the clock moves an interrupted attachment to that session too,
-    /// whose later frames report the clock.
+    /// was interrupted or the clock changed, because no caller waits for that reply. An attachment
+    /// moved while its previous exchange still held it, as a redirect moves it, keeps the newest
+    /// tick of a clock that stays paced in the same generation, so the clock a caller reads is
+    /// never older than a tick event it already took. A reply that the session already follows the
+    /// clock moves an interrupted attachment to that session too, whose later frames report the
+    /// clock.
     pub(crate) fn apply_attach(&self, outcome: &DomainClockAttachOutcome, generation: &Arc<()>) {
         let mut state = self.inner.state.lock();
         match &outcome.disposition {
             DomainClockAttachDisposition::Attached { domain, clock } => {
-                let reported = match state.followed.get(domain) {
-                    Some(followed) => followed.interrupted || followed.clock != *clock,
-                    None => false,
+                let Some(followed) = state.followed.get_mut(domain) else {
+                    state.followed.insert(
+                        domain.clone(),
+                        FollowedClock {
+                            clock: clock.clone(),
+                            tick: None,
+                            generation: generation.clone(),
+                            interrupted: false,
+                        },
+                    );
+                    return;
                 };
-                state.followed.insert(
-                    domain.clone(),
-                    FollowedClock {
-                        clock: clock.clone(),
-                        tick: None,
-                        generation: generation.clone(),
-                        interrupted: false,
-                    },
-                );
+                let reported = followed.interrupted || followed.clock != *clock;
+                followed.observe(clock.clone());
+                followed.generation = generation.clone();
+                followed.interrupted = false;
                 if !reported {
                     return;
                 }
@@ -494,12 +696,7 @@ impl DomainClockAttachments {
         if !Arc::ptr_eq(&followed.generation, generation) || followed.interrupted {
             return;
         }
-        if followed.clock.generation != observed.clock.generation
-            || !matches!(observed.clock.state, DomainClockObservedState::Paced(_))
-        {
-            followed.tick = None;
-        }
-        followed.clock = observed.clock.clone();
+        followed.observe(observed.clock.clone());
         let pending = state.pending(&observed.domain);
         pending.tick = None;
         pending.observed = Some(observed.clock);
@@ -587,7 +784,6 @@ impl DomainClockAttachments {
 mod tests {
     use std::num::NonZeroU64;
 
-    use meticulous::ResultExt as _;
     use nervix_models::{DomainClockPeriod, DomainClockSkew, DomainClockState, DomainTimeRate};
 
     use super::*;
@@ -1031,9 +1227,18 @@ mod tests {
             [domain("sim"), domain("held")]
         );
         clocks.apply_attach(&already_attached("sim"), &second);
-        assert!(!clocks.awaits_restoration_of(&domain("sim")));
-        assert!(clocks.awaits_restoration_of(&domain("held")));
-        assert!(!clocks.awaits_restoration_of(&domain("unknown")));
+        assert!(matches!(
+            clocks.restoration_step(&domain("sim"), ClockRestorationScope::Interrupted),
+            ClockRestorationStep::Done
+        ));
+        assert!(matches!(
+            clocks.restoration_step(&domain("held"), ClockRestorationScope::Interrupted),
+            ClockRestorationStep::Attach(_)
+        ));
+        assert!(matches!(
+            clocks.restoration_step(&domain("unknown"), ClockRestorationScope::Interrupted),
+            ClockRestorationStep::Done
+        ));
         clocks.apply_observed(observed("sim", paced(2, 1.0)), &second);
         let mut events = Vec::new();
         while let Some(event) = clocks.take_event() {
@@ -1196,5 +1401,320 @@ mod tests {
                 .assured("the registry holds its sender"),
             "an exchange that held nothing wakes no one while nothing awaits restoration"
         );
+    }
+
+    #[test]
+    fn an_attachment_moved_while_its_exchange_holds_it_keeps_the_tick_of_an_unchanged_clock() {
+        let clocks = DomainClockAttachments::new();
+        let first = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
+        clocks.apply_ticked(ticked("sim", 1, 5), &first);
+
+        // A redirect's new exchange attaches the clock while the first exchange still holds it.
+        let second = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &second);
+        assert_eq!(
+            clocks.take_event(),
+            Some(DomainClockEvent::Ticked(ticked("sim", 1, 5))),
+            "the unread tick stays unread, and an unchanged clock is not reported"
+        );
+        let moved = clocks
+            .latest(&domain("sim"))
+            .assured("the moved clock is followed");
+        assert_eq!(moved.latest_tick(), Some(&ticked("sim", 1, 5).tick));
+        clocks.apply_ticked(ticked("sim", 1, 5), &second);
+        clocks.apply_ticked(ticked("sim", 1, 8), &first);
+        assert!(
+            clocks.take_event().is_none(),
+            "a repeated tick and a frame of the previous exchange report nothing"
+        );
+        clocks.exchange_ended(&first);
+        assert!(
+            !clocks.awaits_restoration(),
+            "the end of the previous exchange interrupts nothing it no longer holds"
+        );
+
+        // A move that finds another generation reports it without the old generation's tick.
+        let third = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(2, 1.0)), &third);
+        assert_eq!(
+            clocks.take_event(),
+            Some(DomainClockEvent::Observed(observed("sim", paced(2, 1.0))))
+        );
+        let moved = clocks
+            .latest(&domain("sim"))
+            .assured("the moved clock is followed");
+        assert_eq!(moved.latest_tick(), None);
+    }
+
+    /// The attempt a restoration step takes, which a restoration that sends the attach holds.
+    fn attempt(step: ClockRestorationStep) -> ClockRestorationAttempt {
+        let ClockRestorationStep::Attach(attempt) = step else {
+            panic!("the restoration attaches the clock");
+        };
+        attempt
+    }
+
+    #[nervix_primitives::test]
+    async fn a_detach_waits_for_the_attaches_decided_before_it_and_holds_off_later_ones() {
+        let clocks = DomainClockAttachments::new();
+        let first = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
+        assert!(matches!(
+            clocks.restoration_step(&domain("sim"), ClockRestorationScope::Interrupted),
+            ClockRestorationStep::Done
+        ));
+        let moving =
+            attempt(clocks.restoration_step(&domain("sim"), ClockRestorationScope::Followed));
+
+        // A detach registered after the attach was decided waits until the attach is sent.
+        let release = clocks.release(&domain("sim"));
+        let settling = nervix_primitives::task::spawn(async move {
+            release.settled().await;
+            release
+        });
+        nervix_primitives::task::yield_now().await;
+        assert!(
+            !settling.is_finished(),
+            "the detach waits for the attach decided before it"
+        );
+        drop(moving);
+        let release = settling
+            .await
+            .assured("the settling task only waits for the attempt");
+
+        // While the detach is in flight, no restoration attaches the clock.
+        clocks.exchange_ended(&first);
+        for scope in [
+            ClockRestorationScope::Followed,
+            ClockRestorationScope::Interrupted,
+        ] {
+            assert!(matches!(
+                clocks.restoration_step(&domain("sim"), scope),
+                ClockRestorationStep::AwaitRelease
+            ));
+        }
+        let second = clocks.release(&domain("sim"));
+        let changed = clocks.watch();
+        drop(release);
+        assert!(
+            changed
+                .has_changed()
+                .assured("the registry holds its sender"),
+            "a restoration waiting for a detach is woken when it ends"
+        );
+        assert!(
+            matches!(
+                clocks.restoration_step(&domain("sim"), ClockRestorationScope::Interrupted),
+                ClockRestorationStep::AwaitRelease
+            ),
+            "another detach of the clock is still in flight"
+        );
+        drop(second);
+        let restoring =
+            attempt(clocks.restoration_step(&domain("sim"), ClockRestorationScope::Interrupted));
+        drop(restoring);
+
+        // A detach answered not attached ends following, which leaves nothing to restore.
+        let release = clocks.release(&domain("sim"));
+        release.settled().await;
+        clocks.apply_detach(&DomainClockDetachOutcome {
+            disposition: DomainClockDetachDisposition::NotAttached(domain("sim")),
+            message: String::new(),
+        });
+        drop(release);
+        for scope in [
+            ClockRestorationScope::Followed,
+            ClockRestorationScope::Interrupted,
+        ] {
+            assert!(matches!(
+                clocks.restoration_step(&domain("sim"), scope),
+                ClockRestorationStep::Done
+            ));
+        }
+    }
+
+    #[test]
+    fn an_abandoned_restoration_wakes_a_caller_only_while_a_clock_waits_to_be_restored() {
+        let clocks = DomainClockAttachments::new();
+        let first = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
+        let mut changed = clocks.watch();
+        clocks.restoration_abandoned();
+        assert!(
+            !changed
+                .has_changed()
+                .assured("the registry holds its sender"),
+            "nothing waits to be restored while the exchange holds the clock"
+        );
+        clocks.exchange_ended(&first);
+        drop(changed.borrow_and_update());
+        clocks.restoration_abandoned();
+        assert!(
+            changed
+                .has_changed()
+                .assured("the registry holds its sender"),
+            "a caller waiting for the restoration is woken"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod shuttle_tests {
+    use nervix_model_harness::shuttle::check_random_and_pct;
+    use nervix_primitives::sync::{mpsc, oneshot};
+
+    use super::*;
+
+    fn domain() -> DomainName {
+        DomainName::parse("sim").assured("a literal domain name")
+    }
+
+    fn attached() -> DomainClockAttachOutcome {
+        DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::Attached {
+                domain: domain(),
+                clock: DomainClockObservation {
+                    generation: 1,
+                    state: DomainClockObservedState::Unpaced,
+                },
+            },
+            message: String::new(),
+        }
+    }
+
+    /// What the client sends its session about the clock.
+    #[derive(Debug)]
+    enum ClockRequest {
+        Attach,
+        /// A detach, whose sender waits for its answer.
+        Detach(oneshot::Sender<()>),
+    }
+
+    /// A detach races the restoration of its interrupted clock, which decides whether to attach
+    /// the clock and sends the attach it decided on. The session serves both in the order it
+    /// receives them, holding at most one attachment as the ordered lane does, and the client
+    /// applies each reply before the next request is served. Whatever the order, the session
+    /// holds no attachment of the clock once the detach is answered, and the client does not
+    /// follow it.
+    #[test]
+    fn shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let clocks = DomainClockAttachments::new();
+                let ended = Arc::new(());
+                clocks.apply_attach(&attached(), &ended);
+                clocks.exchange_ended(&ended);
+                let (requests, mut received) = mpsc::channel(2);
+                let restoring = {
+                    let clocks = clocks.clone();
+                    let requests = requests.clone();
+                    nervix_primitives::task::spawn(async move {
+                        loop {
+                            nervix_primitives::task::consume_budget().await;
+                            let mut changed = clocks.watch();
+                            let step = clocks
+                                .restoration_step(&domain(), ClockRestorationScope::Interrupted);
+                            match step {
+                                ClockRestorationStep::Attach(attempt) => {
+                                    // The production restoration registers the request's waiter
+                                    // and encodes its frame between deciding and sending, while
+                                    // the caller's detach goes on.
+                                    nervix_primitives::task::yield_now().await;
+                                    requests
+                                        .send(ClockRequest::Attach)
+                                        .await
+                                        .assured("the session serves until both sides finish");
+                                    drop(attempt);
+                                    return;
+                                }
+                                ClockRestorationStep::AwaitRelease => {
+                                    changed.changed().await.assured(
+                                        "the attachments hold the sender of their notifications",
+                                    );
+                                }
+                                ClockRestorationStep::Done => return,
+                            }
+                        }
+                    })
+                };
+                let detaching = {
+                    let clocks = clocks.clone();
+                    nervix_primitives::task::spawn(async move {
+                        let release = clocks.release(&domain());
+                        release.settled().await;
+                        let (answer, answered) = oneshot::channel();
+                        requests
+                            .send(ClockRequest::Detach(answer))
+                            .await
+                            .assured("the session serves until both sides finish");
+                        answered.await.assured("the session answers the detach");
+                        drop(release);
+                    })
+                };
+                let serving = {
+                    let clocks = clocks.clone();
+                    nervix_primitives::task::spawn(async move {
+                        let session = Arc::new(());
+                        let mut holds = false;
+                        while let Some(request) = received.recv().await {
+                            nervix_primitives::task::consume_budget().await;
+                            match request {
+                                ClockRequest::Attach => {
+                                    let outcome = if holds {
+                                        DomainClockAttachOutcome {
+                                            disposition:
+                                                DomainClockAttachDisposition::AlreadyAttached(
+                                                    domain(),
+                                                ),
+                                            message: String::new(),
+                                        }
+                                    } else {
+                                        attached()
+                                    };
+                                    holds = true;
+                                    clocks.apply_attach(&outcome, &session);
+                                }
+                                ClockRequest::Detach(answer) => {
+                                    let disposition = if holds {
+                                        DomainClockDetachDisposition::Detached(domain())
+                                    } else {
+                                        DomainClockDetachDisposition::NotAttached(domain())
+                                    };
+                                    holds = false;
+                                    clocks.apply_detach(&DomainClockDetachOutcome {
+                                        disposition,
+                                        message: String::new(),
+                                    });
+                                    answer.send(()).assured("the detach waits for its answer");
+                                }
+                            }
+                        }
+                        holds
+                    })
+                };
+                restoring
+                    .await
+                    .assured("the restoration only decides and sends its attach");
+                detaching
+                    .await
+                    .assured("the detach only waits for its turn and its answer");
+                let holds = serving
+                    .await
+                    .assured("the session only serves what it receives");
+                assert!(
+                    !holds,
+                    "the session holds an attachment of a clock the client released"
+                );
+                assert!(
+                    clocks.latest(&domain()).is_none(),
+                    "the client follows a clock it released"
+                );
+            });
+        });
     }
 }

@@ -36,6 +36,7 @@ mod infrastructure;
 mod ingestor;
 mod model;
 mod processor;
+mod remote;
 mod route;
 mod schema;
 mod statement;
@@ -44,10 +45,10 @@ mod text;
 mod wasm;
 
 pub use client::ClientParts;
-pub use emitter::SinkVariant;
 pub use entropy::Entropy;
 pub use expression::{EXPRESSION_DEPTH, ExpressionForm};
 pub use model::ModelVariant;
+pub use remote::assert_remote_keys_eq;
 pub use route::{RouteBranch, RouteFlush, RouteShape};
 pub use schema::fields_of_every_type;
 pub use statement::StatementVariant;
@@ -104,11 +105,10 @@ impl<'bytes> Arbitrary<'bytes> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::{EmitSinkKind, IngestSourceKind, PostgresSinkEntity};
     use strum::IntoEnumIterator as _;
 
-    use super::{
-        Arbitrary, Domain, Entropy, ExpressionForm, ModelVariant, SinkVariant, StatementVariant,
-    };
+    use super::{Arbitrary, Domain, Entropy, ExpressionForm, ModelVariant, StatementVariant};
 
     /// Bytes that differ from seed to seed, so each check sees more than one shape of a value.
     fn seeded_bytes(seed: u8) -> Vec<u8> {
@@ -130,26 +130,40 @@ mod tests {
             ExpressionForm::ALL.to_vec(),
             ExpressionForm::iter().collect::<Vec<_>>()
         );
-        assert_eq!(
-            SinkVariant::ALL.to_vec(),
-            SinkVariant::iter().collect::<Vec<_>>()
-        );
     }
 
     #[test]
     fn every_sink_is_built_as_requested_in_both_domains() {
         for domain in [Domain::Nspl, Domain::Vocabulary] {
-            for variant in SinkVariant::ALL {
+            for kind in EmitSinkKind::all() {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
                     let mut arbitrary = Arbitrary::new(&bytes, domain);
-                    let emitter = arbitrary.create_emitter_to(variant);
-                    assert_eq!(SinkVariant::of(&emitter.sink), variant, "{domain:?}");
+                    let emitter = arbitrary.create_emitter_to(kind);
+                    assert_eq!(emitter.sink.kind(), kind, "{domain:?}");
                     assert!(
                         emitter
                             .sink
                             .accepts_publishing_mode(&emitter.publishing_mode),
-                        "{domain:?} {variant:?}"
+                        "{domain:?} {kind:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_source_is_built_as_requested_in_both_domains() {
+        for domain in [Domain::Nspl, Domain::Vocabulary] {
+            for kind in IngestSourceKind::all() {
+                for seed in 0..4 {
+                    let bytes = seeded_bytes(seed);
+                    let mut arbitrary = Arbitrary::new(&bytes, domain);
+                    let ingestor = arbitrary.create_ingestor_from(kind);
+                    assert_eq!(ingestor.input.source_kind(), kind, "{domain:?}");
+                    assert!(
+                        ingestor.input.supports_quiesce(ingestor.input.quiesce()),
+                        "{domain:?} {kind:?}"
                     );
                 }
             }
@@ -240,12 +254,15 @@ mod tests {
         for seed in 0..=u8::MAX {
             let bytes = seeded_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
-            let emitter = arbitrary.create_emitter_to(SinkVariant::Postgres);
-            let nervix_models::EmitSink::Postgres {
-                values,
-                conflict_action,
-                ..
-            } = emitter.sink.as_ref()
+            let emitter =
+                arbitrary.create_emitter_to(EmitSinkKind::Postgres(PostgresSinkEntity::Table));
+            let nervix_models::EmitSink::Postgres(nervix_models::PostgresSink::Table(
+                nervix_models::PostgresTableSink {
+                    values,
+                    conflict_action,
+                    ..
+                },
+            )) = emitter.sink.as_ref()
             else {
                 panic!("a Postgres sink was requested, found {:?}", emitter.sink);
             };

@@ -113,11 +113,12 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
-        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
-        POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
-        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
+        ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
+        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+        TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -12075,6 +12076,27 @@ async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
     }
 }
 
+#[then("every node reports that its last shutdown finished before its deadline")]
+async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+    world: &mut ScenarioWorld,
+) {
+    for node_id in world.cluster().node_ids() {
+        let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
+            panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
+        };
+        if let Some(failure) = world.cluster().node_run_failure(&node_id) {
+            panic!(
+                "node '{node_id}' did not finish its shutdown cleanly, with phases {shutdown:?}: \
+                 {failure}"
+            );
+        }
+        assert!(
+            !shutdown.deadline_expired(),
+            "node '{node_id}' finished its last shutdown past its deadline: {shutdown:?}"
+        );
+    }
+}
+
 #[then(expr = "the last authentication attempts take at least {string}")]
 async fn then_last_authentication_attempts_take_at_least(
     world: &mut ScenarioWorld,
@@ -12742,8 +12764,7 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let Some(nervix_models::IngestSource::Mqtt { .. }) = ingestor.input.transport_source()
-        else {
+        let Some(nervix_models::IngestSource::Mqtt(_)) = ingestor.input.transport_source() else {
             continue;
         };
         world
@@ -26488,30 +26509,31 @@ async fn then_quickwit_index_eventually_contains(
     }
 }
 
+/// How long a scenario waits for text in the OpenTelemetry Collector's followed output.
+const OTEL_COLLECTOR_CONTENT_BOUND: Duration = Duration::from_secs(10);
+
 #[then(expr = "OpenTelemetry Collector eventually contains {string}")]
 async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expected: String) {
     let expected = expand_placeholders(world, &expected);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        if world
-            .dependencies
-            .otel_collector_contains(&expected)
-            .await
-            .expect("OpenTelemetry Collector logs must be readable")
-        {
-            return;
-        }
-        if Instant::now() >= deadline {
-            let logs = world.dependencies.otel_collector_logs().await;
-            panic!(
-                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; last \
-                 command output: {:?}; collector output:\n{logs:?}",
-                world.last_command_output
-            );
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let wait = output
+        .wait_for(&expected, OTEL_COLLECTOR_CONTENT_BOUND)
+        .await;
+    let ended = match wait {
+        CollectorWait::Found => return,
+        CollectorWait::Elapsed => format!("its {OTEL_COLLECTOR_CONTENT_BOUND:?} bound passed"),
+        CollectorWait::FollowerStopped => "the follower stopped reading it".to_string(),
+    };
+    let missed = output.missed(&expected, &world.test_id);
+    panic!(
+        "timed out waiting for OpenTelemetry Collector to contain {expected:?}: {ended}; \
+         {missed}; last command output: {:?}",
+        world.last_command_output
+    );
 }
 
 #[then(
@@ -26523,66 +26545,67 @@ async fn then_otel_collector_receives_split_exports(
     signal: String,
     #[step] step: &Step,
 ) {
-    let (heading, count_key) = match signal.as_str() {
-        "logs" => ("Logs", "log records"),
-        "traces" => ("Traces", "spans"),
-        "metrics" => ("Metrics", "data points"),
-        _ => panic!("unsupported OTEL signal {signal}"),
-    };
+    let signal = signal
+        .parse::<CollectorSignal>()
+        .expect("the step names the logs, traces or metrics signal");
     let expected = expand_placeholders(world, docstring(step));
     let members = expected
         .lines()
         .map(str::trim)
         .filter(|member| !member.is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(members.len(), 3, "the step names exactly three members");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let export_boundary = format!("\tinfo\t{heading}\t");
+    let &[first, second, third] = members.as_slice() else {
+        panic!("the step names exactly three members, not {members:?}");
+    };
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let deadline = Instant::now() + OTEL_COLLECTOR_CONTENT_BOUND;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let logs = world
-            .dependencies
-            .otel_collector_logs()
-            .await
-            .expect("OpenTelemetry Collector logs must be readable");
-        let mut two_record_export = None;
-        let mut one_record_export = None;
+        let printed = output.text();
+        let exports = signal.exports(&printed);
+        let mut two_member_export = None;
+        let mut one_member_export = None;
         let mut observed = Vec::new();
-        for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
-            let count = block
-                .lines()
-                .next()
-                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .and_then(|header| header[count_key].as_u64());
-            let carried = members
-                .iter()
-                .filter(|member| block.contains(**member))
+        for (index, export) in exports.iter().enumerate() {
+            let first_at = export.position(first);
+            let second_at = export.position(second);
+            let third_at = export.position(third);
+            let named = [first_at, second_at, third_at]
+                .into_iter()
+                .flatten()
                 .count();
-            if carried > 0 {
-                observed.push(format!(
-                    "export {index}: {count:?} {count_key}, {carried} named"
-                ));
+            if named == 0 {
+                continue;
             }
-            if count == Some(2)
-                && block.find(members[0]).is_some_and(|first| {
-                    block.find(members[1]).is_some_and(|second| first < second)
-                })
+            let records = export.records();
+            observed.push(format!(
+                "export {index}: {records} {}, {named} named",
+                signal.record_noun()
+            ));
+            if records == 2
+                && let (Some(first_at), Some(second_at)) = (first_at, second_at)
+                && first_at < second_at
             {
-                two_record_export = Some(index);
+                two_member_export = Some(index);
             }
-            if count == Some(1) && block.contains(members[2]) {
-                one_record_export = Some(index);
+            if records == 1 && third_at.is_some() {
+                one_member_export = Some(index);
             }
         }
-        if let (Some(first), Some(second)) = (two_record_export, one_record_export)
-            && first < second
+        if let (Some(two_members), Some(one_member)) = (two_member_export, one_member_export)
+            && two_members < one_member
         {
             return;
         }
         assert!(
             Instant::now() < deadline,
             "timed out waiting for ordered two-member and one-member {signal} exports; observed \
-             {observed:?}"
+             {observed:?}; followed {}",
+            output.progress()
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }

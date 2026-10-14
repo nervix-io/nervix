@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use super::*;
+use super::{
+    audit::{AuditCandidate, AuditPattern, Construct, ErrorInformation, KeyedOperation},
+    *,
+};
 
 fn report(seed: &[u8; 32]) -> CompilerReport {
     let mut findings = Vec::new();
@@ -17,6 +20,12 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
     for index in 0..seed[1] % 5 {
         arguments.push(format!("{index}:{}", text(seed)));
     }
+    let mut audit = Vec::new();
+    for index in 0..seed[2] % 5 {
+        let mut candidate_seed = *seed;
+        candidate_seed.rotate_left(usize::from(index) * 5 + 1);
+        audit.push(audit_candidate(&candidate_seed, index));
+    }
     CompilerReport {
         compiler: text(seed),
         identity: text(seed),
@@ -24,6 +33,7 @@ fn report(seed: &[u8; 32]) -> CompilerReport {
         crate_name: text(seed),
         crate_source: text(seed),
         arguments,
+        audit,
         findings,
         excluded_generated: integer(seed, 6),
         excluded_external: integer(seed, 7),
@@ -96,6 +106,91 @@ fn finding(seed: &[u8; 32], index: u8) -> Finding {
     }
 }
 
+fn audit_candidate(seed: &[u8; 32], index: u8) -> AuditCandidate {
+    let finding = finding(seed, index);
+    let mut span = finding.span;
+    // Patterns with two ordered operations need room for the second offset.
+    if matches!(seed[19] % 7, 0 | 3) {
+        span.site.start &= 0x00ff_ffff;
+        span.end = span.site.start + u32::from(seed[17]);
+    }
+    AuditCandidate {
+        owner: format!("example::owner::{{closure#{index}}}:{}", text(seed)),
+        context: seed[15].is_multiple_of(2).then(|| context(seed)),
+        pattern: pattern(seed, &span),
+        span,
+        expansion: finding.expansion,
+    }
+}
+
+/// Every current audit pattern, with seed-selected values in each of its fields.
+fn pattern(seed: &[u8; 32], source: &SourceSpan) -> AuditPattern {
+    let name = format!("value_{}", seed[16]);
+    let mut later = source.clone();
+    if matches!(seed[19] % 7, 0 | 3) {
+        later.site.start = source.site.start + u32::from(seed[17]) + 1;
+        later.end = later.end.max(later.site.start);
+    }
+    let information = match seed[18] % 3 {
+        0 => ErrorInformation::Report,
+        1 => ErrorInformation::Value,
+        _ => ErrorInformation::Generic,
+    };
+    match seed[19] % 7 {
+        0 => AuditPattern::RepeatedLookup {
+            collection: "std::collections::hash::map::HashMap".into(),
+            receiver: format!("self.{name}"),
+            key: name.clone(),
+            guarded: seed[20].is_multiple_of(2),
+            operations: vec![
+                KeyedOperation {
+                    operation: "get_mut".into(),
+                    span: source.clone(),
+                },
+                KeyedOperation {
+                    operation: "insert".into(),
+                    span: later,
+                },
+            ],
+        },
+        1 => AuditPattern::KeyAllocation {
+            collection: "alloc::collections::btree::map::BTreeMap".into(),
+            operation: "get".into(),
+            allocation: "to_string".into(),
+            key_type: name,
+        },
+        2 => AuditPattern::BorrowedCopy {
+            operation: "clone".into(),
+            value_type: name,
+        },
+        3 => AuditPattern::DuplicatedBranch {
+            construct: if seed[20].is_multiple_of(2) {
+                Construct::If
+            } else {
+                Construct::Match
+            },
+            statement: name,
+            occurrences: vec![source.clone(), later],
+        },
+        4 => AuditPattern::ForwardingWrapper {
+            callee: format!("example::{name}"),
+            callers: u32::from(seed[21]),
+            contract: seed[20].is_multiple_of(2),
+            implementation: seed[21].is_multiple_of(2),
+            relocated: seed[22].is_multiple_of(2),
+        },
+        5 => AuditPattern::DiscardedError {
+            operation: "Result::ok".into(),
+            error_type: name,
+            information,
+        },
+        _ => AuditPattern::DisguisedClamp {
+            operation: "checked_sub".into(),
+            fallback: name,
+        },
+    }
+}
+
 fn context(seed: &[u8; 32]) -> Context {
     let kind = match seed[8] % 5 {
         0 => "recurring",
@@ -126,9 +221,11 @@ fn generated_reports_reach_empty_and_multiple_items_and_integer_boundaries() {
     let empty = report(&[0; 32]);
     assert!(empty.findings.is_empty());
     assert!(empty.arguments.is_empty());
+    assert!(empty.audit.is_empty());
     let multiple = report(&[4; 32]);
     assert_eq!(multiple.findings.len(), 4);
     assert_eq!(multiple.arguments.len(), 4);
+    assert_eq!(multiple.audit.len(), 4);
     for finding in &multiple.findings {
         assert_eq!(finding.expansion.len(), 4);
         assert!(finding.span.source.contains('🦀'));
@@ -162,6 +259,34 @@ fn bolero_compiler_reports_round_trip() {
                 assert!(
                     result.is_err(),
                     "every current finding field is required: {field}"
+                );
+            }
+        }
+        for audit in &original.audit {
+            let encoded = serde_json::to_value(audit)
+                .assured("a current audit candidate has its complete field set");
+            let candidate = encoded.as_object().assured("candidates encode as objects");
+            for field in candidate.keys() {
+                let mut incomplete = candidate.clone();
+                incomplete.remove(field);
+                let result =
+                    serde_json::from_value::<AuditCandidate>(serde_json::Value::Object(incomplete));
+                assert!(
+                    result.is_err(),
+                    "every current candidate field is required: {field}"
+                );
+            }
+            let pattern = candidate["pattern"]
+                .as_object()
+                .assured("patterns encode as tagged objects");
+            for field in pattern.keys() {
+                let mut incomplete = pattern.clone();
+                incomplete.remove(field);
+                let result =
+                    serde_json::from_value::<AuditPattern>(serde_json::Value::Object(incomplete));
+                assert!(
+                    result.is_err(),
+                    "every current pattern field is required: {field}"
                 );
             }
         }
@@ -405,6 +530,70 @@ fn recognition_requires_actual_definition_and_receiver_identity() {
         assert_eq!(acquisition(receiver, defining_crate, "borrow_mut"), None);
     }
     assert!(!may_acquire("borrow_mut"));
+}
+
+#[test]
+fn audit_catalogs_resolve_owners_and_conversions() {
+    use crate::audit::{
+        KeyedAccess, checked_operation, copies_text, copies_value, fallback, keyed_access,
+        preserves_value,
+    };
+    for (collection, operation, expected) in [
+        (
+            "std::collections::hash::map::HashMap",
+            "get_mut",
+            KeyedAccess::Lookup,
+        ),
+        (
+            "alloc::collections::btree::map::BTreeMap",
+            "contains_key",
+            KeyedAccess::Lookup,
+        ),
+        (
+            "indexmap::map::IndexMap",
+            "swap_remove",
+            KeyedAccess::Removal,
+        ),
+        ("dashmap::DashMap", "entry", KeyedAccess::Entry),
+        (
+            "std::collections::hash::set::HashSet",
+            "insert",
+            KeyedAccess::Insertion,
+        ),
+        ("serde_json::map::Map", "index", KeyedAccess::Lookup),
+    ] {
+        assert_eq!(keyed_access(collection, operation), Some(expected));
+        // An unrelated owner with the same method names is not a keyed collection.
+        assert_eq!(keyed_access("example::Registry", operation), None);
+    }
+    assert_eq!(
+        keyed_access("std::collections::hash::map::HashMap", "len"),
+        None
+    );
+    assert!(KeyedAccess::Lookup.borrows_key());
+    assert!(KeyedAccess::Removal.borrows_key());
+    assert!(!KeyedAccess::Insertion.borrows_key());
+    assert!(!KeyedAccess::Entry.borrows_key());
+    for operation in ["clone", "to_owned", "to_vec"] {
+        assert!(copies_value(operation));
+        assert!(!copies_text(operation));
+        assert!(preserves_value(operation));
+    }
+    // Formatting a number or converting a value is not a copy of existing text.
+    for operation in ["to_string", "into"] {
+        assert!(copies_text(operation));
+        assert!(!copies_value(operation));
+    }
+    for operation in ["as_str", "borrow", "copied"] {
+        assert!(preserves_value(operation));
+        assert!(!copies_value(operation));
+        assert!(!copies_text(operation));
+    }
+    assert!(!preserves_value("next"));
+    assert!(checked_operation("checked_sub"));
+    assert!(!checked_operation("saturating_sub"));
+    assert!(fallback("unwrap_or_default"));
+    assert!(!fallback("unwrap"));
 }
 
 #[test]

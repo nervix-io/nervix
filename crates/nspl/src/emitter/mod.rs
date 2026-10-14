@@ -4,12 +4,19 @@ use ahash_compile_time::HashSet;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, AlterEmitter, AlterEmitterOperation, BatchMessageLimit, ClickHouseValueMapping,
-    CodecName, CreateEmitter, CreateStatement, EmitSink, EmitterBatchPolicy, EmitterBody,
-    EmitterName, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    MaterializedStateDependency, MongoDbConflictAction, MySqlConflictAction,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    PayloadSizeLimit, PostgresConflictAction, ProcessorInputs, SqsFifoGroup,
+    AckMode, AlterEmitter, AlterEmitterOperation, BatchMessageLimit, ClickHouseSink,
+    ClickHouseTableSink, ClickHouseValueMapping, ClientConsumerSink, ClientSink, CodecName,
+    CreateEmitter, CreateStatement, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterName,
+    EmitterPublishingMode, HttpRequestSink, HttpSink, IcebergCatalog, IcebergSink,
+    IcebergStorageBackend, IcebergTableSink, IcebergValueMapping, KafkaSink, KafkaTopicSink,
+    MaterializedStateDependency, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
+    MqttSink, MqttTopicSink, MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink,
+    NatsSubjectSink, OtelAggregationTemporality, OtelLogsSink, OtelMappings, OtelMetric,
+    OtelMetricKind, OtelMetricsSink, OtelScope, OtelTracesSink, PayloadSizeLimit,
+    PostgresConflictAction, PostgresSink, PostgresTableSink, ProcessorInputs, PulsarSink,
+    PulsarTopicSink, RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink, RedisSink, SentryEventSink,
+    SentrySink, SqsFifoGroup, SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink,
+    ZeroMqPushSink, ZeroMqSink,
 };
 
 use crate::{
@@ -184,7 +191,7 @@ fn kafka_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Topic))
         .then(topic_ref())
-        .map(|(client, topic)| EmitSink::Kafka { client, topic })
+        .map(|(client, topic)| EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })))
 }
 
 fn client_emit_sink_parser<'src>()
@@ -192,7 +199,7 @@ fn client_emit_sink_parser<'src>()
     kw(Identifier::Client)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(schema_ref())
-        .map(|schema| EmitSink::Client { schema })
+        .map(|schema| EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })))
 }
 
 fn pulsar_emit_sink_parser<'src>()
@@ -201,7 +208,9 @@ fn pulsar_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Topic))
         .then(topic_ref())
-        .map(|(client, topic)| EmitSink::Pulsar { client, topic })
+        .map(|(client, topic)| {
+            EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink { client, topic }))
+        })
 }
 
 fn mqtt_emit_sink_parser<'src>()
@@ -210,7 +219,7 @@ fn mqtt_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Topic))
         .then(topic_ref())
-        .map(|(client, topic)| EmitSink::Mqtt { client, topic })
+        .map(|(client, topic)| EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink { client, topic })))
 }
 
 fn nats_emit_sink_parser<'src>()
@@ -219,7 +228,9 @@ fn nats_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Subject))
         .then(subject_ref())
-        .map(|(client, subject)| EmitSink::Nats { client, subject })
+        .map(|(client, subject)| {
+            EmitSink::Nats(NatsSink::Subject(NatsSubjectSink { client, subject }))
+        })
 }
 
 fn rabbitmq_emit_sink_parser<'src>()
@@ -228,7 +239,9 @@ fn rabbitmq_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Queue))
         .then(queue_ref())
-        .map(|(client, queue)| EmitSink::RabbitMq { client, queue })
+        .map(|(client, queue)| {
+            EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue }))
+        })
 }
 
 fn redis_emit_sink_parser<'src>()
@@ -238,21 +251,23 @@ fn redis_emit_sink_parser<'src>()
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Channel))
         .then(channel_ref())
-        .map(|(client, channel)| EmitSink::Redis { client, channel })
+        .map(|(client, channel)| {
+            EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink { client, channel }))
+        })
 }
 
 fn zeromq_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Zeromq)
         .ignore_then(client_ref())
-        .map(|client| EmitSink::ZeroMq { client })
+        .map(|client| EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client })))
 }
 
 fn syslog_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Syslog)
         .ignore_then(client_ref())
-        .map(|client| EmitSink::Syslog { client })
+        .map(|client| EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client })))
 }
 
 fn sqs_fifo_group_expression<'src>()
@@ -311,10 +326,12 @@ fn sqs_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Queue))
         .then(sqs_queue_name())
         .then(sqs_fifo_group_clause().or_not())
-        .map(|((client, queue), fifo_group)| EmitSink::Sqs {
-            client,
-            queue,
-            fifo_group,
+        .map(|((client, queue), fifo_group)| {
+            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                client,
+                queue,
+                fifo_group,
+            }))
         })
 }
 
@@ -322,7 +339,7 @@ fn sentry_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Sentry)
         .ignore_then(client_ref())
-        .map(|client| EmitSink::Sentry { client })
+        .map(|client| EmitSink::Sentry(SentrySink::Event(SentryEventSink { client })))
 }
 
 fn otel_temporality_parser<'src>()
@@ -349,6 +366,14 @@ fn otel_metric_kind_parser<'src>()
             .ignore_then(otel_temporality_parser())
             .map(|temporality| OtelMetricKind::Histogram { temporality }),
     ))
+}
+
+/// The signal an OTEL sink body spells after its client, which decides the entity the sink is.
+#[derive(Debug, Clone)]
+enum OtelSignal {
+    Logs,
+    Traces,
+    Metric(OtelMetric),
 }
 
 fn otel_signal_parser<'src>()
@@ -447,13 +472,22 @@ fn otel_emit_sink_parser<'src>()
         )
         .then(otel_scope_parser().or_not())
         .map(
-            |(((((client, signal), values), attributes), resource), scope)| EmitSink::Otel {
-                client,
-                signal,
-                values,
-                attributes: attributes.unwrap_or_default(),
-                resource: resource.unwrap_or_default(),
-                scope,
+            |(((((client, signal), values), attributes), resource), scope)| {
+                let mappings = OtelMappings {
+                    values,
+                    attributes: attributes.unwrap_or_default(),
+                    resource: resource.unwrap_or_default(),
+                    scope,
+                };
+                match signal {
+                    OtelSignal::Logs => EmitSink::from(OtelLogsSink { client, mappings }),
+                    OtelSignal::Traces => EmitSink::from(OtelTracesSink { client, mappings }),
+                    OtelSignal::Metric(metric) => EmitSink::from(OtelMetricsSink {
+                        client,
+                        metric,
+                        mappings,
+                    }),
+                }
             },
         )
 }
@@ -499,10 +533,12 @@ fn clickhouse_emit_sink_parser<'src>()
         .then(table_ref())
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
-        .map(|((client, table), values)| EmitSink::ClickHouse {
-            client,
-            table,
-            values,
+        .map(|((client, table), values)| {
+            EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
+                client,
+                table,
+                values,
+            }))
         })
 }
 
@@ -723,12 +759,12 @@ fn postgres_emit_sink_parser<'src>()
                     ));
                 }
             }
-            Ok(EmitSink::Postgres {
+            Ok(EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
                 client,
                 table,
                 values,
                 conflict_action,
-            })
+            })))
         })
 }
 
@@ -742,14 +778,14 @@ fn mysql_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
         .then(mysql_conflict_action())
-        .map(
-            |(((client, table), values), conflict_action)| EmitSink::MySql {
+        .map(|(((client, table), values), conflict_action)| {
+            EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
                 client,
                 table,
                 values,
                 conflict_action,
-            },
-        )
+            }))
+        })
 }
 
 fn mongodb_emit_sink_parser<'src>()
@@ -764,12 +800,14 @@ fn mongodb_emit_sink_parser<'src>()
         .then(mongodb_conflict_action())
         .try_map(|(((client, collection), values), conflict_action), span| {
             validate_mongodb_conflict_action(&values, &conflict_action, span)?;
-            Ok(EmitSink::MongoDb {
-                client,
-                collection,
-                values,
-                conflict_action,
-            })
+            Ok(EmitSink::MongoDb(MongoDbSink::Collection(
+                MongoDbCollectionSink {
+                    client,
+                    collection,
+                    values,
+                    conflict_action,
+                },
+            )))
         })
 }
 
@@ -794,15 +832,17 @@ fn iceberg_sink_shape<'src>()
         .then(string_lit().labelled("iceberg_location"))
         .then(iceberg_catalog_parser())
         .map(
-            |(((((backend, client), table), values), location), catalog)| EmitSink::Iceberg {
-                backend,
-                client,
-                table,
-                values,
-                location,
-                catalog,
-                commit_each: String::new(),
-                max_commit_size: String::new(),
+            |(((((backend, client), table), values), location), catalog)| {
+                EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
+                    backend,
+                    client,
+                    table,
+                    values,
+                    location,
+                    catalog,
+                    commit_each: String::new(),
+                    max_commit_size: String::new(),
+                }))
             },
         )
 }
@@ -814,7 +854,7 @@ fn iceberg_emit_sink_parser<'src>()
     iceberg_sink_shape()
         .then(iceberg_commit_each())
         .map(|(sink, (commit_each, max_commit_size))| match sink {
-            EmitSink::Iceberg {
+            EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 backend,
                 client,
                 table,
@@ -822,7 +862,7 @@ fn iceberg_emit_sink_parser<'src>()
                 location,
                 catalog,
                 ..
-            } => EmitSink::Iceberg {
+            })) => EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 backend,
                 client,
                 table,
@@ -831,7 +871,7 @@ fn iceberg_emit_sink_parser<'src>()
                 catalog,
                 commit_each,
                 max_commit_size,
-            },
+            })),
             other => other,
         })
         .boxed()
@@ -879,11 +919,11 @@ fn http_sink_parser<'src>()
         .then(request_ack_publishing_mode())
         .map(
             |(((client, method), path), publishing_mode)| SinkWithPublishingMode {
-                sink: EmitSink::Http {
+                sink: EmitSink::Http(HttpSink::Request(HttpRequestSink {
                     client,
                     method,
                     path,
-                },
+                })),
                 publishing_mode,
             },
         )
@@ -1163,7 +1203,7 @@ pub fn alter_emitter_parser<'src>()
         .ignore_then(alter_emit_sink_parser())
         .map(|sink| {
             let body = match &sink.sink {
-                EmitSink::Client { .. } => Some(EmitterBody::Client),
+                EmitSink::Client(_) => Some(EmitterBody::Client),
                 _ => None,
             };
             AlterEmitterOperation::SetSink {
@@ -1400,7 +1440,14 @@ pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::FlushPolicy;
+    use nervix_models::{
+        ClickHouseSink, ClickHouseTableSink, FlushPolicy, HttpRequestSink, HttpSink, IcebergSink,
+        IcebergTableSink, KafkaSink, KafkaTopicSink, MongoDbCollectionSink, MongoDbSink, MqttSink,
+        MqttTopicSink, MySqlSink, MySqlTableSink, NatsSink, NatsSubjectSink, OtelLogsSink,
+        OtelMetricsSink, OtelSink, PostgresSink, PostgresTableSink, PulsarSink, PulsarTopicSink,
+        RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink, RedisSink, SqsQueueSink, SqsSink,
+        SyslogCollectorSink, SyslogSink, ZeroMqPushSink, ZeroMqSink,
+    };
 
     use super::*;
     use crate::lexer::lex;
@@ -1434,7 +1481,9 @@ mod tests {
         )
         .expect("bare method and path fields complete their expressions");
 
-        let EmitSink::Http { method, path, .. } = parsed.sink.as_ref() else {
+        let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
+            parsed.sink.as_ref()
+        else {
             panic!("the sink must be HTTP, got {:?}", parsed.sink);
         };
         assert_eq!(
@@ -1461,10 +1510,10 @@ mod tests {
              POLICY BACKOFF 250ms MAX 30s",
         ))
         .expect("a bare mode completes the group before MODE");
-        let EmitSink::Sqs {
+        let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
             fifo_group: Some(nervix_models::SqsFifoGroup::Expression(group)),
             ..
-        } = parsed.sink.as_ref()
+        })) = parsed.sink.as_ref()
         else {
             panic!(
                 "the sink must be SQS with a group expression, got {:?}",
@@ -1483,7 +1532,9 @@ mod tests {
              ERROR LOG;",
         )
         .expect("values named like keywords stay in their entries");
-        let EmitSink::ClickHouse { values, .. } = parsed.sink.as_ref() else {
+        let EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink { values, .. })) =
+            parsed.sink.as_ref()
+        else {
             panic!("the sink must be ClickHouse, got {:?}", parsed.sink);
         };
         let expressions = values
@@ -1505,7 +1556,9 @@ mod tests {
         )
         .expect("PATH takes an expression, so the parenthesis after it opens that expression");
 
-        let EmitSink::Http { method, path, .. } = parsed.sink.as_ref() else {
+        let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
+            parsed.sink.as_ref()
+        else {
             panic!("the sink must be HTTP, got {:?}", parsed.sink);
         };
         assert_eq!(
@@ -1617,21 +1670,14 @@ mod tests {
              'checkout'} SCOPE 'nervix/audit' VERSION '1.0'",
         ))
         .expect("OTEL logs emitter should parse");
-        let EmitSink::Otel {
-            signal,
-            attributes,
-            resource,
-            scope,
-            ..
-        } = logs.sink.as_ref()
+        let EmitSink::Otel(OtelSink::Logs(OtelLogsSink { mappings, .. })) = logs.sink.as_ref()
         else {
             panic!("expected OTEL logs sink");
         };
-        assert!(matches!(signal, OtelSignal::Logs));
-        assert_eq!(attributes.len(), 1);
-        assert_eq!(resource.len(), 1);
+        assert_eq!(mappings.attributes.len(), 1);
+        assert_eq!(mappings.resource.len(), 1);
         assert_eq!(
-            scope.as_ref().map(|scope| scope.name.as_str()),
+            mappings.scope.as_ref().map(|scope| scope.name.as_str()),
             Some("nervix/audit")
         );
 
@@ -1644,10 +1690,7 @@ mod tests {
         .expect("OTEL traces emitter should parse");
         assert!(matches!(
             traces.sink.as_ref(),
-            EmitSink::Otel {
-                signal: OtelSignal::Traces,
-                ..
-            }
+            EmitSink::Otel(OtelSink::Traces(_))
         ));
 
         let gauge = parse_create_emitter(&otel_emitter(
@@ -1658,13 +1701,13 @@ mod tests {
         .expect("OTEL gauge emitter should parse");
         assert!(matches!(
             gauge.sink.as_ref(),
-            EmitSink::Otel {
-                signal: OtelSignal::Metric(OtelMetric {
+            EmitSink::Otel(OtelSink::Metrics(OtelMetricsSink {
+                metric: OtelMetric {
                     kind: OtelMetricKind::Gauge,
                     ..
-                }),
+                },
                 ..
-            }
+            }))
         ));
 
         let sum = parse_create_emitter(&otel_emitter(
@@ -1675,16 +1718,16 @@ mod tests {
         .expect("OTEL sum emitter should parse");
         assert!(matches!(
             sum.sink.as_ref(),
-            EmitSink::Otel {
-                signal: OtelSignal::Metric(OtelMetric {
+            EmitSink::Otel(OtelSink::Metrics(OtelMetricsSink {
+                metric: OtelMetric {
                     kind: OtelMetricKind::Sum {
                         monotonic: true,
                         temporality: OtelAggregationTemporality::Delta,
                     },
                     ..
-                }),
+                },
                 ..
-            }
+            }))
         ));
 
         let histogram = parse_create_emitter(&otel_emitter(
@@ -1696,15 +1739,15 @@ mod tests {
         .expect("OTEL histogram emitter should parse");
         assert!(matches!(
             histogram.sink.as_ref(),
-            EmitSink::Otel {
-                signal: OtelSignal::Metric(OtelMetric {
+            EmitSink::Otel(OtelSink::Metrics(OtelMetricsSink {
+                metric: OtelMetric {
                     kind: OtelMetricKind::Histogram {
                         temporality: OtelAggregationTemporality::Cumulative,
                     },
                     ..
-                }),
+                },
                 ..
-            }
+            }))
         ));
     }
 
@@ -1797,7 +1840,7 @@ mod tests {
             AlterEmitterOperation::SetSink {
                 ref sink,
                 ..
-            } if matches!(sink.as_ref(), EmitSink::ZeroMq { .. })
+            } if matches!(sink.as_ref(), EmitSink::ZeroMq(_))
         ));
         assert!(matches!(
             parsed.operations[5],
@@ -1862,11 +1905,11 @@ mod tests {
                 ..
             }] if matches!(
                 sink.as_ref(),
-                EmitSink::Iceberg {
+                EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                     commit_each,
                     max_commit_size,
                     ..
-                } if commit_each == "1m" && max_commit_size == "512MiB"
+                })) if commit_each == "1m" && max_commit_size == "512MiB"
             )
         ));
     }
@@ -1930,7 +1973,7 @@ mod tests {
                       MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
         assert_canonical_emitter_roundtrip(source, "CLIENT ACK");
         let parsed = parse_create_emitter(source).expect("native client output parses");
-        assert!(matches!(parsed.sink.as_ref(), EmitSink::Client { .. }));
+        assert!(matches!(parsed.sink.as_ref(), EmitSink::Client(_)));
         assert!(matches!(parsed.body.body, EmitterBody::Client));
         assert!(parsed.batch.is_some());
     }
@@ -2125,11 +2168,11 @@ mod tests {
         .expect("SQS FIFO FROM BRANCH mode should parse");
         assert!(matches!(
             from_branch.sink.as_ref(),
-            EmitSink::Sqs {
+            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                 queue,
                 fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
                 ..
-            } if queue == "events.fifo"
+            })) if queue == "events.fifo"
         ));
         let canonical = from_branch
             .to_canonical_nspl()
@@ -2145,10 +2188,10 @@ mod tests {
         .expect("SQS FIFO expression mode should parse");
         assert!(matches!(
             expression.sink.as_ref(),
-            EmitSink::Sqs {
+            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                 fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
                 ..
-            }
+            }))
         ));
     }
 
@@ -2238,11 +2281,11 @@ mod tests {
         );
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Kafka {
+            &EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
                 client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
                 topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
-            }
+            }))
         );
         assert_eq!(parsed.mode, AckMode::Attached);
     }
@@ -2388,7 +2431,7 @@ mod tests {
         assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::ClickHouse {
+            &EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
                 client: nervix_models::ClientName::try_from("clickhouse_client")
                     .expect("valid client identifier"),
                 table: nervix_models::TableName::try_from("my_table")
@@ -2407,7 +2450,7 @@ mod tests {
                         expression: expression("LOWER ( input.action )"),
                     },
                 ],
-            }
+            }))
         );
         assert_eq!(parsed.batch, Some(batch_policy(100, "1MiB")));
     }
@@ -2447,7 +2490,9 @@ mod tests {
 
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        let EmitSink::ClickHouse { values, .. } = parsed.sink.as_ref() else {
+        let EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink { values, .. })) =
+            parsed.sink.as_ref()
+        else {
             panic!("expected a ClickHouse sink, got {:?}", parsed.sink);
         };
         assert_eq!(
@@ -2519,7 +2564,7 @@ mod tests {
         assert_eq!(parsed.mode, AckMode::Detached);
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Iceberg {
+            &EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 backend: IcebergStorageBackend::S3,
                 client: nervix_models::ClientName::try_from("s3_client")
                     .expect("valid client identifier"),
@@ -2542,7 +2587,7 @@ mod tests {
                 },
                 commit_each: "1m".to_string(),
                 max_commit_size: "512MiB".to_string(),
-            }
+            }))
         );
     }
 
@@ -2567,7 +2612,7 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Iceberg {
+            &EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 backend: IcebergStorageBackend::Gcs,
                 client: nervix_models::ClientName::try_from("gcs_client")
                     .expect("valid client identifier"),
@@ -2590,7 +2635,7 @@ mod tests {
                 },
                 commit_each: "1m".to_string(),
                 max_commit_size: "512MiB".to_string(),
-            }
+            }))
         );
     }
 
@@ -2615,7 +2660,7 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Iceberg {
+            &EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 backend: IcebergStorageBackend::AzureBlob,
                 client: nervix_models::ClientName::try_from("azure_client")
                     .expect("valid client identifier"),
@@ -2640,7 +2685,7 @@ mod tests {
                 },
                 commit_each: "1m".to_string(),
                 max_commit_size: "512MiB".to_string(),
-            }
+            }))
         );
     }
 
@@ -2870,7 +2915,7 @@ mod tests {
         assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Postgres {
+            &EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
                 client: nervix_models::ClientName::try_from("postgres_client")
                     .expect("valid client identifier"),
                 table: nervix_models::TableName::try_from("my_table")
@@ -2890,7 +2935,7 @@ mod tests {
                     },
                 ],
                 conflict_action: PostgresConflictAction::None,
-            }
+            }))
         );
         assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
     }
@@ -2912,9 +2957,9 @@ mod tests {
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        let EmitSink::Postgres {
+        let EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
             conflict_action, ..
-        } = parsed.sink.as_ref()
+        })) = parsed.sink.as_ref()
         else {
             panic!("expected postgres emitter sink");
         };
@@ -2943,9 +2988,9 @@ mod tests {
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        let EmitSink::Postgres {
+        let EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
             conflict_action, ..
-        } = parsed.sink.as_ref()
+        })) = parsed.sink.as_ref()
         else {
             panic!("expected postgres emitter sink");
         };
@@ -3108,7 +3153,7 @@ mod tests {
         assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::MySql {
+            &EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
                 client: nervix_models::ClientName::try_from("mysql_client")
                     .expect("valid client identifier"),
                 table: nervix_models::TableName::try_from("my_table")
@@ -3128,7 +3173,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::None,
-            }
+            }))
         );
         assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
     }
@@ -3150,9 +3195,9 @@ mod tests {
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        let EmitSink::MySql {
+        let EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
             conflict_action, ..
-        } = parsed.sink.as_ref()
+        })) = parsed.sink.as_ref()
         else {
             panic!("expected mysql emitter sink");
         };
@@ -3176,9 +3221,9 @@ mod tests {
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        let EmitSink::MySql {
+        let EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
             conflict_action, ..
-        } = parsed.sink.as_ref()
+        })) = parsed.sink.as_ref()
         else {
             panic!("expected mysql emitter sink");
         };
@@ -3287,7 +3332,7 @@ mod tests {
         assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::MongoDb {
+            &EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
                 client: nervix_models::ClientName::try_from("mongodb_client")
                     .expect("valid client identifier"),
                 collection: nervix_models::CollectionName::try_from("my_collection")
@@ -3307,7 +3352,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MongoDbConflictAction::None,
-            }
+            }))
         );
         assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
     }
@@ -3329,9 +3374,10 @@ mod tests {
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        let EmitSink::MongoDb {
-            conflict_action, ..
-        } = parsed.sink.as_ref()
+        let EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+            conflict_action,
+            ..
+        })) = parsed.sink.as_ref()
         else {
             panic!("expected mongodb emitter sink");
         };
@@ -3360,9 +3406,10 @@ mod tests {
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        let EmitSink::MongoDb {
-            conflict_action, ..
-        } = parsed.sink.as_ref()
+        let EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+            conflict_action,
+            ..
+        })) = parsed.sink.as_ref()
         else {
             panic!("expected mongodb emitter sink");
         };
@@ -3538,11 +3585,11 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Pulsar {
+            &EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
                 client: nervix_models::ClientName::try_from("pulsar1")
                     .expect("valid client identifier"),
                 topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
-            }
+            }))
         );
     }
 
@@ -3680,11 +3727,11 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Mqtt {
+            &EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
                 client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
                 topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
-            }
+            }))
         );
     }
 
@@ -3702,12 +3749,12 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Nats {
+            &EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
                 client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
                 subject: nervix_models::SubjectName::try_from("notifications")
                     .expect("valid subject identifier"),
-            }
+            }))
         );
     }
 
@@ -3725,12 +3772,12 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::RabbitMq {
+            &EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
                 client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
                 queue: nervix_models::QueueName::try_from("queue1")
                     .expect("valid queue identifier"),
-            }
+            }))
         );
     }
 
@@ -3748,12 +3795,12 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Redis {
+            &EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
                 client: nervix_models::ClientName::try_from("broker1")
                     .expect("valid client identifier"),
                 channel: nervix_models::ChannelName::try_from("out")
                     .expect("valid channel identifier"),
-            }
+            }))
         );
     }
 
@@ -3795,10 +3842,10 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::ZeroMq {
+            &EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                 client: nervix_models::ClientName::try_from("zmq_out")
                     .expect("valid client identifier"),
-            }
+            }))
         );
     }
 
@@ -3815,10 +3862,10 @@ mod tests {
         let parsed = parse_create_emitter(input).expect("parse should succeed");
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Syslog {
+            &EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
                 client: nervix_models::ClientName::try_from("syslog_out")
                     .expect("valid client identifier"),
-            }
+            }))
         );
         assert!(matches!(
             parsed.publishing_mode,
@@ -3871,12 +3918,12 @@ mod tests {
 
         assert_eq!(
             parsed.sink.as_ref(),
-            &EmitSink::Sqs {
+            &EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                 client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
                 queue: "queue1".to_string(),
                 fifo_group: None,
-            }
+            }))
         );
     }
 

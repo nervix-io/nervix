@@ -24,7 +24,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     BranchName, CanonicalNsplError, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
+    EndpointSourceEntity, IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
     RequestedResourceVersion, ResourceName, ResourceVersionStatus, SchemaField,
 };
 
@@ -396,7 +396,9 @@ impl ConfiguredChoices {
                     )?
                 }
                 (
-                    ConfiguredQuestion::IngestSource(IngestSourceKind::Endpoint),
+                    ConfiguredQuestion::IngestSource(IngestSourceKind::Endpoint(
+                        EndpointSourceEntity::Endpoint,
+                    )),
                     Model::Endpoint(endpoint),
                 ) => ModelCandidate::new(
                     NodeRef::new(ModelKind::Endpoint, &endpoint.name),
@@ -406,7 +408,7 @@ impl ConfiguredChoices {
                 )?,
                 (ConfiguredQuestion::IngestSource(kind), model)
                     if model.kind() == ModelKind::Client
-                        && model.client_type_label() == kind.client_type_label() =>
+                        && model.connector_kind() == kind.client_connector() =>
                 {
                     ModelCandidate::new(
                         model.node_ref(),
@@ -811,13 +813,13 @@ mod tests {
     use nervix_models::{
         AvroType, BranchEviction, BranchName, CodecName, CodecWireFormat, CreateBranch,
         CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWireSchema, DomainName, FieldName, JsonType, MaterializedRelayState, Model,
-        ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching, RelayName,
-        RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
-        ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
-        ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
-        WireSchemaField, WireSchemaName, WireSchemaStrictness,
+        CreateWireSchema, DomainName, EndpointSourceEntity, FieldName, HttpSourceEntity, JsonType,
+        KafkaSourceEntity, MaterializedRelayState, Model, ModelKind, ModelName, NodeRef,
+        ParseAsType, RelayBranching, RelayName, RequestedResourceVersion, ResourceName,
+        ResourceUpload, ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState,
+        ResourceUploads, ResourceVersionCounter, ResourceVersionStatus, SchemaField, SchemaName,
+        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat,
+        UserName, VhostName, WireSchemaField, WireSchemaName, WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -934,7 +936,7 @@ mod tests {
         let in_domain = vec![ChoiceSelection {
             value: ChoiceValue::Domain(domain()),
         }];
-        for kind in IngestSourceKind::ALL {
+        for kind in IngestSourceKind::modeled() {
             let request = ChoiceLookupRequest::new(
                 ChoiceTarget::for_ingest_source(kind),
                 in_domain.clone(),
@@ -1159,15 +1161,21 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http)),
+            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http(
+                HttpSourceEntity::Request
+            ))),
             ["http_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Kafka)),
+            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Kafka(
+                KafkaSourceEntity::Topic
+            ))),
             ["kafka_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Endpoint)),
+            labels(ConfiguredQuestion::IngestSource(
+                IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint)
+            )),
             ["listener"]
         );
         assert_eq!(labels(ConfiguredQuestion::IngestCodecs), ["decode"]);

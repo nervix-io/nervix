@@ -200,6 +200,21 @@ that opened it, and a forwarded producer's link key is never reused within its p
 has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
 zero counts, never markers.
 
+**Sources and sinks.** A source or a sink is addressed by the connector that serves it and the
+entity it consumes, and its Model states both in its shape: the union holds one variant per
+connector, that variant holds one variant per entity, and each entity has its own Model with only
+the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
+an OpenTelemetry sink is a logs, a traces or a metrics sink, so only a metrics sink carries a
+metric and no signal value sits beside mappings that might contradict it. The kind that names a
+pair is read from the Model and never stored beside it. What every source or sink of a pair
+declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
+whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
+every node, what its body references, and for a sink whether it writes headers, needs a codec,
+requires batching and which publishing modes it accepts. A client Model names the connector it
+configures as a typed kind, so a source or a sink is matched with its client by comparing kinds
+rather than labels. A session producer's source is no transport, so the transport union holds no
+Model of it; the kind union still names it, because capability decisions ask about every source.
+
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission
 requires that validated interconnect endpoint; an incomplete publication cannot become a

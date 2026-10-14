@@ -6873,6 +6873,8 @@ name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
+ "criterion 0.5.1",
  "error-stack",
  "futures-util",
  "humantime",
@@ -6977,6 +6979,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
  "faster-hex",
@@ -7187,9 +7190,11 @@ name = "nervix-connector-websockets"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-connector",
  "nervix-dns",
  "nervix-jaq",
@@ -7791,11 +7796,13 @@ dependencies = [
  "clap",
  "error-stack",
  "hickory-proto 0.26.3",
+ "memchr",
  "meticulous",
  "nervix-primitives",
  "nervix-recovery",
  "reqwest 0.13.5",
  "serde_json",
+ "strum 0.26.3",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.21",
