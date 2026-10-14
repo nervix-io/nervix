@@ -8,6 +8,7 @@ source diagnostics, generated reports, semantic fixtures and paired API doctests
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
 walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
+`test-turmoil` collects the canonical simulation suite, including its fresh-process attempts,
 `test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
 `test-deadlock-report` exercises the ordinary local report command in its own build, and
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore`
@@ -262,6 +263,10 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="test-loom", mode="loom", prepare=("build-web-console",),
         instrumented="test-loom-models", finish=(), filterable=True,
+    ),
+    Producer(
+        name="test-turmoil", mode="turmoil", prepare=(),
+        instrumented="test-turmoil", finish=(),
     ),
     Producer(
         name="test-deadlock-evidence-order", mode="deloxide-order", prepare=(),
