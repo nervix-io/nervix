@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** Syslog UDP, TCP and TLS listeners, RFC 6587 stream framing, peer metadata, and
 //!   source lifecycle operations.
-//! - **Depends on.** The connector source contract, connector-owned Syslog configuration, Tokio
-//!   sockets, `memchr`, and rustls.
+//! - **Depends on.** The connector source contract, connector-owned Syslog configuration,
+//!   execution-sensitive sockets and channels, `memchr`, rustls, and a test-only accept fault
+//!   channel supplied by the host.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
 #![cfg_attr(
@@ -31,6 +32,8 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::ClientConfigEntry;
+#[cfg(feature = "testing")]
+use nervix_primitives::{net::TcpStream, sync::broadcast};
 use nervix_primitives::{
     net::{TcpListener, UdpSocket},
     sync::{mpsc, watch},
@@ -54,6 +57,8 @@ const STREAM_READ_CHUNK: usize = 8_192;
 pub struct SyslogSourcePlan {
     config: SyslogClientConfig,
     bind_addr: String,
+    #[cfg(feature = "testing")]
+    listener_faults: Option<broadcast::Sender<(String, watch::Sender<bool>)>>,
 }
 
 impl SyslogSourcePlan {
@@ -63,7 +68,21 @@ impl SyslogSourcePlan {
     ) -> error_stack::Result<Self, SyslogConfigError> {
         let config = SyslogClientConfig::parse(&entries, SyslogDirection::Ingest)?;
         let bind_addr = bind_addr(&config.addr);
-        Ok(Self { config, bind_addr })
+        Ok(Self {
+            config,
+            bind_addr,
+            #[cfg(feature = "testing")]
+            listener_faults: None,
+        })
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn with_listener_faults(
+        mut self,
+        faults: broadcast::Sender<(String, watch::Sender<bool>)>,
+    ) -> Self {
+        self.listener_faults = Some(faults);
+        self
     }
 }
 
@@ -123,11 +142,17 @@ struct SyslogUdpListener {
 }
 
 struct SyslogStreamListener {
-    listener: TcpListener,
+    /// An accept failure retires only this socket; established connection tasks and queued
+    /// frames remain owned by the same source until resume rebinds it.
+    listener: Option<TcpListener>,
     frame_tx: mpsc::Sender<ReceivedSyslogFrame>,
     frame_rx: mpsc::Receiver<ReceivedSyslogFrame>,
     connections: JoinSet<error_stack::Result<(), SyslogConnectionError>>,
     paused: watch::Sender<bool>,
+    #[cfg(feature = "testing")]
+    listener_faults: Option<broadcast::Receiver<(String, watch::Sender<bool>)>>,
+    #[cfg(feature = "testing")]
+    bind_addr: String,
 }
 
 pub struct SyslogSource {
@@ -135,6 +160,8 @@ pub struct SyslogSource {
     bind_addr: String,
     tls_acceptor: Option<TlsAcceptor>,
     listener: Option<SyslogListener>,
+    #[cfg(feature = "testing")]
+    listener_faults: Option<broadcast::Sender<(String, watch::Sender<bool>)>>,
 }
 
 #[derive(Debug, Error)]
@@ -220,11 +247,17 @@ impl SourceConnector for SyslogSource {
             bind_addr: plan.bind_addr.clone(),
             tls_acceptor,
             listener: None,
+            #[cfg(feature = "testing")]
+            listener_faults: plan.listener_faults.clone(),
         })
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.listener.is_none()
+        match self.listener.as_ref() {
+            None => true,
+            Some(SyslogListener::Stream(listener)) => listener.listener.is_none(),
+            Some(SyslogListener::Udp(_)) => false,
+        }
     }
 
     async fn suspend(&mut self) -> SourceResult<()> {
@@ -237,6 +270,17 @@ impl SourceConnector for SyslogSource {
     async fn resume(&mut self) -> SourceResult<SourceResume> {
         if let Some(listener) = self.listener.as_mut() {
             if let SyslogListener::Stream(listener) = listener {
+                if listener.listener.is_none() {
+                    let socket = TcpListener::bind(&self.bind_addr).await.map_err(|source| {
+                        Report::new(SyslogListenerError::Bind {
+                            transport: "stream",
+                            addr: self.bind_addr.clone(),
+                            source,
+                        })
+                        .change_context(SourceError::Resume { connector: SYSLOG })
+                    })?;
+                    listener.listener = Some(socket);
+                }
                 listener.paused.send_replace(false);
             }
             return Ok(SourceResume::Ready);
@@ -269,6 +313,9 @@ impl BrokerSourceConnector for SyslogSource {
                 listener.receive(self.config.max_message_size).await
             }
             Some(SyslogListener::Stream(listener)) => {
+                if listener.listener.is_none() {
+                    return Ok(SourceBatch::ResumeRequired);
+                }
                 listener
                     .receive(self.config.max_message_size, self.tls_acceptor.clone())
                     .await
@@ -277,10 +324,7 @@ impl BrokerSourceConnector for SyslogSource {
         };
         match result {
             Ok(message) => Ok(SourceBatch::Messages(vec![message])),
-            Err(error) => {
-                self.drop_listener();
-                Err(error.change_context(SourceError::Read { connector: SYSLOG }))
-            }
+            Err(error) => Err(self.on_listener_error(error)),
         }
     }
 
@@ -294,6 +338,20 @@ impl BrokerSourceConnector for SyslogSource {
 }
 
 impl SyslogSource {
+    fn on_listener_error(&mut self, error: Report<SyslogListenerError>) -> Report<SourceError> {
+        if matches!(
+            error.current_context(),
+            SyslogListenerError::StreamAccept { .. }
+        ) {
+            if let Some(SyslogListener::Stream(listener)) = self.listener.as_mut() {
+                listener.listener = None;
+            }
+        } else {
+            self.drop_listener();
+        }
+        error.change_context(SourceError::Read { connector: SYSLOG })
+    }
+
     async fn bind_listener(&self) -> error_stack::Result<SyslogListener, SyslogListenerError> {
         match self.config.protocol {
             SyslogProtocol::Udp => {
@@ -320,11 +378,18 @@ impl SyslogSource {
                 let (frame_tx, frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
                 let (paused, _) = watch::channel(false);
                 Ok(SyslogListener::Stream(SyslogStreamListener {
-                    listener,
+                    listener: Some(listener),
                     frame_tx,
                     frame_rx,
                     connections: JoinSet::new(),
                     paused,
+                    #[cfg(feature = "testing")]
+                    listener_faults: self
+                        .listener_faults
+                        .as_ref()
+                        .map(|faults| faults.subscribe()),
+                    #[cfg(feature = "testing")]
+                    bind_addr: self.bind_addr.clone(),
                 }))
             }
         }
@@ -375,8 +440,22 @@ impl SyslogStreamListener {
     ) -> error_stack::Result<SyslogSourceMessage, SyslogListenerError> {
         loop {
             nervix_primitives::task::consume_budget().await;
+            #[cfg(feature = "testing")]
+            let accept = accept_stream(
+                self.listener
+                    .as_ref()
+                    .assured("receive is called only with a bound listener"),
+                &self.bind_addr,
+                &mut self.listener_faults,
+            );
+            #[cfg(not(feature = "testing"))]
+            let accept = self
+                .listener
+                .as_ref()
+                .assured("receive is called only with a bound listener")
+                .accept();
             nervix_primitives::select! {
-                accepted = self.listener.accept() => {
+                accepted = accept => {
                     let (stream, peer_addr) = accepted.map_err(|source| {
                         Report::new(SyslogListenerError::StreamAccept { source })
                     })?;
@@ -441,6 +520,30 @@ impl SyslogStreamListener {
     }
 }
 
+#[cfg(feature = "testing")]
+async fn accept_stream(
+    listener: &TcpListener,
+    bind_addr: &str,
+    listener_faults: &mut Option<broadcast::Receiver<(String, watch::Sender<bool>)>>,
+) -> std::io::Result<(TcpStream, SocketAddr)> {
+    let Some(listener_faults) = listener_faults.as_mut() else {
+        return listener.accept().await;
+    };
+    loop {
+        nervix_primitives::select! {
+            accepted = listener.accept() => return accepted,
+            fault = listener_faults.recv() => match fault {
+                Ok((address, fired)) if address == bind_addr => {
+                    fired.send_replace(true);
+                    return Err(std::io::Error::other("injected Syslog stream accept failure"));
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return listener.accept().await,
+            }
+        }
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(
@@ -469,17 +572,17 @@ async fn read_stream_connection(
             .next_frame()
             .change_context(SyslogConnectionError::Frame)?
         {
-            nervix_primitives::select! {
-                sent = tx.send(ReceivedSyslogFrame { payload: frame, peer_addr }) => {
-                    if sent.is_err() {
-                        return Ok(());
-                    }
-                }
-                changed = paused.changed() => {
-                    if changed.is_err() {
-                        return Ok(());
-                    }
-                }
+            // Once decoded, this frame belongs to the intake handoff. A pause may stop the
+            // following read, but must not cancel a send already waiting on the bounded queue.
+            if tx
+                .send(ReceivedSyslogFrame {
+                    payload: frame,
+                    peer_addr,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
             }
             continue;
         }

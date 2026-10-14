@@ -204,6 +204,9 @@ struct FaultInjectionState {
     /// While set, every node refuses to install a runtime-state checkpoint it replicates.
     state_replica_installation_failing: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
+    /// A scenario can fail one stream accept on a selected bound address, and observe that the
+    /// source consumed the fault before checking its established connections.
+    syslog_listener_faults: broadcast::Sender<(String, watch::Sender<bool>)>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -382,6 +385,7 @@ pub(crate) struct LeadershipTransferRequest {
 impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
+        let (syslog_listener_faults, _) = broadcast::channel(16);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
@@ -432,6 +436,7 @@ impl Default for FaultInjection {
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
+                syslog_listener_faults,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
                 entity_gate_deadline: RwLock::new(None),
@@ -1923,6 +1928,24 @@ impl FaultInjection {
 
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.inner.syslog_ingestor_bind_ips.insert(node_id, host);
+    }
+
+    pub fn fail_next_syslog_stream_accept(&self, bind_addr: String) -> watch::Receiver<bool> {
+        let (fired, observed) = watch::channel(false);
+        assert!(
+            self.inner
+                .syslog_listener_faults
+                .send((bind_addr, fired))
+                .is_ok(),
+            "a Syslog source must be subscribed before its listener fault is armed"
+        );
+        observed
+    }
+
+    pub(crate) fn syslog_listener_faults(
+        &self,
+    ) -> broadcast::Sender<(String, watch::Sender<bool>)> {
+        self.inner.syslog_listener_faults.clone()
     }
 
     pub fn set_branch_instance_expiration_scan_interval(&self, interval: Duration) {

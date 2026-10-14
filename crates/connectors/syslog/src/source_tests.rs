@@ -1,11 +1,10 @@
 //! Syslog stream framing qualification.
 //!
 //! Layer: test harness.
-//! - **Owns.** RFC 6587 frames and failures at every read boundary, the read cursor and its single
-//!   compaction per read, and the property that framing does not depend on how reads split a
-//!   stream.
+//! - **Owns.** RFC 6587 framing at every read boundary and the connection handoff and listener
+//!   lifecycle invariants that keep decoded frames and established connections alive.
 //! - **Depends on.** The production stream frame decoder and connection reader.
-//! - **Must not know.** Codecs, runtime collectors or listener lifecycle.
+//! - **Must not know.** Codecs, runtime collectors or graph placement.
 
 #![cfg_attr(
     nervix_lint,
@@ -14,8 +13,10 @@
 
 use std::{
     collections::VecDeque,
+    future::{Future as _, poll_fn},
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use nonzero_ext::nonzero;
@@ -556,6 +557,136 @@ async fn a_connection_closes_on_the_first_malformed_frame() {
     assert_eq!(delivered, frames(&[b"tls!"]));
 }
 
+#[nervix_primitives::test]
+async fn a_decoded_frame_waiting_for_intake_survives_suspension() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
+    tx.send(ReceivedSyslogFrame {
+        payload: b"first".to_vec(),
+        peer_addr,
+    })
+    .await
+    .expect("the intake queue is open");
+    let (pause_tx, pause_rx) = watch::channel(false);
+    let mut connection = Box::pin(read_stream_connection(
+        ScriptedStream::new(&[b"6 second"]),
+        peer_addr,
+        nonzero!(128usize),
+        true,
+        tx,
+        pause_rx,
+    ));
+
+    // Poll through decoding to the full queue. This is the exact cancellation point: a pause
+    // change used to win the select and discard the already decoded second frame.
+    poll_fn(|context| {
+        assert!(matches!(connection.as_mut().poll(context), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    pause_tx.send_replace(true);
+    assert_eq!(
+        rx.recv()
+            .await
+            .expect("the first frame stays queued")
+            .payload,
+        b"first"
+    );
+    pause_tx.send_replace(false);
+    nervix_primitives::time::timeout(Duration::from_secs(1), connection)
+        .await
+        .expect("the connection resumes")
+        .expect("the second frame is complete");
+    assert_eq!(
+        rx.recv()
+            .await
+            .expect("the decoded frame must survive")
+            .payload,
+        b"second"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let reservation = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve an available listener port");
+    let bind_addr = reservation
+        .local_addr()
+        .expect("the reserved port has an address")
+        .to_string();
+    drop(reservation);
+    let plan = SyslogSourcePlan::new(
+        vec![
+            ClientConfigEntry {
+                key: "protocol".to_string(),
+                value: "tcp".to_string(),
+            },
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "127.0.0.1:5514".to_string(),
+            },
+        ],
+        |_| bind_addr,
+    )
+    .expect("the TCP plan is valid");
+    let mut source = SyslogSource::open(&plan, 0)
+        .await
+        .expect("the source opens");
+    source.resume().await.expect("the listener binds");
+    let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
+    let (mut client, server) = tokio::io::duplex(128);
+    let Some(SyslogListener::Stream(listener)) = source.listener.as_mut() else {
+        panic!("the source has a stream listener");
+    };
+    let tx = listener.frame_tx.clone();
+    let paused = listener.paused.subscribe();
+    listener.connections.spawn(read_stream_connection(
+        server,
+        peer_addr,
+        nonzero!(128usize),
+        true,
+        tx,
+        paused,
+    ));
+
+    let failure = source.on_listener_error(Report::new(SyslogListenerError::StreamAccept {
+        source: std::io::Error::other("accept failed"),
+    }));
+    assert!(failure.contains::<SyslogListenerError>());
+    assert!(source.needs_resume());
+
+    let blocker = TcpListener::bind(&source.bind_addr)
+        .await
+        .expect("another listener claims the retired socket's port");
+    let retry_failure = source
+        .resume()
+        .await
+        .expect_err("rebinding must report a transient error while the port is busy");
+    assert!(retry_failure.contains::<SyslogListenerError>());
+    assert!(source.needs_resume());
+
+    client
+        .write_all(b"6 second")
+        .await
+        .expect("the established connection remains writable");
+    client.shutdown().await.expect("the client closes cleanly");
+    let Some(SyslogListener::Stream(listener)) = source.listener.as_mut() else {
+        panic!("the source retains its stream state");
+    };
+    let frame = nervix_primitives::time::timeout(Duration::from_secs(1), listener.frame_rx.recv())
+        .await
+        .expect("the connection keeps reading")
+        .expect("the connection keeps its intake channel");
+    assert_eq!(frame.payload, b"second");
+    drop(blocker);
+    source.resume().await.expect("the listener rebinds");
+    assert!(!source.needs_resume());
+    source.close().await.expect("the source closes");
+}
+
 #[test]
 fn listener_connection_and_frame_failures_name_their_cause_once() {
     let refused = || std::io::Error::other("the peer reset the connection");
@@ -606,4 +737,63 @@ fn listener_connection_and_frame_failures_name_their_cause_once() {
             format!("malformed Syslog octet count: {parse_failure}"),
         ]
     );
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
+    nervix_model_harness::shuttle::check_random_and_pct(|| {
+        shuttle::future::block_on(async {
+            let (tx, mut rx) = mpsc::channel(1);
+            let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
+            tx.send(ReceivedSyslogFrame {
+                payload: b"first".to_vec(),
+                peer_addr,
+            })
+            .await
+            .expect("the intake queue is open");
+            let (pause_tx, pause_rx) = watch::channel(false);
+            let mut connection = Box::pin(read_stream_connection(
+                ScriptedStream::new(&[b"6 second"]),
+                peer_addr,
+                nonzero!(128usize),
+                true,
+                tx,
+                pause_rx,
+            ));
+            poll_fn(|context| {
+                assert!(matches!(connection.as_mut().poll(context), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+
+            let reader = nervix_primitives::task::spawn(async move { connection.await });
+            let pauser_tx = pause_tx.clone();
+            let pauser = nervix_primitives::task::spawn(async move {
+                pauser_tx.send_replace(true);
+                nervix_primitives::task::yield_now().await;
+                pauser_tx.send_replace(false);
+            });
+            assert_eq!(
+                rx.recv()
+                    .await
+                    .expect("the queued frame is retained")
+                    .payload,
+                b"first"
+            );
+            assert_eq!(
+                rx.recv()
+                    .await
+                    .expect("the pending frame is retained")
+                    .payload,
+                b"second"
+            );
+            reader
+                .await
+                .expect("the connection task finishes")
+                .expect("the stream has complete frames");
+            pauser.await.expect("the pause task finishes");
+            assert!(rx.try_recv().is_err(), "the pending frame is sent once");
+        });
+    });
 }

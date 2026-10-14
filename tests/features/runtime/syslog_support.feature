@@ -347,6 +347,101 @@ Feature: Syslog support
       | 1            | 0             |
       | 3            | 1             |
 
+  @syslog_suspend_handoff @deloxide_stress
+  Scenario Outline: A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_message (message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
+      CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE INGESTOR syslog_intake
+        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND DECODE USING syslog_codec
+        TO syslog_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Given ingestor "syslog_intake" pauses inside dispatch
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When a Syslog TCP sender publishes 80 numbered frames to "{{syslog_ingest_addr}}"
+    Then ingestor "syslog_intake" reaches the dispatch pause
+    When these NSPL commands begin executing in the background
+      """
+      ALTER RELAY syslog_events SET CAPACITY 8;
+      """
+    And ingestor "syslog_intake" leaves the dispatch pause
+    Then the entity gate pause for domain "{{domain}}" is reached
+    When the entity gate pause for domain "{{domain}}" is released
+    Then the background NSPL execution succeeds
+    And within "30s" the relay subscription receives 80 numbered Syslog frames once
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @syslog_listener_rebind @deloxide_stress
+  Scenario Outline: A Syslog accept error keeps an established TCP connection on <cluster_size> nodes
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_message (message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE INGESTOR syslog_intake
+        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND DECODE USING syslog_codec
+        TO syslog_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    When a live Syslog TCP sender connects to "{{syslog_ingest_addr}}"
+    And the live Syslog TCP sender writes message "before-error"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "message":"before-error"
+      """
+    When the Syslog listener at "{{syslog_ingest_addr}}" fails its next accept through the fault hook
+    Then the Syslog listener accept fault fires
+    When the live Syslog TCP sender writes message "after-error"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "message":"after-error"
+      """
+    When a fresh Syslog TCP sender writes message "after-rebind" to "{{syslog_ingest_addr}}"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "message":"after-rebind"
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Syslog TCP intake reassembles a <framing> frame split across two reads
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
