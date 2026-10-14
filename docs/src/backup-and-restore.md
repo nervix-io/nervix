@@ -647,6 +647,17 @@ partial chunks, headers, indices and receipts. It measures value lengths without
 payloads. The complete incoming checkpoint footprint must fit before the first chunk is written;
 the installation barrier prevents concurrent jobs from oversubscribing the allowance. An exact
 staging retry first removes its own incomplete checkpoint data and reuses that allowance.
+
+A node measures that usage by reading every unpublished entry once, and keeps the measurement
+for as long as it stays exact. A checkpoint that stages completely adds its admitted footprint,
+which is exactly the keys and values it wrote. Whatever else changes what the measurement
+counts forgets it: a staging attempt that fails after its first chunk or replaces an earlier
+attempt at the same checkpoint, a sweep that reclaims a namespace or leftover receipts, and a
+publication. The next admission or sweep then measures again, and so does the first one after a
+node starts. Admission and an idle sweep therefore read no staged entry, however much another
+restore left unpublished on the node, and a restore staged beside a generation that is still
+retained costs what it stages itself. The measurement is taken, kept and changed only under the
+installation barrier.
 Published checkpoint data is outside this quota; leftover receipts remain staging until removed.
 Lowering the allowance on restart preserves retained installations that already exceed it and
 refuses additional staging until usage fits or those attempts end.
@@ -672,7 +683,8 @@ awaiting compaction. Fjall reports its current LSM levels; files awaiting final 
 appear. It excludes the shared journal and other keyspaces. This quota bounds live
 unpublished data and does not impose a hard filesystem limit. Physical space falls as snapshots
 close and database compaction reclaims files. A cancelled or failed sweep updates no series and
-does not count its partial deletion; the next completed sweep reconstructs current usage.
+does not count its partial deletion; the next completed sweep reconstructs current usage, because
+a sweep forgets the kept measurement before it removes anything it counts.
 
 ### Order Of Steps
 
@@ -1015,7 +1027,13 @@ Deloxide selections, which additionally exercise the tracked blocking locks on t
 The guest-save scenario uses two 40 MiB branch saves in both one- and three-node clusters. It
 measures every owner's bulk reservations during public backup, interrupts a guest section after
 two chunks and verifies that no archive appears, then retries, restores with `--resume`, compares
-the guest bytes exactly and checks the next even output of each branch.
+the guest bytes exactly and checks the next even output of each branch. A mismatch names each
+differing save with its lengths, digests, first differing offset and the bytes there, never the
+whole saves. A resumed restore replays the inputs whose acknowledgements its archive does not hold,
+so the exact comparison relies on every input of the source cut being acknowledged; a checkpoint of
+a save this large can outlast the source's `ACK TIMEOUT` under load, which the branch's keepalive
+of the inputs that checkpoint holds prevents from becoming a replay. See
+[WASM State And Recovery](wasm-state.md#stages).
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication

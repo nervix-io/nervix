@@ -4,9 +4,11 @@
 //!
 //! - **Owns.** The two input contracts an ingestor declares — an external transport together with
 //!   the codec that decodes its payloads, or the typed batches application clients submit through
-//!   their sessions — and the capabilities each contract carries: header reads, execution on every
-//!   node, the source it references, its quiesce modes and its acknowledgement.
-//! - **Depends on.** The source Models and the schema and codec names they reference.
+//!   their sessions — and how either one answers what its source declares: header reads, execution
+//!   on every node, the model it references, its quiesce mode and its acknowledgement. A client
+//!   contract writes no quiesce mode, so the one it honors is fixed here.
+//! - **Depends on.** The source Models with what their entities declare, and the schema and codec
+//!   names they reference.
 //! - **Must not know.** How a source is opened, how a batch is decoded or admitted, or which node
 //!   executes an ingestor.
 //!
@@ -18,15 +20,13 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
-
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
 use crate::{
-    AckWindow, CodecName, IngestAcknowledgement, IngestQuiesceMode, IngestSource, IngestSourceKind,
-    ModelKind, ModelName, RetryPolicy, SchemaName,
+    ClientProducerSource, ClientSourceEntity, CodecName, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSource, IngestSourceKind, ModelKind, ModelName,
 };
 
 /// The only quiesce mode a client source honors: admission stops and the producer keeps its
@@ -41,7 +41,7 @@ pub enum IngestorInput {
     /// An external transport whose payloads the codec decodes.
     Transport(TransportIngestorInput),
     /// Typed batches application clients submit through their sessions.
-    Client(ClientIngestSource),
+    Client(ClientProducerSource),
 }
 
 /// An external transport and the codec that decodes the payloads it delivers.
@@ -51,28 +51,6 @@ pub enum IngestorInput {
 pub struct TransportIngestorInput {
     pub source: IngestSource,
     pub codec: CodecName,
-}
-
-/// Application clients submitting native Arrow batches of one internal schema.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct ClientIngestSource {
-    /// The internal schema every submitted batch matches exactly, before route construction.
-    pub schema: SchemaName,
-    pub mode: ClientIngestMode,
-}
-
-/// How many submitted batches may await their acknowledgement across every producer of one
-/// client ingestor, how long one waits without progress, and how a producer retries a batch that
-/// was refused before admission.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct ClientIngestMode {
-    pub window: AckWindow,
-    pub ack_timeout: String,
-    pub retry_policy: RetryPolicy,
 }
 
 /// Which of the two input contracts an ingestor declares, for diagnostics that name it.
@@ -92,33 +70,30 @@ impl IngestorInput {
         }
     }
 
-    /// The source class capability decisions read, such as whether messages carry headers.
+    /// The connector and entity of the source, which capability decisions read: whether its
+    /// messages carry headers, which metadata they expose, and where it executes.
     pub const fn source_kind(&self) -> IngestSourceKind {
         match self {
-            Self::Transport(input) => input.source.transport_kind(),
-            Self::Client(_) => IngestSourceKind::Client,
+            Self::Transport(input) => input.source.kind(),
+            Self::Client(_) => IngestSourceKind::Client(ClientSourceEntity::Producer),
         }
     }
 
-    /// The NSPL keyword of the source, as `DESCRIBE` and diagnostics name it.
-    pub fn source_label(&self) -> &str {
-        match self {
-            Self::Transport(input) => input.source.transport_label(),
-            Self::Client(_) => "CLIENT",
-        }
+    /// The NSPL keyword of the source's connector, as `DESCRIBE` and diagnostics name it.
+    pub fn source_label(&self) -> &'static str {
+        self.source_kind().connector().keyword()
     }
 
     /// Whether this input executes on every live cluster node rather than on one scheduled owner.
     pub fn executes_on_every_cluster_node(&self) -> bool {
-        match self {
-            Self::Transport(input) => input.source.executes_on_every_cluster_node(),
-            Self::Client(_) => false,
-        }
+        self.source_kind()
+            .capabilities()
+            .executes_on_every_cluster_node
     }
 
     /// Whether the messages this input delivers carry transport headers that `read_header` and
     /// `read_headers` can read.
-    pub const fn reads_headers(&self) -> bool {
+    pub fn reads_headers(&self) -> bool {
         self.source_kind().reads_headers()
     }
 
@@ -133,10 +108,7 @@ impl IngestorInput {
 
     /// The kind of the model [`Self::source_ref`] names.
     pub fn source_model_kind(&self) -> ModelKind {
-        match self {
-            Self::Transport(input) => input.source.source_kind(),
-            Self::Client(_) => ModelKind::Schema,
-        }
+        self.source_kind().capabilities().reference.model_kind()
     }
 
     /// The external transport this input reads. A client source reads none.
@@ -170,22 +142,11 @@ impl IngestorInput {
     }
 
     /// The acknowledgement a transport's delivery mode declares. A client source acknowledges
-    /// through its own window, which [`ClientIngestMode`] describes.
+    /// through its own window, which [`ClientIngestMode`](crate::ClientIngestMode) describes.
     pub fn transport_acknowledgement(&self) -> Option<IngestAcknowledgement<'_>> {
         match self {
             Self::Transport(input) => Some(input.source.acknowledgement()),
             Self::Client(_) => None,
-        }
-    }
-}
-
-impl ClientIngestMode {
-    /// The acknowledgement window as a count: one batch for `ACK SEQUENTIAL`, `max` for
-    /// `ACK PARALLEL MAX <max>`.
-    pub fn window_size(&self) -> NonZeroU64 {
-        match self.window {
-            AckWindow::Sequential => NonZeroU64::MIN,
-            AckWindow::Parallel { max } => max,
         }
     }
 }

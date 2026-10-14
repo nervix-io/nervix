@@ -164,8 +164,11 @@ impl Runtime {
 )]
 mod tests {
     use nervix_models::{
-        ClientPoolBounds, CreateClientMqtt, CreateClientRedis, CreateClientSqs, MqttIngestMode,
-        MqttQos, MqttSession, RabbitMqIngestMode, RedisPubSubIngestMode, SqsIngestMode,
+        ClientPoolBounds, CreateClientMqtt, CreateClientRedis, CreateClientSqs, HttpRequestSource,
+        HttpSource, MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource,
+        PrometheusQuerySource, PrometheusSource, RabbitMqIngestMode, RabbitMqQueueSource,
+        RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource, SqsIngestMode,
+        SqsQueueSource, SqsSource,
     };
 
     use super::*;
@@ -249,13 +252,13 @@ mod tests {
         let client_name: ClientName = named("upstream");
         let plans = planned_source_ingestor(
             &domain,
-            IngestSource::Http {
+            IngestSource::Http(HttpSource::Request(HttpRequestSource {
                 client: client_name.clone(),
                 every: "1s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
                 quiesce: IngestQuiesceMode::Suspend,
-            },
+            })),
             Model::ClientHttp(CreateClientHttp {
                 name: client_name,
                 mount: None,
@@ -351,11 +354,11 @@ mod tests {
             .assured("the fixture cadence is a positive duration");
         for (source, client_model) in [
             (
-                IngestSource::Http {
+                IngestSource::Http(HttpSource::Request(HttpRequestSource {
                     client: client_name.clone(),
                     every: cadence,
                     quiesce: IngestQuiesceMode::Suspend,
-                },
+                })),
                 Model::ClientHttp(CreateClientHttp {
                     name: client_name.clone(),
                     mount: None,
@@ -363,12 +366,12 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Prometheus {
+                IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                     client: client_name.clone(),
                     query: "up".to_string(),
                     every: cadence,
                     quiesce: IngestQuiesceMode::Suspend,
-                },
+                })),
                 Model::ClientPrometheus(CreateClientPrometheus {
                     name: client_name.clone(),
                     mount: None,
@@ -376,7 +379,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::RabbitMq {
+                IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
                     client: client_name.clone(),
                     queue: named("events"),
                     instances: NonZeroU64::MIN,
@@ -388,7 +391,7 @@ mod tests {
                         },
                     },
                     quiesce: IngestQuiesceMode::Suspend,
-                },
+                })),
                 Model::ClientRabbitMq(CreateClientRabbitMq {
                     name: client_name.clone(),
                     mount: None,
@@ -396,7 +399,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Sqs {
+                IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
                     client: client_name.clone(),
                     queue: named("events"),
                     instances: NonZeroU64::MIN,
@@ -408,7 +411,7 @@ mod tests {
                         },
                     },
                     quiesce: IngestQuiesceMode::Suspend,
-                },
+                })),
                 Model::ClientSqs(CreateClientSqs {
                     name: client_name.clone(),
                     mount: None,
@@ -416,12 +419,12 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::RedisPubSub {
+                IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                     client: client_name.clone(),
                     channel: named("events"),
                     mode: RedisPubSubIngestMode::NoAckSequential,
                     quiesce: IngestQuiesceMode::Drop,
-                },
+                })),
                 Model::ClientRedis(CreateClientRedis {
                     name: client_name.clone(),
                     pool: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
@@ -431,7 +434,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Mqtt {
+                IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                     client: client_name.clone(),
                     topic: "events".to_string(),
                     instances: NonZeroU64::MIN,
@@ -440,7 +443,7 @@ mod tests {
                         qos: MqttQos::AtMostOnce,
                     },
                     quiesce: IngestQuiesceMode::Drop,
-                },
+                })),
                 Model::ClientMqtt(CreateClientMqtt {
                     name: client_name.clone(),
                     mount: None,

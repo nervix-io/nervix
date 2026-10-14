@@ -172,7 +172,7 @@ impl UnfoldingDomain {
                 .into_iter()
                 .next()
                 .assured("the source fixture declares one instance"),
-            metadata_kind: plan.ingestor.metadata_kind(),
+            metadata_scope: plan.ingestor.metadata_scope(),
             buffered_intake: intake.buffered,
             flush_each_intake: true,
             unacknowledged_admission: intake.admission,

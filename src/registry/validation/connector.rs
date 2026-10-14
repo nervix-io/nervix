@@ -23,11 +23,13 @@ use nervix_models::{
     Assignment, AssignmentTarget, ClientIngestMode, CodecBatchContainer, CreateClientHttp,
     CreateCodec, CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName,
     EmitSink, EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
-    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource,
-    IngestorInput, Model, ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind,
-    OtelSignal, OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
-    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName, parse_duration_text,
+    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestSink, HttpSink,
+    IngestSource, IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName, MqttSource,
+    MqttTopicSource, OtelAggregationTemporality, OtelMappings, OtelMetricKind, OtelMetricsSink,
+    OtelSink, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName,
+    SignalingWireFormat, SqsFifoGroup, SqsQueueSink, SqsSink, VhostName, parse_duration_text,
 };
+use nervix_primitives::sync::StdArc;
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticScopePolicy,
     compile_program_with_options_for_bindings_with_sensitivity,
@@ -101,7 +103,8 @@ pub(in crate::registry) fn validate_ingestor_source(
     }
     match &ingestor.input {
         IngestorInput::Transport(input) => {
-            if let IngestSource::Mqtt { topic, .. } = &input.source
+            if let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource { topic, .. })) =
+                &input.source
                 && topic.is_empty()
             {
                 return Err(invalid("MQTT topic filter must not be empty".to_string()));
@@ -170,8 +173,8 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     }
 
     match (emitter.sink.as_ref(), &emitter.body) {
-        (EmitSink::Client { .. }, nervix_models::EmitterBody::Client) => {}
-        (EmitSink::Client { .. }, _) => {
+        (EmitSink::Client(_), nervix_models::EmitterBody::Client) => {}
+        (EmitSink::Client(_), _) => {
             return Err(invalid(
                 "CLIENT emitter requires native Arrow output".to_string(),
             ));
@@ -182,10 +185,10 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
             ));
         }
         (
-            EmitSink::Http { .. },
+            EmitSink::Http(_),
             nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
         ) => {}
-        (EmitSink::Http { .. }, nervix_models::EmitterBody::Values) => {
+        (EmitSink::Http(_), nervix_models::EmitterBody::Values) => {
             return Err(invalid(
                 "HTTP emitter requires ENCODE USING or WITHOUT BODY".to_string(),
             ));
@@ -251,9 +254,9 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     }
 
     match emitter.sink.as_ref() {
-        EmitSink::Sqs {
+        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
             queue, fifo_group, ..
-        } => {
+        })) => {
             let fifo_queue = queue.ends_with(".fifo");
             if fifo_queue && fifo_group.is_none() {
                 return Err(invalid(format!(
@@ -283,33 +286,25 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 }
             }
         }
-        EmitSink::Otel {
-            signal,
-            values,
-            attributes,
-            resource,
-            ..
-        } => {
-            validate_otel_mapping_contract(
-                domain, identifier, signal, values, attributes, resource,
-            )?;
+        EmitSink::Otel(sink) => {
+            validate_otel_mapping_contract(domain, identifier, sink)?;
         }
-        EmitSink::Client { .. }
-        | EmitSink::Http { .. }
-        | EmitSink::Kafka { .. }
-        | EmitSink::Pulsar { .. }
-        | EmitSink::RabbitMq { .. }
-        | EmitSink::Redis { .. }
-        | EmitSink::Mqtt { .. }
-        | EmitSink::Nats { .. }
-        | EmitSink::ZeroMq { .. }
-        | EmitSink::Syslog { .. }
-        | EmitSink::Sentry { .. }
-        | EmitSink::Iceberg { .. }
-        | EmitSink::ClickHouse { .. }
-        | EmitSink::Postgres { .. }
-        | EmitSink::MySql { .. }
-        | EmitSink::MongoDb { .. } => {}
+        EmitSink::Client(_)
+        | EmitSink::Http(_)
+        | EmitSink::Kafka(_)
+        | EmitSink::Pulsar(_)
+        | EmitSink::RabbitMq(_)
+        | EmitSink::Redis(_)
+        | EmitSink::Mqtt(_)
+        | EmitSink::Nats(_)
+        | EmitSink::ZeroMq(_)
+        | EmitSink::Syslog(_)
+        | EmitSink::Sentry(_)
+        | EmitSink::Iceberg(_)
+        | EmitSink::ClickHouse(_)
+        | EmitSink::Postgres(_)
+        | EmitSink::MySql(_)
+        | EmitSink::MongoDb(_) => {}
     }
 
     Ok(())
@@ -435,10 +430,7 @@ pub(in crate::registry) fn validate_emitter_batch_container(
 fn validate_otel_mapping_contract(
     domain: &DomainName,
     identifier: &ModelName,
-    signal: &OtelSignal,
-    values: &[OtelValueMapping],
-    attributes: &[OtelValueMapping],
-    resource: &[OtelValueMapping],
+    sink: &OtelSink,
 ) -> error_stack::Result<(), RegistryError> {
     /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
     /// whether delta temporality adds `start_time` to the required keys.
@@ -454,8 +446,8 @@ fn validate_otel_mapping_contract(
         allowed,
         required,
         delta,
-    } = match signal {
-        OtelSignal::Logs => SignalContract {
+    } = match sink {
+        OtelSink::Logs(_) => SignalContract {
             signal: OtelMappingSignal::Logs,
             allowed: &[
                 "time",
@@ -468,7 +460,7 @@ fn validate_otel_mapping_contract(
             required: &["time", "body"],
             delta: false,
         },
-        OtelSignal::Traces => SignalContract {
+        OtelSink::Traces(_) => SignalContract {
             signal: OtelMappingSignal::Traces,
             allowed: &[
                 "trace_id",
@@ -484,7 +476,7 @@ fn validate_otel_mapping_contract(
             required: &["trace_id", "span_id", "name", "start_time", "end_time"],
             delta: false,
         },
-        OtelSignal::Metric(metric) => match metric.kind {
+        OtelSink::Metrics(OtelMetricsSink { metric, .. }) => match metric.kind {
             OtelMetricKind::Gauge => SignalContract {
                 signal: OtelMappingSignal::MetricGauge,
                 allowed: &["time", "start_time", "value"],
@@ -523,6 +515,12 @@ fn validate_otel_mapping_contract(
         })
     };
 
+    let OtelMappings {
+        values,
+        attributes,
+        resource,
+        scope: _,
+    } = sink.mappings();
     let mut value_keys = HashSet::default();
     for mapping in values {
         if !allowed.contains(&mapping.column.as_str()) {
@@ -576,10 +574,10 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let EmitSink::Sqs {
+    let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
         fifo_group: Some(SqsFifoGroup::Expression(expression)),
         ..
-    } = emitter.sink.as_ref()
+    })) = emitter.sink.as_ref()
     else {
         return Ok(());
     };
@@ -690,7 +688,9 @@ pub(in crate::registry) fn validate_http_request_expressions(
     input_schema: &CreateSchema,
     payload_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+    let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
+        emitter.sink.as_ref()
+    else {
         return Ok(());
     };
 
@@ -863,7 +863,9 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         value: HttpHeaderValue,
     }
 
-    let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+    let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
+        emitter.sink.as_ref()
+    else {
         return Ok(());
     };
     let invalid = |reason: String| {
@@ -1204,10 +1206,11 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", output_schema),
     ];
-    if let Some(metadata_schema) = ingestor_filter_map_metadata_schema(&ingestor.input) {
+    let metadata_scope = ingestor.input.source_kind().capabilities().metadata;
+    if let Some(metadata_schema) = metadata_scope.arrow_schema() {
         bindings.push(CompileBinding::readonly(
             "metadata",
-            arrow_schema_for_internal_schema(&metadata_schema),
+            StdArc::new(metadata_schema),
         ));
     }
     let local_namespaces = HashSet::from_iter([
@@ -1256,60 +1259,8 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
     Ok(output_schema.clone())
 }
 
-/// The typed metadata scope an ingestor's programs read as `metadata`: Kafka's position and
-/// Syslog's peer address. Every other transport, and every client source, exposes none.
-fn ingestor_filter_map_metadata_schema(input: &IngestorInput) -> Option<CreateSchema> {
-    let IngestorInput::Transport(input) = input else {
-        return None;
-    };
-    match &input.source {
-        IngestSource::Kafka { .. } => Some(CreateSchema {
-            name: SchemaName::parse("ingestor_metadata")
-                .assured("this is a constant literal that satisfies the identifier grammar"),
-            fields: vec![
-                SchemaField {
-                    name: FieldName::parse("topic").assured(
-                        "this is a constant literal that satisfies the identifier grammar",
-                    ),
-                    ty: ParseAsType::String,
-                    optional: true,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: FieldName::parse("partition").assured(
-                        "this is a constant literal that satisfies the identifier grammar",
-                    ),
-                    ty: ParseAsType::I32,
-                    optional: true,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: FieldName::parse("offset").assured(
-                        "this is a constant literal that satisfies the identifier grammar",
-                    ),
-                    ty: ParseAsType::I64,
-                    optional: true,
-                    sensitive: false,
-                },
-            ],
-        }),
-        IngestSource::Syslog { .. } => Some(CreateSchema {
-            name: SchemaName::parse("ingestor_metadata")
-                .assured("this is a constant literal that satisfies the identifier grammar"),
-            fields: vec![SchemaField {
-                name: FieldName::parse("peer_addr")
-                    .assured("this is a constant literal that satisfies the identifier grammar"),
-                ty: ParseAsType::String,
-                optional: true,
-                sensitive: false,
-            }],
-        }),
-        _ => None,
-    }
-}
-
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    sink.capabilities().writes_headers()
+    sink.capabilities().writes_headers
 }
 
 pub(in crate::registry) fn effective_emitter_filter_map_schema(
@@ -1410,7 +1361,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
     let output_sensitivity = match (emitter.sink.as_ref(), codec_route) {
-        (EmitSink::Http { .. } | EmitSink::Client { .. }, true) => SchemaSensitivity::default(),
+        (EmitSink::Http(_) | EmitSink::Client(_), true) => SchemaSensitivity::default(),
         _ => schema_sensitivity_for_internal_schema(output_schema),
     };
     {

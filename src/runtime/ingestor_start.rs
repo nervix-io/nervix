@@ -469,9 +469,9 @@ mod tests {
         CodecWireFormat, CreateClientMqtt, CreateCodec, CreateIngestor, CreateJsonWireSchema,
         CreateRelay, CreateSchema, DomainConfig, DomainPace, DomainSchedule, DomainState,
         DomainStatus, GeneralErrorPolicy, IngestSource, IngestorName, JsonType, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType, ProcessorOutputs,
-        RelayBranching, RelayName, RetryPolicy, SchemaField, SchemaName, WireSchemaField,
-        WireSchemaName,
+        MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource, OutputBranch,
+        ParseAsType, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, SchemaField,
+        SchemaName, WireSchemaField, WireSchemaName,
     };
     use nonzero_ext::nonzero;
 
@@ -586,16 +586,18 @@ mod tests {
                             .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::Mqtt {
-                                        client,
-                                        topic: "notifications".to_string(),
-                                        instances: nonzero!(2u64),
-                                        mode: MqttIngestMode::NoAckSequential {
-                                            session: MqttSession::Clean,
-                                            qos: MqttQos::AtMostOnce,
+                                    source: IngestSource::Mqtt(MqttSource::Topic(
+                                        MqttTopicSource {
+                                            client,
+                                            topic: "notifications".to_string(),
+                                            instances: nonzero!(2u64),
+                                            mode: MqttIngestMode::NoAckSequential {
+                                                session: MqttSession::Clean,
+                                                qos: MqttQos::AtMostOnce,
+                                            },
+                                            quiesce: nervix_models::IngestQuiesceMode::Drop,
                                         },
-                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
-                                    },
+                                    )),
                                     codec: codec.clone(),
                                 },
                             ),
@@ -714,7 +716,7 @@ mod tests {
                         .with_branch(OutputBranch::Unbranched),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Mqtt {
+                            source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                                 client,
                                 topic: "notifications".to_string(),
                                 instances: nonzero!(1u64),
@@ -726,7 +728,7 @@ mod tests {
                                     },
                                 },
                                 quiesce: nervix_models::IngestQuiesceMode::Drop,
-                            },
+                            })),
                             codec: codec.clone(),
                         },
                     ),

@@ -41,6 +41,8 @@
 )]
 
 mod arguments;
+#[cfg(feature = "benchmarks")]
+pub mod benchmark;
 mod counts;
 mod extremes;
 mod histogram;

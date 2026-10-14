@@ -174,6 +174,7 @@ class InventoryTests(unittest.TestCase):
             "backup-section-mapping",
             "stopping-node-drain-wire",
             "restore-installation-storage",
+            "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax",
             "nspl-statement",
             "nspl-statement-text",
@@ -289,6 +290,7 @@ class InventoryTests(unittest.TestCase):
             "simd-elapsed-histograms",
             "simd-flag-packing",
             "simd-window-runs",
+            "simd-window-moments",
             "columnar-json-rows",
             "bounded-write-limits",
             "connector-row-request-division",
@@ -306,6 +308,8 @@ class InventoryTests(unittest.TestCase):
             "console-pending-backups",
             "console-pending-backups-malformed",
             "console-restore-drafts",
+            "runtime-window-sketch-panes",
+            "kafka-partition-offsets",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -324,6 +328,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
+            "nervix-connector-kafka",
             "nervix-paced-simulation",
             "nervix-wasm-protocol",
             "nervix-wasm",

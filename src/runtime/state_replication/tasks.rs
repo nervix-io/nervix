@@ -16,7 +16,45 @@
     )
 )]
 
+use std::future::Future;
+
 use super::*;
+
+/// The snapshot tasks of this node's deduplicator and window branches.
+///
+/// A snapshot task outlives the branch task that started it: once that task is gone, whether it
+/// stopped or was ended at its stop grace, the snapshot task still writes what the branch
+/// published last. No branch task can therefore own it to its end, so the runtime does, and none
+/// outlives the runtime with the node's storage open. Closing the owner tells every task to write
+/// that state now and end; waiting for it returns once each of them has finished.
+#[derive(Default)]
+pub(in crate::runtime) struct BranchSnapshotTasks {
+    tracker: TaskTracker,
+    stopping: CancellationToken,
+}
+
+impl BranchSnapshotTasks {
+    /// The signal a snapshot task waits for beside its own branch's stop.
+    pub(in crate::runtime) fn stopping(&self) -> CancellationToken {
+        self.stopping.clone()
+    }
+
+    pub(in crate::runtime) fn spawn(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> JoinHandle<()> {
+        self.tracker.spawn(task)
+    }
+
+    pub(in crate::runtime) fn close(&self) {
+        self.stopping.cancel();
+        self.tracker.close();
+    }
+
+    pub(in crate::runtime) async fn wait(&self) {
+        self.tracker.wait().await;
+    }
+}
 
 impl Runtime {
     pub(in crate::runtime) fn spawn_kafka_offset_snapshot_task(
@@ -89,6 +127,10 @@ impl Runtime {
     /// changed, so replicas follow the branch without anything reading its live state. On every
     /// snapshot interval, and once more when the branch stops, it also persists what was published
     /// last, including when the branch task is gone and can no longer publish.
+    ///
+    /// The task runs under the runtime's [`BranchSnapshotTasks`], not under its branch task, so a
+    /// runtime that stops waits for that last write. The handle this returns only lets a branch
+    /// that stops in time wait for it too; dropping it leaves the task with the runtime.
     pub(in crate::runtime) fn spawn_published_branch_state_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -101,7 +143,8 @@ impl Runtime {
             snapshot_interval.min(self.inner.state_replication_poll_interval);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(nervix_primitives::task::spawn(async move {
+        let runtime_stopping = self.inner.branch_snapshot_tasks.stopping();
+        Some(self.inner.branch_snapshot_tasks.spawn(async move {
             let mut next_persist = Instant::now() + snapshot_interval;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -115,26 +158,15 @@ impl Runtime {
                                     "failed to publish branch state during shutdown"
                                 );
                             }
-                            match state
-                                .persist_published(
-                                    &store,
-                                    &runtime.inner.executor,
-                                    &runtime.inner.snapshot_staging,
-                                )
-                                .await
-                            {
-                                Ok(Some(lsm)) => runtime.announce_checkpoint(
-                                    state.placement(), state.replication(), lsm,
-                                ),
-                                Ok(None) => {}
-                                Err(error) => warn!(
-                                    kind = state.placement().kind.as_str(),
-                                    error = %format_args!("{error:#}"),
-                                    "failed to flush branch state snapshot during shutdown"
-                                ),
-                            }
+                            runtime.persist_stopped_branch_state(&state, &store).await;
                             break;
                         }
+                    }
+                    // A stopping runtime has ended its branch tasks, so nothing publishes for this
+                    // state any more and what was published last is what a restart restores.
+                    _ = runtime_stopping.cancelled() => {
+                        runtime.persist_stopped_branch_state(&state, &store).await;
+                        break;
                     }
                     _ = sleep(publication_interval) => {
                         if let Err(error) = state.request_publication(&snapshot_requests).await {
@@ -170,6 +202,27 @@ impl Runtime {
                 }
             }
         }))
+    }
+
+    /// Write what a branch that has stopped published last, and offer the checkpoint to its
+    /// replicas.
+    async fn persist_stopped_branch_state(
+        &self,
+        state: &PublishedBranchState,
+        store: &RuntimeStateStore,
+    ) {
+        let persisted = state
+            .persist_published(store, &self.inner.executor, &self.inner.snapshot_staging)
+            .await;
+        match persisted {
+            Ok(Some(lsm)) => self.announce_checkpoint(state.placement(), state.replication(), lsm),
+            Ok(None) => {}
+            Err(error) => warn!(
+                kind = state.placement().kind.as_str(),
+                error = %format_args!("{error:#}"),
+                "failed to flush branch state snapshot during shutdown"
+            ),
+        }
     }
 
     pub(in crate::runtime) fn spawn_materialized_stream_snapshot_task(
@@ -1066,3 +1119,7 @@ impl Runtime {
             .retain(|placement, _| &placement.domain != domain);
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "tasks_shuttle_tests.rs"]
+mod shuttle_tests;

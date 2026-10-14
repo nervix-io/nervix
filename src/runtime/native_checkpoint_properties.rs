@@ -168,15 +168,31 @@ fn scalar(arbitrary: &mut Arbitrary<'_>) -> StateValue {
     match arbitrary.entropy().byte() % 13 {
         0 => StateValue::U8(arbitrary.entropy().byte()),
         1 => StateValue::I8(i8::from_le_bytes([arbitrary.entropy().byte()])),
-        2 => StateValue::U16(u16::from(arbitrary.entropy().byte())),
-        3 => StateValue::I16(i16::from(arbitrary.entropy().byte())),
-        4 => StateValue::U32(u32::from(arbitrary.entropy().byte())),
-        5 => StateValue::I32(i32::from(arbitrary.entropy().byte())),
+        2 => StateValue::U16(
+            u16::try_from(arbitrary.entropy().boundary_biased(0..=u64::from(u16::MAX)))
+                .assured("drawn within u16"),
+        ),
+        3 => StateValue::I16(
+            u16::try_from(arbitrary.entropy().boundary_biased(0..=u64::from(u16::MAX)))
+                .assured("drawn within u16")
+                .cast_signed()
+                ^ i16::MIN,
+        ),
+        4 => StateValue::U32(
+            u32::try_from(arbitrary.entropy().boundary_biased(0..=u64::from(u32::MAX)))
+                .assured("drawn within u32"),
+        ),
+        5 => StateValue::I32(
+            u32::try_from(arbitrary.entropy().boundary_biased(0..=u64::from(u32::MAX)))
+                .assured("drawn within u32")
+                .cast_signed()
+                ^ i32::MIN,
+        ),
         6 => StateValue::U64(arbitrary.entropy().any_u64()),
         7 => StateValue::I64(arbitrary.entropy().any_i64()),
         8 => StateValue::Bool(arbitrary.entropy().flag()),
         9 => StateValue::String(arbitrary.string()),
-        10 => StateValue::Datetime("1969-12-31T23:59:59.999999999+00:00".into()),
+        10 => StateValue::Datetime(arbitrary.timestamp().into_datetime().to_rfc3339()),
         11 => {
             let bits = u32::try_from(arbitrary.entropy().any_u64() >> 32)
                 .assured("the selected high half contains at most 32 bits");
@@ -209,8 +225,12 @@ fn bolero_streamed_kafka_preserves_every_partition_and_offset() {
             let mut offsets = std::collections::BTreeMap::new();
             for _ in 0..arbitrary.entropy().count(64) {
                 let topic = format!("topic_{}", arbitrary.entropy().byte());
-                let partition = i32::from(arbitrary.entropy().byte());
-                let next_offset = arbitrary.entropy().between(
+                let partition =
+                    u32::try_from(arbitrary.entropy().boundary_biased(0..=u64::from(u32::MAX)))
+                        .assured("drawn within u32")
+                        .cast_signed()
+                        ^ i32::MIN;
+                let next_offset = arbitrary.entropy().boundary_biased(
                     0..=u64::try_from(i64::MAX).assured("the positive signed maximum fits u64"),
                 );
                 offsets.insert(

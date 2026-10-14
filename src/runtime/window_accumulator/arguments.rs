@@ -909,6 +909,16 @@ impl WindowArgumentColumns {
         Ok(ArgumentColumn::new(array))
     }
 
+    /// One single-argument demand over `array`, as the pane sketch benchmark admits it.
+    #[cfg(feature = "benchmarks")]
+    pub(in crate::runtime) fn single(array: ArrayRef) -> Self {
+        let rows = array.len();
+        Self {
+            demands: vec![WindowArguments::Single(ArgumentColumn::new(array))],
+            rows,
+        }
+    }
+
     /// The argument columns of the demand at index `demand`.
     pub(super) fn demand(&self, demand: usize) -> &WindowArguments<ArgumentColumn> {
         self.demands
