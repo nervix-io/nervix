@@ -216,7 +216,7 @@ impl History {
 #[test]
 fn bolero_a_kept_staging_measurement_equals_a_fresh_one_after_any_history() {
     bolero::check!()
-        .with_iterations(48)
+        .with_iterations(96)
         .with_max_len(96)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);

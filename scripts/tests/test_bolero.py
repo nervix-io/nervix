@@ -174,6 +174,7 @@ class InventoryTests(unittest.TestCase):
             "backup-section-mapping",
             "stopping-node-drain-wire",
             "restore-installation-storage",
+            "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax",
             "nspl-statement",
             "nspl-statement-text",
