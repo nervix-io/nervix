@@ -7659,6 +7659,7 @@ dependencies = [
  "imbl",
  "indexmap 2.14.2",
  "lapin",
+ "memmap2",
  "meticulous",
  "mongodb",
  "multer",

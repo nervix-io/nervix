@@ -698,6 +698,16 @@ scenario = "A keyspace and a window above the bulk budget resume exactly beside 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Lazy stored checkpoint selection, admitted native views, bounded archive groups and stopped restore through the existing capture and installation locks on one node. Three-node byte equality runs in the ordinary suite."
+examples = 1
+feature = "tests/features/cluster/backup_stored_branch_capture.feature"
+id = "scenario.stored-branch-capture"
+invariant = "Stored keyspaces and windows above 32 MiB beside 24 small branches are admitted and re-export every byte exactly after stop and stopped restore."
+invocation = "scenarios"
+scenario = "Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "A three-node WASM processor commits two branch saves above the replication-message limit, then drains its owner through checkpoint capture, bulk fetch, verification, and successor installation while state-store locks are tracked. Async stream waits and interconnect transport scheduling remain outside Deloxide."
 examples = 1
 feature = "tests/features/runtime/large_wasm_state_replication.feature"
@@ -1342,6 +1352,16 @@ id = "stress.branch-state-large"
 invariant = "On one node, a 40 MiB keyspace and a 40 MiB window beside 24 small branches restore exactly after an interrupted publication, re-export identically from a stopped restore, and continue with exact keys and aggregates across a restart."
 invocation = "stress-restore-scenarios"
 scenario = "A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: lazy stored checkpoint selection, admitted native views, bounded archive groups and stopped restore through the existing capture and installation locks on one node."
+examples = 1
+feature = "tests/features/cluster/backup_stored_branch_capture.feature"
+id = "stress.stored-branch-capture"
+invariant = "Stored keyspaces and windows above 32 MiB beside 24 small branches are admitted and re-export every byte exactly after stop and stopped restore."
+invocation = "stress-restore-scenarios"
+scenario = "Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

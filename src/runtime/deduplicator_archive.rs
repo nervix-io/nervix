@@ -37,9 +37,13 @@ use ordered_float::OrderedFloat;
 use super::{
     DeduplicatorKey, PublishedDeduplicatorKey, ReorderKeyPart, ReplicatedDeduplicatorState,
     VmTypedArray,
-    deduplicator::{decode_deduplicator_snapshot, write_deduplicator_snapshot},
+    deduplicator::{
+        stored_view::{StoredKeyGroup, StoredKeyspaceView},
+        write_deduplicator_snapshot,
+    },
     published_generation::Generation,
     reorder_key_part,
+    snapshot_staging::MappedArtifact,
 };
 use crate::runtime_schema::RuntimeRecordBatch;
 
@@ -76,40 +80,97 @@ pub(crate) enum DeduplicatorArchiveError {
 /// from the state store; nothing is copied until a group of them becomes Arrow columns.
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedDeduplicatorKeyspace {
+    source: KeyspaceSource,
+}
+
+#[derive(Debug, Clone)]
+enum KeyspaceSource {
+    Published(PublishedKeyspace),
+    Stored {
+        revision: u64,
+        view: StoredKeyspaceView,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PublishedKeyspace {
     generation: StdArc<Generation<Vec<PublishedDeduplicatorKey>>>,
 }
 
 impl CapturedDeduplicatorKeyspace {
     /// The keys the branch task published last.
     pub(super) fn published(state: &ReplicatedDeduplicatorState) -> Self {
+        Self::from_generation(state.generations.load())
+    }
+
+    fn from_generation(generation: StdArc<Generation<Vec<PublishedDeduplicatorKey>>>) -> Self {
         Self {
-            generation: state.generations.load(),
+            source: KeyspaceSource::Published(PublishedKeyspace { generation }),
         }
     }
 
     /// The keys a persisted checkpoint at `revision` holds.
-    pub(super) fn stored(
+    pub(in crate::runtime) async fn stored(
+        executor: &Executor,
         revision: u64,
-        payload: &[u8],
+        payload: MappedArtifact,
     ) -> error_stack::Result<Self, DeduplicatorArchiveError> {
-        let recent_keys = decode_deduplicator_snapshot(payload)
-            .change_context(DeduplicatorArchiveError::Decode)?;
+        let view = StoredKeyspaceView::open(executor, payload).await?;
         Ok(Self {
-            generation: StdArc::new(Generation {
-                revision,
-                value: ReplicatedDeduplicatorState::published_keys(&recent_keys),
-            }),
+            source: KeyspaceSource::Stored { revision, view },
         })
     }
 
     pub(crate) fn revision(&self) -> u64 {
-        self.generation.revision
+        match &self.source {
+            KeyspaceSource::Published(keys) => keys.generation.revision,
+            KeyspaceSource::Stored { revision, .. } => *revision,
+        }
     }
 
     pub(crate) fn key_count(&self) -> usize {
-        self.generation.value.len()
+        match &self.source {
+            KeyspaceSource::Published(keys) => keys.generation.value.len(),
+            KeyspaceSource::Stored { view, .. } => view.count(),
+        }
     }
 
+    pub(crate) fn groups(&self, limit: u64) -> Vec<Range<usize>> {
+        match &self.source {
+            KeyspaceSource::Published(keys) => keys.groups(limit),
+            KeyspaceSource::Stored { view, .. } => view.groups(limit),
+        }
+    }
+
+    pub(crate) async fn encode_group(
+        &self,
+        executor: &Executor,
+        schema: &StdArc<ArrowSchema>,
+        group: Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, DeduplicatorArchiveError> {
+        match &self.source {
+            KeyspaceSource::Published(keys) => keys.encode_group(executor, schema, group).await,
+            KeyspaceSource::Stored { revision, view } => {
+                let StoredKeyGroup {
+                    keys,
+                    _memory: memory,
+                } = view.read_group(executor, group).await?;
+                let count = keys.len();
+                let keys = PublishedKeyspace {
+                    generation: StdArc::new(Generation {
+                        revision: *revision,
+                        value: keys,
+                    }),
+                };
+                let encoded = keys.encode_group(executor, schema, 0..count).await;
+                drop(memory);
+                encoded
+            }
+        }
+    }
+}
+
+impl PublishedKeyspace {
     /// Consecutive keys whose estimated Arrow payload stays within `limit`, oldest first. A key
     /// larger than the limit occupies a group of its own.
     pub(crate) fn groups(&self, limit: u64) -> Vec<Range<usize>> {
@@ -529,7 +590,7 @@ mod tests {
     use nervix_execution::ExecutionConfig;
     use nonzero_ext::nonzero;
 
-    use super::*;
+    use super::{super::deduplicator::decode_deduplicator_snapshot, *};
 
     /// One of the key column types a `DEDUPLICATE ON` expression can produce.
     fn generated_key_type(entropy: &mut Entropy<'_>) -> DataType {
@@ -839,6 +900,45 @@ mod tests {
         restored
     }
 
+    /// The native checkpoint behind an admitted immutable view, through the production staging
+    /// and mapping owners. The property compares every complete encoded archive group.
+    async fn mapped_keyspace(
+        executor: &Executor,
+        revision: u64,
+        keys: &[PublishedDeduplicatorKey],
+    ) -> CapturedDeduplicatorKeyspace {
+        let directory = tempfile::tempdir().assured("property staging directory opens");
+        let staging = super::super::snapshot_staging::SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            super::super::snapshot_staging::SnapshotStagingLimits::default(),
+        );
+        let native = super::super::deduplicator::encode_deduplicator_snapshot(keys)
+            .assured("bounded current keys encode");
+        let mut writer = staging
+            .try_stage(u64::try_from(native.len()).assured("bounded native bytes fit"))
+            .await
+            .assured("the native view has disk quota");
+        let native = executor
+            .charge_owned(MemoryClass::Bulk, native)
+            .await
+            .assured("bounded fixture bytes are admitted");
+        writer
+            .write_chunk(native)
+            .await
+            .assured("the native bytes are staged");
+        let mapped = writer
+            .finish_artifact()
+            .await
+            .assured("the native artifact finishes")
+            .into_mapped()
+            .await
+            .assured("the native view is admitted");
+        CapturedDeduplicatorKeyspace::stored(executor, revision, mapped)
+            .await
+            .assured("the current native keyspace opens")
+    }
+
     #[test]
     fn bolero_deduplicator_archive_keys_preserve_every_key_and_seen_at() {
         bolero::check!()
@@ -859,12 +959,12 @@ mod tests {
                 let keys = generated_keyspace(&mut entropy, &key_types);
                 let revision = entropy.any_u64();
                 let limit = entropy.between(1..=96);
-                let keyspace = CapturedDeduplicatorKeyspace {
-                    generation: StdArc::new(Generation {
-                        revision,
-                        value: ReplicatedDeduplicatorState::published_keys(&keys),
-                    }),
-                };
+                let generation = StdArc::new(Generation {
+                    revision,
+                    value: ReplicatedDeduplicatorState::published_keys(&keys),
+                });
+                let keyspace =
+                    CapturedDeduplicatorKeyspace::from_generation(StdArc::clone(&generation));
                 assert_eq!(keyspace.revision(), revision);
                 assert_eq!(keyspace.key_count(), keys.len());
 
@@ -875,7 +975,7 @@ mod tests {
                     assert!(group.end > group.start, "no group is empty");
                     if group.len() > 1 {
                         let mut bytes = 0_u64;
-                        for published in &keyspace.generation.value[group.clone()] {
+                        for published in &generation.value[group.clone()] {
                             bytes = bytes
                                 .checked_add(published.key.estimated_bytes())
                                 .assured("a few bounded keys stay far below u64::MAX bytes");
@@ -891,6 +991,26 @@ mod tests {
 
                 let schema = key_schema(&key_types);
                 let checkpoint = runtime.block_on(async {
+                    let stored = mapped_keyspace(&executor, revision, &generation.value).await;
+                    assert_eq!(stored.revision(), keyspace.revision());
+                    assert_eq!(stored.key_count(), keyspace.key_count());
+                    assert_eq!(stored.groups(limit), groups);
+                    for group in &groups {
+                        let resident = keyspace
+                            .encode_group(&executor, &schema, group.clone())
+                            .await
+                            .assured("a published group encodes");
+                        let from_stored = stored
+                            .encode_group(&executor, &schema, group.clone())
+                            .await
+                            .assured("the corresponding stored group encodes");
+                        assert_eq!(
+                            from_stored.as_ref(),
+                            resident.as_ref(),
+                            "every complete Arrow group matches the resident path byte for byte"
+                        );
+                    }
+                    drop(stored);
                     let restored =
                         archived_and_restored(&executor, &keyspace, &schema, limit).await;
                     assert_eq!(restored.len(), keys.len());
@@ -905,24 +1025,22 @@ mod tests {
                     .assured("a restored checkpoint decodes as a keyspace");
                 assert_eq!(
                     exact_keys(&ReplicatedDeduplicatorState::published_keys(&decoded)),
-                    exact_keys(&keyspace.generation.value),
+                    exact_keys(&generation.value),
                     "every key, its order, its exact parts and its seen_at survive the archive"
                 );
                 assert_eq!(
                     checkpoint,
-                    super::super::deduplicator::encode_deduplicator_snapshot(
-                        &keyspace.generation.value
-                    )
-                    .assured("the published keys encode"),
+                    super::super::deduplicator::encode_deduplicator_snapshot(&generation.value)
+                        .assured("the published keys encode"),
                     "streaming writes exactly the ordinary checkpoint of the same keys"
                 );
             });
     }
 
-    fn one_key_keyspace(parts: Vec<ReorderKeyPart>) -> CapturedDeduplicatorKeyspace {
+    fn one_key_keyspace(parts: Vec<ReorderKeyPart>) -> PublishedKeyspace {
         let mut keys = ExpiryMap::new();
         keys.insert(DeduplicatorKey::new(parts), Timestamp::from_unix_nanos(7));
-        CapturedDeduplicatorKeyspace {
+        PublishedKeyspace {
             generation: StdArc::new(Generation {
                 revision: 1,
                 value: ReplicatedDeduplicatorState::published_keys(&keys),

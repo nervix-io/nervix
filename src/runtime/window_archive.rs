@@ -28,12 +28,11 @@ use super::{
     WindowProcessorStateSnapshot,
     published_generation::Generation,
     snapshot_staging::SnapshotStaging,
-    window_state::{
-        WindowCheckpointPieces, WindowPublishedSnapshot, WindowSnapshotLifetime,
-        WindowSnapshotSchemas, decode_window_processor_snapshot,
-    },
+    window_state::{WindowCheckpointPieces, WindowPublishedSnapshot},
 };
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow};
+
+pub(in crate::runtime) mod stored;
 
 /// Why a window could not become archive groups, or archive groups a window checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -70,89 +69,155 @@ pub(crate) enum WindowAccumulatorState {
     },
 }
 
-/// A window a backup captured: its branch task's last publication or its persisted checkpoint,
-/// at the revision it stands at.
+/// A live window publication shared by a backup at the revision it stands at.
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedWindow {
     revision: u64,
-    source: CapturedWindowSource,
-}
-
-#[derive(Debug, Clone)]
-enum CapturedWindowSource {
-    /// The shared row views the branch task published.
-    Live(WindowProcessorStateSnapshot),
-    /// A checkpoint that opens only against the window's input and argument schemas.
-    Sealed(Vec<u8>),
+    snapshot: WindowProcessorStateSnapshot,
 }
 
 impl CapturedWindow {
-    /// What a published generation holds, or nothing for a window that never published.
+    /// Share a live publication. An inactive branch uses its selected stored checkpoint instead.
     pub(super) fn published(
         generation: &Generation<Option<WindowPublishedSnapshot>>,
     ) -> Option<Self> {
-        let source = match &generation.value {
-            None => return None,
-            Some(WindowPublishedSnapshot::Live(snapshot)) => {
-                CapturedWindowSource::Live(snapshot.clone())
-            }
-            Some(WindowPublishedSnapshot::Sealed(payload)) => {
-                CapturedWindowSource::Sealed(payload.clone())
-            }
+        let snapshot = match &generation.value {
+            None | Some(WindowPublishedSnapshot::Sealed(_)) => return None,
+            Some(WindowPublishedSnapshot::Live(snapshot)) => snapshot.clone(),
         };
         Some(Self {
             revision: generation.revision,
-            source,
+            snapshot,
         })
     }
 
-    /// A persisted checkpoint at `revision`.
-    pub(super) fn stored(revision: u64, payload: Vec<u8>) -> Self {
-        Self {
-            revision,
-            source: CapturedWindowSource::Sealed(payload),
-        }
-    }
-
-    /// Opens the window against `input` and `arguments`, the schemas its model gives its retained
-    /// rows. A checkpoint with no branch lifetime, an empty forced-recovery window, opens as nothing.
-    pub(crate) async fn open(
-        self,
-        executor: &Executor,
-        input: &StdArc<ArrowSchema>,
-        arguments: &StdArc<ArrowSchema>,
-    ) -> error_stack::Result<Option<CapturedWindowState>, WindowArchiveError> {
-        let snapshot = match self.source {
-            CapturedWindowSource::Live(snapshot) => snapshot,
-            CapturedWindowSource::Sealed(payload) => {
-                let decoded = decode_window_processor_snapshot(
-                    &payload,
-                    executor,
-                    WindowSnapshotSchemas { input, arguments },
-                    WindowSnapshotLifetime::Recorded,
-                )
-                .await
-                .change_context(WindowArchiveError::Open)?;
-                let Some(decoded) = decoded else {
-                    return Ok(None);
-                };
-                decoded
-            }
-        };
-        let Some(incarnation) = snapshot.incarnation else {
-            return Ok(None);
-        };
-        Ok(Some(CapturedWindowState::new(
+    /// Open the shared publication. A forced-recovery window without a branch lifetime is empty.
+    pub(crate) fn open(self) -> Option<CapturedWindowState> {
+        let snapshot = self.snapshot;
+        let incarnation = snapshot.incarnation?;
+        Some(CapturedWindowState::new(
             self.revision,
             incarnation,
             snapshot,
-        )))
+        ))
     }
 }
 
 /// A captured window with a branch lifetime, ready to be written as archive groups.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct CapturedWindowState {
+    source: OpenedWindowSource,
+}
+
+#[derive(Clone)]
+enum OpenedWindowSource {
+    Live(Arc<LiveWindowState>),
+    Stored(Arc<stored::StoredWindowState>),
+}
+
+impl std::fmt::Debug for CapturedWindowState {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("CapturedWindowState")
+            .field("revision", &self.revision())
+            .field("incarnation", &self.incarnation())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CapturedWindowState {
+    fn new(revision: u64, incarnation: u64, snapshot: WindowProcessorStateSnapshot) -> Self {
+        Self {
+            source: OpenedWindowSource::Live(Arc::new(LiveWindowState::new(
+                revision,
+                incarnation,
+                snapshot,
+            ))),
+        }
+    }
+    pub(in crate::runtime) async fn stored(
+        executor: &Executor,
+        revision: u64,
+        view: super::snapshot_staging::MappedArtifact,
+        input: &StdArc<ArrowSchema>,
+        arguments: &StdArc<ArrowSchema>,
+    ) -> error_stack::Result<Option<Self>, WindowArchiveError> {
+        let opened =
+            stored::StoredWindowState::open(executor, revision, view, input, arguments).await?;
+        Ok(opened.map(|opened| Self {
+            source: OpenedWindowSource::Stored(Arc::new(opened)),
+        }))
+    }
+    pub(crate) fn revision(&self) -> u64 {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.revision(),
+            OpenedWindowSource::Stored(window) => window.revision(),
+        }
+    }
+    pub(crate) fn incarnation(&self) -> u64 {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.incarnation(),
+            OpenedWindowSource::Stored(window) => window.incarnation(),
+        }
+    }
+    pub(crate) fn next_sequence(&self) -> u64 {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.next_sequence(),
+            OpenedWindowSource::Stored(window) => window.next_sequence(),
+        }
+    }
+    pub(crate) fn first_sequence(&self) -> Option<u64> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.first_sequence(),
+            OpenedWindowSource::Stored(window) => window.first_sequence(),
+        }
+    }
+    pub(crate) fn row_watermarks(&self) -> Vec<RemoteRuntimeRecordMetadata> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.row_watermarks(),
+            OpenedWindowSource::Stored(window) => window.row_watermarks(),
+        }
+    }
+    pub(crate) fn accumulators(
+        &self,
+    ) -> error_stack::Result<Vec<WindowAccumulatorState>, WindowArchiveError> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.accumulators(),
+            OpenedWindowSource::Stored(window) => window.accumulators(),
+        }
+    }
+    pub(crate) fn groups(&self, limit: u64) -> Vec<Range<usize>> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.groups(limit),
+            OpenedWindowSource::Stored(window) => window.groups(limit),
+        }
+    }
+    pub(crate) async fn encode_input_group(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, WindowArchiveError> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.encode_input_group(executor, group).await,
+            OpenedWindowSource::Stored(window) => window.encode_input_group(executor, group).await,
+        }
+    }
+    pub(crate) async fn encode_argument_group(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, WindowArchiveError> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.encode_argument_group(executor, group).await,
+            OpenedWindowSource::Stored(window) => {
+                window.encode_argument_group(executor, group).await
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LiveWindowState {
     revision: u64,
     incarnation: u64,
     snapshot: WindowProcessorStateSnapshot,
@@ -160,7 +225,7 @@ pub(crate) struct CapturedWindowState {
     arguments: MaterializedGeneration,
 }
 
-impl CapturedWindowState {
+impl LiveWindowState {
     fn new(revision: u64, incarnation: u64, snapshot: WindowProcessorStateSnapshot) -> Self {
         let mut input_records = Vec::with_capacity(snapshot.entries.len());
         let mut argument_records = Vec::with_capacity(snapshot.entries.len());
@@ -554,7 +619,12 @@ mod tests {
     use nervix_models::ParseAsType;
     use ordered_float::OrderedFloat;
 
-    use super::*;
+    use super::{
+        super::window_state::{
+            WindowSnapshotLifetime, WindowSnapshotSchemas, decode_window_processor_snapshot,
+        },
+        *,
+    };
     use crate::{
         runtime::{
             OptionalTestField, TestWindow, WindowArgumentColumns, WindowProcessorState,
@@ -754,9 +824,7 @@ mod tests {
         let captured =
             CapturedWindow::published(&generation).verified("the generation holds a window");
         let opened = captured
-            .open(executor, &input, &arguments)
-            .await
-            .assured("a published window opens against its own schemas")
+            .open()
             .verified("a window the branch task published has a branch lifetime");
         assert_eq!(opened.revision(), revision);
         assert_eq!(Some(opened.incarnation()), published.incarnation);
@@ -777,6 +845,97 @@ mod tests {
             executor.clone(),
             SnapshotStagingLimits::default(),
         );
+        let native = super::super::window_state::encode_window_processor_snapshot(
+            &published, revision, executor,
+        )
+        .await
+        .assured("the bounded current window encodes");
+        // The stored reader replaces resident decoding of these same native bytes. Arrow may
+        // normalize unused Boolean buffer bits while persisting a live row view, so the complete
+        // byte oracle starts at the same stored checkpoint rather than an earlier live carrier.
+        let resident_native = decode_window_processor_snapshot(
+            &native,
+            executor,
+            WindowSnapshotSchemas {
+                input: &input,
+                arguments: &arguments,
+            },
+            WindowSnapshotLifetime::Recorded,
+        )
+        .await
+        .assured("the bounded native checkpoint opens resident")
+        .verified("the resident checkpoint has its recorded lifetime");
+        let resident_native =
+            CapturedWindowState::new(revision, opened.incarnation(), resident_native);
+        let mut native_writer = staging
+            .try_stage(u64::try_from(native.len()).assured("native length fits"))
+            .await
+            .assured("the native checkpoint has disk quota");
+        native_writer
+            .write_chunk(
+                executor
+                    .charge_owned(nervix_execution::MemoryClass::Bulk, native)
+                    .await
+                    .assured("bounded native fixture bytes are admitted"),
+            )
+            .await
+            .assured("native checkpoint bytes are staged");
+        let view = native_writer
+            .finish_artifact()
+            .await
+            .assured("native artifact finishes")
+            .into_mapped()
+            .await
+            .assured("the native window view is admitted");
+        let from_stored = CapturedWindowState::stored(executor, revision, view, &input, &arguments)
+            .await
+            .assured("stored window opens against its exact schemas")
+            .verified("the generated window has a branch lifetime");
+        assert_eq!(from_stored.revision(), opened.revision());
+        assert_eq!(from_stored.incarnation(), opened.incarnation());
+        assert_eq!(from_stored.first_sequence(), opened.first_sequence());
+        assert_eq!(from_stored.next_sequence(), opened.next_sequence());
+        assert_eq!(from_stored.row_watermarks(), opened.row_watermarks());
+        assert_eq!(
+            from_stored.accumulators().assured("buckets fit"),
+            opened.accumulators().assured("buckets fit")
+        );
+        let stored_groups = from_stored.groups(limit);
+        assert_eq!(stored_groups, resident_native.groups(limit));
+        for group in &stored_groups {
+            let resident = resident_native
+                .encode_input_group(executor, group)
+                .await
+                .assured("resident input encodes");
+            let stored = from_stored
+                .encode_input_group(executor, group)
+                .await
+                .assured("stored input encodes");
+            assert_eq!(
+                stored.as_ref(),
+                resident.as_ref(),
+                "complete input groups match byte for byte"
+            );
+            drop(stored);
+            drop(resident);
+            let resident = resident_native
+                .encode_argument_group(executor, group)
+                .await
+                .assured("resident arguments encode");
+            let stored = from_stored
+                .encode_argument_group(executor, group)
+                .await
+                .assured("stored arguments encode");
+            assert_eq!(
+                stored.as_ref(),
+                resident.as_ref(),
+                "complete argument groups match byte for byte"
+            );
+        }
+        // Restore the new stored reader's complete output; the caller compares every retained
+        // value, sequence, watermark and typed accumulator with the original live publication.
+        let opened = from_stored;
+        let groups = stored_groups;
         let mut builder = WindowCheckpointBuilder::new(
             executor,
             &staging,
@@ -1109,9 +1268,6 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_window_without_a_branch_lifetime_archives_nothing() {
         let window = window();
-        let executor = Executor::default();
-        let input = window.input_schema.arrow_schema();
-        let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
         let mut never_admitted = window
             .state
             .to_snapshot()
@@ -1123,9 +1279,7 @@ mod tests {
         };
         let opened = CapturedWindow::published(&generation)
             .verified("the generation holds a window")
-            .open(&executor, &input, &arguments)
-            .await
-            .assured("an empty window opens");
+            .open();
         assert!(
             opened.is_none(),
             "an empty forced-recovery window restores empty"
@@ -1146,7 +1300,7 @@ mod tests {
     }
 
     impl OpenedWindow {
-        async fn of_two_rows(executor: &Executor) -> Self {
+        async fn of_two_rows() -> Self {
             let mut window = window();
             let latencies: ArrayRef = StdArc::new(Int64Array::from(vec![Some(1), Some(2)]));
             let labels: ArrayRef = StdArc::new(StringArray::from(vec![Some("a"), None]));
@@ -1164,9 +1318,7 @@ mod tests {
             };
             let opened = CapturedWindow::published(&generation)
                 .verified("the generation holds a window")
-                .open(executor, &input, &arguments)
-                .await
-                .assured("the window opens")
+                .open()
                 .verified("the window has a branch lifetime");
             Self {
                 opened,
@@ -1220,7 +1372,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn rebuilding_a_window_refuses_groups_that_disagree_with_its_descriptor() {
         let executor = Executor::default();
-        let window = OpenedWindow::of_two_rows(&executor).await;
+        let window = OpenedWindow::of_two_rows().await;
         let directory = tempfile::tempdir().assured("the staging directory opens");
         let staging = SnapshotStaging::new(
             directory.path().to_path_buf(),
@@ -1296,7 +1448,7 @@ mod tests {
     async fn a_refused_section_is_admitted_again_into_the_same_checkpoint() {
         const MEBIBYTE: u64 = 1024 * 1024;
         let executor = Executor::default();
-        let window = OpenedWindow::of_two_rows(&executor).await;
+        let window = OpenedWindow::of_two_rows().await;
         let input_rows = window.input_rows(&executor, 0..2).await;
         let argument_rows = window.argument_rows(&executor, 0..2).await;
 

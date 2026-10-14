@@ -1557,6 +1557,13 @@ retries within one 30-second opening deadline. The typed capacity classification
 retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
 admitted or partially consumed response is never reopened by this admission retry.
 
+Stored branch capture keeps storage and admission failures beneath `BackupStateCaptureError`,
+with `Keyspace` or `Window` naming the entity at native conversion. Mapping admission is decided
+before a file is mapped and before a group allocates its owned values. Keyspace execution refusal
+uses `DeduplicatorArchiveError::Admission` with the executor report beneath it; it does not
+classify an unexamined checkpoint as undecodable. A cancelled or refused reader releases its view,
+staged files and reservations, and the capture owner discards the incomplete section inventory.
+
 ### Restore
 
 A restore's failures are owned where they are decided, in the order the restore meets them. The

@@ -93,8 +93,22 @@ publish its state. For each branch a captured lifecycle holds, capture takes the
 deduplicator published, every key with the time it was first seen, and the rows its window
 retains, with their aggregate argument values, admission sequences and watermarks, the branch
 incarnation the window belongs to, and every linear histogram's pending delayed removals. A branch
-with no published state on its owner contributes its stored checkpoint, and a stopped domain reads
-stored checkpoints only. An evicted branch contributes nothing.
+with no live publication on its owner, including an inactive window with a sealed publication,
+contributes its stored checkpoint. A stopped domain reads stored checkpoints only. An evicted
+branch contributes nothing.
+Stored keyspace and window selections retain the cut's immutable database view until their
+scheduled owner and schema are checked. Each owner opens one selected checkpoint at a time,
+streams it to quota-owned disk in 64 KiB blocks, and admits an immutable mapping after unlinking
+its temporary name. The checkpoint revision comes from the same read as its bytes. A running
+branch's live publication supersedes its stored checkpoint before that checkpoint is opened.
+
+Keyspace validation compares borrowed native keys for uniqueness and records their sizes; only
+the next archive group is converted into owned key parts. A stored window validates its header,
+sequences, identities and delayed removals, then indexes its native column sections. It decodes
+one native group at a time to determine the canonical archive boundaries, releases those decoded
+columns, and subsequently reads only sections overlapping each input or argument group. The
+descriptor and every group's order, bytes, length and digest use the same archive contracts as
+capture of a live publication.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
 roots, relay and node buffers, relays that admitted a batch while the node read that view, and
 emitter buffers or publishes. Parked `REQUIRED WAIT` messages and the rows a window retains until
@@ -1039,6 +1053,17 @@ the original Arrow bytes. A running or paused backup captures fresh runtime rows
 assignment barriers. These representation
 checks do not establish capture-fence or installation-ordering correctness, which retain their
 production-owner concurrency and recovery evidence.
+The registered keyspace and window properties additionally open admitted native checkpoint views
+and compare every complete emitted Arrow group byte for byte with the resident path. The window
+oracle decodes the same native checkpoint, since persistence can normalize unused Boolean buffer
+bits of a live carrier. Restoring the bounded reader's output compares all significant row values
+and validity with the live publication. The checks compare revisions, counts, group boundaries,
+sequences, watermarks and delayed removals. The stored-branch capture outline exercises a stopped
+domain and a stopped restore with
+a keyspace and a window above 32 MiB beside 24 small branches, checks exact re-export, and reports
+sampled per-node bulk and metadata reservations separately from harness allocator statistics.
+Mappings are included in their admission class; jemalloc's resident figure excludes mappings
+outside jemalloc and is not the process's complete resident set.
 
 ## Limits
 
@@ -1063,6 +1088,8 @@ production-owner concurrency and recovery evidence.
 | Materialized identity group / Arrow group | 1 MiB / 8 MiB |
 | Materialized capture metadata / typed uniqueness metadata / native row views | 8 MiB each, independently admitted |
 | Deduplicator key group / window input group / window argument group | 8 MiB each; capture fills a group to at most half that bound, and a single larger row takes a group of its own |
+| Selected stored branch checkpoint capture | One checkpoint per owner at a time. Before opening, `restore_metadata` admits three times its stored length to cover an inline value's copies. Four 64 KiB bulk blocks plus 8 KiB cover staging. The complete immutable mapping and its retained indexes remain admitted; selected key parts and decoded columns have separate temporary metadata charges. |
+| Stored window structure conversion | `restore_metadata` admits a conservative eight times the native length plus 256 KiB for typed removals, descriptor projection and header scratch, independently of the mapping and bounded column buffers. A checkpoint that cannot fit these reservations is refused with its entity named. |
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
 | Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
@@ -1107,6 +1134,10 @@ contents. The reasons are:
 
 A capture that fails or is interrupted drops every section its owners staged for it. No archive is
 assembled from a partial capture, and the backup can be sent again.
+The same refusal applies to a selected stored keyspace or window whose immutable view, native
+validation, typed metadata or bounded projection cannot be admitted. Cancellation is checked
+between stored chunks, identities and keys; refused or interrupted staging drops its private
+files and returns their quota. No partial branch checkpoint becomes an archive section.
 
 A refused restore reports `restore refused:` and the reason, and changed nothing. The reasons are:
 

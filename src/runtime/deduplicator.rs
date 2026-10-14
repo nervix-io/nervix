@@ -11,6 +11,8 @@ use nervix_vm::CompiledProgram as VmCompiledProgram;
 use ordered_float::OrderedFloat;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
+pub(in crate::runtime) mod stored_view;
+
 use super::{
     KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
     RuntimePersistenceError, RuntimeStateKind, RuntimeStatePlacement, StoredStateIssue,

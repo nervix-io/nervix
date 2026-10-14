@@ -602,6 +602,13 @@ Guest capture retains a selected checkpoint handle until its scheduled generatio
 its admitted storage job records the size for later admission, and opening that handle returns
 the checkpoint revision with the reader for those exact bytes.
 
+Deduplicator and window capture likewise distinguish a live publication from an unopened stored
+checkpoint in the captured-state union. A stored selection carries its immutable view and inspected
+size, and opening it returns its actual revision with an admitted immutable artifact. Only a
+validated keyspace or window reader exposes counts, boundaries or columns. The control plane
+selects the scheduled owner and schema before opening; it receives typed conversion results rather
+than native bytes. A window's live and stored readers retain their own required lifetime and metadata.
+
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader
 whose complete header is required; there is no optional or defaulted generation metadata. Each

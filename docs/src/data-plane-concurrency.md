@@ -286,6 +286,17 @@ between bounded units. Each bounded artifact read also retains its file and quot
 job until it exits. Local and remote installation retain their exact file source and use
 the existing authority and installation barriers; conversion adds no lock to record paths.
 
+Stored branch capture also retains one immutable database selection, opens only the scheduled
+checkpoint, and streams it in cancellable 64 KiB units into a quota-owned file. Its admitted
+read-only mapping and size index remain owned through each bounded conversion job; cancellation
+does not release their memory or disk permits before that job exits. Keyspace and window codecs
+convert only the selected archive group. This adds no lock or publication protocol. Existing
+capture and restore lifecycle locks remain tracked by Deloxide: the stored-branch scenario runs
+in active and order selections and in the restore stress selection. Deloxide does not observe
+the mapping, CPU jobs or async admission; ordinary cancellation/refusal owner tests and complete
+Bolero byte comparisons cover those boundaries. The capture fence's Shuttle and Loom models
+retain ownership of its unchanged publication and ordering invariants.
+
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
 atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
