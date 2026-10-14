@@ -475,7 +475,6 @@ impl MongoDbSink {
 /// refuse, names each one it refuses with the code of the refusal, and reports a write concern it
 /// could not satisfy beside the documents it applied, which a write concern failure never undoes.
 /// So even a failed write says which of its documents are stored.
-#[derive(Debug)]
 struct WriteAnswers {
     request: FailedRequest,
     /// The refusals the server reported, by the index of the document each one names.
@@ -486,7 +485,7 @@ struct WriteAnswers {
 
 /// The request a failed write was sent as, which decides how the server reports the documents it
 /// applied.
-#[derive(Debug, strum::AsRefStr)]
+#[derive(strum::AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 enum FailedRequest {
     /// An unordered `insert_many`, which names only the documents it refused: the server applied
@@ -498,7 +497,6 @@ enum FailedRequest {
 }
 
 /// How the server refused one document of a write.
-#[derive(Debug, Clone, Copy)]
 enum Refusal {
     /// One refusal, with the code it carries.
     Code(i32),
@@ -507,7 +505,6 @@ enum Refusal {
 }
 
 /// A write concern the server could not satisfy, as it named it.
-#[derive(Debug)]
 struct UnsatisfiedWriteConcern {
     code: i32,
     /// The name of the code, when the server gave one.
@@ -515,7 +512,6 @@ struct UnsatisfiedWriteConcern {
 }
 
 /// What one document of a failed write resolves to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DocumentAnswer {
     /// The server applied the document.
     Delivered,
