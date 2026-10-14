@@ -547,7 +547,8 @@ test-primitives-compile:
 # and the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
 # `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
 # `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@remote_ack_owners`, `@udf_column_builder`,
-# `@vhost_tls_rebinding` and `@inferencer_branch_batches` scenarios and then the
+# `@vhost_tls_rebinding`, `@inferencer_branch_batches` and `@inferencer_inspection_admission`
+# scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
 # in a session of its own within its bound and the inventory's budget, and the lane fails on an

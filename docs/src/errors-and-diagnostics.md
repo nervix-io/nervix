@@ -712,6 +712,16 @@ These failures name the owning node and relevant relay, codec, or field. A missi
 lookup file is rejected during candidate binding validation; malformed records remain a loader
 failure when the pinned file is decoded. Neither failure silently selects another resource version.
 
+ONNX binding preflight preserves the distinction between invalid tensor bindings, an ONNX loading
+failure, worker refusal, worker panic and inspection timeout. Worker refusal retains the bounded
+executor's report beneath the inferencer context; it does not classify an uninspected model as
+malformed. The thirty-second inspection bound covers admission to a bulk worker through release of
+the temporary session. Debug events record submission, worker entry, builder initialization, model
+loading and session release. A timeout also records the bulk class's configured workers, running
+jobs and pending jobs, so an operator can correlate queue delay with dependency work. These are
+observations of the run; a successful later inspection does not identify the cause of an earlier
+timeout.
+
 ### Runtime Installation
 
 Installing a domain on a node, whether it builds the domain's execution, applies a schedule delta,
