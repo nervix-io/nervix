@@ -748,6 +748,10 @@ impl SilenceSweeps {
     /// sweep, such as runtime teardown's, then ends the task before the next sweep rather than
     /// after as many more as the task's cooperative budget allows, and the join waits for the sweep
     /// in progress and for no other.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the one synchronous sweep each tick runs")
+    )]
     pub(super) async fn run(mut self, mut sweep: impl FnMut()) {
         loop {
             nervix_primitives::task::consume_budget().await;
