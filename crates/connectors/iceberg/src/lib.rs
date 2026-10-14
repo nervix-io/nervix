@@ -1360,7 +1360,10 @@ mod tests {
             SortOrder, Struct, Summary, TableMetadataBuilder,
         },
     };
-    use arrow_array::builder::{ListBuilder, TimestampNanosecondBuilder};
+    use arrow_array::builder::{
+        FixedSizeListBuilder, LargeListBuilder, ListBuilder, MapBuilder, StringBuilder,
+        TimestampNanosecondBuilder,
+    };
     use arrow_schema::Field;
     use meticulous::ResultExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
@@ -1801,6 +1804,105 @@ mod tests {
         assert_eq!(observed.value(0), -1);
         assert!(observed.is_null(1));
         assert_eq!(observed.value(2), 1_234);
+    }
+
+    #[test]
+    fn iceberg_nested_container_shapes_keep_values_offsets_and_nulls() {
+        let timestamp_field = StdArc::new(Field::new(
+            "item",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            true,
+        ));
+        let stage = |source: &ArrayRef| {
+            let mapped = arrow_schema::Schema::new(vec![Field::new(
+                "observed",
+                source.data_type().clone(),
+                true,
+            )]);
+            let schema = IcebergSink::staged_arrow_schema(&mapped)
+                .expect("nested datetime schema stages as microseconds");
+            let staged = IcebergSink::staged_column(source, schema.field(0).data_type())
+                .expect("nested datetime values stage as microseconds");
+            assert_eq!(staged.data_type(), schema.field(0).data_type());
+            staged
+        };
+
+        let mut large =
+            LargeListBuilder::new(TimestampNanosecondBuilder::new().with_timezone("+00:00"))
+                .with_field(timestamp_field.clone());
+        large.values().append_value(-1);
+        large.values().append_value(1_999);
+        large.append(true);
+        large.append(false);
+        let source: ArrayRef = StdArc::new(large.finish());
+        let staged = stage(&source);
+        let large = staged
+            .as_any()
+            .downcast_ref::<LargeListArray>()
+            .expect("large list remains a large list");
+        assert_eq!(large.value_offsets(), &[0, 2, 2]);
+        assert!(large.is_null(1));
+        let values = large
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("large list members are microsecond datetimes");
+        assert_eq!(values.values().as_ref(), &[-1, 1]);
+
+        let mut fixed =
+            FixedSizeListBuilder::new(TimestampNanosecondBuilder::new().with_timezone("+00:00"), 2)
+                .with_field(timestamp_field);
+        fixed.values().append_value(1_999);
+        fixed.values().append_null();
+        fixed.append(true);
+        fixed.values().append_value(0);
+        fixed.values().append_value(0);
+        fixed.append(false);
+        let source: ArrayRef = StdArc::new(fixed.finish());
+        let staged = stage(&source);
+        let fixed = staged
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .expect("fixed list remains a fixed list");
+        assert_eq!(fixed.value_length(), 2);
+        assert!(fixed.is_null(1));
+        let values = fixed
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("fixed list members are microsecond datetimes");
+        assert_eq!(values.value(0), 1);
+        assert!(values.is_null(1));
+
+        let mut map = MapBuilder::new(
+            None,
+            StringBuilder::new(),
+            TimestampNanosecondBuilder::new().with_timezone("+00:00"),
+        );
+        map.keys().append_value("first");
+        map.values().append_value(-1);
+        map.append(true).expect("map entry is valid");
+        let source: ArrayRef = StdArc::new(map.finish());
+        let staged = stage(&source);
+        let map = staged
+            .as_any()
+            .downcast_ref::<MapArray>()
+            .expect("map remains a map");
+        assert_eq!(map.value_offsets(), &[0, 1]);
+        let values = map
+            .entries()
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("map values are microsecond datetimes");
+        assert_eq!(values.value(0), -1);
+
+        let error = IcebergSink::staged_column(&source, &DataType::Utf8)
+            .expect_err("an unplanned staged type must fail publication");
+        assert_eq!(
+            *error.current_context(),
+            SinkPublishError::Publish { sink: ICEBERG }
+        );
     }
 
     /// The staged schema and the staged values follow every list level, retaining each list
