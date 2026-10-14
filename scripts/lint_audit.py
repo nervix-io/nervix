@@ -20,6 +20,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 from typing import Any
 
 from scripts import typed_ratchet
@@ -389,6 +390,11 @@ class PullRequests:
 
     SUBJECT = re.compile(r"\(#(\d+)\)\s*$")
     REMOTE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repository>[^/]+?)(?:\.git)?$")
+    # A server error or a dropped connection on one of the hundreds of commit reads an audit makes
+    # is transient: the same read succeeds when it is repeated. Any other failure is final.
+    TRANSIENT = re.compile(r"\bHTTP 5\d\d\b|connection reset|i/o timeout|TLS handshake timeout")
+    ATTEMPTS = 4
+    FIRST_BACKOFF_SECONDS = 2
 
     def __init__(self, root: pathlib.Path) -> None:
         remote = git(root, "remote", "get-url", "origin").strip()
@@ -400,10 +406,20 @@ class PullRequests:
         self.merged: dict[str, int | None] = {}
 
     def api(self, path: str) -> Any:
-        completed = subprocess.run(["gh", "api", "--paginate", "--slurp", path], text=True, capture_output=True)
-        if completed.returncode:
-            raise AuditError(f"gh api {path} failed:\n{completed.stderr}")
-        return json.loads(completed.stdout)
+        """Read `path`, reading it again after a transient failure with a doubling backoff, at most
+        `ATTEMPTS` reads in all; a failure that persists, or any other failure, ends the audit without
+        a report."""
+        failures = []
+        for attempt in range(self.ATTEMPTS):
+            completed = subprocess.run(["gh", "api", "--paginate", "--slurp", path], text=True, capture_output=True)
+            if completed.returncode == 0:
+                return json.loads(completed.stdout)
+            failures.append(completed.stderr.strip())
+            if self.TRANSIENT.search(completed.stderr) is None:
+                break
+            if attempt + 1 < self.ATTEMPTS:
+                time.sleep(self.FIRST_BACKOFF_SECONDS * 2 ** attempt)
+        raise AuditError(f"gh api {path} failed after {len(failures)} attempt(s):\n" + "\n".join(failures))
 
     def number(self, subject: str, sha: str) -> int | None:
         """The pull request that merged `sha`: the number a squash merge's subject names, or for a

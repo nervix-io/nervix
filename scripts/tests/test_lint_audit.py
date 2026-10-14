@@ -208,6 +208,48 @@ class RepositoryTests(unittest.TestCase):
         pull_requests.api = lambda path: pages[path]
         return pull_requests
 
+    def reader(self) -> lint_audit.PullRequests:
+        self.git("remote", "add", "origin", "https://github.com/example/project.git")
+        return lint_audit.PullRequests(self.root)
+
+    @staticmethod
+    def gh(status: int, text: str) -> subprocess.CompletedProcess[str]:
+        """A `gh api` call that ended with `status`, writing `text` to standard output on success and to
+        standard error otherwise."""
+        if status == 0:
+            return subprocess.CompletedProcess([], status, stdout=text, stderr="")
+        return subprocess.CompletedProcess([], status, stdout="", stderr=text)
+
+    def test_a_transient_github_failure_is_read_again(self) -> None:
+        pull_requests = self.reader()
+        run = mock.Mock(side_effect=[self.gh(1, "gh: HTTP 500\n"), self.gh(1, "read: connection reset by peer\n"),
+                                     self.gh(0, '[{"sha": "a"}]')])
+        with mock.patch.object(lint_audit.subprocess, "run", run), \
+                mock.patch.object(lint_audit.time, "sleep") as sleep:
+            self.assertEqual(pull_requests.api("repos/example/project/commits/a"), [{"sha": "a"}])
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (4,)])
+
+    def test_a_github_failure_that_persists_ends_the_audit(self) -> None:
+        pull_requests = self.reader()
+        run = mock.Mock(side_effect=[self.gh(1, "gh: HTTP 502\n")] * 4)
+        with mock.patch.object(lint_audit.subprocess, "run", run), \
+                mock.patch.object(lint_audit.time, "sleep") as sleep:
+            with self.assertRaisesRegex(lint_audit.AuditError, r"commits/a failed after 4 attempt\(s\):\ngh: HTTP 502"):
+                pull_requests.api("repos/example/project/commits/a")
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (4,), (8,)])
+
+    def test_a_final_github_failure_is_not_read_again(self) -> None:
+        pull_requests = self.reader()
+        run = mock.Mock(side_effect=[self.gh(1, "gh: Not Found (HTTP 404)\n")])
+        with mock.patch.object(lint_audit.subprocess, "run", run), \
+                mock.patch.object(lint_audit.time, "sleep") as sleep:
+            with self.assertRaisesRegex(lint_audit.AuditError, r"failed after 1 attempt\(s\):\ngh: Not Found"):
+                pull_requests.api("repos/example/project/commits/a")
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_not_called()
+
     def squash_sketches(self) -> None:
         self.commit("2026-09-23", "feat(window): add pane sketches (#7)", {
             "src/runtime/sketches.rs": ("fn admit(map: &mut M, pane: i64) {\n    if let Some(sketch) = map.get_mut(&pane) {\n"
