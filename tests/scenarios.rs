@@ -16020,6 +16020,39 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill every bulk worker on every node, and give them all back once `duration` has passed. The
+/// scenario goes on while they are held, so work a stopping node hands its bulk workers waits out
+/// the rest of that time, and the release does not depend on the step that stops the node.
+#[when(expr = "bulk execution on every node is occupied for {string}")]
+async fn when_bulk_execution_is_occupied_on_every_node_for(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let fault_injection = world.fault_injection.clone();
+    let mut node_names = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let node_name = crate::common::cluster::node_name(&node_id);
+        nervix_primitives::time::timeout(
+            Duration::from_secs(30),
+            fault_injection.occupy_execution(&node_name, nervix_execution::CpuClass::Bulk),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("bulk execution on '{node_id}' never filled its workers: {error}")
+        });
+        node_names.push(node_name);
+    }
+    // The release outlives this step and the scenario's own failure, so a node that waits for its
+    // bulk workers always gets them back.
+    nervix_primitives::task::spawn(async move {
+        nervix_primitives::time::sleep(duration).await;
+        for node_name in &node_names {
+            fault_injection.release_execution(node_name);
+        }
+    });
+}
+
 /// Fill every bulk worker and every place in the bulk wait queue on a node, so the next bulk job
 /// the node is handed is refused for room rather than queued.
 #[when(expr = "bulk execution on node {string} is saturated")]
