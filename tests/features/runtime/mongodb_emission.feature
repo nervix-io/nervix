@@ -514,8 +514,8 @@ Feature: MongoDB emission
       """
 
     Examples:
-      | nodes | collection                         | conflict_clause                           |
-      | 1     | exists                             |                                           |
-      | 3     | exists                             |                                           |
-      | 1     | with unique user id exists         | ON CONFLICT ("mongodb_user_id") DO UPDATE |
-      | 3     | with unique user id exists         | ON CONFLICT ("mongodb_user_id") DO UPDATE |
+      | nodes | collection                 | conflict_clause                           |
+      | 1     | exists                     |                                           |
+      | 3     | exists                     |                                           |
+      | 1     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE |
+      | 3     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE |

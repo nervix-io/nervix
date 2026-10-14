@@ -1812,11 +1812,15 @@ mod tests {
                     }
                     None => None,
                 };
-                let observed_failure = match &outcome.infrastructure_error {
-                    Some(failure) => Some(failure_message(failure).map(str::to_owned)),
-                    None => None,
-                };
-                assert_eq!(observed_failure, expected_failure.map(Some));
+                match (&outcome.infrastructure_error, &expected_failure) {
+                    (Some(failure), Some(expected)) => {
+                        assert_eq!(failure_message(failure), Some(expected.as_str()));
+                    }
+                    (None, None) => {}
+                    (observed, expected) => {
+                        panic!("the write failed as {observed:?}, but should fail as {expected:?}");
+                    }
+                }
             });
     }
 
