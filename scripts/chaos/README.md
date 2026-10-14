@@ -281,6 +281,14 @@ fails injection qualification; a large sample cannot turn four replies per forty
 passing evidence. Pumba parameters, action hold times and product recovery deadlines do not
 change with the sample size. `just test-chaos-degraded-evidence` runs the focused controller,
 parser and effect controls; `just coverage-chaos-degraded-evidence` retains their shell coverage.
+The controls pin each profile's packet count and interval and the 30-second helper budget. They
+also exercise both sides of the inclusive reply and loss thresholds at 40 and 400 packets.
+For a composed-action sampling change, run the same retained `mixed-instability` plan with
+`--plan FILE` on both immutable ordinary and diagnostic images, using a separate run ID and
+artifact directory for each. Check the plan hash, complete action trace, burst sample, exact
+output ledger, committed source offsets and cleanup verdict; the diagnostic run also requires
+complete clean deadlock evidence. Preserve the original failure alongside the new attempts.
+
 The 262,144-byte transfer has one 90-second deadline shared by the sender and receiver, covering
 connection establishment, TCP retransmissions, byte delivery and receiver completion. It uses
 the pinned BusyBox netcat's EOF half-close rather than an idle timeout. At 256 kbit/s the payload
