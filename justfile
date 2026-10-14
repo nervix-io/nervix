@@ -1066,8 +1066,8 @@ test-coverage: tests-deps
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
-        --package nervix-server --lcov --output-path lcov.info
+    # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
+    pwd -P > coverage-source-root.txt
 
 test-scenarios-coverage: tests-deps
     #!/usr/bin/env bash
@@ -1094,8 +1094,7 @@ test-scenarios-coverage: tests-deps
     uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
         -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
-        --package nervix-server --lcov --output-path lcov.info
+    pwd -P > coverage-source-root.txt
 
 # Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
 # Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
@@ -1103,10 +1102,34 @@ test-scenarios-coverage: tests-deps
 coverage-clean-workspace:
     cargo llvm-cov clean --workspace
 
-# Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
-# workspace package, so crate lines the server's tests executed are measured as CI measures them.
+# Rewrite lcov-workspace.info and its checkout path from the profiles the last coverage recipe
+# collected, over the sources of every workspace package, so crate lines the server's tests executed
+# are measured as CI measures them. `coverage-merge` then maps it onto the repository.
 coverage-report-workspace *args:
-    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info {{ args }}
+    pwd -P > coverage-source-root.txt
+
+# Merge ordinary coverage into the one repository-relative lcov-workspace.info that every coverage
+# consumer reads, and record its inputs, counts and dropped records in
+# target/coverage-merge/record.json. An input is a producer's artifact directory or one report, each
+# with the coverage-source-root.txt its producer wrote; CI names the three ordinary artifacts, and
+# without inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
+# writing no report, when the report would be incomplete.
+coverage-merge *inputs:
+    python3 -m scripts.coverage_merge --output lcov-workspace.info --record {{ quote(cargo_target_dir + "/coverage-merge/record.json") }} {{ inputs }}
+
+# Exercise the merge's source mapping, its integrity failures and its CI contract.
+test-coverage-merge:
+    python3 -m unittest scripts.tests.test_coverage_merge
+
+# Retain the merge's own measured line coverage beside the other Python tooling reports.
+coverage-merge-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/coverage-merge"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" --branch --source=scripts.coverage_merge,scripts.tests.test_coverage_merge -m unittest scripts.tests.test_coverage_merge
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
 
 # Check the same merged workspace coverage and complexity limit locally as CI does.
 check-coverage report="lcov-workspace.info":
