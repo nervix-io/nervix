@@ -15,8 +15,8 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, BooleanArray, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
-    TimestampMicrosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Int64Array, LargeListArray, LargeStringArray,
+    ListArray, RecordBatch, StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
@@ -28085,6 +28085,16 @@ impl IcebergTableFixture {
     }
 
     fn parse_data_type(column_type: &str) -> ArrowDataType {
+        if let Some(element) = column_type
+            .strip_prefix("LIST<")
+            .and_then(|nested| nested.strip_suffix('>'))
+        {
+            return ArrowDataType::List(StdArc::new(ArrowField::new(
+                "item",
+                Self::parse_data_type(element),
+                false,
+            )));
+        }
         match column_type {
             "STRING" => ArrowDataType::Utf8,
             "I64" => ArrowDataType::Int64,
@@ -28122,52 +28132,76 @@ fn iceberg_cell_value(
 ) -> Result<serde_json::Value, String> {
     let schema = batch.schema();
     let field = schema.field(column_index);
-    let array = batch.column(column_index);
+    iceberg_array_value(batch.column(column_index).as_ref(), row_index, field.name())
+}
+
+fn iceberg_array_value(
+    array: &dyn Array,
+    row_index: usize,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
     if array.is_null(row_index) {
         return Ok(serde_json::Value::Null);
     }
-    match field.data_type() {
+    match array.data_type() {
         ArrowDataType::Int64 => Ok(serde_json::Value::from(
-            iceberg_column::<Int64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<Int64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::UInt64 => Ok(serde_json::Value::from(
-            iceberg_column::<UInt64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<UInt64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Boolean => Ok(serde_json::Value::from(
-            iceberg_column::<BooleanArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<BooleanArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8 => Ok(serde_json::Value::from(
-            iceberg_column::<StringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::LargeUtf8 => Ok(serde_json::Value::from(
-            iceberg_column::<LargeStringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<LargeStringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8View => Ok(serde_json::Value::from(
-            iceberg_column::<StringViewArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringViewArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => Ok(serde_json::Value::from(
-            iceberg_column::<TimestampMicrosecondArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<TimestampMicrosecondArray>(array, field_name)?.value(row_index),
         )),
+        ArrowDataType::List(_) => iceberg_list_values(
+            iceberg_array::<ListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::LargeList(_) => iceberg_list_values(
+            iceberg_array::<LargeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::FixedSizeList(_, _) => iceberg_list_values(
+            iceberg_array::<FixedSizeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
         unsupported => Err(format!(
             "unsupported Iceberg assertion field '{}' Arrow type {unsupported:?}",
-            field.name()
+            field_name
         )),
     }
 }
 
-fn iceberg_column<T: 'static>(batch: &RecordBatch, column_index: usize) -> Result<&T, String> {
-    let schema = batch.schema();
-    batch
-        .column(column_index)
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| {
-            format!(
-                "Iceberg assertion column '{}' did not contain expected Arrow array {}",
-                schema.field(column_index).name(),
-                std::any::type_name::<T>()
-            )
-        })
+fn iceberg_list_values(
+    values: StdArc<dyn Array>,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
+    let values = (0..values.len())
+        .map(|index| iceberg_array_value(values.as_ref(), index, field_name))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::Value::Array(values))
+}
+
+fn iceberg_array<'a, T: 'static>(array: &'a dyn Array, field_name: &str) -> Result<&'a T, String> {
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        format!(
+            "Iceberg assertion column '{}' did not contain expected Arrow array {}",
+            field_name,
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 fn iceberg_row_matches_expected(row: &serde_json::Value, expected: &serde_json::Value) -> bool {

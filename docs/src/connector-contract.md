@@ -1035,7 +1035,10 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
   prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
-  host measures from staging, ends or its staged files reach the maximum commit size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
+  host measures from staging, ends or its staged files reach the maximum commit size. Open checks
+  mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
+  nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
+  successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
   limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
