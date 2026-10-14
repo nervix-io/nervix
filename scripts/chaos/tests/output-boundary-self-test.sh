@@ -112,7 +112,7 @@ run_boundary
     || fail 'an observation failure did not reset consecutive stable reads'
 jq -se 'any(.[]; .command_exit_code == 73 and .outcome == "command-failed")' \
     "${artifact_dir}"/traffic/offsets/*/result.json >/dev/null || fail 'the exact failed broker command was lost'
-rg -q 'broker observation refused' "${artifact_dir}/traffic/offsets" || fail 'broker stderr was lost'
+grep -q 'broker observation refused' "${artifact_dir}"/traffic/offsets/*/stderr.txt || fail 'broker stderr was lost'
 
 begin_case moving 1000
 for _ in {1..40}; do printf 'moving\n'; done >"${artifact_dir}/responses.txt"
