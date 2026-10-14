@@ -294,6 +294,7 @@ class InventoryTests(unittest.TestCase):
             "columnar-json-rows",
             "bounded-write-limits",
             "connector-row-request-division",
+            "connector-confirmation-window",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",

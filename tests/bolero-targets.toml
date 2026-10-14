@@ -2680,6 +2680,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connector/src/__fuzz__/confirmation_window__tests__bolero_a_publish_settles_every_answer_given_before_it_ends/corpus"
+domain_version = 1
+features = []
+id = "connector-confirmation-window"
+invariant = "Under any MAX and ACK TIMEOUT, records refused at hand-over, answers confirmed, refused or failed within, at, past or never by each record's deadline, pauses between hand-overs and a driver failure, the window ends the publish exactly when the documented rule does, holds fewer than MAX answers after each hand-over, delivers exactly the records the broker confirmed before the end and rejects exactly those refused at hand-over or before the end, so no confirmed record is ever returned as unresolved, and reports the driver's failure, the oldest's failed answer or its missed deadline as the rule names."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector"
+random_iterations = 256
+source = "crates/connector/src/confirmation_window_tests.rs"
+test = "confirmation_window::tests::bolero_a_publish_settles_every_answer_given_before_it_ends"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_batch_packing__tests__bolero_subdivision_follows_the_documented_rule_for_any_encoding_size/corpus"
 domain_version = 1
 features = []

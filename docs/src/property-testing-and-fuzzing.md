@@ -163,6 +163,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `columnar-json-rows` | `nervix-columnar-json` written rows against an independent rendering of their logical values and the first refused null | every supported scalar, list, fixed-size and nested list column, sliced, every null policy and number and bytes encoding, v1 | 256 | 8192 bytes |
 | `bounded-write-limits` | `nervix-bounded-write` whole writes within the limit, capacity within it, and the outcome classification against a reference of the rule | writes, encoder failures and writing on after a refusal under limits of 1 to 1,021 bytes, v1 | 256 | 1024 bytes |
 | `connector-row-request-division` | `nervix-connector` row request division against the documented halving rule, both limits and the measurement bound | declared and native row and byte limits, up to 160 rows, measures that grow and shrink with a candidate, v1 | 256 | 1024 bytes |
+| `connector-confirmation-window` | `nervix-connector` confirmation window outcomes, end instant and in-flight bound against a reference model of the documented window rule, so no record confirmed before the publish ends is left unresolved | `MAX` one to six, `ACK TIMEOUT` one to 40 ms, up to 24 records refused at hand-over or answered confirmed, refused or failed within, at, past or never by their deadlines, pauses between hand-overs and a driver failure, on a paused clock, v1 | 256 | 512 bytes |
 | `emitter-batch-subdivision` | `nervix-server` batch candidates against the documented rule, message limit, compatibility and encoding bound | up to 96 members in three compatibility classes, failing containers, encodings that grow and shrink, v1 | 256 | 1024 bytes |
 | `emitter-batch-packing` | `nervix-server` packed payloads and rejected rows against the documented packing of exact member encodings and container framing | generated schemaful codecs and rows in carriers across two relays, three branches, three envelopes and seals, `MAX SIZE` from below one member's container to above the whole run's, v1 | 256 | 4096 bytes |
 | `codec-bounded-encodings` | `nervix-server` bounded row, member and container encodings against the unbounded bytes, and container framing | generated schemaful codecs and batches under limits short of, at, past and around each encoding, and containers of 24, 64 and 256 repeated members where a count's encoding grows, v1 | 256 | 4096 bytes |
@@ -343,7 +344,11 @@ Registered properties also hold behavioral contracts against independent referen
   Bolero reads its checked-in corpus, with four random cases of at most 512 input bytes; every step
   still runs and checks its own answer, and the complete state is compared every sixteenth step and
   at the end. Mutation testing runs the property in every mutant through
-  `just test-expiry-map-mutants`.
+  `just test-expiry-map-mutants`. `connector-confirmation-window` publishes generated hand-overs,
+  refusals, pauses and scripted broker answers through the brokered sink confirmation window on a
+  paused clock, and compares the instant the publish ends, the answers the window holds after each
+  hand-over, the records it settles and the failure that ends it with a reference model of the
+  documented window rule computed in whole milliseconds.
 - **Numeric references.** The decimal rounding kernels are compared with the exact decimal
   expansion of each value and with a 128-bit integer reference. That a value holding no more
   fractional digits than the count is its own rounding is checked apart from the rounded results.
