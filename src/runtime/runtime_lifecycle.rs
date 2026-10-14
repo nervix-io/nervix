@@ -181,6 +181,7 @@ impl Runtime {
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
+                branch_snapshot_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
@@ -726,6 +727,12 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
+        // Every branch task has ended, in time or at a stop grace, and the snapshot task of each
+        // deduplicator and window branch is writing what its branch published last. Those tasks
+        // hold this runtime and its storage, so the runtime waits for each of them here, while
+        // the replication routes their checkpoints are offered through are still installed.
+        self.inner.branch_snapshot_tasks.close();
+        self.inner.branch_snapshot_tasks.wait().await;
         self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
