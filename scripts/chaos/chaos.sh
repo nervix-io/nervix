@@ -162,7 +162,8 @@ case "${command_name}" in
         ;;
     self-test)
         [[ "$#" -eq 0 ]] || { usage >&2; exit 2; }
-        exec "${script_dir}/tests/self-test.sh"
+        "${script_dir}/tests/self-test.sh"
+        exec "${script_dir}/tests/network-preflight-self-test.sh"
         ;;
     -h | --help | help)
         usage
