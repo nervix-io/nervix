@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import enum
 import html
 import json
 import os
@@ -28,6 +29,23 @@ ROOT = Path(__file__).resolve().parent.parent
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 FILE_LIMIT = 100
 RANGE_LIMIT = 20
+
+
+class Scope(enum.StrEnum):
+    """Independent reports, each with its own PR comment and execution attribution."""
+
+    ORDINARY = "ordinary"
+    TURMOIL = "turmoil"
+
+    def marker(self) -> str:
+        if self is Scope.ORDINARY:
+            return COMMENT_MARKER
+        return "<!-- nervix-patch-coverage-turmoil -->"
+
+    def title(self) -> str:
+        if self is Scope.ORDINARY:
+            return "Patch coverage"
+        return "Turmoil patch coverage"
 
 
 def command(arguments: Sequence[str], *, root: Path = ROOT, input_text: str | None = None, encoding_errors: str = "strict") -> str:
@@ -176,8 +194,8 @@ class Measurement:
     def covered(self) -> int:
         return sum(item.covered for item in self.files)
 
-    def markdown(self, repo: str | None = None) -> str:
-        lines = [COMMENT_MARKER, "## Patch coverage", ""]
+    def markdown(self, repo: str | None = None, scope: Scope = Scope.ORDINARY) -> str:
+        lines = [scope.marker(), f"## {scope.title()}", ""]
         if self.executable:
             lines.append(f"**Patch line coverage: {100 * self.covered / self.executable:.2f}%** ({self.covered} / {self.executable} added executable lines).")
         else:
@@ -203,6 +221,7 @@ class Publication:
     repo: str
     pr: int
     head: str
+    scope: Scope = Scope.ORDINARY
 
     def publish(self, body: str) -> None:
         endpoint = f"repos/{self.repo}"
@@ -219,7 +238,7 @@ class Publication:
         method = "POST"
         for page in pages:
             for comment in page:
-                if comment["body"].startswith(COMMENT_MARKER) and comment["user"]["login"] == author:
+                if comment["body"].startswith(self.scope.marker()) and comment["user"]["login"] == author:
                     destination = f"{endpoint}/issues/comments/{comment['id']}"
                     method = "PATCH"
         command(["gh", "api", "--method", method, destination, "--input", "-"], input_text=json.dumps({"body": body}))
@@ -236,6 +255,7 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--pr", type=int)
     parser.add_argument("--pr-head", help="PR head SHA when coverage was collected from a synthetic merge commit")
+    parser.add_argument("--scope", type=Scope, choices=list(Scope), default=Scope.ORDINARY, help="execution scope and independent PR comment")
     options = parser.parse_args(arguments)
     try:
         patch = Patch.load(root, options.base, options.head)
@@ -249,7 +269,7 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
         coverage = Coverage.load(root, options.report or [root / "lcov-workspace.info"], origins)
         measured = coverage.measure(patch)
         repo = options.repo
-        body = measured.markdown(repo)
+        body = measured.markdown(repo, options.scope)
         output = root / options.output
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(body, encoding="utf-8")
@@ -260,7 +280,7 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
         if options.pr:
             if not repo:
                 repo = command(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root=root).strip()
-            Publication(repo, options.pr, options.pr_head or patch.head).publish(body)
+            Publication(repo, options.pr, options.pr_head or patch.head, options.scope).publish(body)
     except (OSError, RunnerError, RuntimeError, ValueError, SyntaxError, KeyError, subprocess.SubprocessError) as error:
         print(f"patch coverage: {error}", file=sys.stderr)
     return 0
