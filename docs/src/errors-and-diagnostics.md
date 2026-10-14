@@ -1913,6 +1913,9 @@ does not establish successful Docker-client completion within the inspection bou
 Only the ping helper's missing-replies outcome qualifies blocked traffic. A Docker execution
 refusal or a probe timeout supplies no effect observation and fails preflight with its own status.
 The real preflight failure controls qualify separately from a scenario's timed verifier self-check.
+They resolve the pinned tool images before starting an injector with automatic pulls disabled.
+Missing-image preparation retains each inspection, pull and confirmation outcome and its raw streams;
+a preparation refusal ends qualification before any fault or product node starts.
 CI retains their raw outcomes before starting the suite; failure to complete that qualification
 fails the shard without consuming a product scenario's execution window.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the

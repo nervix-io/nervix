@@ -1421,6 +1421,10 @@ image, sidecar disappearance versus inspection failure while still present, and 
 Docker execution of the blocked-traffic probe. The same controls run in `just chaos self-test`;
 `just coverage-chaos-network-preflight` retains their shell coverage under
 `target/chaos-network-preflight-coverage/`.
+The entrypoint prepares the pinned Pumba, nettools and probe images before starting any fault;
+Pumba's helper runs retain automatic pulling disabled. `image-preparation/<tool>/` records the
+reference, inspection, any required bounded pull and confirmation, with native statuses and both
+streams. A preparation refusal ends qualification before the first canary or product node starts.
 Each scenario keeps its existing verifier self-check. The full command adds the real network
 refusal controls afterward; they do not consume a scenario's execution budget. CI runs the controls
 once before each shard's timed suite and retains their raw evidence beside the suite evidence.

@@ -18,6 +18,34 @@ trap cleanup EXIT
 
 export CHAOS_NETWORK_TEST_DOCKER
 CHAOS_NETWORK_TEST_DOCKER="$(command -v docker)"
+
+# Pumba uses the daemon directly with --pull-image=false. Prepare its helper before a fault starts;
+# an inspector's later Docker run must not be the first operation that supplies that image.
+prepare_tool_image() {
+    local tool="$1" reference="$2" directory="${artifact_dir}/image-preparation/$1" status=0
+    mkdir -p "${directory}"
+    printf '%s\n' "${reference}" >"${directory}/reference.txt"
+    timeout --foreground --kill-after=10s 20s "${CHAOS_NETWORK_TEST_DOCKER}" image inspect \
+        --format '{{.Id}}' "${reference}" \
+        >"${directory}/inspect.stdout.txt" 2>"${directory}/inspect.stderr.txt" || status=$?
+    printf '%s\n' "${status}" >"${directory}/inspect.exit-code.txt"
+    if ((status != 0)); then
+        status=0
+        timeout --foreground --kill-after=10s 120s "${CHAOS_NETWORK_TEST_DOCKER}" pull "${reference}" \
+            >"${directory}/pull.stdout.txt" 2>"${directory}/pull.stderr.txt" || status=$?
+        printf '%s\n' "${status}" >"${directory}/pull.exit-code.txt"
+        ((status == 0)) || fail "${tool} image preparation returned ${status}; see ${directory}/pull.stderr.txt"
+        timeout --foreground --kill-after=10s 20s "${CHAOS_NETWORK_TEST_DOCKER}" image inspect \
+            --format '{{.Id}}' "${reference}" \
+            >"${directory}/confirm.stdout.txt" 2>"${directory}/confirm.stderr.txt" || status=$?
+        printf '%s\n' "${status}" >"${directory}/confirm.exit-code.txt"
+        ((status == 0)) || fail "${tool} image confirmation returned ${status}; see ${directory}/confirm.stderr.txt"
+    fi
+}
+prepare_tool_image pumba "${chaos_pumba_image}"
+prepare_tool_image nettools "${chaos_nettools_image}"
+prepare_tool_image probe "${chaos_probe_image}"
+
 export CHAOS_NETWORK_TEST_STATE="${artifact_dir}/kind"
 export CHAOS_NETWORK_TEST_CASE
 export CHAOS_NETWORK_TEST_RUN_ID="${run_id}"
