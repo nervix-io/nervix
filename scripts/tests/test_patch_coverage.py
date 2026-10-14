@@ -211,6 +211,43 @@ class PublicationTests(unittest.TestCase):
         self.publisher = patch_coverage.Publication("owner/repository", 12, "current-head")
         self.pr = {"state": "open", "head": {"sha": "current-head"}}
 
+    def test_scoped_publications_update_only_their_own_current_head_comments(self) -> None:
+        scopes = [patch_coverage.Scope.ORDINARY, patch_coverage.Scope.TURMOIL]
+        comments = [[
+            {"id": index, "body": scope.marker(), "user": {"login": "github-actions[bot]"}}
+            for index, scope in enumerate(scopes, start=1)
+        ]]
+        measured = patch_coverage.Coverage({}).measure(patch_coverage.Patch("base", "head", {}))
+        for index, scope in enumerate(scopes, start=1):
+            with self.subTest(scope=scope):
+                body = measured.markdown(scope=scope)
+                self.assertTrue(body.startswith(scope.marker()))
+                self.assertIn(scope.title(), body)
+                publisher = patch_coverage.Publication("owner/repository", 12, "current-head", scope)
+                with mock.patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}):
+                    with mock.patch.object(patch_coverage, "command", side_effect=[json.dumps(self.pr), json.dumps(comments), "{}"]) as commands:
+                        publisher.publish(body)
+                self.assertIn(f"repos/owner/repository/issues/comments/{index}", commands.call_args.args[0])
+                self.assertEqual(json.loads(commands.call_args.kwargs["input_text"]), {"body": body})
+
+    def test_scoped_cli_retains_the_report_and_publishes_with_the_pr_head_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "turmoil.md"
+            patch = patch_coverage.Patch("base", "tested-merge", {})
+            with mock.patch.object(patch_coverage.Patch, "load", return_value=patch):
+                with mock.patch.object(patch_coverage.Coverage, "load", return_value=patch_coverage.Coverage({})):
+                    with mock.patch.object(patch_coverage.Publication, "publish") as publish, redirect_stdout(io.StringIO()):
+                        status = patch_coverage.main(
+                            ["--scope", "turmoil", "--repo", "owner/repository", "--pr", "12",
+                             "--pr-head", "current-head", "--output", str(output)], root=root,
+                        )
+            self.assertEqual(status, 0)
+            body = output.read_text()
+            self.assertTrue(body.startswith(patch_coverage.Scope.TURMOIL.marker()))
+            self.assertIn("Turmoil patch coverage", body)
+            publish.assert_called_once_with(body)
+
     def test_new_comment_is_created_with_the_exact_markdown_body(self) -> None:
         body = patch_coverage.COMMENT_MARKER + "\n## Patch coverage\n"
         with mock.patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}):
