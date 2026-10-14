@@ -150,7 +150,7 @@ impl DatabaseSink {
                     .expect("failed to disconnect the MySQL root pool");
             }
             Self::MongoDb => {
-                let client = mongodb_client(dependencies, false)
+                let client = MongoDbServer::Standalone.client(dependencies)
                     .await
                     .expect("failed to connect to MongoDB");
                 let database = client.database("nervix");
@@ -273,7 +273,7 @@ impl DatabaseSink {
                     .collect()
             }
             Self::MongoDb => {
-                let client = mongodb_client(dependencies, false)
+                let client = MongoDbServer::Standalone.client(dependencies)
                     .await
                     .expect("failed to connect to MongoDB");
                 let mut cursor = client
@@ -389,7 +389,7 @@ impl DatabaseSink {
                 }
             }
             Self::MongoDb => {
-                let client = mongodb_client(dependencies, false)
+                let client = MongoDbServer::Standalone.client(dependencies)
                     .await
                     .expect("failed to connect to MongoDB");
                 let documents = client
@@ -464,7 +464,7 @@ impl DatabaseSink {
                 count
             }
             Self::MongoDb => {
-                let client = mongodb_client(dependencies, false)
+                let client = MongoDbServer::Standalone.client(dependencies)
                     .await
                     .expect("failed to connect to MongoDB");
                 client

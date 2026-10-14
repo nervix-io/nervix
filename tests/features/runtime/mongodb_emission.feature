@@ -427,3 +427,95 @@ Feature: MongoDB emission
       | 3            |                                           | VEC<STRING>          |
       | 1            | ON CONFLICT ("mongodb_user_id") DO UPDATE | VEC<STRING>          |
       | 3            | ON CONFLICT ("mongodb_user_id") DO UPDATE | VEC<STRING>          |
+
+  @database_emitter_modes
+  Scenario Outline: A MongoDB write concern the replica set cannot satisfy keeps the documents the server wrote and retries only the rest
+    Given MQTT is running
+    And MongoDB replica set is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <nodes> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MongoDB replica set collection "write_concern_mongodb_{{test_id}}" <collection>
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        action STRING
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer,
+        action string
+      );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_ingress
+      TYPE MQTT
+      CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-mongodb-write-concern-{{test_id}}'
+      };
+      CREATE INGESTOR mqtt_notifications
+      FROM MQTT mqtt_ingress TOPIC mongodb_write_concern_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      ON QUIESCE DROP DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT mongodb_client
+      TYPE MONGODB
+      POOL SIZE MIN 2 MAX 8
+      CONFIG {
+        'addr' = '{{mongodb_replica_set_addr}}&w=2',
+        'database' = 'nervix'
+      };
+      CREATE EMITTER to_mongodb
+      FROM notifications
+      TO MONGODB mongodb_client INSERT TO COLLECTION write_concern_mongodb_{{test_id}}
+      VALUES {
+        "mongodb_user_id" = input.user_id,
+        "mongodb_action" = LOWER(input.action)
+      }
+      <conflict_clause>
+      MODE ACK RETRY POLICY BACKOFF 500ms MAX 1s
+      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      FLUSH EACH 2s MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    When these MQTT messages are rapidly published to topic "mongodb_write_concern_in_{{test_id}}"
+      """
+      {"user_id":1,"action":"FIRST"}
+      {"user_id":2,"action":"SECOND"}
+      {"user_id":3,"action":"THIRD"}
+      {"user_id":4,"action":"FOURTH"}
+      {"user_id":5,"action":"FIFTH"}
+      {"user_id":6,"action":"SIXTH"}
+      """
+    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
+      """
+      write concern failed
+      """
+    And the MongoDB collection eventually holds exactly these documents
+      """
+      {"mongodb_user_id":1,"mongodb_action":"first"}
+      {"mongodb_user_id":2,"mongodb_action":"second"}
+      {"mongodb_user_id":3,"mongodb_action":"third"}
+      {"mongodb_user_id":4,"mongodb_action":"fourth"}
+      {"mongodb_user_id":5,"mongodb_action":"fifth"}
+      {"mongodb_user_id":6,"mongodb_action":"sixth"}
+      """
+
+    Examples:
+      | nodes | collection                         | conflict_clause                           |
+      | 1     | exists                             |                                           |
+      | 3     | exists                             |                                           |
+      | 1     | with unique user id exists         | ON CONFLICT ("mongodb_user_id") DO UPDATE |
+      | 3     | with unique user id exists         | ON CONFLICT ("mongodb_user_id") DO UPDATE |

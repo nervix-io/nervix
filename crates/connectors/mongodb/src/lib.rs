@@ -1102,6 +1102,10 @@ impl<'a> MappedBsonColumn<'a> {
 mod tests {
     use arrow_array::types::UInt64Type;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use mongodb::{
+        error::{BulkWriteError, InsertManyError, WriteConcernError, WriteError},
+        results::{UpdateResult, VerboseBulkWriteResult},
+    };
     use nervix_models::{MessageErrorCode, MessageErrorOperation};
     use nervix_primitives::sync::StdArc;
 
@@ -1297,6 +1301,91 @@ mod tests {
             },
             occurred_at: Timestamp::from_unix_nanos(1),
         }
+    }
+
+    /// The write concern error a single-member replica set reports for a write that asks for a
+    /// second data-bearing member, after it applied the write.
+    fn unsatisfiable_write_concern() -> WriteConcernError {
+        mongodb::bson::from_document(doc! {
+            "code": 100,
+            "codeName": "UnsatisfiableWriteConcern",
+            "errmsg": "Not enough data-bearing nodes",
+        })
+        .expect("a server's write concern error deserializes")
+    }
+
+    /// An unordered insert whose write concern failed still applied every document it did not
+    /// refuse, so those are delivered and only the refused one is rejected: resending them would
+    /// store them twice. The write still fails, so the host retries what remains on its backoff.
+    #[test]
+    fn an_insert_whose_write_concern_failed_delivers_the_documents_it_wrote() {
+        let rows = [written_row(0), written_row(1), written_row(2)];
+        let mut insert_error: InsertManyError = mongodb::bson::from_document(doc! {
+            "writeErrors": [{ "index": 1, "code": 11000, "errmsg": "E11000 duplicate key error" }],
+        })
+        .expect("a server's insert reply deserializes");
+        insert_error.write_concern_error = Some(unsatisfiable_write_concern());
+        let mut outcome = PerRecordOutcome::empty();
+
+        MongoDbSink::apply_insert_many_error(
+            &rows,
+            DriverError::from(ErrorKind::InsertMany(insert_error)),
+            &mut outcome,
+        );
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position, rows[2].position]);
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].id, rows[1].position);
+        assert!(
+            outcome.infrastructure_error.is_some(),
+            "a write concern the server could not satisfy fails the write"
+        );
+    }
+
+    /// A bulk write whose write concern failed reports a result for every upsert it applied, so
+    /// those are delivered, a refused one is rejected, and a row it reported nothing for is left
+    /// unresolved for the host to retry.
+    #[test]
+    fn a_bulk_write_whose_write_concern_failed_delivers_the_upserts_it_wrote() {
+        let rows = [
+            written_row(0),
+            written_row(1),
+            written_row(2),
+            written_row(3),
+        ];
+        let mut written = VerboseBulkWriteResult::default();
+        written.update_results.insert(0, UpdateResult::default());
+        written.update_results.insert(2, UpdateResult::default());
+        let mut bulk_error = BulkWriteError::default();
+        bulk_error.partial_result = Some(PartialBulkWriteResult::Verbose(written));
+        bulk_error.write_errors.insert(
+            1,
+            mongodb::bson::from_document::<WriteError>(doc! {
+                "code": 11000,
+                "errmsg": "E11000 duplicate key error",
+            })
+            .expect("a server's write error deserializes"),
+        );
+        bulk_error
+            .write_concern_errors
+            .push(unsatisfiable_write_concern());
+        let mut outcome = PerRecordOutcome::empty();
+
+        MongoDbSink::apply_bulk_write_error(
+            &rows,
+            DriverError::from(ErrorKind::BulkWrite(bulk_error)),
+            &mut outcome,
+        );
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position, rows[2].position]);
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].id, rows[1].position);
+        assert!(
+            outcome.infrastructure_error.is_some(),
+            "the unanswered upsert and the write concern fail the write"
+        );
     }
 
     /// An inserted document is measured as the driver writes it, with the `_id` it prepends to a
