@@ -465,6 +465,9 @@ at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or sourc
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
 `MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
 
+A record sink prepares its external bytes once before retention, including when a payload carries
+one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
+across retries and connector replacement; preparation adds no shared owner or synchronization.
 A payload offered to the sink stays in the same task's buffer until the sink answers for it. The
 task marks each member row prepared, and the one answer for the payload resolves every member: a
 row resolves once, so neither a repeated answer nor a later attempt resolves its acknowledgement

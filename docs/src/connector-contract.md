@@ -496,8 +496,14 @@ continues to own flush, branch routing, quiesce, source ACK propagation and mess
 connector crate reads the native output or chooses its graph semantics.
 
 The host prepares one write for one of four sink contracts. A **record sink** receives
-codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
-host assigned each record of the write. A **row sink** receives a run of host-projected Arrow
+keys, prepared payloads, headers, optional ordering groups, timestamps, and the identity the
+host assigned each record of the write. For each new payload, the host calls
+`RecordSink::prepare_payload` with the codec's bytes and the payload's execution time.
+The connector either returns its external bytes or refuses the payload with a definitive
+structured message error. The ordinary preparation returns the codec's bytes unchanged. The host
+retains the successful preparation with its source members for both single-row and batch payloads;
+retries and reopened connectors receive those same bytes without re-encoding or preparing again.
+A **row sink** receives a run of host-projected Arrow
 carriers of one source relay and concrete branch, the target columns their mapped columns are
 written to, and each carrier's selected rows, execution time and, for a sink that retains them,
 acknowledgements; it encodes its external representation from those columns. A **row request
@@ -633,8 +639,12 @@ limit is classified like any other publish failure.
 Syslog sends a completed codec payload as one transport frame. Its UDP writer rejects a frame above
 65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
 non-transparent TCP rejects one containing LF. The Sentry writer accepts one
-JSON event per envelope and checks the final event after default fields are added against the
-1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
+JSON event per envelope and prepares that envelope once, before the host retains it. Preparation
+validates the event, preserves a supplied `event_id` with its exact spelling, generates one UUID
+only when the field is absent, and fills absent `timestamp` and `platform` fields. Both the
+envelope header and the event carry that identity, and every attempt sends the retained envelope
+byte for byte, including after the host reopens the sink. Preparation checks the final event
+against the 1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
 its last digit. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
@@ -687,7 +697,10 @@ shrink with a candidate: `connector-row-request-division` the division rule and 
 envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
 `emitter-retained-payloads` the membership and byte-for-byte retry, and `sqs-batch-requests`,
-`mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures. See
+`mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures.
+`sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
+bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
+after a mock endpoint's `503` response. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
 
 Iceberg is a row sink that stages each carrier of the run as its own file, which its commit
