@@ -889,9 +889,9 @@ Every record is mapped onto the repository. The merge strips the producer's chec
 resolves `..` segments lexically, so the record of a `#[path]` module names the file it includes,
 and it keeps a record only when its file is tracked at the tested revision, test sources included.
 It drops the rest and counts the dropped files by class: dependencies below `~/.cargo/registry`,
-`~/.cargo/git` and `/kache/.cargo/registry`, the standard library below `/rustc/<commit>`, files
-generated below the checkout's Cargo target directory, such as the FlatBuffers `OUT_DIR` sources,
-untracked files, and any other path outside the checkout. The counters of every report that
+`~/.cargo/git` and `/kache/.cargo/registry`, the standard library below `/rustc/<commit>` or a
+local rustup toolchain, files generated below the checkout's Cargo target directory, such as the
+FlatBuffers `OUT_DIR` sources, untracked files, and any other path outside the checkout. The counters of every report that
 measured a file are summed. The report holds line and function counters. Branch records are left
 out: the Rust producers export none, and coverage.py names Python branches in words that LCOV readers
 such as `cargo crap` refuse.

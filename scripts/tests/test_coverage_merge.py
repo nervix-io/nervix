@@ -168,6 +168,7 @@ class MappingTests(unittest.TestCase):
             ("/home/runner/.cargo/git/checkouts/rkyv-85ab059846312217/868fa9c/rkyv/src/lib.rs", Dropped.CARGO_GIT),
             ("/kache/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chumsky-0.12.0/src/lib.rs", Dropped.KACHE_REGISTRY),
             ("/rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/sys/thread_local/native/mod.rs", Dropped.TOOLCHAIN),
+            ("/home/dev/.rustup/toolchains/1.99-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/lib.rs", Dropped.TOOLCHAIN),
             (f"{TESTS_ROOT}/target/llvm-cov-target/debug/build/nervix-client-wire-4a7cdd872e94304c/out/flatbuffers/session_module.rs", Dropped.GENERATED),
         ):
             with self.subTest(dropped=dropped):

@@ -80,7 +80,9 @@ class Dropped(enum.StrEnum):
     @classmethod
     def outside_the_checkout(cls, source: str) -> Dropped:
         """The class of an absolute source that lies below none of its producer's checkout roots."""
-        if source.startswith("/rustc/"):
+        # CI's compilers name the standard library by its commit; one with the rust-src component
+        # names the copy in its rustup toolchain.
+        if source.startswith("/rustc/") or "/.rustup/toolchains/" in source:
             return cls.TOOLCHAIN
         if source.startswith("/kache/.cargo/registry/"):
             return cls.KACHE_REGISTRY
@@ -99,7 +101,7 @@ DROPPED_POLICY = {
     Dropped.CARGO_REGISTRY: "dependency sources below ~/.cargo/registry",
     Dropped.CARGO_GIT: "dependency sources below ~/.cargo/git",
     Dropped.KACHE_REGISTRY: "dependency sources below /kache/.cargo/registry",
-    Dropped.TOOLCHAIN: "standard library sources below /rustc/<commit>",
+    Dropped.TOOLCHAIN: "standard library sources below /rustc/<commit> or a rustup toolchain",
     Dropped.GENERATED: "files generated below the checkout's Cargo target directory",
     Dropped.UNTRACKED: "files inside the checkout that the tested revision does not track",
     Dropped.OUTSIDE: "any other file outside the checkout",
