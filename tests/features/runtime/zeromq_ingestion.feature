@@ -26,8 +26,8 @@ Feature: ZeroMQ ingestion
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
         };
-        CREATE INGESTOR zeromq_notifications
-        FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
+        CREATE ZEROMQ PULL INGESTOR zeromq_notifications
+        FROM zeromq_main MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -83,8 +83,8 @@ Feature: ZeroMQ ingestion
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
         };
-        CREATE INGESTOR zeromq_notifications
-        FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
+        CREATE ZEROMQ PULL INGESTOR zeromq_notifications
+        FROM zeromq_main MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

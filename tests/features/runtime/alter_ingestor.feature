@@ -18,16 +18,16 @@ Feature: Altering ingestors
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-roundtrip.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      ALTER INGESTOR event_source
-        SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB,
+      ALTER HTTP ENDPOINT INGESTOR event_source
+        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB,
         SET DECODE USING event_codec_v2,
         SET TIMESTAMP NOW,
         SET FILTER WHERE input.seq > 0,
@@ -40,8 +40,8 @@ Feature: Altering ingestors
       """
     Then the last command output contains
       """
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
         DECODE USING event_codec_v2
         TIMESTAMP NOW
         FILTER WHERE input.seq > 0
@@ -81,8 +81,8 @@ Feature: Altering ingestors
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-swap.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -100,8 +100,8 @@ Feature: Altering ingestors
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER INGESTOR event_source
-        SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB;
+      ALTER HTTP ENDPOINT INGESTOR event_source
+        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB;
       """
     Then the last command output contains
       """
@@ -147,8 +147,8 @@ Feature: Altering ingestors
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE INGESTOR buffered_source
-        FROM ENDPOINT buffered_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR buffered_source
+        FROM buffered_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_event_codec
         TO buffered_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -164,7 +164,7 @@ Feature: Altering ingestors
       """
     And these NSPL commands begin executing in the background
       """
-      ALTER INGESTOR buffered_source SET DECODE USING buffered_event_codec_v2;
+      ALTER HTTP ENDPOINT INGESTOR buffered_source SET DECODE USING buffered_event_codec_v2;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     Then within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "status: quiesced"
@@ -209,13 +209,13 @@ Feature: Altering ingestors
       CREATE RELAY quiesce_events SCHEMA quiesce_event UNBRANCHED;
       CREATE VHOST quiesce_edge http-{{test_id}}-set-quiesce.example.com;
       CREATE ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce' TYPE HTTP;
-      CREATE INGESTOR quiesce_source
-        FROM ENDPOINT quiesce_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR quiesce_source
+        FROM quiesce_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING quiesce_event_codec
         TO quiesce_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
-      ALTER INGESTOR quiesce_source SET QUIESCE REJECT RETRY AFTER 7s;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE REJECT RETRY AFTER 7s;
       """
     Then the last command output contains
       """
@@ -229,9 +229,9 @@ Feature: Altering ingestors
       """
       ON QUIESCE REJECT RETRY AFTER 7s
       """
-    When these NSPL commands fail with "ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+    When these NSPL commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
       """
-      ALTER INGESTOR quiesce_source SET QUIESCE SUSPEND;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE SUSPEND;
       """
 
     Examples:
@@ -269,8 +269,8 @@ Feature: Altering ingestors
       CREATE VHOST paced_edge http-{{test_id}}-paced-alter.example.com;
       CREATE ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter' TYPE HTTP;
 
-      CREATE INGESTOR paced_source
-        FROM ENDPOINT paced_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR paced_source
+        FROM paced_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING paced_event_codec
         TIMESTAMP NOW
         TO paced_events INHERIT ALL UNBRANCHED
@@ -295,7 +295,7 @@ Feature: Altering ingestors
       """
     When these NSPL commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
       """
-      ALTER INGESTOR paced_source DROP TIMESTAMP;
+      ALTER HTTP ENDPOINT INGESTOR paced_source DROP TIMESTAMP;
       """
     And these NSPL commands are executed on the leader node
       """

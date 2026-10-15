@@ -27,8 +27,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}?keep_alive=30',
           'client_id' = 'nervix-cucumber-ingestor-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -89,8 +89,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}?keep_alive=30',
           'client_id' = 'nervix-cucumber-ingestor-reconnect-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_reconnect_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_reconnect_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -126,7 +126,7 @@ Feature: MQTT ingestion
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: MQTT NO_ACK PARALLEL delivers QoS 1 payloads
+  Scenario Outline: MQTT NO ACK at QoS 1 delivers QoS 1 payloads
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -154,8 +154,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-noack-parallel-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_noack_parallel_{{test_id}} QOS 1 MODE NO_ACK PARALLEL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_noack_parallel_{{test_id}}' QOS 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -213,8 +213,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-fixed-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_client_conflict_{{test_id}} INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_client_conflict_{{test_id}}' INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -263,8 +263,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-template-{{test_id}}-{{instance}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_client_template_{{test_id}} INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_client_template_{{test_id}}' INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -324,8 +324,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}'
         };
 
-      CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_start_failure_{{test_id}} INSTANCES 1 SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_start_failure_{{test_id}}' INSTANCES 1 SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -397,8 +397,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-out-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC notifications_ack_seq_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'notifications_ack_seq_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -472,8 +472,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-parallel-{{test_id}}-{{instance}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_ack_parallel_{{test_id}} INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_ack_parallel_{{test_id}}' INSTANCES 2 SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -543,8 +543,8 @@ Feature: MQTT ingestion
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-buffer-<mode_tag>-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_buffer_<mode_tag>_{{test_id}} <mode>
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_buffer_<mode_tag>_{{test_id}}' <mode>
         ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -570,7 +570,7 @@ Feature: MQTT ingestion
       """
     When these NSPL commands begin executing in the background
       """
-      ALTER INGESTOR mqtt_notifications SET DECODE USING notification_codec_v2;
+      ALTER MQTT TOPIC INGESTOR mqtt_notifications SET DECODE USING notification_codec_v2;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     And within "5s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -600,7 +600,7 @@ Feature: MQTT ingestion
 
     Examples:
       | cluster_size | replica_count | mode_tag | mode                                                                                             |
-      | 1            | 0             | noack    | MODE NO_ACK SEQUENTIAL                                                                           |
-      | 3            | 1             | noack    | MODE NO_ACK SEQUENTIAL                                                                           |
+      | 1            | 0             | noack    | MODE NO ACK                                                                                      |
+      | 3            | 1             | noack    | MODE NO ACK                                                                                      |
       | 1            | 0             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
       | 3            | 1             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |

@@ -19,6 +19,10 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/injected_hold.rs"]
+mod injected_hold;
+#[path = "common/injected_hold_tests.rs"]
+mod injected_hold_tests;
 #[path = "common/materialized_state_diagnostics.rs"]
 mod materialized_state_diagnostics;
 #[path = "common/materialized_state_diagnostics_tests.rs"]

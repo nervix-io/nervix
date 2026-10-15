@@ -36,9 +36,9 @@ Feature: HTTP receiver fixture
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR poll_receiver
-        FROM HTTP receiver_api EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+      CREATE HTTP REQUEST INGESTOR poll_receiver
+        FROM receiver_api EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -112,9 +112,9 @@ Feature: HTTP receiver fixture
           'tls_cert_file' = '{{receiver_tls}}/client.pem',
           'tls_key_file' = '{{receiver_tls}}/client-key.pem'
         };
-      CREATE INGESTOR poll_secure
-        FROM HTTP receiver_secure EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+      CREATE HTTP REQUEST INGESTOR poll_secure
+        FROM receiver_secure EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -166,9 +166,9 @@ Feature: HTTP receiver fixture
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR poll_untrusted
-        FROM HTTP receiver_untrusted EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+      CREATE HTTP REQUEST INGESTOR poll_untrusted
+        FROM receiver_untrusted EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

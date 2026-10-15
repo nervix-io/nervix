@@ -119,6 +119,31 @@ jq -n '{sent:400,received:40,lost:360,longest_loss_run:10,min_ms:1,avg_ms:2,max_
     >"${tmp_dir}/burst-excess-loss.json"
 must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/burst-excess-loss.json"
 
+# Received and lost limits are inclusive fractions, with the next packet outside each boundary
+# rejected. Exercise both supported observation sizes so neither limit becomes an absolute count.
+# Each fixture represents one contiguous lost run followed by the remaining replies.
+while read -r sent received verdict; do
+    sample="${tmp_dir}/burst-boundary-${sent}-${received}.json"
+    jq -n --argjson sent "${sent}" --argjson received "${received}" \
+        '{sent:$sent,received:$received,lost:($sent-$received),longest_loss_run:($sent-$received),
+          min_ms:1,avg_ms:2,max_ms:3}' >"${sample}"
+    if [[ "${verdict}" == pass ]]; then
+        "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${sample}" \
+            || fail "burst boundary ${received}/${sent} did not qualify"
+    else
+        must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${sample}"
+    fi
+done <<'EOF'
+40 5 pass
+40 4 fail
+400 50 pass
+400 49 fail
+40 37 pass
+40 38 fail
+400 370 pass
+400 371 fail
+EOF
+
 # A correlated-loss sample starts with the four replies seen in the failed soak observation,
 # then continues with a qualifying loss distribution. Drive the production sampler, parser and
 # effect verifier together: a short prefix must not stand in for the complete burst observation.
@@ -129,6 +154,8 @@ must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/b
     run_id=degraded-probe-control
     script_dir="${chaos_dir}"
     CHAOS_PROBE_IMAGE=probe-control
+    expected_probe_count=400
+    expected_probe_interval=0.01
     owned_service_container() { printf 'sender-control\n'; }
     node_address() { printf '10.213.1.13\n'; }
     run_bounded() {
@@ -142,6 +169,8 @@ must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/b
             esac
             shift
         done
+        [[ "${count}" -eq "${expected_probe_count}" && "${interval}" == "${expected_probe_interval}" ]] \
+            || fail 'link probe changed the profile packet count or interval'
         awk -v count="${count}" -v interval="${interval}" '
             BEGIN {
                 if (count * interval > 4) exit 2
@@ -168,9 +197,13 @@ must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/b
     must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/baseline.json"
     jq '.longest_loss_run = 1' "${tmp_dir}/burst-sample.json" >"${tmp_dir}/burst-isolated-loss.json"
     must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/burst-isolated-loss.json"
-    link_ping "${tmp_dir}/healthy-sample.txt" sender receiver baseline
-    jq -e '.sent == 40' "${tmp_dir}/healthy-sample.json" >/dev/null \
-        || fail 'healthy observation did not retain its packet count'
+    expected_probe_count=40
+    expected_probe_interval=0.1
+    for profile in baseline healed delay jitter random-loss rate-limit combined; do
+        link_ping "${tmp_dir}/${profile}-sample.txt" sender receiver "${profile}"
+        jq -e '.sent == 40' "${tmp_dir}/${profile}-sample.json" >/dev/null \
+            || fail "${profile} observation did not retain its packet count"
+    done
     must_fail link_ping "${tmp_dir}/invalid-profile.txt" sender receiver unrecognized
 )
 

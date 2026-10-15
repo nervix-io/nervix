@@ -41,8 +41,8 @@ Feature: Relay junction
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-      CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
           INHERIT ALL
@@ -51,8 +51,8 @@ Feature: Relay junction
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
           INHERIT ALL
@@ -141,8 +141,8 @@ Feature: Relay junction
         ON edge
         PATH '/branch-b'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -151,8 +151,8 @@ Feature: Relay junction
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
@@ -242,8 +242,8 @@ Feature: Relay junction
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-        CREATE INGESTOR state_source
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR state_source
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
@@ -252,8 +252,8 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -262,8 +262,8 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
@@ -383,8 +383,8 @@ Feature: Relay junction
         ON edge
         PATH '/junction-default'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -459,8 +459,8 @@ Feature: Relay junction
         ON edge
         PATH '/junction-optional'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL

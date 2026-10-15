@@ -29,7 +29,7 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
     client_config_value, client_tls_paths,
 };
-use nervix_models::{ClientConfigEntry, QueueGroupName, SubjectName};
+use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
 use thiserror::Error;
 
 const NATS: &str = "nats";
@@ -58,8 +58,8 @@ type NatsSourceResult<T> = Result<T, Report<NatsSourceError>>;
 #[derive(Clone)]
 pub struct NatsSourcePlan {
     config: Vec<ClientConfigEntry>,
-    subject: SubjectName,
-    queue_group: QueueGroupName,
+    subject: NatsSubjectName,
+    queue_group: NatsQueueGroupName,
 }
 
 /// One instance's connection and queue subscription, kept together because the subscription
@@ -72,8 +72,8 @@ struct NatsSubscription {
 impl NatsSourcePlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
-        subject: SubjectName,
-        queue_group: QueueGroupName,
+        subject: NatsSubjectName,
+        queue_group: NatsQueueGroupName,
     ) -> Self {
         Self {
             config,

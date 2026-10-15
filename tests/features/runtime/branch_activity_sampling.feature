@@ -55,8 +55,8 @@ Feature: Branch activity sampling
         PATH '/right'
         TYPE HTTP;
 
-      CREATE INGESTOR left_ingestor
-        FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR left_ingestor
+        FROM left_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO left_events
@@ -67,8 +67,8 @@ Feature: Branch activity sampling
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR right_ingestor
-        FROM ENDPOINT right_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR right_ingestor
+        FROM right_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO right_events

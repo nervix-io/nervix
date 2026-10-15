@@ -33,9 +33,9 @@ Feature: Prometheus ingestion
           'addr' = '{{prometheus_dns_addr}}',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR prom_samples
-        FROM PROMETHEUS prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING sample_codec
+        CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples
@@ -92,9 +92,9 @@ Feature: Prometheus ingestion
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR prom_samples
-        FROM PROMETHEUS prom_main QUERY 'label_replace(vector(43.5), "source", "recover", "", "")' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING sample_codec
+        CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'label_replace(vector(43.5), "source", "recover", "", "")' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples
@@ -156,9 +156,9 @@ Feature: Prometheus ingestion
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR prom_samples
-        FROM PROMETHEUS prom_main QUERY 'label_replace(vector(time()), "source", "local", "", "")' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING sample_codec
+        CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'label_replace(vector(time()), "source", "local", "", "")' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TIMESTAMP NOW
         TO samples
         INHERIT ALL

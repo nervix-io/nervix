@@ -22,10 +22,10 @@ Feature: Ingestor quiesce engagement during dispatch
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR quiesce_source
-        FROM KAFKA quiesce_kafka TOPIC quiesce_dispatch_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_quiesce_dispatch_{{test_id}}
-          MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR quiesce_source
+        FROM quiesce_kafka TOPIC 'quiesce_dispatch_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_quiesce_dispatch_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING quiesce_event_codec
         TO quiesce_output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -63,6 +63,6 @@ Feature: Ingestor quiesce engagement during dispatch
     Then the background NSPL execution succeeds
 
     Examples:
-      | nodes | operation                                                               |
-      | 1     | ALTER INGESTOR quiesce_source SET DECODE USING quiesce_event_codec_alt; |
-      | 3     | DRAIN NODE {{source_owner}};                                            |
+      | nodes | operation                                                                           |
+      | 1     | ALTER KAFKA TOPIC INGESTOR quiesce_source SET DECODE USING quiesce_event_codec_alt; |
+      | 3     | DRAIN NODE {{source_owner}};                                                        |

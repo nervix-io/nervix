@@ -423,8 +423,8 @@ Feature: HTTP emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
         TO outgoing
           INHERIT ALL
@@ -519,8 +519,8 @@ Feature: HTTP emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
         TO outgoing
           INHERIT ALL
@@ -596,8 +596,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -732,8 +732,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -835,8 +835,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -947,8 +947,8 @@ Feature: HTTP emitter
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR routes_source
-        FROM ENDPOINT routes_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routes_source
+        FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
         TO routes
           INHERIT ALL
@@ -956,8 +956,8 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1066,8 +1066,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1338,8 +1338,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1448,8 +1448,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1549,8 +1549,8 @@ Feature: HTTP emitter
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR from_a
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR from_a
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_a
           INHERIT ALL
@@ -1559,8 +1559,8 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR from_b
-        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR from_b
+        FROM ingress_b MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_b
           INHERIT ALL
@@ -1689,8 +1689,8 @@ Feature: HTTP emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1768,8 +1768,8 @@ Feature: HTTP emitter
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR routes_source
-        FROM ENDPOINT routes_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routes_source
+        FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
         TO routes
           INHERIT ALL
@@ -1777,8 +1777,8 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1876,8 +1876,8 @@ Feature: HTTP emitter
       CREATE RELAY accounts SCHEMA account_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT accounts_ingress ON edge PATH '/accounts' TYPE HTTP;
-      CREATE INGESTOR accounts_source
-        FROM ENDPOINT accounts_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR accounts_source
+        FROM accounts_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING account_events_codec
         TO accounts
           INHERIT ALL

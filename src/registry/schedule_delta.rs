@@ -264,8 +264,8 @@ mod tests {
         AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CommandExecutionReference,
         CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
         CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
-        EmitterPublishingMode, EndpointEndpointSource, EndpointIngestMode, EndpointSource,
-        ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy, IngestSource, Literal, Model,
+        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
+        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, Literal, Model,
         ModelKind, NodeRef, OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput,
         ProcessorOutputs, QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy,
         RouteConstruction, ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
@@ -351,10 +351,10 @@ mod tests {
                         }]),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint(EndpointSource::Endpoint(
-                                    EndpointEndpointSource {
+                                source: IngestSource::Http(HttpSource::Endpoint(
+                                    HttpEndpointSource {
                                         endpoint: named(endpoint),
-                                        mode: EndpointIngestMode::NoAckSequential,
+                                        mode: EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
                                         },

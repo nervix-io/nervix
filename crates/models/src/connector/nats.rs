@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The NATS client Model, the subject source and sink Models with their delivery
-//!   mode, and what each entity declares.
+//!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
+//!   them to, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The NATS driver, its configuration keys, or how a subject is subscribed or
 //!   published to.
@@ -21,15 +22,67 @@ use serde::{Deserialize, Serialize};
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    QueueGroupName, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
 };
 
 configured_client!(Nats: unpooled CreateClientNats => NatsConfigEntry);
+
+/// The longest subject Nervix subscribes to, in bytes.
+const NATS_SUBJECT_MAX: usize = 1024;
+/// The longest queue group Nervix joins, in bytes.
+const NATS_QUEUE_GROUP_MAX: usize = 255;
+
+external_names! {
+    /// A NATS subject a queue subscription listens on: at most 1,024 bytes of tokens joined by `.`,
+    /// none of them empty, without whitespace or control characters. `*` stands for one token and
+    /// `>` for every remaining token, each only as a whole token, and `>` only as the last one.
+    pub struct NatsSubjectName => nats_subject_rule;
+    /// A NATS queue group: 1 to 255 bytes without whitespace or control characters.
+    pub struct NatsQueueGroupName => nats_queue_group_rule;
+}
+
+/// The first whitespace or control character of `text`, which neither a subject nor a queue group
+/// may hold.
+fn refuse_whitespace(text: &str) -> Result<(), ExternalNameError> {
+    match text
+        .chars()
+        .find(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        Some(ch) => Err(ExternalNameError::InvalidChar { ch }),
+        None => Ok(()),
+    }
+}
+
+fn nats_subject_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, NATS_SUBJECT_MAX)?;
+    refuse_whitespace(text)?;
+    let mut tokens = text.split('.').peekable();
+    while let Some(token) = tokens.next() {
+        if token.is_empty() {
+            return Err(ExternalNameError::EmptyLevel { separator: '.' });
+        }
+        if token.len() > 1
+            && let Some(wildcard) = token.chars().find(|ch| matches!(ch, '*' | '>'))
+        {
+            return Err(ExternalNameError::WildcardInsideLevel { wildcard });
+        }
+        if token == ">" && tokens.peek().is_some() {
+            return Err(ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' });
+        }
+    }
+    Ok(())
+}
+
+fn nats_queue_group_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, NATS_QUEUE_GROUP_MAX)?;
+    refuse_whitespace(text)
+}
 
 /// One subject a NATS client subscribes to as a member of a queue group.
 #[derive(
@@ -37,8 +90,8 @@ configured_client!(Nats: unpooled CreateClientNats => NatsConfigEntry);
 )]
 pub struct NatsSubjectSource {
     pub client: ClientName,
-    pub subject: SubjectName,
-    pub queue_group: QueueGroupName,
+    pub subject: NatsSubjectName,
+    pub queue_group: NatsQueueGroupName,
     pub instances: NonZeroU64,
     pub mode: NatsIngestMode,
     pub quiesce: IngestQuiesceMode,
@@ -82,13 +135,13 @@ impl SourceBody for NatsSubjectSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum NatsIngestMode {
-    NoAckSequential,
+    NoAck,
 }
 
 impl NatsIngestMode {
     pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -97,6 +150,8 @@ connector_sources! {
     connector Nats = "NATS";
     /// What a NATS source reads.
     pub enum NatsSource;
+    /// The alterations of the ingestors that read a NATS entity.
+    pub enum NatsIngestorAlteration;
     /// The entities a NATS source reads.
     pub enum NatsSourceEntity {
         Subject(NatsSubjectSource) = "SUBJECT", "NATS";

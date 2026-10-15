@@ -31,8 +31,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR fast_buffering_source
-        FROM ENDPOINT fast_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR fast_buffering_source
+        FROM fast_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO fast_ingested
@@ -114,8 +114,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR immediate_buffering_source
-        FROM ENDPOINT immediate_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR immediate_buffering_source
+        FROM immediate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO immediate_ingested
@@ -186,8 +186,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR collect_buffering_source
-        FROM ENDPOINT collect_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR collect_buffering_source
+        FROM collect_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO collect_ingested
@@ -260,8 +260,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/gate'
         TYPE HTTP;
-      CREATE INGESTOR held_buffering_source
-        FROM ENDPOINT held_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR held_buffering_source
+        FROM held_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO held_ingested
@@ -271,8 +271,8 @@ Feature: Domain-paced branch buffering
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR gate_buffering_source
-        FROM ENDPOINT gate_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR gate_buffering_source
+        FROM gate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO gate_ingested
@@ -315,7 +315,7 @@ Feature: Domain-paced branch buffering
       """
     When these NSPL commands are executed
       """
-      ALTER INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
       """
     Then within "10s" the relay subscription receives payloads
       """

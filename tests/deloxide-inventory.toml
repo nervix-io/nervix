@@ -116,6 +116,7 @@ tags = [
   "@udf_column_builder",
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
+  "@inferencer_inspection_admission",
   "@shutdown_cordon_release",
   "@shutdown_kafka_handoff",
   "@shutdown_leader_change",
@@ -917,6 +918,16 @@ scenario = "Batched inferencer isolates interleaved concrete branches"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Control-plane ONNX inspection admission, typed full-queue refusal and successful creation after releasing the bulk workers on diagnostic nodes. Dependency-owned ONNX threads and async queue waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/inferencer.feature"
+id = "scenario.inferencer-inspection-admission"
+invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
+invocation = "scenarios"
+scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "The Rust client library in a diagnostic paced driver, and the nodes it drives, across a reopen."
 examples = 4
 feature = "tests/features/runtime/paced_simulation.feature"
@@ -1254,6 +1265,16 @@ id = "stress.inferencer-branch-batches"
 invariant = "A batched inferencer scores interleaved records of two branches in one batch for each branch and keeps each branch's rows apart, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "Batched inferencer isolates interleaved concrete branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: control-plane ONNX inspection admission, typed full-queue refusal and successful creation after releasing the bulk workers. Dependency-owned ONNX threads and async queue waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/inferencer.feature"
+id = "stress.inferencer-inspection-admission"
+invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -1981,9 +2002,11 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The holders mutex in occupy_execution and release_execution is reached by ordinary bounded-execution and branch-state-room scenarios, which the lane's registered scenario selections do not include."
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The inferencer inspection admission workloads also reach the execution occupancy holders mutex while saturating and releasing the bulk workers. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
+  "scenario.inferencer-inspection-admission",
+  "stress.inferencer-inspection-admission",
   "scenario.shutdown-flush-before-freeze",
   "scenario.shutdown-kafka-handoff",
   "scenario.shutdown-leader-change",

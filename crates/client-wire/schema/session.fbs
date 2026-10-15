@@ -157,7 +157,8 @@ enum ChoiceTarget : ubyte {
   /// Fields of a codec's output schema. Requires a domain and then a codec model reference.
   CodecField,
   /// A source-specific configured client or endpoint in the selected domain.
-  IngestHttpSource,
+  IngestHttpRequestSource,
+  IngestHttpEndpointSource,
   IngestKafkaSource,
   IngestPulsarSource,
   IngestMqttSource,
@@ -167,8 +168,8 @@ enum ChoiceTarget : ubyte {
   IngestPrometheusSource,
   IngestZeroMqSource,
   IngestSqsSource,
-  IngestEndpointSource,
-  IngestWebsocketsSource,
+  IngestWebsocketsConnectionSource,
+  IngestWebsocketsEndpointSource,
   IngestSyslogSource,
   /// Codecs whose wire format can decode an ingestor payload.
   IngestCodec,

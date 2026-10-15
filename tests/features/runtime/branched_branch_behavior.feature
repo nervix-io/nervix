@@ -39,8 +39,8 @@ Feature: Branched branch behavior
       CREATE ENDPOINT ingress
         ON edge
         PATH '/notifications'
-        TYPE HTTP; CREATE INGESTOR source_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR source_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -99,8 +99,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -183,8 +183,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/metrics'
         TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -263,8 +263,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -273,8 +273,8 @@ Feature: Branched branch behavior
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
@@ -346,8 +346,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
