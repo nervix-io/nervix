@@ -2332,7 +2332,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-com
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2433,7 +2433,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2594,9 +2594,29 @@ test-nspl-backup-completion:
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
 
-# Check the shared R2 configuration used by native CI jobs and Docker builds.
+# Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
+# job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
+
+# Retain the kache remote contract's own measured line coverage beside the other Python tooling.
+coverage-kache-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/kache-ci"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.tests.test_kache_ci -m unittest scripts.tests.test_kache_ci
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" -o "{{ cargo_target_dir }}/kache-ci/python.lcov"
+
+# Exercise the pinned Go formatter bootstrap and its CI wiring without network access.
+test-go-ci-tool:
+    python3 -m unittest scripts.tests.test_go_ci_tool
+
+# Measure the installer's Python lines separately from Rust's ordinary LCOV.
+coverage-go-ci-tool:
+    mkdir -p target/go-ci-tool
+    COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
+    COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
 test-docs: typed-ratchet-source-build
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
@@ -3245,7 +3265,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \

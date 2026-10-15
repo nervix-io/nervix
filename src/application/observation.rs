@@ -669,6 +669,7 @@ impl SessionServiceImpl {
                 ready: false,
                 quiesce_state: None,
                 quiesce_counters: Default::default(),
+                transport_redeliveries_total: 0,
                 memory_backpressure_paused: self
                     .inner
                     .runtime

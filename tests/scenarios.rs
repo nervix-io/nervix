@@ -134,6 +134,7 @@ use crate::common::{
         TestUpload, TestUploadPart, WireOutcome as _, flatten_command_messages,
         fresh_execution_reference, outcome_not_leader, outcome_succeeded, outcome_unknown,
     },
+    runner_lag::RunnerLagObserver,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
@@ -29171,6 +29172,20 @@ fn publish_suite_summary() {
     }
 }
 
+/// How the scenario run observes stalls of its runner task. A healthy runner polls within
+/// milliseconds; one second clears scheduling noise on a loaded runner and still shows every step
+/// whose synchronous work delays the scenarios beside it. A tick every 250 milliseconds measures a
+/// stall to within a quarter of that bound.
+const SCENARIO_RUNNER_LAG: RunnerLagObserver = RunnerLagObserver {
+    period: Duration::from_millis(250),
+    reported: Duration::from_secs(1),
+};
+
+const _: () = assert!(
+    SCENARIO_RUNNER_LAG.period.as_millis() * 4 <= SCENARIO_RUNNER_LAG.reported.as_millis(),
+    "a reported runner stall spans at least four tick periods"
+);
+
 async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
@@ -29364,6 +29379,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
     // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
     // they are — so the retry coverage below keeps running until the budget itself expires.
+    // A step that blocks the runner task holds every scenario and the watchdog alike, and nothing
+    // polled on that task can end it, so each such stall is logged with the scenarios live during
+    // it.
+    let run = SCENARIO_RUNNER_LAG.observe(run, |stall| {
+        append_cucumber_log_line(&stall.to_string());
+        for active in ActiveScenario::active() {
+            append_cucumber_log_line(&format!("scenario live during runner stall: {active}"));
+        }
+    });
     let writer = match watchdog
         .bound_with_timeout_report(run, publish_suite_summary)
         .await

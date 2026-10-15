@@ -457,6 +457,7 @@ pub struct IngestorDescribeEnvelope {
     pub quiesce_buffered_bytes: u64,
     pub quiesce_dropped_total: u64,
     pub quiesce_rejected_total: u64,
+    pub transport_redeliveries_total: u64,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,
