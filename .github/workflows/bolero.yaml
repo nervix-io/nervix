@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KACHE_VERSION: "0.28.1"
+  KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   NO_COLOR: "1"
   CARGO_TERM_COLOR: never
@@ -85,40 +85,42 @@ jobs:
           linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
-      - name: Configure kache remote
-        env:
-          KACHE_CONFIG: ${{ runner.temp }}/kache-bolero.toml
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          bash scripts/configure_kache_remote.sh "$KACHE_CONFIG"
-          echo "KACHE_CONFIG=$KACHE_CONFIG" >> "$GITHUB_ENV"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: bolero-random-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: bolero-random-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Run runner tests and every ordinary Bolero property
         run: |
           just toolchains-install
           just test-bolero-runner
           just test-bolero
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
   bolero-fuzz:
     name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
@@ -186,34 +188,24 @@ jobs:
           linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
-      - name: Configure kache remote
-        env:
-          KACHE_CONFIG: ${{ runner.temp }}/kache-bolero.toml
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          bash scripts/configure_kache_remote.sh "$KACHE_CONFIG"
-          echo "KACHE_CONFIG=$KACHE_CONFIG" >> "$GITHUB_ENV"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: bolero-fuzz-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: bolero-fuzz-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
         run: |
@@ -293,6 +285,18 @@ jobs:
             ${{ runner.temp }}/runner-load.md
             ${{ runner.temp }}/runner-load.log
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
   bolero-fuzz-combined:
     name: bolero-fuzz-combined
