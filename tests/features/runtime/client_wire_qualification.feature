@@ -16,8 +16,8 @@ Feature: Integrated client wire qualification
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge qualified-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE INGESTOR wire_source
-        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant

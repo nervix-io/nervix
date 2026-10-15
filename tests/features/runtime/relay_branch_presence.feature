@@ -55,8 +55,8 @@ Feature: Relay branch presence
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR state_notifications
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR state_notifications
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
@@ -66,8 +66,8 @@ Feature: Relay branch presence
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL

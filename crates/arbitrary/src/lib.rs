@@ -31,6 +31,7 @@ mod control;
 mod emitter;
 mod entropy;
 mod expression;
+mod external_name;
 mod impact;
 mod infrastructure;
 mod ingestor;

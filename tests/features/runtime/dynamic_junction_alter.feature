@@ -16,8 +16,8 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-filter.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -79,8 +79,8 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA output_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-construction.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -139,8 +139,8 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-dynamic-flush.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -193,8 +193,8 @@ Feature: Dynamically applying junction ALTER operations
       CREATE RELAY outgoing SCHEMA output_event BRANCHED BY by_event_source;
       CREATE VHOST edge http-{{test_id}}-dynamic-branch-revision.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
         TO incoming INHERIT ALL BRANCHED BY by_event_source SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The RabbitMQ client Model, the queue source and sink Models with their delivery
-//!   mode, and what each entity declares.
+//!   mode, the queue name a source consumes with the rule AMQP holds it to, and what each entity
+//!   declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, its configuration keys, or how a queue is consumed or
 //!   published to.
@@ -21,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
@@ -32,13 +34,25 @@ use crate::{
 
 configured_client!(RabbitMq: unpooled CreateClientRabbitMq => RabbitMqConfigEntry);
 
+/// The longest queue name AMQP 0-9-1 carries, in bytes.
+const RABBITMQ_QUEUE_MAX: usize = 255;
+
+external_names! {
+    /// A RabbitMQ queue: 1 to 255 bytes, the length AMQP 0-9-1 carries a queue name in.
+    pub struct RabbitMqQueueName => rabbitmq_queue_rule;
+}
+
+fn rabbitmq_queue_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, RABBITMQ_QUEUE_MAX)
+}
+
 /// One queue a RabbitMQ client consumes.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RabbitMqQueueSource {
     pub client: ClientName,
-    pub queue: QueueName,
+    pub queue: RabbitMqQueueName,
     pub instances: NonZeroU64,
     pub mode: RabbitMqIngestMode,
     pub quiesce: IngestQuiesceMode,
@@ -104,6 +118,8 @@ connector_sources! {
     connector RabbitMq = "RABBITMQ";
     /// What a RabbitMQ source reads.
     pub enum RabbitMqSource;
+    /// The alterations of the ingestors that read a RabbitMQ entity.
+    pub enum RabbitMqIngestorAlteration;
     /// The entities a RabbitMQ source reads.
     pub enum RabbitMqSourceEntity {
         Queue(RabbitMqQueueSource) = "QUEUE", "RabbitMQ";

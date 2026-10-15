@@ -115,7 +115,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "leader"
@@ -140,7 +140,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "cli_node"

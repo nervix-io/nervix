@@ -24,8 +24,8 @@ Feature: Emitter metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_emitter_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
-        CREATE INGESTOR emitter_metrics_source
-        FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR emitter_metrics_source
+        FROM emitter_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

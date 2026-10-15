@@ -24,8 +24,8 @@ Feature: Interconnect relay admission
       };
       CREATE VHOST edge blocked-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -49,8 +49,8 @@ Feature: Interconnect relay admission
       };
       CREATE VHOST edge runnable-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -119,15 +119,15 @@ Feature: Interconnect relay admission
       CREATE VHOST edge branches-{{test_id}}.example.com;
       CREATE ENDPOINT blocked_ingress ON edge PATH '/blocked' TYPE HTTP;
       CREATE ENDPOINT runnable_ingress ON edge PATH '/runnable' TYPE HTTP;
-      CREATE INGESTOR blocked_source
-        FROM ENDPOINT blocked_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR blocked_source
+        FROM blocked_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR runnable_source
-        FROM ENDPOINT runnable_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR runnable_source
+        FROM runnable_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
@@ -196,8 +196,8 @@ Feature: Interconnect relay admission
       };
       CREATE VHOST edge cancellation-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant

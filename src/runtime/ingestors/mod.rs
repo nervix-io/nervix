@@ -257,6 +257,7 @@ mod tests {
                 every: "1s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
+                mode: nervix_models::HttpRequestIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             Model::ClientHttp(CreateClientHttp {
@@ -357,6 +358,7 @@ mod tests {
                 IngestSource::Http(HttpSource::Request(HttpRequestSource {
                     client: client_name.clone(),
                     every: cadence,
+                    mode: nervix_models::HttpRequestIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientHttp(CreateClientHttp {
@@ -370,6 +372,7 @@ mod tests {
                     client: client_name.clone(),
                     query: "up".to_string(),
                     every: cadence,
+                    mode: nervix_models::PrometheusIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 Model::ClientPrometheus(CreateClientPrometheus {
@@ -422,7 +425,7 @@ mod tests {
                 IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                     client: client_name.clone(),
                     channel: named("events"),
-                    mode: RedisPubSubIngestMode::NoAckSequential,
+                    mode: RedisPubSubIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 })),
                 Model::ClientRedis(CreateClientRedis {
@@ -436,9 +439,10 @@ mod tests {
             (
                 IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                     client: client_name.clone(),
-                    topic: "events".to_string(),
+                    topic: nervix_models::MqttTopicFilter::parse("events")
+                        .expect("valid topic filter"),
                     instances: NonZeroU64::MIN,
-                    mode: MqttIngestMode::NoAckSequential {
+                    mode: MqttIngestMode::NoAck {
                         session: MqttSession::Clean,
                         qos: MqttQos::AtMostOnce,
                     },

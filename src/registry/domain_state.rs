@@ -16,8 +16,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    ConnectorKind, DomainName, EndpointType, IngestSource, IngestorInput, Model, ModelIndex,
-    ModelKind, NodeRef, RelayName, SourceReference, parse_duration_text,
+    CreateEndpoint, DomainName, EndpointType, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
+    RelayName, SourceReference, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -573,6 +573,7 @@ impl DomainState {
                                 expect_codec_model(domain, identifier, models, &input.codec)?;
                             ensure_codec_supports_decoding(domain, identifier, codec_model)?;
 
+                            let kind = input.source.kind();
                             match input.source.reference() {
                                 SourceReference::Client(client) => {
                                     let client_node = expect_kind(
@@ -583,34 +584,34 @@ impl DomainState {
                                         client,
                                         ModelKind::Client,
                                     )?;
-                                    if let IngestSource::Syslog(_) = &input.source {
-                                        let client_model = models
-                                            .get(&NodeRef::new(ModelKind::Client, client.clone()))
-                                            .verified(
-                                                "expect_kind above resolved this client reference \
-                                                 against the same model set",
-                                            );
-                                        let found = client_model.connector_kind().verified(
-                                            "this model was resolved as a client above, and every \
-                                             client model configures a connector",
+                                    let client_model = models
+                                        .get(&NodeRef::new(ModelKind::Client, client.clone()))
+                                        .verified(
+                                            "expect_kind above resolved this client reference \
+                                             against the same model set",
                                         );
-                                        if found != ConnectorKind::Syslog {
-                                            return Err(Report::new(RegistryError::InvalidModel {
-                                                domain: domain.as_str().to_string(),
-                                                identifier: identifier.as_str().to_string(),
-                                                reason: format!(
-                                                    "SYSLOG ingestor requires a SYSLOG client, \
-                                                     found {} client '{}'",
-                                                    found.keyword(),
-                                                    client.as_str(),
-                                                ),
-                                            }));
-                                        }
+                                    let found = client_model.connector_kind().verified(
+                                        "this model was resolved as a client above, and every \
+                                         client model configures a connector",
+                                    );
+                                    if let Some(required) = kind.client_connector()
+                                        && found != required
+                                    {
+                                        return Err(Report::new(
+                                            RegistryError::IngestorClientConnectorMismatch {
+                                                domain: domain.clone(),
+                                                ingestor: identifier.clone(),
+                                                kind,
+                                                client: client.clone(),
+                                                required,
+                                                found,
+                                            },
+                                        ));
                                     }
                                     graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                                 }
                                 SourceReference::Endpoint(endpoint) => {
-                                    let endpoint = expect_kind(
+                                    let endpoint_node = expect_kind(
                                         domain,
                                         identifier,
                                         models,
@@ -618,7 +619,29 @@ impl DomainState {
                                         endpoint,
                                         ModelKind::Endpoint,
                                     )?;
-                                    graph.add_edge(endpoint, source, EdgeKind::RequiredBy);
+                                    let found = models
+                                        .configured::<CreateEndpoint>(endpoint.clone())
+                                        .verified(
+                                            "expect_kind above resolved this endpoint reference \
+                                             against the same model set",
+                                        )
+                                        .endpoint_type;
+                                    if let Some(required) =
+                                        kind.capabilities().reference.endpoint_type()
+                                        && found != required
+                                    {
+                                        return Err(Report::new(
+                                            RegistryError::IngestorEndpointTypeMismatch {
+                                                domain: domain.clone(),
+                                                ingestor: identifier.clone(),
+                                                kind,
+                                                endpoint: endpoint.clone(),
+                                                required,
+                                                found,
+                                            },
+                                        ));
+                                    }
+                                    graph.add_edge(endpoint_node, source, EdgeKind::RequiredBy);
                                 }
                             }
                         }

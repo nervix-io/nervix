@@ -33,8 +33,8 @@ Feature: Reingestor output flushing
       CREATE RELAY repartitioned SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge reingestor-flush-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming
           INHERIT ALL

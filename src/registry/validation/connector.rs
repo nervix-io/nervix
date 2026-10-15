@@ -24,10 +24,10 @@ use nervix_models::{
     CreateCodec, CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName,
     EmitSink, EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
     HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestSink, HttpSink,
-    IngestSource, IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName, MqttSource,
-    MqttTopicSource, OtelAggregationTemporality, OtelMappings, OtelMetricKind, OtelMetricsSink,
-    OtelSink, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName,
-    SignalingWireFormat, SqsFifoGroup, SqsQueueSink, SqsSink, VhostName, parse_duration_text,
+    IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName, OtelAggregationTemporality,
+    OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink, ParseAsType, ProcessorOutput,
+    RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
+    SqsQueueSink, SqsSink, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -74,7 +74,7 @@ pub(in crate::registry) fn validate_ingestor_source(
     if !ingestor.input.supports_quiesce(quiesce) {
         return Err(invalid(format!(
             "{} ingestors do not support ON QUIESCE {}",
-            ingestor.input.source_label(),
+            ingestor.input.source_phrase(),
             quiesce.kind_label()
         )));
     }
@@ -101,16 +101,8 @@ pub(in crate::registry) fn validate_ingestor_source(
         }
         nervix_models::IngestQuiesceMode::Suspend | nervix_models::IngestQuiesceMode::Drop => {}
     }
-    match &ingestor.input {
-        IngestorInput::Transport(input) => {
-            if let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource { topic, .. })) =
-                &input.source
-                && topic.is_empty()
-            {
-                return Err(invalid("MQTT topic filter must not be empty".to_string()));
-            }
-        }
-        IngestorInput::Client(source) => validate_client_ingest_mode(&source.mode, invalid)?,
+    if let IngestorInput::Client(source) = &ingestor.input {
+        validate_client_ingest_mode(&source.mode, invalid)?;
     }
     Ok(())
 }
@@ -1142,7 +1134,7 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "{} ingestors do not support read_header or read_headers",
-                input.source_label()
+                input.source_phrase()
             ),
         }));
     }
@@ -1192,7 +1184,7 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "{} ingestors do not support read_header or read_headers",
-                ingestor.input.source_label()
+                ingestor.input.source_phrase()
             ),
         }));
     }

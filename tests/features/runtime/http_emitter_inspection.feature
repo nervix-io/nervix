@@ -49,8 +49,8 @@ Feature: HTTP emitter inspection, errors and metrics
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -268,9 +268,9 @@ Feature: HTTP emitter inspection, errors and metrics
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_events
-        FROM KAFKA kafka_main TOPIC http_ignore_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP http_ignore_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_events
+        FROM kafka_main TOPIC 'http_ignore_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_ignore_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING outbound_events_codec
         TO outgoing

@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The SQS client Model, the queue source and sink Models with their delivery mode
-//!   and FIFO grouping, the message size SQS itself admits, and what each entity declares.
+//!   and FIFO grouping, the queue name a source receives with and the rule SQS holds it to, the
+//!   message size SQS itself admits, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations, expressions and the names a body
 //!   references.
 //! - **Must not know.** The SQS driver, its configuration keys, or how a queue is received from or
@@ -22,16 +23,45 @@ use serde::{Deserialize, Serialize};
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     ByteSizeUnit, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PayloadSizeLimit, PositionClass, QueueName, RetryPolicy, SinkBody,
+    IngestSourceCapabilities, PayloadSizeLimit, PositionClass, RetryPolicy, SinkBody,
     SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
     SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Sqs: unpooled CreateClientSqs => SqsConfigEntry);
+
+/// The longest queue name SQS admits, its `.fifo` suffix included.
+const SQS_QUEUE_MAX: usize = 80;
+/// The suffix the name of every FIFO queue ends in.
+const SQS_FIFO_SUFFIX: &str = ".fifo";
+
+external_names! {
+    /// An SQS queue: 1 to 80 ASCII letters, digits, `-` and `_`, where the name of a FIFO queue
+    /// ends in `.fifo`, as SQS itself requires.
+    pub struct SqsQueueName => sqs_queue_rule;
+}
+
+fn sqs_queue_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, SQS_QUEUE_MAX)?;
+    let base = text.strip_suffix(SQS_FIFO_SUFFIX).unwrap_or(text);
+    if base.is_empty() {
+        return Err(ExternalNameError::EmptyBeforeSuffix {
+            suffix: SQS_FIFO_SUFFIX,
+        });
+    }
+    let refused = base
+        .chars()
+        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')));
+    match refused {
+        Some(ch) => Err(ExternalNameError::InvalidChar { ch }),
+        None => Ok(()),
+    }
+}
 
 /// One queue an SQS client receives from.
 #[derive(
@@ -39,7 +69,7 @@ configured_client!(Sqs: unpooled CreateClientSqs => SqsConfigEntry);
 )]
 pub struct SqsQueueSource {
     pub client: ClientName,
-    pub queue: QueueName,
+    pub queue: SqsQueueName,
     pub instances: NonZeroU64,
     pub mode: SqsIngestMode,
     pub quiesce: IngestQuiesceMode,
@@ -105,6 +135,8 @@ connector_sources! {
     connector Sqs = "SQS";
     /// What an SQS source reads.
     pub enum SqsSource;
+    /// The alterations of the ingestors that read an SQS entity.
+    pub enum SqsIngestorAlteration;
     /// The entities an SQS source reads.
     pub enum SqsSourceEntity {
         Queue(SqsQueueSource) = "QUEUE", "SQS";

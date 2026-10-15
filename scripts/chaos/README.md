@@ -281,6 +281,14 @@ fails injection qualification; a large sample cannot turn four replies per forty
 passing evidence. Pumba parameters, action hold times and product recovery deadlines do not
 change with the sample size. `just test-chaos-degraded-evidence` runs the focused controller,
 parser and effect controls; `just coverage-chaos-degraded-evidence` retains their shell coverage.
+The controls pin each profile's packet count and interval and the 30-second helper budget. They
+also exercise both sides of the inclusive reply and loss thresholds at 40 and 400 packets.
+For a composed-action sampling change, run the same retained `mixed-instability` plan with
+`--plan FILE` on both immutable ordinary and diagnostic images, using a separate run ID and
+artifact directory for each. Check the plan hash, complete action trace, burst sample, exact
+output ledger, committed source offsets and cleanup verdict; the diagnostic run also requires
+complete clean deadlock evidence. Preserve the original failure alongside the new attempts.
+
 The 262,144-byte transfer has one 90-second deadline shared by the sender and receiver, covering
 connection establishment, TCP retransmissions, byte delivery and receiver completion. It uses
 the pinned BusyBox netcat's EOF half-close rather than an idle timeout. At 256 kbit/s the payload
@@ -1411,6 +1419,52 @@ Run the external verifier, pinned tool image and Compose contract checks directl
 just chaos self-test
 ```
 
+`just test-chaos-network-preflight` exercises the actual network-fault preflight with the pinned
+Pumba, nettools and probe images. It verifies full-strength netem and iptables installation, blocked
+gateway traffic, SIGTERM healing and exact helper cleanup within the existing bounds. Its negative
+controls cover an abrupt rules-inspection refusal, a real 30-second Docker-client timeout after the
+inspection helper exited, a failed injector-state inspection, failed log retrieval, failed cleanup,
+a Docker launch that created a canary before refusing, an injector that cannot start its nettools
+image, sidecar disappearance versus inspection failure while still present, and a refused
+Docker execution of the blocked-traffic probe. The same controls run in `just chaos self-test`;
+`just coverage-chaos-network-preflight` retains their shell coverage under
+`target/chaos-network-preflight-coverage/`.
+The entrypoint prepares the pinned Pumba, nettools and probe images before starting any fault;
+Pumba's helper runs retain automatic pulling disabled. `image-preparation/<tool>/` records the
+reference, inspection, any required bounded pull and confirmation, with native statuses and both
+streams. A preparation refusal ends qualification before the first canary or product node starts.
+Each scenario keeps its existing verifier self-check. The full command adds the real network
+refusal controls afterward; they do not consume a scenario's execution budget. CI runs the controls
+once before each shard's timed suite and retains their raw evidence beside the suite evidence.
+That qualification keeps the existing 600-second full-self-check cap, with a ten-second termination
+grace; the job funds it with eleven additional minutes. Fault and product deadlines are unchanged.
+Pass an already-built Nervix image as `just coverage-chaos-network-preflight IMAGE` to include
+the public runner's setup-error projection; the controlled refusal ends before any node starts.
+Existing evidence directories are refused, preserving their records and preventing stale launch
+cidfiles from becoming cleanup authority.
+
+Each network preflight retains `diagnostics/network-preflight/result.json` with its verdict, failing
+stage, original exit status, elapsed time, helper identities and independent cleanup outcome.
+`operations.ndjson` records completed commands with exact argument arrays, command bounds, start
+and elapsed times, identities and paths to both raw streams. Each numbered `operations/*.json`
+record exists before its command starts, so an interrupted command remains identifiable beside its
+partial streams. Injector inspection and raw Pumba logs are saved before cleanup removes a helper;
+failed log retrieval and cleanup retain their own command outcomes and cannot replace the primary
+failure. A sidecar that disappeared after enumeration is confirmed absent and recorded; an
+inspection failure while it still exists fails cleanup. Launch cidfiles keep helpers identifiable
+even when the Docker client fails after creating them. Cleanup removes only the run's canary,
+injector and Pumba sidecars joined to run-owned namespaces.
+
+The runner reports the actual preflight refusal and links these records. A Docker launch,
+inspection or timeout failure does not establish that the worker lacks fault capabilities. The
+30-second rules-inspection bound includes Docker client and helper-launch time; a helper that exited
+successfully does not establish that the client finished within that bound. The overall preflight
+bound remains 120 seconds, and this diagnostic work changes neither fault strength nor product
+deadlines. Only BusyBox ping's missing-replies status qualifies blocked traffic; a Docker
+execution refusal or command timeout provides no effect observation and fails with its own status.
+Pass a control name to `just test-chaos-network-preflight`, such as `probe-refusal`, for a focused
+control plus the live installation/effect/healing check; omission runs every control.
+
 `just test-chaos-output-boundary` runs the focused preparation-budget and production observation
 controls without Docker. `just coverage-chaos-output-boundary` retains their shell coverage under
 `target/chaos-output-boundary-coverage/`. The full self-test runs these controls too.
@@ -1594,7 +1648,10 @@ ended and which runs cleanup signalled or killed, and renders the summary again.
 `just chaos suite shards SUITE` prints the budgets CI applies to each shard. Its execution budget is
 the sum of its entries' budgets. Its step budget adds one 15-minute run teardown reserve, the bound
 within which a run that reached its own timeout finishes its teardown. Its job budget adds
-`ci_reserve_minutes` for the steps that follow the suite: cleanup, the summary and the uploads.
+`ci_reserve_minutes` for the separate network-control qualification and for the steps that follow
+the suite: cleanup, the summary and the uploads. Its 21 minutes retain the existing ten-minute
+cleanup/evidence allowance and fund the qualification's 600-second cap plus ten-second termination
+grace with eleven additional minutes.
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards
 and fails unless each passed and N of them are present.
 

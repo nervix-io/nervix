@@ -486,7 +486,7 @@ peer after that peer finished draining is negatively acknowledged.
 
 A drain that reaches its timeout reports itself abandoned and shutdown continues. Terminal teardown
 then negatively acknowledges the remaining work. A source with external acknowledgements redelivers
-it after a restart; a `NO_ACK` source loses it.
+it after a restart; a source in `MODE NO ACK` loses it.
 
 This is the behavior an unavailable sink produces. An emitter whose sink will not accept records
 holds the drain until the timeout, its source offsets are never committed, and the records are

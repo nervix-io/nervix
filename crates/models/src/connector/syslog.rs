@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The syslog client Model, the listener source and collector sink Models, and what
-//!   each entity declares.
+//! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
+//!   collector sink Model, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** Syslog framing, its configuration keys, or how a listener is bound or a
 //!   collector is written to.
@@ -30,12 +30,12 @@ use crate::{
 configured_client!(Syslog: unpooled CreateClientSyslog => SyslogConfigEntry);
 
 /// The listener a syslog client's configuration binds, which every node of the cluster serves.
-/// Its delivery mode is always `NO_ACK SEQUENTIAL`, so the Model carries none.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct SyslogListenerSource {
     pub client: ClientName,
+    pub mode: SyslogIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -70,7 +70,24 @@ impl SourceBody for SyslogListenerSource {
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        IngestAcknowledgement::Unacknowledged
+        self.mode.acknowledgement()
+    }
+}
+
+/// How a listener's messages are delivered. Syslog senders expect no acknowledgement, so none
+/// waits on one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SyslogIngestMode {
+    NoAck,
+}
+
+impl SyslogIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
+        }
     }
 }
 
@@ -78,6 +95,8 @@ connector_sources! {
     connector Syslog = "SYSLOG";
     /// What a syslog source reads.
     pub enum SyslogSource;
+    /// The alterations of the ingestors that read a syslog entity.
+    pub enum SyslogIngestorAlteration;
     /// The entities a syslog source reads.
     pub enum SyslogSourceEntity {
         Listener(SyslogListenerSource) = "LISTENER", "Syslog";

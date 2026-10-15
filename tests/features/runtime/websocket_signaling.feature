@@ -38,8 +38,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_style_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -108,8 +108,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL rejecting_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -172,8 +172,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL raw_handshake;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -257,8 +257,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL protobuf_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -340,8 +340,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL protobuf_levels;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -408,8 +408,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL authenticated_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -478,8 +478,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL sequenced_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -548,8 +548,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL challenge_response;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -617,8 +617,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL passthrough_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -685,8 +685,8 @@ Feature: Websocket signaling protocols
         PATH '/ws'
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL buffered_subscribe;
 
-      CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

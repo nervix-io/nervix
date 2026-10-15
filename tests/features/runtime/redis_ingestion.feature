@@ -27,8 +27,8 @@ Feature: Redis ingestion
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE INGESTOR redis_notifications
-        FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR redis_notifications
+        FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -86,8 +86,8 @@ Feature: Redis ingestion
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE INGESTOR redis_notifications
-        FROM REDIS PUBSUB redis_main CHANNEL notifications_reconnect_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR redis_notifications
+        FROM redis_main CHANNEL 'notifications_reconnect_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

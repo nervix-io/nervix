@@ -34,8 +34,8 @@ Feature: Domain execution time
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR source_events
-        FROM ENDPOINT source_event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_events
+        FROM source_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TIMESTAMP NOW
         FILTER WHERE now() < ('2001-01-01T00:00:00Z' AS DATETIME)
@@ -120,8 +120,8 @@ Feature: Domain execution time
         ON edge
         PATH '/probe'
         TYPE HTTP;
-      CREATE INGESTOR clock_probe_source
-        FROM ENDPOINT clock_probe_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR clock_probe_source
+        FROM clock_probe_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_probe_codec
         TIMESTAMP NOW
         TO clock_probes
@@ -196,8 +196,8 @@ Feature: Domain execution time
         ON edge
         PATH '/calculations'
         TYPE HTTP;
-      CREATE INGESTOR calculation_source
-        FROM ENDPOINT calculation_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR calculation_source
+        FROM calculation_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TIMESTAMP NOW
         TO calculations
@@ -283,8 +283,8 @@ Feature: Domain execution time
         ON edge
         PATH '/trigger'
         TYPE HTTP;
-      CREATE INGESTOR trigger_source
-        FROM ENDPOINT trigger_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR trigger_source
+        FROM trigger_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING trigger_event_codec
         TIMESTAMP NOW
         TO trigger_events

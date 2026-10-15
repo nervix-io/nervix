@@ -206,7 +206,15 @@ connector, that variant holds one variant per entity, and each entity has its ow
 the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
 an OpenTelemetry sink is a logs, a traces or a metrics sink, so only a metrics sink carries a
 metric and no signal value sits beside mappings that might contradict it. The kind that names a
-pair is read from the Model and never stored beside it. What every source or sink of a pair
+pair is read from the Model and never stored beside it. An ingestor alteration is nested the same
+way: its head selects one connector and entity, and the operations of that entity set a source of
+that entity's own Model, so `ALTER KAFKA TOPIC INGESTOR` cannot carry a Redis channel and no kind
+field sits beside the source it sets. Only a transport's operations include the codec that decodes
+its payloads, so a client producer alteration cannot hold one. A stored ingestor of another pair is
+refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
+types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
+decoded, and keeps its text exactly as written, case included, so a connector sends what the
+statement says. What every source or sink of a pair
 declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
 whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
 every node, what its body references, and for a sink whether it writes headers, needs a codec,

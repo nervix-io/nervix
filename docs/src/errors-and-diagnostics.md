@@ -269,7 +269,10 @@ The vocabulary is the innermost owner, and its Model operations report the same 
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
 typed fields: the field, input relay, route target, or materialized dependency, or the stored and
-requested names when an alteration targets another Model. An input, route, or dependency operation
+requested names when an alteration targets another Model. An ingestor alteration whose head names
+another connector and entity than the stored ingestor reads is refused with both typed kinds, which
+its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
+KAFKA TOPIC INGESTOR cannot alter it`. An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
 conversion. Canonical NSPL rendering refuses only a value the language has no spelling for: a NaN or
@@ -668,21 +671,24 @@ sequenceDiagram
 
 ### Registry Validation And Planning
 
-Registry validation and planning refuse invalid models before graph activation. Validation names
-the owning node, the route when the rule is route-local, the operation, and relevant fields or
+Registry validation and planning refuse invalid models before graph activation. Validation names the
+owning node, the route when the rule is route-local, the operation, and relevant fields or
 references. A branch mismatch in an error route, for example, identifies the source route, error
 relay, and both branch declarations. A flush-based route without `FLUSH EACH` or `FLUSH IMMEDIATE`
 fails validation; the registry does not supply a cadence. The current registry reports this as an
-invalid-model failure naming the node and output in its diagnostic. Planning failures likewise
-retain the selected entity or placement so an operator can correct the request. A relocation the
-graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`: a member
-that does not exist names the domain and the member, a server-listener ingestor names the ingestor,
-a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides request
-different strategies lists every member of that group, and an override outside the unit names its
-member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. See [Control
-Plane](./control-plane.md) for activation and [Typed States And Validation
-Boundaries](./typed-states.md) for required state.
+invalid-model failure naming the node and output in its diagnostic. An ingestor whose body names a
+client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
+refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
+or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. Planning failures
+likewise retain the selected entity or placement so an operator can correct the request. A
+relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
+a member that does not exist names the domain and the member, a server-listener ingestor names the
+ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
+request different strategies lists every member of that group, and an override outside the unit
+names its member. The failed command renders the chain, such as `relocation plan failed: junction
+'chain_distant' is not part of the relocation`. See [Control Plane](./control-plane.md) for
+activation and [Typed States And Validation Boundaries](./typed-states.md) for required state.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before
@@ -711,6 +717,16 @@ output branch and route construction, and WASM guest-state generation before run
 These failures name the owning node and relevant relay, codec, or field. A missing
 lookup file is rejected during candidate binding validation; malformed records remain a loader
 failure when the pinned file is decoded. Neither failure silently selects another resource version.
+
+ONNX binding preflight preserves the distinction between invalid tensor bindings, an ONNX loading
+failure, worker refusal, worker panic and inspection timeout. Worker refusal retains the bounded
+executor's report beneath the inferencer context; it does not classify an uninspected model as
+malformed. The thirty-second inspection bound covers admission to a bulk worker through release of
+the temporary session. Debug events record submission, worker entry, builder initialization, model
+loading and session release. A timeout also records the bulk class's configured workers, running
+jobs and pending jobs, so an operator can correlate queue delay with dependency work. These are
+observations of the run; a successful later inspection does not identify the cause of an earlier
+timeout.
 
 ### Runtime Installation
 
@@ -1901,6 +1917,23 @@ transfer to alter a later measurement. A failed required attempt remains evidenc
 subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
+Network-fault preflight refusals retain the failing stage and original command status, exact
+arguments and bound, elapsed time, helper identities and both raw streams. The operation record
+exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the
+injector's state and logs before removing it and records its own failures independently of the
+original refusal. A sidecar that disappeared between enumeration and inspection is confirmed
+absent and recorded as an ordinary outcome; a failed inspection of a still-present sidecar fails
+cleanup. The public setup error reports the actual refusal rather than inferring that the worker
+lacks netem or iptables capabilities from a Docker client failure. A successful helper exit alone
+does not establish successful Docker-client completion within the inspection bound.
+Only the ping helper's missing-replies outcome qualifies blocked traffic. A Docker execution
+refusal or a probe timeout supplies no effect observation and fails preflight with its own status.
+The real preflight failure controls qualify separately from a scenario's timed verifier self-check.
+They resolve the pinned tool images before starting an injector with automatic pulls disabled.
+Missing-image preparation retains each inspection, pull and confirmation outcome and its raw streams;
+a preparation refusal ends qualification before any fault or product node starts.
+CI retains their raw outcomes before starting the suite; failure to complete that qualification
+fails the shard without consuming a product scenario's execution window.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product

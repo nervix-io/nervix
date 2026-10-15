@@ -1392,13 +1392,12 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterBody, EmitterPublishingMode, EndpointEndpointSource, EndpointIngestMode,
-        EndpointSource, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, IngestSource,
-        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
-        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, ModelKind, NatsSink, NatsSubjectSink, ProcessorInputWhere,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        EmitterBody, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, IngestTimestampSource,
+        InputCollectPolicy, Literal, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, NatsSink,
+        NatsSubjectSink, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        QuiesceLevel, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1551,9 +1550,9 @@ mod tests {
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+                source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
                     endpoint: named("ingress_a"),
-                    mode: EndpointIngestMode::NoAckSequential,
+                    mode: EndpointIngestMode::NoAck,
                     quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
@@ -1981,14 +1980,13 @@ mod tests {
                     let crate::IngestorInput::Transport(input) = &mut candidate.input else {
                         panic!("the fixture ingestor reads an endpoint");
                     };
-                    input.source =
-                        IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
-                            endpoint: named("ingress_b"),
-                            mode: EndpointIngestMode::NoAckSequential,
-                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
-                            },
-                        }));
+                    input.source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                        endpoint: named("ingress_b"),
+                        mode: EndpointIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
+                    }));
                     candidate
                 },
                 ModelChangeAspect::IngestorSource,

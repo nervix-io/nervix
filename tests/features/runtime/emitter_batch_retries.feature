@@ -33,9 +33,9 @@ Feature: Emitter batch payloads through acknowledgements and retries
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_events
-        FROM KAFKA kafka_main TOPIC retried_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP retried_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_events
+        FROM kafka_main TOPIC 'retried_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retried_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -115,9 +115,9 @@ Feature: Emitter batch payloads through acknowledgements and retries
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_events
-        FROM KAFKA kafka_main TOPIC detached_retried_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP detached_retried_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_events
+        FROM kafka_main TOPIC 'detached_retried_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'detached_retried_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -190,8 +190,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge refused-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -261,8 +261,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
       CREATE VHOST edge mongodb-retried-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO notifications
         INHERIT ALL

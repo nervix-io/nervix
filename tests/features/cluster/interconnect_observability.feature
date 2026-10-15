@@ -71,8 +71,8 @@ Feature: Interconnection observability
       };
       CREATE VHOST edge observability-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

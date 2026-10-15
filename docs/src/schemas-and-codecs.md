@@ -494,7 +494,7 @@ A payload is decoded as a whole or rejected as a whole. A malformed value, a pro
 error, an output that is not an object or does not fit the schema, or more than 65,536 messages
 rejects the entire payload, including the messages produced before the failure. The rejection is a
 decode failure of the payload, not a route message error: it is reported as a runtime error event
-and logged, `NO_ACK` modes continue with the next payload, and acknowledged modes retry or
+and logged, `MODE NO ACK` continues with the next payload, and acknowledged modes retry or
 redeliver it as they do any payload that fails to decode. The diagnostic names the codec, the
 cause, and the zero-based position of the input value, plus the output's position when an output
 is at fault. It never quotes payload values, so a mismatched field is described by its JSON kind

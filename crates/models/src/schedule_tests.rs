@@ -2,10 +2,10 @@ use nonzero_ext::nonzero;
 
 use crate::{
     AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
-    CreateSchema, DomainName, DomainSchedule, EndpointEndpointSource, EndpointIngestMode,
-    EndpointSource, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode, IngestSource,
-    KafkaPartitionSchedule, Model, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SyslogListenerSource,
+    CreateSchema, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointSource, HttpSource, IngestQuiesceMode, IngestSource, KafkaPartitionSchedule, Model,
+    ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, ResolvedBranching,
+    ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode, SyslogListenerSource,
     SyslogSource,
 };
 
@@ -173,9 +173,9 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+                source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
                     endpoint: named("public_http"),
-                    mode: EndpointIngestMode::NoAckSequential,
+                    mode: EndpointIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
@@ -209,6 +209,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
                 source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
                     client: named("syslog_listener"),
+                    mode: SyslogIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),
                 codec: named("codec"),

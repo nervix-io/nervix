@@ -39,6 +39,7 @@ use nervix_models::{
     ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode, SentryEventSink,
     SentrySink, SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink, WasmStateInspection,
     ZeroMqPushSink, ZeroMqSink, expression_to_nspl, ingest_quiesce_to_nspl,
+    ingestor_input_body_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 
@@ -212,7 +213,11 @@ pub(in crate::application) fn format_ingestor_describe_output(
     let mut lines = vec![
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
-        format!("source: {}", ingestor.input.source_label()),
+        format!(
+            "from: {} {}",
+            ingestor.input.source_phrase(),
+            ingestor_input_body_to_nspl(&ingestor.input)
+        ),
         format!(
             "streams: {}",
             ingestor
@@ -368,7 +373,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
     lines.join("\n")
 }
 
-/// One line of `SHOW INGESTORS`: the ingestor's source, its schema or codec, the node that
+/// One line of `SHOW INGESTORS`: the pair the ingestor reads, its schema or codec, the node that
 /// executes it and its state, and for a client ingestor whether it admits batches and the
 /// producers attached to it. `summary` is `None` when no node executes the ingestor, or when its
 /// node could not be asked.
@@ -378,9 +383,9 @@ pub(in crate::application) fn format_ingestor_listing_line(
     summary: Option<&RuntimeIngestorDescribe>,
 ) -> String {
     let mut line = format!(
-        "{} source={}",
+        "{} from={}",
         ingestor.name.as_str(),
-        ingestor.input.source_label()
+        ingestor.input.source_phrase()
     );
     match &ingestor.input {
         IngestorInput::Transport(transport) => {
@@ -1580,10 +1585,15 @@ fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
         | Model::Reorderer(_)
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
-        Model::Ingestor(ingestor) => !matches!(
-            ingestor.input.transport_source(),
-            Some(IngestSource::Endpoint(_))
-        ),
+        // An endpoint ingestor executes on every node that serves its endpoint, so no placement
+        // can hold it.
+        Model::Ingestor(ingestor) => ingestor
+            .input
+            .source_kind()
+            .capabilities()
+            .reference
+            .endpoint_type()
+            .is_none(),
         Model::Relay(_) => true,
         _ => false,
     }

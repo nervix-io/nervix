@@ -1930,12 +1930,21 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
 fi
 if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
+    network_preflight_status=0
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
         --pumba "${pumba_image_id}" --nettools "${CHAOS_NETTOOLS_IMAGE}" \
         --probe "${CHAOS_PROBE_IMAGE}" \
         --output "${artifact_dir}/diagnostics/network-preflight" \
         >"${artifact_dir}/diagnostics/network-preflight.txt" 2>&1 \
-        || setup_error "this Docker worker cannot install and heal netem/iptables faults; see ${artifact_dir}/diagnostics/network-preflight.txt"
+        || network_preflight_status=$?
+    if [[ "${network_preflight_status}" -ne 0 ]]; then
+        network_preflight_reason="controller exited ${network_preflight_status}"
+        if [[ -s "${artifact_dir}/diagnostics/network-preflight/result.json" ]]; then
+            network_preflight_reason="$(jq -r '"\(.stage): \(.reason) (exit \(.exit_code))"' \
+                "${artifact_dir}/diagnostics/network-preflight/result.json")"
+        fi
+        setup_error "network fault preflight failed: ${network_preflight_reason}; see ${artifact_dir}/diagnostics/network-preflight.txt and network-preflight/"
+    fi
 fi
 
 update_manifest '.status = "running"'

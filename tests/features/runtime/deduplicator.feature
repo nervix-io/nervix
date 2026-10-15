@@ -28,8 +28,8 @@ Feature: Relay deduplication
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -98,8 +98,8 @@ Feature: Relay deduplication
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -184,8 +184,8 @@ Feature: Relay deduplication
         ON edge
         PATH '/dedup-functions'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -262,8 +262,8 @@ Feature: Relay deduplication
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -355,8 +355,8 @@ Feature: Relay deduplication
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE INGESTOR state_txns_ingestor
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR state_txns_ingestor
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO state_txns
         INHERIT ALL
@@ -365,8 +365,8 @@ Feature: Relay deduplication
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -485,8 +485,8 @@ Feature: Relay deduplication
         ON edge
         PATH '/dedup-default'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL

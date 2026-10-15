@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Kafka client Model, the topic source and sink Models with their offset and
-//!   delivery modes, and what each entity declares.
+//!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
+//!   them to, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
@@ -21,9 +22,10 @@ use serde::{Deserialize, Serialize};
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
-    ClientName, ConnectorKind, ConsumerGroupName, EmitSinkCapabilities, EmitterBatchRequirement,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
     PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
     SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
@@ -31,13 +33,47 @@ use crate::{
 
 configured_client!(Kafka: unpooled CreateClientKafka => KafkaConfigEntry);
 
+/// The longest topic Kafka admits, in bytes.
+const KAFKA_TOPIC_MAX: usize = 249;
+/// The longest consumer group Nervix joins, in bytes. Kafka bounds a group only by the length of
+/// its protocol string, so this bound is Nervix's own.
+const KAFKA_CONSUMER_GROUP_MAX: usize = 255;
+
+external_names! {
+    /// A Kafka topic: 1 to 249 ASCII letters, digits, `.`, `_` and `-`, and neither `.` nor `..`,
+    /// as the broker itself requires.
+    pub struct KafkaTopicName => kafka_topic_rule;
+    /// A Kafka consumer group: 1 to 255 bytes without control characters.
+    pub struct KafkaConsumerGroupName => kafka_consumer_group_rule;
+}
+
+fn kafka_topic_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, KAFKA_TOPIC_MAX)?;
+    let refused = text
+        .chars()
+        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')));
+    if let Some(ch) = refused {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    match text {
+        "." => Err(ExternalNameError::Reserved { name: "." }),
+        ".." => Err(ExternalNameError::Reserved { name: ".." }),
+        _ => Ok(()),
+    }
+}
+
+fn kafka_consumer_group_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, KAFKA_CONSUMER_GROUP_MAX)?;
+    refuse_control_characters(text)
+}
+
 /// One topic a Kafka client consumes.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct KafkaTopicSource {
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: KafkaTopicName,
     pub offset_mode: KafkaOffsetMode,
     pub instances: NonZeroU64,
     pub mode: KafkaIngestMode,
@@ -80,7 +116,7 @@ impl SourceBody for KafkaTopicSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum KafkaOffsetMode {
-    ConsumerGroup(ConsumerGroupName),
+    ConsumerGroup(KafkaConsumerGroupName),
     Domain,
 }
 
@@ -98,7 +134,7 @@ pub enum KafkaIngestMode {
         timeout: String,
         retry_policy: RetryPolicy,
     },
-    NoAckParallel,
+    NoAck,
 }
 
 impl KafkaIngestMode {
@@ -122,7 +158,7 @@ impl KafkaIngestMode {
                 timeout,
                 retry: retry_policy,
             },
-            Self::NoAckParallel => IngestAcknowledgement::Unacknowledged,
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -131,6 +167,8 @@ connector_sources! {
     connector Kafka = "KAFKA";
     /// What a Kafka source reads.
     pub enum KafkaSource;
+    /// The alterations of the ingestors that read a Kafka entity.
+    pub enum KafkaIngestorAlteration;
     /// The entities a Kafka source reads.
     pub enum KafkaSourceEntity {
         Topic(KafkaTopicSource) = "TOPIC", "Kafka";

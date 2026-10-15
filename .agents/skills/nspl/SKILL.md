@@ -17,7 +17,7 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors for all supported source families, junctions, reingestors, and session
+Roto UDFs, ingestors for every connector and entity pair, junctions, reingestors, and session
 subscriptions; use the same web-console chapter for their typed fields, resource versions, program
 editors, reference lookup, and transaction behavior.
 
@@ -167,10 +167,12 @@ attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
-dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`, or
-change only the current source's mode with `SET QUIESCE <body>`; a client ingestor takes the
-complete `SET FROM CLIENT SCHEMA ...` body, and a change to its endpoint contract ends its attached
-producers.
+dynamic. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
+`ALTER KAFKA TOPIC INGESTOR`; an alteration never changes its connector or entity, so reading
+another one takes `DROP INGESTOR` and a new `CREATE`. Use that head's complete body after
+`SET FROM`, or change only the quiesce mode with `SET QUIESCE <body>`; a client ingestor takes the
+complete `SET FROM SCHEMA ...` body under `ALTER CLIENT PRODUCER INGESTOR`, and a change to its
+endpoint contract ends its attached producers.
 Buffered client routes force-flush and settle their admitted acknowledgements before an alteration
 publishes a replacement contract. Keep reading admitted outcomes while admission is suspended;
 reopen a producer after a committed contract change, and retain its attachment when an alteration
@@ -294,9 +296,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   without a message. A payload is decoded or rejected as a whole, unfolds into at most 65,536
   messages, and stays the unit of source acknowledgement. `ON EMITTING` must yield exactly one
   value per record.
-- Unfolding runs on the node's extension workers. Before relying on a `NO_ACK` source to keep its
-  payloads while those workers are full, read `Ingestors` → `When The Extension Workers Are Full`:
-  some sources wait for them, and others refuse the payload and count it.
+- Unfolding runs on the node's extension workers. Before relying on a `MODE NO ACK` source to keep
+  its payloads while those workers are full, read `Ingestors` → `When The Extension Workers Are
+  Full`: some sources wait for them, and others refuse the payload and count it.
 - Give every signaling protocol an explicit `FORMAT` and express the handshake as JAQ:
   `SEND JAQ` programs must each yield exactly one value, and `WAIT JAQ` matchers accept any output
   that is neither null nor false. Match only the fields that matter so acknowledgements carrying
@@ -341,10 +343,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   separate runtime-node kind. All relays are valid placement members and corridor hops.
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
-- Treat Endpoint and Syslog ingestors as cluster-wide listeners. Every client-source ingestor,
-  including an outbound WebSocket client, is single-owner and keeps its live assignment across
-  ordinary schedule recomputation; use drain, `RELOCATE`, or a hard colocation requirement when it
-  must move.
+- Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
+  listeners. Every other ingestor, a `WEBSOCKETS CONNECTION` included, is single-owner and keeps its
+  live assignment across ordinary schedule recomputation; use drain, `RELOCATE`, or a hard
+  colocation requirement when it must move.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
   `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in
@@ -456,21 +458,32 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
   only clamps a batch, and the flush tuning guidance in the docs records which sinks benefit from
   larger batches.
-- Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
-  never accepts `MAX`.
+- Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
+  `NO_ACK` have no in-flight ACK window and never accept `MAX`.
+- Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
+  `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
+  `FROM` without a connector keyword. Reference a client of the head's connector, and pair
+  `HTTP ENDPOINT` with a `TYPE HTTP` endpoint and `WEBSOCKETS ENDPOINT` with a `TYPE WEBSOCKETS`
+  endpoint. Write every source's `MODE`, using `MODE NO ACK` where nothing waits on an
+  acknowledgement and only the modes `Ingestors` → `Delivery Modes` lists for that entity.
+- Write external names as string literals spelled exactly as the external system names them:
+  topics, consumer groups, subscriptions, queues, channels, subjects, queue groups, and MQTT topic
+  filters, within the rules in `Ingestors` → `External Names`. Keep Nervix references such as
+  clients, endpoints, schemas, codecs, and relays bare identifiers.
 - When an application publishes typed batches itself, use a client ingestor:
-  `FROM CLIENT SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY
-  BACKOFF <d> MAX <d> ON QUIESCE SUSPEND`, with no client, codec, headers, or `NO_ACK`. Producers are
-  opened through the client library or session protocol, not with a statement. Read `Ingestors` →
-  `Client Ingestors` before explaining outcomes, limits, or what ends a producer, and never promise
-  that a batch whose outcome is unknown or failed had no effect. The Rust client restores a desired
-  producer across a session gap or relocation only while the domain `START` generation and endpoint
-  contract still match; it never resends a batch merely because its outcome is missing.
-- End every transport ingestor source specification with an explicit source-supported `ON QUIESCE`
-  body immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
-  explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include `RETRY AFTER` for endpoint
-  `REJECT`. Use MQTT `SUSPEND` only with `SESSION PERSISTENT QOS 1`. Do not invent a default or use a
-  mode offered by another source type.
+  `CREATE CLIENT PRODUCER INGESTOR <name> FROM SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX
+  <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE SUSPEND`, with no client, codec,
+  `DECODE USING`, headers, or `NO ACK`. Producers are opened through the client library or session
+  protocol, not with a statement. Read `Ingestors` → `Client Ingestors` before explaining
+  outcomes, limits, or what ends a producer, and never promise that a batch whose outcome is
+  unknown or failed had no effect. The Rust client restores a desired producer across a session gap
+  or relocation only while the domain `START` generation and endpoint contract still match; it
+  never resends a batch merely because its outcome is missing.
+- End every transport ingestor source body with an explicit source-supported `ON QUIESCE` body
+  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
+  `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
+  `RETRY AFTER` for endpoint `REJECT`. Use `MQTT TOPIC` `SUSPEND` only with
+  `SESSION PERSISTENT QOS 1`. Do not invent a default or use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live
@@ -510,7 +523,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   connector syntax retained in older examples or configurations as invalid.
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
-  client transport, and use only the documented `NO_ACK` source and sink forms.
+  client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
+  and `NO_ACK` sink forms.
 - For a Sentry sink, reference a `TYPE SENTRY` client containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other

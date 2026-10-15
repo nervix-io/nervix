@@ -2,23 +2,59 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Delayed-cut workloads and assertions on command recovery and downloaded archives.
-//! - **Depends on.** The public Rust client, CLI, archive reader and controlled capture gates.
+//! - **Depends on.** The public Rust client, CLI, archive reader, controlled capture gates and the
+//!   injected holds of those gates.
 //! - **Must not know.** Command storage, mutation leases or private checkpoint representations.
 
+use std::future::Future;
+
 use super::*;
+use crate::common::injected_hold::{HeldGate, InjectedHold, hold_in_order};
+
+/// How long a backup may take to reach a controlled cut before the step fails.
+const CUT_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The controlled cut of one domain's quiesced backup, where the server waits after draining the
+/// domain until the scenario releases it.
+struct BackupCutGate {
+    fault_injection: FaultInjection,
+    domain: DomainName,
+}
+
+impl BackupCutGate {
+    fn of(world: &ScenarioWorld, raw_domain: &str) -> Self {
+        Self {
+            fault_injection: world.fault_injection.clone(),
+            domain: scenario_domain(world, raw_domain),
+        }
+    }
+}
+
+impl fmt::Display for BackupCutGate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "the backup cut of domain '{}'", self.domain)
+    }
+}
+
+impl HeldGate for BackupCutGate {
+    fn reached(&self) -> impl Future<Output = ()> + Send {
+        self.fault_injection.wait_for_backup_cut_pause(&self.domain)
+    }
+
+    fn release(&self) {
+        self.fault_injection.release_backup_cut_pause(&self.domain);
+    }
+}
 
 #[when(expr = "backup cut {string} is held for {int} seconds and then released")]
 async fn when_backup_cut_is_delayed(world: &mut ScenarioWorld, raw_domain: String, seconds: u64) {
-    let domain = scenario_domain(world, &raw_domain);
-    nervix_primitives::time::timeout(
-        Duration::from_secs(30),
-        world.fault_injection.wait_for_backup_cut_pause(&domain),
-    )
-    .await
-    .assured("the backup reaches the controlled cut");
-    // Workload duration after the observed gate; readiness is established by the notification.
-    nervix_primitives::time::sleep(Duration::from_secs(seconds)).await;
-    world.fault_injection.release_backup_cut_pause(&domain);
+    let hold = InjectedHold {
+        gate: BackupCutGate::of(world, &raw_domain),
+        duration: Duration::from_secs(seconds),
+    };
+    hold_in_order(vec![hold], CUT_ARRIVAL_TIMEOUT)
+        .await
+        .assured("the backup reaches the controlled cut");
 }
 
 #[then("the CLI backup wait failure exposes its execution reference for recovery")]
@@ -174,19 +210,18 @@ async fn when_nspl_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld
         .assured("the backup client connects");
     let query = format!("BACKUP CLUSTER TO '{}' TIMEOUT 20s;", archive.display());
     let mut task = nervix_primitives::task::spawn(async move { client.execute(query).await });
+    let mut holds = Vec::new();
     for (suffix, seconds) in [("_a", 12), ("_b", 14)] {
-        nervix_primitives::task::consume_budget().await;
-        let domain = scenario_domain(world, &format!("{{{{backup_base}}}}{suffix}"));
-        nervix_primitives::select! {
-            result = &mut task => panic!("the backup ended before both cuts: {result:?}"),
-            reached = nervix_primitives::time::timeout(
-                Duration::from_secs(30),
-                world.fault_injection.wait_for_backup_cut_pause(&domain),
-            ) => reached.assured("the backup reaches this domain's cut"),
-        }
-        // This is the injected workload duration after an observed cut, not a readiness sleep.
-        nervix_primitives::time::sleep(Duration::from_secs(seconds)).await;
-        world.fault_injection.release_backup_cut_pause(&domain);
+        holds.push(InjectedHold {
+            gate: BackupCutGate::of(world, &format!("{{{{backup_base}}}}{suffix}")),
+            duration: Duration::from_secs(seconds),
+        });
+    }
+    let mut held = std::pin::pin!(hold_in_order(holds, CUT_ARRIVAL_TIMEOUT));
+    nervix_primitives::select! {
+        biased;
+        released = &mut held => released.assured("the backup reaches each domain's cut"),
+        result = &mut task => panic!("the backup ended before both cuts: {result:?}"),
     }
     let outcome = task
         .await
@@ -224,21 +259,25 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
     let expected = execution.reference().clone();
     let mut task =
         nervix_primitives::task::spawn(async move { client.execute_prepared(&execution).await });
-    let first = scenario_domain(world, "{{backup_base}}_a");
+    let first = InjectedHold {
+        gate: BackupCutGate::of(world, "{{backup_base}}_a"),
+        duration: Duration::from_secs(2),
+    };
     let second = scenario_domain(world, "{{backup_base}}_b");
-    for domain in [&first, &second] {
-        nervix_primitives::task::consume_budget().await;
-        nervix_primitives::select! {
-            result = &mut task => panic!("the native wait ended before the second cut: {result:?}"),
-            reached = nervix_primitives::time::timeout(
-                Duration::from_secs(30),
-                world.fault_injection.wait_for_backup_cut_pause(domain),
-            ) => reached.assured("the native backup reaches the controlled cut"),
+    let mut held = std::pin::pin!(hold_in_order(vec![first], CUT_ARRIVAL_TIMEOUT));
+    nervix_primitives::select! {
+        biased;
+        released = &mut held => {
+            released.assured("the native backup reaches the first controlled cut");
         }
-        if domain == &first {
-            nervix_primitives::time::sleep(Duration::from_secs(2)).await;
-            world.fault_injection.release_backup_cut_pause(domain);
-        }
+        result = &mut task => panic!("the native wait ended before the second cut: {result:?}"),
+    }
+    nervix_primitives::select! {
+        result = &mut task => panic!("the native wait ended before the second cut: {result:?}"),
+        reached = nervix_primitives::time::timeout(
+            CUT_ARRIVAL_TIMEOUT,
+            world.fault_injection.wait_for_backup_cut_pause(&second),
+        ) => reached.assured("the native backup reaches the controlled cut"),
     }
     let result = nervix_primitives::time::timeout(Duration::from_secs(12), task)
         .await

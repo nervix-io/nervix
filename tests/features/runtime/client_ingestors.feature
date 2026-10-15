@@ -27,8 +27,8 @@ Feature: Client ingestors
       CREATE BRANCH by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders_by_region SCHEMA order_record BRANCHED BY by_region;
       CREATE RELAY orders_deduped SCHEMA order_record BRANCHED BY by_region;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -75,13 +75,13 @@ Feature: Client ingestors
       """
     Then the last command output contains
       """
-      FROM CLIENT SCHEMA order_in MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND
+      FROM SCHEMA order_in MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND
       """
     And <session> cannot open a producer on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING" because "schema mismatch"
     When <session> opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     Then within "30s" the leader node describes ingestor "orders_in" with
       """
-      source: CLIENT
+      from: CLIENT PRODUCER
       schema: order_in
       mode: ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       admission: open
@@ -132,7 +132,7 @@ Feature: Client ingestors
       """
     Then the last command output contains
       """
-      orders_in source=CLIENT schema=order_in
+      orders_in from=CLIENT PRODUCER schema=order_in
       """
     When producer "orders" is closed
     Then within "30s" the leader node describes ingestor "orders_in" with
@@ -164,8 +164,8 @@ Feature: Client ingestors
       CREATE SCHEMA order_error (order_id STRING, code STRING);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
       CREATE RELAY order_errors SCHEMA order_error UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -176,8 +176,8 @@ Feature: Client ingestors
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR routed_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR routed_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -190,8 +190,8 @@ Feature: Client ingestors
             SET order_id = input.order_id,
                 code = error.code
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR lenient_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR lenient_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -293,8 +293,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -306,8 +306,8 @@ Feature: Client ingestors
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_in;
       CREATE VHOST edge orders-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/orders' TYPE HTTP;
-      CREATE INGESTOR orders_http
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR orders_http
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -370,8 +370,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -437,8 +437,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -488,7 +488,7 @@ Feature: Client ingestors
       """
     Then the last command output contains
       """
-      orders_in source=CLIENT schema=order_in
+      orders_in from=CLIENT PRODUCER schema=order_in
       """
     # Cancelling the wait for credit sends nothing; cancelling the wait for an outcome keeps the
     # batch with the producer.
@@ -531,16 +531,16 @@ Feature: Client ingestors
       CREATE SCHEMA region_key (region STRING);
       CREATE BRANCH by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
           FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR other_orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR other_orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -579,7 +579,7 @@ Feature: Client ingestors
     When client "alter owner" executes these NSPL commands
       """
       BEGIN;
-      ALTER INGESTOR orders_in REPLACE ROUTE TO orders
+      ALTER CLIENT PRODUCER INGESTOR orders_in REPLACE ROUTE TO orders
         INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
@@ -617,7 +617,7 @@ Feature: Client ingestors
     # A new acknowledgement window is a new endpoint contract.
     When these NSPL commands are executed on the leader node
       """
-      ALTER INGESTOR orders_in SET FROM CLIENT SCHEMA order_in
+      ALTER CLIENT PRODUCER INGESTOR orders_in SET FROM SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND;
       """
@@ -668,16 +668,16 @@ Feature: Client ingestors
       CREATE SCHEMA region_key (region STRING);
       CREATE BRANCH by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
           FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR other_orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR other_orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -714,7 +714,7 @@ Feature: Client ingestors
     When client "alter owner" executes these NSPL commands
       """
       BEGIN;
-      ALTER INGESTOR orders_in SET FROM CLIENT SCHEMA order_in
+      ALTER CLIENT PRODUCER INGESTOR orders_in SET FROM SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND;
       """
@@ -754,7 +754,7 @@ Feature: Client ingestors
       | eu     | o-5      | 5      | 4111-5 |
     And these NSPL commands are executed on the leader node
       """
-      ALTER INGESTOR orders_in REPLACE ROUTE TO orders
+      ALTER CLIENT PRODUCER INGESTOR orders_in REPLACE ROUTE TO orders
         INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
@@ -799,8 +799,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -875,8 +875,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -930,8 +930,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -988,8 +988,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -1064,8 +1064,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -1110,7 +1110,7 @@ Feature: Client ingestors
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -1145,7 +1145,7 @@ Feature: Client ingestors
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -1187,8 +1187,8 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW

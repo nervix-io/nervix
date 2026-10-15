@@ -901,8 +901,8 @@ Feature: Resource version bindings
       CREATE RELAY scored SCHEMA scored UNBRANCHED CAPACITY 16;
       CREATE VHOST edge drift-{{test_id}}.example.com WITH TLS tls_bundle VERSION LATEST;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE INGESTOR feature_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR feature_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
         INHERIT ALL

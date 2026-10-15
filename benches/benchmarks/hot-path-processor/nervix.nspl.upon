@@ -26,12 +26,12 @@ CREATE CLIENT kafka_output
 CREATE RELAY benchmark_records SCHEMA benchmark_record UNBRANCHED;
 {% for lane in lanes %}
 CREATE RELAY benchmark_ingested_{{ lane }} SCHEMA benchmark_record UNBRANCHED;
-CREATE INGESTOR kafka_in_{{ lane }}
-  FROM KAFKA kafka_input
-  TOPIC {{ input_topic }}
-  OFFSET BY CONSUMER GROUP {{ consumer_group }}
+CREATE KAFKA TOPIC INGESTOR kafka_in_{{ lane }}
+  FROM kafka_input
+  TOPIC '{{ input_topic }}'
+  OFFSET BY CONSUMER GROUP '{{ consumer_group }}'
   INSTANCES 1
-  MODE NO_ACK PARALLEL
+  MODE NO ACK
   ON QUIESCE SUSPEND DECODE USING benchmark_codec
   TO benchmark_ingested_{{ lane }}
     INHERIT ALL

@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The producer source Model with its acknowledgement mode, the consumer sink Model,
-//!   and what each entity declares.
+//! - **Owns.** The producer source Model with its acknowledgement mode, the alterations of the
+//!   ingestors that read it, the consumer sink Model, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations, the acknowledgement and retry
 //!   vocabulary, and the schema name a body references.
 //! - **Must not know.** How a session attaches, how a batch is submitted, admitted or delivered,
@@ -12,7 +12,7 @@
 //! No client Model configures this connector: an application reaches it through its own session.
 //! A producer's batches already carry the ingestor's input schema, so its source is held by
 //! [`IngestorInput`](crate::IngestorInput) beside the transport contract and never pairs with a
-//! codec.
+//! codec, and an alteration of its ingestor holds no codec to set either.
 
 #![cfg_attr(
     nervix_lint,
@@ -21,14 +21,21 @@
 
 use std::num::NonZeroU64;
 
+use error_stack::Report;
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::entity_union::{connector_sinks, connector_source_kinds};
+use super::{
+    entity_union::{ALTERED_PAIR_CHECKED, connector_sinks, connector_source_kinds},
+    source::AlteredIngestorSource,
+};
 use crate::{
-    AckWindow, ClientName, EmitSinkCapabilities, EmitterBatchRequirement, EmitterPublishingMode,
-    IngestSourceCapabilities, PositionClass, RetryPolicy, SchemaName, SinkBody, SinkEntity,
-    SinkReference, SourceEntity, SourceMetadataScope, SourceReferenceKind,
+    AckWindow, AlterIngestorError, AlterIngestorOperation, CanonicalNsplError, ClientName,
+    CreateIngestor, EmitSinkCapabilities, EmitterBatchRequirement, EmitterPublishingMode,
+    IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration, IngestorEntityModel,
+    IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody, SinkEntity, SinkReference,
+    SourceEntity, SourceMetadataScope, SourceReferenceKind,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -81,6 +88,79 @@ connector_source_kinds! {
     /// The entities a client source reads.
     pub enum ClientSourceEntity {
         Producer(ClientProducerSource) = "PRODUCER", "Client batches";
+    }
+}
+
+/// The alterations of the ingestors that read a client entity. Their batches need no codec, so no
+/// operation of theirs sets one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ClientIngestorAlteration {
+    Producer(Vec<AlterIngestorOperation<ClientProducerSource>>),
+}
+
+impl ClientIngestorAlteration {
+    /// The entity whose ingestors this alteration changes.
+    pub const fn entity(&self) -> ClientSourceEntity {
+        match self {
+            Self::Producer(_) => ClientSourceEntity::Producer,
+        }
+    }
+
+    /// Applies the operations in order to an ingestor that reads this entity.
+    pub(crate) fn apply_to(
+        &self,
+        ingestor: &mut CreateIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError> {
+        match self {
+            Self::Producer(operations) => ingestor.apply_operations(operations),
+        }
+    }
+
+    /// The canonical NSPL of each operation, in order.
+    pub(crate) fn operations_to_nspl(
+        &self,
+    ) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+        match self {
+            Self::Producer(operations) => {
+                crate::canonical::alter_ingestor_operations_to_nspl(operations)
+            }
+        }
+    }
+}
+
+impl From<Vec<AlterIngestorOperation<ClientProducerSource>>> for ClientIngestorAlteration {
+    fn from(operations: Vec<AlterIngestorOperation<ClientProducerSource>>) -> Self {
+        Self::Producer(operations)
+    }
+}
+
+impl From<Vec<AlterIngestorOperation<ClientProducerSource>>> for IngestorAlteration {
+    fn from(operations: Vec<AlterIngestorOperation<ClientProducerSource>>) -> Self {
+        Self::Client(ClientIngestorAlteration::Producer(operations))
+    }
+}
+
+impl AlteredIngestorSource for ClientProducerSource {
+    fn set_into(&self, input: &mut IngestorInput) {
+        let source = input.client_source_mut().verified(ALTERED_PAIR_CHECKED);
+        *source = self.clone();
+    }
+
+    /// A client source writes no quiesce mode: it honors `SUSPEND` alone, which setting changes
+    /// nothing.
+    fn set_quiesce_of(
+        input: &mut IngestorInput,
+        quiesce: IngestQuiesceMode,
+    ) -> error_stack::Result<(), AlterIngestorError> {
+        if !input.supports_quiesce(&quiesce) {
+            return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
+                kind: Self::KIND,
+                mode: quiesce.kind_label(),
+            }));
+        }
+        Ok(())
     }
 }
 

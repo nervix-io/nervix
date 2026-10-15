@@ -562,7 +562,8 @@ test-primitives-compile:
 # and the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
 # `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
 # `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@remote_ack_owners`, `@udf_column_builder`,
-# `@vhost_tls_rebinding` and `@inferencer_branch_batches` scenarios and then the
+# `@vhost_tls_rebinding`, `@inferencer_branch_batches` and `@inferencer_inspection_admission`
+# scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
 # in a session of its own within its bound and the inventory's budget, and the lane fails on an
@@ -2699,6 +2700,20 @@ deps-down:
 # reaches the controller, whose exit trap heals, captures evidence and cleans up.
 chaos *args:
     exec bash scripts/chaos/chaos.sh {{ args }}
+
+# Prove the network preflight and its retained failure outcomes through the external controller.
+test-chaos-network-preflight *cases:
+    exec bash scripts/chaos/tests/network-preflight-self-test.sh {{ cases }}
+
+# Retain source coverage of network-preflight failure recording and live fault controls.
+coverage-chaos-network-preflight image="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE={{ quote(image) }} kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/chaos.sh") }},{{ quote(invocation_directory() / "scripts/chaos/network-faults.sh") }},{{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/network-preflight-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-network-preflight-coverage") }} scripts/chaos/chaos.sh self-test
 
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:

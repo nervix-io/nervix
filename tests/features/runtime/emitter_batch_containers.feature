@@ -73,8 +73,8 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -220,8 +220,8 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA rich_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -324,8 +324,8 @@ Feature: Emitter batch containers
       CREATE RELAY echoed SCHEMA echoed_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_batch_codec
         TO events
         INHERIT ALL
@@ -351,9 +351,9 @@ Feature: Emitter batch containers
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR json_batch_source
-        FROM KAFKA kafka_main TOPIC json_batches_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_json_batches_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR json_batch_source
+        FROM kafka_main TOPIC 'json_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_json_batches_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING json_batch_codec
         TO echoed
@@ -363,9 +363,9 @@ Feature: Emitter batch containers
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR proto_batch_source
-        FROM KAFKA kafka_main TOPIC proto_batches_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_proto_batches_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR proto_batch_source
+        FROM kafka_main TOPIC 'proto_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_proto_batches_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING proto_batch_reader
         TO echoed
@@ -427,8 +427,8 @@ Feature: Emitter batch containers
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -506,8 +506,8 @@ Feature: Emitter batch containers
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -581,8 +581,8 @@ Feature: Emitter batch containers
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO syslog_events
         INHERIT ALL

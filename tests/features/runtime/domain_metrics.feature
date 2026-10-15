@@ -27,8 +27,8 @@ Feature: Domain metrics
         CREATE RELAY domain_metrics_deduped SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
-        CREATE INGESTOR domain_metrics_source
-        FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR domain_metrics_source
+        FROM domain_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO domain_metrics_raw
         INHERIT ALL
