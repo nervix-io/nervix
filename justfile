@@ -2739,6 +2739,10 @@ coverage-chaos-network-preflight image="":
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
 
+# Judge mixed-instability holds over a lossy link from retained public statuses without a product image.
+test-chaos-hold-quorum:
+    exec bash scripts/chaos/tests/hold-quorum-self-test.sh
+
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
