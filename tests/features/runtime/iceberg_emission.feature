@@ -405,8 +405,8 @@ Feature: Iceberg emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-iceberg-nested-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC iceberg_nested_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'iceberg_nested_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications INHERIT ALL UNBRANCHED
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
