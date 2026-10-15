@@ -1176,6 +1176,13 @@ build and the existing tests, and nothing in it changes behavior.
   Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
   randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
+- Check verifies its exact tested merge before excluding ordinary suites for documentation-only
+  changes. `test-selection` records the changed paths and requirements; its selection is not
+  property execution evidence. `no-docker` never authorizes a test exclusion. The reusable Bolero
+  call is excluded as a whole only for verified prose changes without `fuzz`; once called, its
+  ordinary properties and requested sanitizer execution remain mandatory even on single-job
+  reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
+  owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, and struct fields whose presence depends on `cfg(feature = "testing")`.

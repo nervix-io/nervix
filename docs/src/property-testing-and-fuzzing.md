@@ -389,6 +389,39 @@ validation job and the Bolero randomized job retain their separate scopes and li
 the reusable Bolero workflow with its exact tested SHA, event and label snapshot. Scheduled and
 manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
 
+### Documentation-only Selection
+
+Before starting ordinary suites, Check's `test-selection` job verifies that its checkout is the
+event's exact merge of the stated base and head, then reads every changed path between the base
+and tested merge. Rename detection is disabled so deleting or moving product code into a prose
+location still requires execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and
+Markdown under `.agents/skills/` qualify for the documentation-only exclusion. An empty diff,
+code, tests, build configuration, workflow definitions, scripts and unknown paths require suites;
+`no-docker` supplies no evidence about this choice. Missing or mismatched source identity fails
+selection and cannot authorize an exclusion.
+
+A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
+diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
+unless the event carries `fuzz`. Validation and the conventional PR title check remain independent
+and mandatory. Label-selected mode checks remain selected by their labels; `fuzz` still requires
+both ordinary properties and the complete sanitizer inventory even for documentation. Label
+addition and removal compute a fresh selection from that event's label snapshot.
+
+The `ci-test-selection` artifact records run, attempt, job, event and action, tested/base/head
+identities, every changed path, labels and each ordinary/Bolero requirement. Its `selected` verdict
+records a source decision, never successful property execution or coverage. Actual job conclusions
+remain in the workflow run. The reusable workflow's `bolero-selection` record is produced only
+after all of its required execution succeeds; failed, cancelled, skipped or missing required
+producers still fail its gate.
+
+A validation-only rerun uses the original event and tested commit. Its ordinary producer selection
+remains in the caller, outside the reusable workflow's `always()` gate, so deliberate non-code
+exclusion never becomes a cancelled property campaign to excuse. Historical attempts retain their
+actual cancellations; this policy does not turn an interrupted required campaign into success.
+`just test-ci-selection` exercises source identity, mixed changes, renames, label events, reruns and
+strict gates; `just coverage-ci-selection` measures that Python contract without launching product
+campaigns. Selection does not claim a model-checker or public Cucumber result.
+
 ### Sanitizer Shards
 
 A single job running every sanitizer campaign outgrew its limit as the inventory grew. With all
