@@ -115,10 +115,10 @@ An ingestor brings external data into the graph. It decodes each payload with th
 the result to a relay:
 
 ```nspl
-CREATE INGESTOR kafka_orders
-  FROM KAFKA kafka_local
-  TOPIC orders
-  OFFSET BY CONSUMER GROUP quickstart
+CREATE KAFKA TOPIC INGESTOR kafka_orders
+  FROM kafka_local
+  TOPIC 'orders'
+  OFFSET BY CONSUMER GROUP 'quickstart'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING order_codec
   TO orders
@@ -131,6 +131,9 @@ CREATE INGESTOR kafka_orders
 
 Reading top to bottom:
 
+- `KAFKA TOPIC INGESTOR` names the connector and the entity the ingestor reads. `FROM` names the
+  `TYPE KAFKA` client, and the topic and consumer group are string literals sent to Kafka exactly
+  as written.
 - `OFFSET BY CONSUMER GROUP` tracks progress in Kafka; `MODE ACK SEQUENTIAL` acknowledges records
   in order. The full Kafka source grammar is in
   [Supported Ingestor Types](ingestors.md#supported-ingestor-types).
@@ -221,10 +224,10 @@ CREATE CLIENT redis_local
     'addr' = 'redis://127.0.0.1:6379/'
   };
 
-CREATE INGESTOR kafka_orders
-  FROM KAFKA kafka_local
-  TOPIC orders
-  OFFSET BY CONSUMER GROUP quickstart
+CREATE KAFKA TOPIC INGESTOR kafka_orders
+  FROM kafka_local
+  TOPIC 'orders'
+  OFFSET BY CONSUMER GROUP 'quickstart'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING order_codec
   TO orders

@@ -55,6 +55,15 @@ name = "nervix-client-core"
 
 [[package]]
 checks = [
+  "confirmation_window::shuttle_tests::shuttle_a_failed_oldest_answer_settles_the_younger_answers_given_before_it",
+  "confirmation_window::shuttle_tests::shuttle_a_failure_settles_every_answer_its_broker_gave_before_it",
+  "confirmation_window::shuttle_tests::shuttle_an_expired_oldest_settles_the_answers_given_before_it",
+  "confirmation_window::shuttle_tests::shuttle_answers_racing_a_full_window_settle_each_record_exactly_once",
+]
+name = "nervix-connector"
+
+[[package]]
+checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
@@ -121,6 +130,7 @@ checks = [
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads",
+  "runtime::ingestors::source::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
   "runtime::ingestors::source::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",

@@ -314,6 +314,24 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   the connector receives that plan.
 - Capabilities the registry validates live in the vocabulary. The registry names no connector crate,
   so a capability declared only inside one could never be validated.
+- Connector names come from the vocabulary's `ConnectorKind` display and entity names from their
+  declarations. Derive labels and prefixes from those sources across configuration errors,
+  transports, metrics, logs, dataflow identifiers and `DESCRIBE`; do not maintain another spelling
+  or case table. External protocol and pass-through configuration names keep their contract.
+- Connector errors preserve typed causes with `thiserror` and `error-stack` until the reporting
+  boundary. Do not replace an available typed cause with driver `Display` text or a free-text
+  reason. Each `nervix::error_boundary(outcome|library, ...)` annotation names the actual behavior
+  at its exact error type or return contract; it never claims a record rejection the path does
+  not perform.
+- Each implemented publish, window or batch, header and metadata mapping, and acknowledgement
+  path has unit coverage through its production owner. Every connector-owned encoding or
+  encoded-size measure has a bounded Bolero property registered for ordinary and fuzz execution;
+  shared implementations keep their properties with their owner. Unit tests do not replace
+  required public scenarios or concurrency evidence.
+- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)
+  owns the detailed requirements. Before closing a connector epic, review landed parallel work
+  against it and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
+  relevant manuals and the ratchet current in the same change.
 
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
 moves into them keeps its counts and its clock rules.
@@ -1158,6 +1176,13 @@ build and the existing tests, and nothing in it changes behavior.
   Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
   randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
+- Check verifies its exact tested merge before excluding ordinary suites for documentation-only
+  changes. `test-selection` records the changed paths and requirements; its selection is not
+  property execution evidence. `no-docker` never authorizes a test exclusion. The reusable Bolero
+  call is excluded as a whole only for verified prose changes without `fuzz`; once called, its
+  ordinary properties and requested sanitizer execution remain mandatory even on single-job
+  reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
+  owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, and struct fields whose presence depends on `cfg(feature = "testing")`.

@@ -16,8 +16,8 @@ Feature: Web console execution graph
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE CLIENT kafka_out TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
-      CREATE INGESTOR orders_in
-        FROM KAFKA kafka_in TOPIC orders_topic OFFSET BY CONSUMER GROUP orders_group INSTANCES 1 MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR orders_in
+        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
         TO orders
         INHERIT ALL
@@ -64,8 +64,8 @@ Feature: Web console execution graph
       CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED;
       CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE CLIENT kafka_out TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
-      CREATE INGESTOR orders_in
-        FROM KAFKA kafka_in TOPIC orders_topic OFFSET BY CONSUMER GROUP orders_group INSTANCES 1 MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR orders_in
+        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
         TO orders
         INHERIT ALL
@@ -155,8 +155,8 @@ Feature: Web console execution graph
       CREATE RELAY validated_notifications SCHEMA notification BRANCHED BY by_tenant_user;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_ingress ON edge PATH '/notifications' TYPE HTTP;
-      CREATE INGESTOR notifications_source
-        FROM ENDPOINT notifications_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR notifications_source
+        FROM notifications_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -202,8 +202,8 @@ Feature: Web console execution graph
       CREATE RELAY retried SCHEMA retry_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT retry_ingress ON edge PATH '/retries' TYPE HTTP;
-      CREATE INGESTOR retry_source
-        FROM ENDPOINT retry_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR retry_source
+        FROM retry_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_codec
         TO pending
         INHERIT ALL
@@ -248,8 +248,8 @@ Feature: Web console execution graph
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE INGESTOR orders_in
-        FROM KAFKA kafka_in TOPIC orders_topic OFFSET BY CONSUMER GROUP orders_group INSTANCES 1 MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR orders_in
+        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
         TO orders
         INHERIT ALL

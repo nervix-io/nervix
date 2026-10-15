@@ -20,8 +20,8 @@ Feature: JAQ codec unfolding
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT order_lines_endpoint ON edge PATH '/order-lines' TYPE HTTP;
-      CREATE INGESTOR order_lines_source
-        FROM ENDPOINT order_lines_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR order_lines_source
+        FROM order_lines_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_lines_codec
         TO order_lines
         INHERIT ALL
@@ -69,8 +69,8 @@ Feature: JAQ codec unfolding
       CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT order_lines_endpoint ON edge PATH '/order-lines' TYPE HTTP;
-      CREATE INGESTOR order_lines_source
-        FROM ENDPOINT order_lines_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR order_lines_source
+        FROM order_lines_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_stream_codec
         TO order_lines
         INHERIT ALL
@@ -118,8 +118,8 @@ Feature: JAQ codec unfolding
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR events_source
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR events_source
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING events_codec
         TO events
         INHERIT ALL
@@ -180,8 +180,8 @@ Feature: JAQ codec unfolding
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT flood_endpoint ON edge PATH '/flood' TYPE HTTP;
-      CREATE INGESTOR flood_source
-        FROM ENDPOINT flood_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR flood_source
+        FROM flood_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING flood_codec
         TO events
         INHERIT ALL
@@ -240,9 +240,9 @@ Feature: JAQ codec unfolding
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR selected_event_source
-        FROM KAFKA kafka_main TOPIC selected_events_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_selected_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR selected_event_source
+        FROM kafka_main TOPIC 'selected_events_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_selected_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING selected_events_codec
         TO events
@@ -309,9 +309,9 @@ Feature: JAQ codec unfolding
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR split_event_source
-        FROM KAFKA kafka_main TOPIC split_events_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_split_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR split_event_source
+        FROM kafka_main TOPIC 'split_events_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING split_events_codec
         TO delivered_events
@@ -397,9 +397,9 @@ Feature: JAQ codec unfolding
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR split_event_source
-        FROM KAFKA kafka_main TOPIC split_events_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_split_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR split_event_source
+        FROM kafka_main TOPIC 'split_events_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING split_events_codec
         TO delivered_events
@@ -479,9 +479,9 @@ Feature: JAQ codec unfolding
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR tenant_batch_source
-        FROM KAFKA kafka_main TOPIC tenant_batches_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_tenant_batches_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR tenant_batch_source
+        FROM kafka_main TOPIC 'tenant_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_tenant_batches_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING tenant_batch_codec
         TO tenant_events
@@ -531,8 +531,8 @@ Feature: JAQ codec unfolding
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge unfold-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
-      CREATE INGESTOR notifications_source
-        FROM ENDPOINT notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR notifications_source
+        FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

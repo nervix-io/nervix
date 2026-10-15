@@ -4,34 +4,45 @@
 //!
 //! - **Owns.** The union of transport source Models and the kind that names every source pair,
 //!   the declaration each source entity makes whatever its statement says, the contract the body
-//!   of a source statement fulfils, and the quiesce and acknowledgement vocabulary those bodies
-//!   share.
-//! - **Depends on.** The connector modules' entity Models, the metadata namespaces, and the names
-//!   a body references.
+//!   of a source statement fulfils, the union of the alterations an `ALTER … INGESTOR` statement
+//!   holds, and the quiesce, delivery and acknowledgement vocabulary those bodies share.
+//! - **Depends on.** The connector modules' entity Models and alterations, the metadata
+//!   namespaces, and the names a body references.
 //! - **Must not know.** How a source is opened, polled, quiesced or acknowledged at run time.
+//!
+//! The head of an ingestor statement names the pair it reads, so an alteration holds the
+//! operations of one pair's entity Model and can set no source of another pair.
 
 #![cfg_attr(
     nervix_lint,
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{
+    fmt::{Display, Formatter},
+    num::NonZeroU64,
+};
 
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
 
 use super::{
-    ClientSourceEntity, EndpointSource, EndpointSourceEntity, HttpSource, HttpSourceEntity,
-    KafkaSource, KafkaSourceEntity, MqttSource, MqttSourceEntity, NatsSource, NatsSourceEntity,
-    PrometheusSource, PrometheusSourceEntity, PulsarSource, PulsarSourceEntity, RabbitMqSource,
-    RabbitMqSourceEntity, RedisSource, RedisSourceEntity, SqsSource, SqsSourceEntity, SyslogSource,
-    SyslogSourceEntity, WebsocketsSource, WebsocketsSourceEntity, ZeroMqSource, ZeroMqSourceEntity,
-    entity_union::entity_union,
+    ClientIngestorAlteration, ClientSourceEntity, HttpIngestorAlteration, HttpSource,
+    HttpSourceEntity, KafkaIngestorAlteration, KafkaSource, KafkaSourceEntity,
+    MqttIngestorAlteration, MqttSource, MqttSourceEntity, NatsIngestorAlteration, NatsSource,
+    NatsSourceEntity, PrometheusIngestorAlteration, PrometheusSource, PrometheusSourceEntity,
+    PulsarIngestorAlteration, PulsarSource, PulsarSourceEntity, RabbitMqIngestorAlteration,
+    RabbitMqSource, RabbitMqSourceEntity, RedisIngestorAlteration, RedisSource, RedisSourceEntity,
+    SqsIngestorAlteration, SqsSource, SqsSourceEntity, SyslogIngestorAlteration, SyslogSource,
+    SyslogSourceEntity, WebsocketsIngestorAlteration, WebsocketsSource, WebsocketsSourceEntity,
+    ZeroMqIngestorAlteration, ZeroMqSource, ZeroMqSourceEntity,
+    entity_union::{entity_union, ingestor_alteration_union},
 };
 use crate::{
-    AlterIngestorError, ClientName, ConnectorKind, EndpointName, ModelKind, ModelName, RetryPolicy,
-    SourceMetadataScope,
+    AlterIngestorError, ClientName, ConnectorKind, EndpointName, EndpointType, IngestorInput,
+    Model, ModelKind, ModelName, RetryPolicy, SourceMetadataScope,
 };
 
 #[derive(
@@ -107,8 +118,8 @@ pub enum IngestAcknowledgement<'a> {
 pub enum SourceReferenceKind {
     /// A configured client of one connector.
     Client(ConnectorKind),
-    /// An endpoint this cluster serves.
-    Endpoint,
+    /// An endpoint of one type this cluster serves.
+    Endpoint(EndpointType),
     /// The schema every batch a producer submits matches.
     Schema,
 }
@@ -118,7 +129,7 @@ impl SourceReferenceKind {
     pub const fn model_kind(self) -> ModelKind {
         match self {
             Self::Client(_) => ModelKind::Client,
-            Self::Endpoint => ModelKind::Endpoint,
+            Self::Endpoint(_) => ModelKind::Endpoint,
             Self::Schema => ModelKind::Schema,
         }
     }
@@ -128,7 +139,59 @@ impl SourceReferenceKind {
     pub const fn client_connector(self) -> Option<ConnectorKind> {
         match self {
             Self::Client(connector) => Some(connector),
-            Self::Endpoint | Self::Schema => None,
+            Self::Endpoint(_) | Self::Schema => None,
+        }
+    }
+
+    /// The type a referenced endpoint must be. A body that names a client or a schema references
+    /// no endpoint.
+    pub const fn endpoint_type(self) -> Option<EndpointType> {
+        match self {
+            Self::Endpoint(endpoint_type) => Some(endpoint_type),
+            Self::Client(_) | Self::Schema => None,
+        }
+    }
+
+    /// Whether a body of this reference kind can name `model`: a client of its connector, an
+    /// endpoint of its type, or a schema.
+    pub fn admits<Version>(self, model: &Model<Version>) -> bool {
+        match self {
+            Self::Client(connector) => model.connector_kind() == Some(connector),
+            Self::Endpoint(endpoint_type) => {
+                let Model::Endpoint(endpoint) = model else {
+                    return false;
+                };
+                endpoint.endpoint_type == endpoint_type
+            }
+            Self::Schema => model.kind() == ModelKind::Schema,
+        }
+    }
+}
+
+/// How an endpoint's requests or messages are delivered. The endpoint answers each one when its
+/// ingestor admits it, so none waits on an acknowledgement.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EndpointIngestMode {
+    NoAck,
+}
+
+impl EndpointIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
+        }
+    }
+
+    /// Whether an endpoint delivering in this mode can honor `quiesce`: it holds what arrives in a
+    /// bounded buffer, or refuses it with a time to retry after.
+    pub const fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
+        match self {
+            Self::NoAck => matches!(
+                quiesce,
+                IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. }
+            ),
         }
     }
 }
@@ -149,6 +212,26 @@ impl SourceReference<'_> {
     }
 }
 
+/// What a source's message positions still mean once the connection that delivered them is gone,
+/// and so what a host does with an acknowledgement or a rejection it could not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum PositionClass {
+    /// A position names a place in a log the source can seek back to on any connection, such as
+    /// a Kafka offset. A rejection that failed is retried with the same positions after the
+    /// source reconnects, before it reads again.
+    Replayable,
+    /// A position names one delivery on one connection, such as a RabbitMQ delivery tag, an SQS
+    /// receipt handle or an MQTT packet identifier. Once that connection is lost the broker
+    /// redelivers everything it delivered and was not acknowledged, so after a reconnect an
+    /// acknowledgement or a rejection still pending for it is discarded and counted as a
+    /// transport redelivery.
+    BrokerRedelivered,
+    /// The source keeps no position: nothing is acknowledged or rejected on the transport, so
+    /// nothing is ever pending.
+    None,
+}
+
 /// What every source of one entity declares, whatever its statement says.
 ///
 /// This lives in the vocabulary so the registry can validate an ingestor, and a host can prepare
@@ -164,6 +247,8 @@ pub struct IngestSourceCapabilities {
     pub executes_on_every_cluster_node: bool,
     /// What its body names to read from.
     pub reference: SourceReferenceKind,
+    /// What its message positions mean once the connection that delivered them is gone.
+    pub position_class: PositionClass,
 }
 
 /// The declaration one source entity's Model makes for every statement of that entity.
@@ -188,6 +273,24 @@ pub trait SourceBody {
     /// The acknowledgement this body's delivery mode declares. A body that declares no delivery
     /// mode acknowledges nothing.
     fn acknowledgement(&self) -> IngestAcknowledgement<'_>;
+}
+
+/// The pair one entity Model is a source of, which the head of its ingestor's statements names.
+pub trait IngestorEntityModel {
+    const KIND: IngestSourceKind;
+}
+
+/// A source Model an alteration's `SET FROM` states, and how the alteration reaches the stored
+/// input of the ingestor it changes, which reads this Model's pair.
+pub(crate) trait AlteredIngestorSource: IngestorEntityModel + Clone {
+    /// Makes this Model the source `input` reads.
+    fn set_into(&self, input: &mut IngestorInput);
+
+    /// Sets the quiesce mode of the source `input` reads, which its pair must honor.
+    fn set_quiesce_of(
+        input: &mut IngestorInput,
+        quiesce: IngestQuiesceMode,
+    ) -> error_stack::Result<(), AlterIngestorError>;
 }
 
 /// What the kind of one connector's source entities answers for each of them.
@@ -230,9 +333,34 @@ entity_union! {
         Prometheus(PrometheusSource, PrometheusSourceEntity),
         ZeroMq(ZeroMqSource, ZeroMqSourceEntity),
         Sqs(SqsSource, SqsSourceEntity),
-        Endpoint(EndpointSource, EndpointSourceEntity),
         Websockets(WebsocketsSource, WebsocketsSourceEntity),
         Syslog(SyslogSource, SyslogSourceEntity),
+    }
+}
+
+ingestor_alteration_union! {
+    /// The operations of one `ALTER <CONNECTOR> <ENTITY> INGESTOR` statement, nested by the pair
+    /// its head names, so its `SET FROM` can only state a source of that pair.
+    pub enum IngestorAlteration;
+    Client(ClientIngestorAlteration),
+    Http(HttpIngestorAlteration),
+    Kafka(KafkaIngestorAlteration),
+    Pulsar(PulsarIngestorAlteration),
+    Mqtt(MqttIngestorAlteration),
+    Nats(NatsIngestorAlteration),
+    RabbitMq(RabbitMqIngestorAlteration),
+    Redis(RedisIngestorAlteration),
+    Prometheus(PrometheusIngestorAlteration),
+    ZeroMq(ZeroMqIngestorAlteration),
+    Sqs(SqsIngestorAlteration),
+    Websockets(WebsocketsIngestorAlteration),
+    Syslog(SyslogIngestorAlteration),
+}
+
+/// A pair is written as its phrase: the connector's keyword, then the entity's.
+impl Display for IngestSourceKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.phrase())
     }
 }
 
@@ -284,11 +412,6 @@ impl IngestSource {
         self.kind().connector()
     }
 
-    /// The NSPL keyword of the source's connector, as `DESCRIBE` and diagnostics name it.
-    pub fn transport_label(&self) -> &'static str {
-        self.connector().keyword()
-    }
-
     pub fn executes_on_every_cluster_node(&self) -> bool {
         self.kind().capabilities().executes_on_every_cluster_node
     }
@@ -334,8 +457,8 @@ impl IngestSource {
     ) -> error_stack::Result<(), AlterIngestorError> {
         if !self.supports_quiesce(&quiesce) {
             return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
-                transport: self.transport_label().to_string(),
-                mode: quiesce.kind_label().to_string(),
+                kind: self.kind(),
+                mode: quiesce.kind_label(),
             }));
         }
         *self.body_mut().quiesce_mut() = quiesce;

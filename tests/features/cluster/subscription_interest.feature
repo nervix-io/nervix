@@ -22,8 +22,8 @@ Feature: Gossip subscription interest
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge subscription-interest-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL

@@ -54,10 +54,10 @@ CREATE CLIENT kafka_main
     'bootstrap.servers' = 'localhost:9092'
   };
 
-CREATE INGESTOR kafka_notifications
-  FROM KAFKA kafka_main
-  TOPIC notifications
-  OFFSET BY CONSUMER GROUP nervix_consumer
+CREATE KAFKA TOPIC INGESTOR kafka_notifications
+  FROM kafka_main
+  TOPIC 'notifications'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
   TO notifications

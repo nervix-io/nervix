@@ -1,0 +1,226 @@
+//! External names: what an external system calls the topics, queues, channels, subjects, consumer
+//! groups and subscriptions a source reads, spelled as that system admits them.
+//!
+//! Each generator writes text its name's rule accepts, reaching the rule's length bound as often
+//! as anywhere else and using the case, punctuation and wildcards the rule admits, so a property
+//! meets the spellings a string literal has to keep exactly. A generator whose bytes ran out
+//! writes the smallest name the rule admits.
+
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{
+    KafkaConsumerGroupName, KafkaTopicName, MqttTopicFilter, NatsQueueGroupName, NatsSubjectName,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+};
+
+use crate::Arbitrary;
+
+/// The longest Kafka topic, in bytes.
+const KAFKA_TOPIC_BYTES: usize = 249;
+/// The longest Kafka consumer group, NATS queue group, Pulsar subscription or RabbitMQ queue, in
+/// bytes.
+const SHORT_NAME_BYTES: usize = 255;
+/// The longest Pulsar topic, NATS subject or Redis channel, in bytes.
+const LONG_NAME_BYTES: usize = 1024;
+/// The longest SQS queue name, its `.fifo` suffix included.
+const SQS_QUEUE_BYTES: usize = 80;
+/// The suffix of a FIFO queue's name.
+const SQS_FIFO_SUFFIX: &str = ".fifo";
+/// The longest MQTT topic filter, in bytes.
+const MQTT_TOPIC_FILTER_BYTES: usize = 65_535;
+/// The longest level or token of a filter or subject that holds several, in bytes.
+const LEVEL_BYTES: usize = 32;
+/// The most levels or tokens a generated filter or subject holds.
+const MOST_LEVELS: usize = 6;
+
+/// What a Kafka topic is spelled from.
+const KAFKA_TOPIC_PIECES: [&str; 7] = ["a", "Z", "0", "9", ".", "_", "-"];
+/// What an SQS queue name is spelled from before its suffix.
+const SQS_QUEUE_PIECES: [&str; 6] = ["a", "Z", "0", "9", "-", "_"];
+/// What a name with no rule but its length and the absence of control characters is spelled from:
+/// letters of both cases, digits, the punctuation external systems put in names, the characters a
+/// string literal has to quote, a space, and text outside ASCII.
+const PRINTABLE_PIECES: [&str; 22] = [
+    "a", "Z", "0", "9", "-", "_", ".", "/", ":", "*", ">", "+", "#", " ", "'", "\"", "$", "\\",
+    "é", "中文", "🎉", "\u{2028}",
+];
+/// What a name is spelled from when its system admits any text at all, control characters
+/// included.
+const ANY_PIECES: [&str; 26] = [
+    "a", "Z", "0", "9", "-", "_", ".", "/", ":", "*", ">", "+", "#", " ", "'", "\"", "$", "\\",
+    "é", "中文", "🎉", "\u{2028}", "\n", "\t", "\0", "\r",
+];
+/// What a NATS queue group, or a token of a NATS subject apart from its separator and wildcards,
+/// is spelled from: no whitespace and no control character.
+const SOLID_PIECES: [&str; 13] = [
+    "a", "Z", "0", "9", "-", "_", "/", ":", "$", "\\", "'", "é", "中文",
+];
+/// What one level of an MQTT topic filter is spelled from apart from its wildcards: anything but
+/// the level separator, the wildcards and NUL.
+const MQTT_LEVEL_PIECES: [&str; 13] = [
+    "a", "Z", "0", "9", " ", "-", "_", ".", "$", "'", "é", "中文", "\n",
+];
+/// What a local Pulsar topic, or a level of a qualified one, is spelled from: no `/`, no
+/// whitespace and no control character.
+const PULSAR_LEVEL_PIECES: [&str; 11] = ["a", "Z", "0", "9", "-", "_", ".", ":", "$", "é", "中文"];
+
+impl Arbitrary<'_> {
+    /// A Kafka topic: 1 to 249 bytes of letters, digits, `.`, `_` and `-`, never `.` or `..`.
+    pub fn kafka_topic_name(&mut self) -> KafkaTopicName {
+        let mut text = self.pieces_text(KAFKA_TOPIC_PIECES, KAFKA_TOPIC_BYTES);
+        if text == "." || text == ".." {
+            text.push('a');
+        }
+        KafkaTopicName::parse(&text).assured("a generated Kafka topic follows the topic rule")
+    }
+
+    /// A Kafka consumer group: 1 to 255 bytes without control characters.
+    pub fn kafka_consumer_group_name(&mut self) -> KafkaConsumerGroupName {
+        let text = self.pieces_text(PRINTABLE_PIECES, SHORT_NAME_BYTES);
+        KafkaConsumerGroupName::parse(&text)
+            .assured("a generated consumer group holds no control character within the bound")
+    }
+
+    /// A Pulsar topic: a local name, or one qualified by its domain, tenant and namespace.
+    pub fn pulsar_topic_name(&mut self) -> PulsarTopicName {
+        let text = if self.entropy.flag() {
+            let domain = self.entropy.pick(["persistent", "non-persistent"]);
+            let tenant = self.pieces_text(PULSAR_LEVEL_PIECES, LEVEL_BYTES);
+            let namespace = self.pieces_text(PULSAR_LEVEL_PIECES, LEVEL_BYTES);
+            let topic = self.pieces_text(PULSAR_LEVEL_PIECES, LEVEL_BYTES);
+            format!("{domain}://{tenant}/{namespace}/{topic}")
+        } else {
+            self.pieces_text(PULSAR_LEVEL_PIECES, LONG_NAME_BYTES)
+        };
+        PulsarTopicName::parse(&text).assured("a generated Pulsar topic follows the topic rule")
+    }
+
+    /// A Pulsar subscription: 1 to 255 bytes without control characters.
+    pub fn pulsar_subscription_name(&mut self) -> PulsarSubscriptionName {
+        let text = self.pieces_text(PRINTABLE_PIECES, SHORT_NAME_BYTES);
+        PulsarSubscriptionName::parse(&text)
+            .assured("a generated subscription holds no control character within the bound")
+    }
+
+    /// A RabbitMQ queue: 1 to 255 bytes of any text.
+    pub fn rabbitmq_queue_name(&mut self) -> RabbitMqQueueName {
+        let text = self.pieces_text(ANY_PIECES, SHORT_NAME_BYTES);
+        RabbitMqQueueName::parse(&text).assured("a generated queue name is within the bound")
+    }
+
+    /// An SQS queue: letters, digits, `-` and `_`, where a FIFO queue's name ends in `.fifo`, 80
+    /// bytes at most with the suffix.
+    pub fn sqs_queue_name(&mut self) -> SqsQueueName {
+        let fifo = self.entropy.flag();
+        let base_bytes = if fifo {
+            SQS_QUEUE_BYTES
+                .checked_sub(SQS_FIFO_SUFFIX.len())
+                .assured("the FIFO suffix is shorter than the queue bound")
+        } else {
+            SQS_QUEUE_BYTES
+        };
+        let mut text = self.pieces_text(SQS_QUEUE_PIECES, base_bytes);
+        if fifo {
+            text.push_str(SQS_FIFO_SUFFIX);
+        }
+        SqsQueueName::parse(&text).assured("a generated SQS queue follows the queue rule")
+    }
+
+    /// A Redis channel: 1 to 1,024 bytes of any text.
+    pub fn redis_channel_name(&mut self) -> RedisChannelName {
+        let text = self.pieces_text(ANY_PIECES, LONG_NAME_BYTES);
+        RedisChannelName::parse(&text).assured("a generated channel is within the bound")
+    }
+
+    /// A NATS subject: one token up to the subject's bound, or several short ones, where a token
+    /// may be the one-token wildcard `*` and the last may be the remaining-tokens wildcard `>`.
+    pub fn nats_subject_name(&mut self) -> NatsSubjectName {
+        let text = if self.entropy.flag() {
+            self.pieces_text(SOLID_PIECES, LONG_NAME_BYTES)
+        } else {
+            let count = self.levels();
+            let mut tokens = Vec::with_capacity(count);
+            for index in 0..count {
+                let last = index
+                    .checked_add(1)
+                    .verified("an index below the level count is below usize::MAX")
+                    == count;
+                let token = match self.entropy.byte() % 6 {
+                    0 => "*".to_string(),
+                    1 if last => ">".to_string(),
+                    _ => self.pieces_text(SOLID_PIECES, LEVEL_BYTES),
+                };
+                tokens.push(token);
+            }
+            tokens.join(".")
+        };
+        NatsSubjectName::parse(&text).assured("a generated subject follows the subject rule")
+    }
+
+    /// A NATS queue group: 1 to 255 bytes without whitespace or control characters.
+    pub fn nats_queue_group_name(&mut self) -> NatsQueueGroupName {
+        let text = self.pieces_text(SOLID_PIECES, SHORT_NAME_BYTES);
+        NatsQueueGroupName::parse(&text)
+            .assured("a generated queue group holds no whitespace or control character")
+    }
+
+    /// An MQTT topic filter: one level up to the filter's bound, or several short ones, where a
+    /// level may be empty or the one-level wildcard `+`, and the last may be the remaining-levels
+    /// wildcard `#`.
+    pub fn mqtt_topic_filter(&mut self) -> MqttTopicFilter {
+        let text = if self.entropy.flag() {
+            self.pieces_text(MQTT_LEVEL_PIECES, MQTT_TOPIC_FILTER_BYTES)
+        } else {
+            let count = self.levels();
+            let mut levels = Vec::with_capacity(count);
+            for index in 0..count {
+                let last = index
+                    .checked_add(1)
+                    .verified("an index below the level count is below usize::MAX")
+                    == count;
+                let level = match self.entropy.byte() % 7 {
+                    0 => "+".to_string(),
+                    1 if last => "#".to_string(),
+                    2 => String::new(),
+                    _ => self.pieces_text(MQTT_LEVEL_PIECES, LEVEL_BYTES),
+                };
+                levels.push(level);
+            }
+            // Two levels or more join with at least one separator, so the filter is never empty.
+            levels.join("/")
+        };
+        MqttTopicFilter::parse(&text).assured("a generated filter follows the filter rule")
+    }
+
+    /// How many levels or tokens a filter or subject of several holds: two or more.
+    fn levels(&mut self) -> usize {
+        let extra = self.entropy.count(
+            MOST_LEVELS
+                .checked_sub(2)
+                .assured("a filter of several levels holds at most six"),
+        );
+        extra
+            .checked_add(2)
+            .verified("at most four extra levels stay far below usize::MAX")
+    }
+
+    /// Text of 1 through `max` bytes assembled from `pieces`, whose first is one byte. Its length
+    /// is drawn first and lands on the bound as often as anywhere, and a piece that would pass the
+    /// length is replaced by the first.
+    fn pieces_text<const N: usize>(&mut self, pieces: [&'static str; N], max: usize) -> String {
+        let max = u64::try_from(max).assured("a name bound fits in u64");
+        let length = self.entropy.boundary_biased(1..=max);
+        let length = usize::try_from(length).verified("the length is at most the usize bound");
+        let mut text = String::with_capacity(length);
+        while text.len() < length {
+            let room = length
+                .checked_sub(text.len())
+                .verified("the loop runs only while the text is shorter than its length");
+            let mut piece = self.entropy.pick(pieces);
+            if piece.len() > room {
+                piece = pieces[0];
+            }
+            text.push_str(piece);
+        }
+        text
+    }
+}

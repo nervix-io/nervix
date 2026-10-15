@@ -35,8 +35,8 @@ Feature: RabbitMQ name resolution
         'addr' = '{{<address>}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR rabbit_in
-      FROM RABBITMQ rabbit_main QUEUE dns_in_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_in
+      FROM rabbit_main QUEUE 'dns_in_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -100,8 +100,8 @@ Feature: RabbitMQ name resolution
         'addr' = '{{rabbitmq_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR rabbit_in
-      FROM RABBITMQ rabbit_main QUEUE dns_in_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_in
+      FROM rabbit_main QUEUE 'dns_in_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -143,8 +143,8 @@ Feature: RabbitMQ name resolution
       CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
-      CREATE INGESTOR rabbit_in
-      FROM RABBITMQ rabbit_main QUEUE dns_in_{{test_id}} INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_in
+      FROM rabbit_main QUEUE 'dns_in_{{test_id}}' INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -213,9 +213,9 @@ Feature: RabbitMQ name resolution
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_ingress TOPIC rabbitmq_dns_boundary_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP rabbitmq_dns_boundary_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'rabbitmq_dns_boundary_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'rabbitmq_dns_boundary_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -285,8 +285,8 @@ Feature: RabbitMQ name resolution
       CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
-      CREATE INGESTOR rabbit_in
-      FROM RABBITMQ rabbit_main QUEUE dns_in_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_in
+      FROM rabbit_main QUEUE 'dns_in_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL

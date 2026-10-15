@@ -50,8 +50,8 @@ Feature: Datetime functions
       CREATE RELAY reading_times SCHEMA reading_time UNBRANCHED;
       CREATE VHOST edge datetime-functions-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TIMESTAMP NOW
         TO readings
@@ -158,8 +158,8 @@ Feature: Datetime functions
       CREATE RELAY datetime_errors SCHEMA datetime_error UNBRANCHED;
       CREATE VHOST edge datetime-boundaries-{{test_id}}.example.com;
       CREATE ENDPOINT boundary_ingress ON edge PATH '/boundaries' TYPE HTTP;
-      CREATE INGESTOR boundary_source
-        FROM ENDPOINT boundary_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR boundary_source
+        FROM boundary_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING boundary_event_batch_codec
         TO boundary_events
           INHERIT ALL

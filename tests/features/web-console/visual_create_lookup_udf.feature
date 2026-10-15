@@ -115,7 +115,7 @@ Feature: Web console visual hash map and Roto UDF creation
       CREATE RELAY visual_udf_outputs SCHEMA visual_udf_output UNBRANCHED;
       CREATE VHOST visual_udf_edge udf-{{test_id}}.example.com;
       CREATE ENDPOINT visual_udf_ingress ON visual_udf_edge PATH '/udf' TYPE HTTP;
-      CREATE INGESTOR visual_udf_source FROM ENDPOINT visual_udf_ingress MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_udf_codec TO visual_udf_inputs INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR visual_udf_source FROM visual_udf_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_udf_codec TO visual_udf_inputs INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"

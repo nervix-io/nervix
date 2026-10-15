@@ -307,3 +307,5 @@ def load_files(root: Path) -> list[RustFile]:
             continue
         files.append(RustFile(path, (root / path).read_text(encoding="utf-8")))
     return files
+
+

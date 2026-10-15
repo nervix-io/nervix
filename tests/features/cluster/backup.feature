@@ -104,7 +104,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-other-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -152,9 +152,9 @@ Feature: Configuration backup into a public archive
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE CLIENT drop_nats TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE INGESTOR event_source FROM NATS drop_nats
-        SUBJECT backup_drop_{{test_id}} QUEUE GROUP backup_drop_group_{{test_id}}
-        INSTANCES 1 MODE NO_ACK SEQUENTIAL
+      CREATE NATS SUBJECT INGESTOR event_source FROM drop_nats
+        SUBJECT 'backup_drop_{{test_id}}' QUEUE GROUP 'backup_drop_group_{{test_id}}'
+        INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -208,8 +208,8 @@ Feature: Configuration backup into a public archive
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR wait_event_source
-        FROM KAFKA wait_kafka TOPIC backup_wait_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR wait_event_source
+        FROM wait_kafka TOPIC 'backup_wait_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 5m
             RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -218,8 +218,8 @@ Feature: Configuration backup into a public archive
         ON GENERAL ERROR LOG;
       CREATE VHOST edge backup-wait-{{test_id}}.example.com;
       CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR wait_state_source
-        FROM ENDPOINT wait_state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+        FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
         TO wait_state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -286,7 +286,7 @@ Feature: Configuration backup into a public archive
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge backup-stalled-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -408,8 +408,8 @@ Feature: Configuration backup into a public archive
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC backup_wasm_in_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -542,8 +542,8 @@ Feature: Configuration backup into a public archive
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC backup_wasm_in_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -646,8 +646,8 @@ Feature: Configuration backup into a public archive
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC backup_wasm_in_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'backup_wasm_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec

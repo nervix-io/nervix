@@ -17,7 +17,7 @@ use nervix_connector::{
     RecordSink as _, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError,
 };
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
-use nervix_models::{ClientConfigEntry, QueueName, Timestamp};
+use nervix_models::{ClientConfigEntry, SqsQueueName, Timestamp};
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
     task::JoinHandle,
@@ -215,7 +215,7 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
         .await
         .expect("the answer that accepts returns the queue URL");
     assert_eq!(queue_url, format!("http://{SERVICE}/000000000000/{QUEUE}"));
-    let queue = QueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+    let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
     SqsSourcePlan::connect(&config, &queue, fixture.dns())
         .await
         .expect("the source reaches the same answer");
@@ -452,7 +452,7 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
 async fn a_source_that_cannot_reach_the_service_fails_to_open_its_queue() {
     let fixture = Fixture::start().await;
     let port = closed_port().await;
-    let queue = QueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+    let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
 
     let Err(report) = SqsSourcePlan::connect(
         &client_config(&format!("http://127.0.0.1:{port}")),

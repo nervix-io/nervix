@@ -25,9 +25,9 @@ Feature: Attached record outcomes across independent branch deliveries
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR ack_owner_source
-        FROM KAFKA ack_owner_kafka TOPIC ack_owners_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP ack_owners_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR ack_owner_source
+        FROM ack_owner_kafka TOPIC 'ack_owners_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'ack_owners_group_{{test_id}}'
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING ack_owner_codec
         TO ack_owner_records INHERIT ALL

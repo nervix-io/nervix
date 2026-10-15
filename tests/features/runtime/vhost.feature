@@ -140,8 +140,8 @@ Feature: Vhost persistence
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge rotate-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events
         INHERIT ALL

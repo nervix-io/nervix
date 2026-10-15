@@ -556,23 +556,47 @@ impl SessionServiceImpl {
                 node: processor.name.clone(),
                 file: processor.file.clone(),
             })?;
-        let inspected = nervix_primitives::time::timeout(
+        tracing::debug!(
+            node = %processor.name,
+            model_file = %processor.file,
+            "ONNX metadata inspection submitted to bulk execution"
+        );
+        let inspected = match nervix_primitives::time::timeout(
             MODEL_INSPECTION_TIMEOUT,
             executor.run_cpu(
                 CpuClass::Bulk,
                 reservation,
                 move |_charge, _cancellation| {
+                    tracing::debug!(
+                        node = %processor_name,
+                        model_file = %processor_file,
+                        "ONNX metadata inspection worker started"
+                    );
                     Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
                 },
             ),
         )
         .await
-        .map_err(|_| {
-            Report::new(InferencerBindingValidationError::InspectionTimeout {
-                node: processor.name.clone(),
-                file: processor.file.clone(),
-            })
-        })?;
+        {
+            Ok(inspected) => inspected,
+            Err(_) => {
+                let bulk = executor.snapshot().bulk_cpu;
+                tracing::debug!(
+                    node = %processor.name,
+                    model_file = %processor.file,
+                    workers = bulk.workers,
+                    running = bulk.running,
+                    pending = bulk.pending,
+                    "ONNX metadata inspection deadline expired"
+                );
+                return Err(Report::new(
+                    InferencerBindingValidationError::InspectionTimeout {
+                        node: processor.name.clone(),
+                        file: processor.file.clone(),
+                    },
+                ));
+            }
+        };
         let model_metadata = match inspected {
             Ok(model_metadata) => model_metadata?,
             Err(error) => {
@@ -628,19 +652,7 @@ impl SessionServiceImpl {
         processor_file: &str,
         path: &std::path::Path,
     ) -> error_stack::Result<OnnxModelMetadata, InferencerBindingValidationError> {
-        let mut builder = Session::builder().map_err(|source| {
-            Report::new(InferencerBindingValidationError::SessionBuilder {
-                node: processor_name.clone(),
-                source,
-            })
-        })?;
-        let session = builder.commit_from_file(path).map_err(|source| {
-            Report::new(InferencerBindingValidationError::SessionModel {
-                node: processor_name.clone(),
-                file: processor_file.to_string(),
-                source,
-            })
-        })?;
+        let session = Self::load_onnx_metadata_session(processor_name, processor_file, path)?;
         let model_inputs = session
             .inputs()
             .iter()
@@ -665,15 +677,77 @@ impl SessionServiceImpl {
                 )
             })
             .collect::<HashMap<_, _>>();
+        tracing::debug!(
+            node = %processor_name,
+            model_file = %processor_file,
+            "ONNX metadata session releasing"
+        );
+        drop(session);
+        tracing::debug!(
+            node = %processor_name,
+            model_file = %processor_file,
+            "ONNX metadata session released"
+        );
         Ok(OnnxModelMetadata {
             inputs: model_inputs,
             outputs: model_outputs,
         })
     }
+
+    fn load_onnx_metadata_session(
+        processor_name: &InferencerName,
+        processor_file: &str,
+        path: &std::path::Path,
+    ) -> error_stack::Result<Session, InferencerBindingValidationError> {
+        tracing::debug!(
+            node = %processor_name,
+            model_file = %processor_file,
+            "ONNX metadata session builder initializing"
+        );
+        let builder = Session::builder().map_err(|source| {
+            Report::new(InferencerBindingValidationError::SessionBuilder {
+                node: processor_name.clone(),
+                source,
+            })
+        })?;
+        // Reading metadata executes no inference. Keep optimization on the admitted bulk
+        // worker too: ONNX's defaults create a physical-core-sized pool for every inspection.
+        let builder = builder.with_intra_threads(1).map_err(|source| {
+            Report::new(InferencerBindingValidationError::SessionBuilder {
+                node: processor_name.clone(),
+                source: source.into(),
+            })
+        })?;
+        let mut builder = builder.with_inter_threads(1).map_err(|source| {
+            Report::new(InferencerBindingValidationError::SessionBuilder {
+                node: processor_name.clone(),
+                source: source.into(),
+            })
+        })?;
+        tracing::debug!(
+            node = %processor_name,
+            model_file = %processor_file,
+            "ONNX metadata session loading"
+        );
+        let session = builder.commit_from_file(path).map_err(|source| {
+            Report::new(InferencerBindingValidationError::SessionModel {
+                node: processor_name.clone(),
+                file: processor_file.to_string(),
+                source,
+            })
+        })?;
+        tracing::debug!(
+            node = %processor_name,
+            model_file = %processor_file,
+            "ONNX metadata session loaded"
+        );
+        Ok(session)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, BranchSelection, InferencerTensorElementType, InferencerTensorRepresentation,
         ProcessorInputs, ProcessorOutputs,
@@ -681,6 +755,70 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::{super::test_fixtures::named, *};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn metadata_inspection_uses_only_its_admitted_worker() {
+        const CHILD: &str = "NERVIX_ONNX_INSPECTION_THREAD_BOUND_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let executable =
+                std::env::current_exe().assured("the test harness has a running executable");
+            let output = std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "application::model_validation::tests::metadata_inspection_uses_only_its_admitted_worker",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .assured("the current test executable starts its isolated owner regression");
+            assert!(
+                output.status.success(),
+                "isolated ONNX thread bound failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("test result: ok. 1 passed; 0 failed"),
+                "the isolated owner regression must actually execute: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+
+        // A fresh process prevents another parallel test's runtime or database threads from
+        // changing this count. Initialize the dependency's environment before the observation;
+        // no session has been loaded and no ONNX operator pool has been created yet.
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::sink)
+            .try_init()
+            .assured("the isolated owner regression has installed no other tracing subscriber");
+        drop(Session::builder().assured("ONNX Runtime creates its environment"));
+        let before = std::fs::read_dir("/proc/self/task")
+            .assured("Linux exposes the current process's tasks")
+            .count();
+        let processor = inferencer();
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/batch_score.onnx");
+        let session = SessionServiceImpl::load_onnx_metadata_session(
+            &processor.name,
+            &processor.file,
+            &model,
+        )
+        .assured("the current ONNX fixture is valid");
+        let during = std::fs::read_dir("/proc/self/task")
+            .assured("Linux exposes the current process's tasks")
+            .count();
+        assert_eq!(session.inputs().len(), 2);
+        assert_eq!(session.outputs().len(), 1);
+        assert_eq!(
+            during, before,
+            "metadata inspection started CPU workers outside its admitted executor job"
+        );
+    }
 
     fn inferencer() -> CreateInferencer {
         CreateInferencer {
@@ -841,6 +979,71 @@ mod tests {
         let after = executor.snapshot().bulk_cpu;
         assert_eq!(after.admitted - before.admitted, 1);
         assert_eq!(after.completed - before.completed, 1);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_queued_model_inspection_times_out_and_releases_its_admission() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::sink)
+            .finish();
+        let _tracing = tracing::subscriber::set_default(subscriber);
+        let executor = crate::runtime::single_worker_executor();
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service_with_executor(
+            false,
+            executor.clone(),
+        )
+        .await;
+        let reservation = executor
+            .try_reserve(MemoryClass::Bulk, 0)
+            .assured("an empty occupying job requires no memory");
+        let (entered, entry) = nervix_primitives::sync::oneshot::channel();
+        let (release, held) = nervix_primitives::sync::blocking::mpsc::channel();
+        let occupied_executor = executor.clone();
+        let occupying = nervix_primitives::task::spawn(async move {
+            occupied_executor
+                .run_cpu(CpuClass::Bulk, reservation, move |_, _| {
+                    entered
+                        .send(())
+                        .assured("the test retains its worker-entry receiver");
+                    held.recv()
+                        .assured("the test releases its occupied worker after the assertion");
+                })
+                .await
+                .assured("the only occupying job fits the single-worker class");
+        });
+        entry
+            .await
+            .assured("the occupying job publishes its actual worker entry");
+        let processor = inferencer();
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+
+        let failure = service
+            .validate_inferencer_model_metadata(&processor, &model)
+            .await
+            .expect_err("the occupied worker cannot inspect a queued model within its bound");
+
+        assert!(
+            matches!(failure.current_context(), InferencerBindingValidationError::InspectionTimeout { node, .. } if node == &processor.name),
+            "{failure:?}"
+        );
+        let timed_out = executor.snapshot();
+        assert_eq!(timed_out.bulk_cpu.running, 1);
+        assert_eq!(timed_out.bulk_cpu.pending, 0);
+        assert_eq!(timed_out.bulk_memory.reserved_bytes, 0);
+        release
+            .send(())
+            .assured("the occupied worker retains its release receiver");
+        occupying
+            .await
+            .assured("the released occupying job completes");
         let _ = std::fs::remove_dir_all(&path);
     }
 

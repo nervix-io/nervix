@@ -22,9 +22,9 @@ Feature: Forced ownership recovery while a former owner holds relay deliveries
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR forced_source
-        FROM KAFKA forced_kafka TOPIC forced_delivery_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP forced_delivery_group_{{test_id}} INSTANCES 1
+      CREATE KAFKA TOPIC INGESTOR forced_source
+        FROM forced_kafka TOPIC 'forced_delivery_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'forced_delivery_group_{{test_id}}' INSTANCES 1
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING forced_codec
         TO forced_records INHERIT ALL UNBRANCHED

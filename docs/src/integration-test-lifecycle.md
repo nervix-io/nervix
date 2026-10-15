@@ -46,6 +46,13 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
+path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
+validation and title checks remain enabled. This exclusion records a source decision rather than
+scenario execution, and cancellation of a required run never supplies successful evidence. Explicit
+mode labels retain their own selections. [Documentation-only Selection](./property-testing-and-fuzzing.md#documentation-only-selection)
+owns the allowed paths, immutable event snapshot and retained CI selection record.
+
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
 `tests/features`. Its lifecycle owners live in `tests/common`.
 
@@ -60,6 +67,9 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
+| Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
@@ -249,15 +259,23 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP, retained artifacts and an advisory patch line coverage comment |
+| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
 | `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side, the two stress selections included: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
+The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
+their pinned Go formatters. This makes the installer and the later cache publication and report
+scripts available when a tool setup step fails. The installer retains every attempt in a
+`go-tool-bootstrap-<job>` artifact and retries only a checksum database transport error within its
+eight-minute budget. The publication and report steps check for their scripts before calling them,
+so a failed checkout does not add a second failure that obscures the original one. The jobs'
+existing deadlines and test budgets are unchanged.
+
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
+seconds. Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
@@ -267,22 +285,79 @@ limit.
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
 `artifacts-pr` prefix, configured in the daemon's TOML file. This lets successive PR runs reuse
-their builds. Protected-branch pushes use only `artifacts`; scheduled and manually dispatched
-native jobs retain kache's read-only policy. Fork PRs still need credentials to access R2.
-Kache 0.28.1's `doctor` displays the generic read-only CI policy even when the PR prefix is
-enabled; actual uploads confirm that PR publication is active.
+their builds. Kache lets only a protected-branch push publish to `artifacts`, and no workflow runs
+on one; scheduled and manually dispatched native jobs retain kache's read-only policy. Docker image
+builds run kache inside BuildKit, which does not see the GitHub Actions environment, so their
+builder publishes to `artifacts`. Fork PRs still need credentials to access R2. Kache's `doctor`
+displays the generic read-only CI policy even when the PR prefix is enabled; the job's daemon
+reports its actual write mode, which the start step prints and publication records.
 
 CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
 name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its
 credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and
-`KACHE_BUCKET_SECRET_ACCESS_KEY`. The workflows pass these settings through kache's `KACHE_S3_*`
-environment variables and the setup action's S3 inputs. Docker image builds pass the same settings
-to their builder. The service URL is written into the daemon's TOML configuration before startup.
+`KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
+environment variables, to `python3 scripts/kache_remote.py start` right after the setup action.
+Docker image builds pass the same settings to their builder, whose build command runs
+`scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
+written into the daemon's TOML configuration before startup.
 
 For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_BUCKET_ENDPOINT` to
 `https://<account-id>.r2.cloudflarestorage.com`, without the bucket name in the URL. The bucket name
-belongs in `KACHE_BUCKET`. The configuration script rejects URLs with a bucket path; supplying the
-full bucket URL can make the remote cache appear empty.
+belongs in `KACHE_BUCKET`. `scripts/kache_remote.py` rejects URLs with a bucket path; supplying
+the full bucket URL can make the remote cache appear empty.
+
+### Cache Publication
+
+`scripts/kache_remote.py` owns the remote of every kache-backed job: the `check.yaml`, Bolero,
+`benchmark` and `build-book` jobs, and the builder stage of every Docker image build.
+
+`kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped
+runtime directory, and stops the job's daemon in its post step. It receives no S3 inputs, so its
+post step neither saves a manifest nor pushes. The `Start kache remote` step that follows it:
+
+1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the bucket, region,
+   service URL, base prefix and pull-request prefix. The credentials stay in the environment.
+2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
+   `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
+   every build variant keeps its own manifest and shards.
+3. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
+   that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
+   daemon that has not answered yet gets three polls, two seconds apart. The step prints whether
+   the daemon publishes uploads or, under kache's read-only policy, skips them.
+
+During the build the daemon publishes each entry the build stores: kache records a durable upload
+intent, uploads the entry in the background, and retries an upload that failed for a retryable
+reason every five seconds.
+
+`Publish kache cache` runs `scripts/kache_remote.py publish` whatever the job's result: just before
+the kache report where the job publishes one, and as the job's last step otherwise. For a job whose
+work succeeded, it saves the build manifest with `kache save-manifest`, then reads the daemon's
+upload counters from `kache telemetry write` every two seconds until no upload is queued or in
+flight. It waits at most 120 seconds, its kache commands included. The step's 4-minute
+`timeout-minutes` only backstops that bound. Every kache answer it reads is a versioned kache
+document, and an answer outside its schema is reported rather than read. The outcome is one of:
+
+| Outcome | When | What remains |
+| --- | --- | --- |
+| `published` | The manifest is saved and the daemon reports every upload of the job finished | Nothing |
+| `incomplete` | The budget ended with uploads queued or in flight, the manifest failed or did not finish, an upload failed for good, or the daemon stopped answering during the wait | Queued uploads go to the daemon's shutdown drain, which kache bounds at 30 seconds |
+| `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
+| `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
+| `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
+| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the phase the step reached |
+
+Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
+ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
+add a workflow warning. A job that failed before its checkout has no script to run, so its step
+adds only a notice. The record, `publication.json` and `publication.md`, lands in
+`$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
+the job summary. An image build runs `publish --job-status success` as the last command of its
+build stage, which reaches it only when every artifact has been built.
+
+No job runs `kache sync --push`. Kache's push-only sync lists every key under both prefixes before
+it decides what to push. On 2026-10-14 and 2026-10-15 that listing grew from 650,859 to 690,780
+keys, took six to eight and a half minutes in every kache-backed job, and found nothing the daemon
+had not already published.
 
 ## Product Deadlines And Harness Deadlines
 
@@ -308,6 +383,18 @@ responding-node pair while other probes remain healthy. It can also hold one nod
 that node reports a runtime revision prepared, wait until the hold is reached, and release it after
 asserting command completion. These are per-scenario injected conditions; their waits have harness
 bounds and do not shorten the product's completion deadline.
+
+An injected hold is the opposite case: a product deadline races it. The scenario holds a controlled
+operation at a gate for a workload duration, counted from the moment it observes the gate, and the
+node keeps its own deadline running while the operation waits. The backup wait scenarios hold one
+domain's quiesced cut for 12 seconds and the next one's for 14 seconds, each inside its own
+20-second cut budget. The scenario's margin is the part of the budget the hold leaves, and a runner
+task that another scenario's synchronous step stalls for longer than that margin would lengthen a
+hold timed on the runner task until the product deadline expires. `tests/common/injected_hold.rs`
+therefore waits for each gate, holds it for its duration and releases it on a task of its own, and
+the step that injects the holds only awaits that task. A stalled runner delays when the step learns
+of a release, never the release itself. The step still watches the controlled operation, and a
+command that ends before its gates were held fails the step with the command's own outcome.
 
 The boundary between them is kept in four places.
 
@@ -1318,28 +1405,33 @@ current profiles and reuses unchanged instrumented artifacts for another scenari
 When collecting a different source revision, first run `just coverage-clean-workspace` so
 instrumented binaries and line mappings from earlier sources cannot enter the new report.
 After collecting unit and scenario profiles, `just coverage-report-workspace` exports all
-workspace packages, including executed test files.
+workspace packages, including executed test files, as `lcov-workspace.info` with the checkout path
+beside it, and `just coverage-merge` maps that report onto the repository.
 
-Both CI collectors export `lcov-workspace.info` with an explicit `--workspace` report scope and
-`--no-default-ignore-filename-regex`. Test lines stay in these reports, so merging native extra
-reports cannot make executed library properties appear uncovered because their files were filtered.
-Executing a crate's tests does not include that crate in a report whose package selection names
-only the root package. The coverage job merges these workspace reports with completed native
-extra reports and passes that combined workspace report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. The separate `lcov.info` artifact
-retains the focused server, CLI and web-console view. Patch coverage and comment publication are
-advisory and never change the build verdict; the complexity check is independent. The PR comment
-and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
-reports and `target/patch-coverage.md`.
-Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
+Both CI collectors export `lcov-workspace.info` from every collected profile, with no package
+selection, and with `--no-default-ignore-filename-regex`, and write the absolute checkout path they
+ran in to `coverage-source-root.txt` beside it. Test lines stay in these reports, so merging native
+extra reports cannot make executed library properties appear uncovered because their files were
+filtered. Executing a crate's tests does not include that crate in a report whose package selection
+names only the root package. Filtering happens in the merge, not in the exports: the coverage job
+runs `just coverage-merge` over the `coverage-tests`, `coverage-scenarios` and
+`coverage-native-extras` artifacts, which maps every record onto the files tracked at the tested
+revision, drops dependency, toolchain and generated records by class, leaves out the native
+collections of other modes, and fails rather than publish a report that misses an input or a
+workspace member. It passes that one report to `just coverage-patch`, so library properties
+contribute to patch coverage alongside server and client tests. Patch coverage and comment
+publication are advisory and never change the build verdict; the complexity check is independent.
+The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
+artifact retains the report, its merge record `target/coverage-merge/record.json` and
+`target/patch-coverage.md`.
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
 deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
 The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
 Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
-The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
-to files on its GitHub-hosted runner.
+The merge reads each producer's checkout path explicitly when it maps LCOV sources from Blacksmith
+onto files on its GitHub-hosted runner.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
@@ -1350,6 +1442,12 @@ to files on its GitHub-hosted runner.
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
 the job's result uploads the whole `tests/logs` directory as the `scenario-logs` artifact.
+
+A suite that passes ends before its budget, so the reserve then holds the coverage export, the
+uploads and [cache publication](#cache-publication), which waits at most 120 seconds. Saving the
+manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and the daemon had
+already published every entry those jobs built. A suite that fails or runs out of its budget leaves
+publication `not-run`, so the reserve stays with the cleanup.
 
 The first split-job PR run completed its suite in 21m49s with 88.3% run-slot utilization and four
 retries. One Raft snapshot scenario failed all three attempts because its setup accepted a purge
@@ -1366,6 +1464,26 @@ A same-commit rerun of the scenarios job replaces that job's four report artifac
 runner load, kache report, and scenario coverage. This lets a rerun publish its own diagnostics
 under GitHub Actions' immutable artifact names. When the coverage job is rerun, its advisory
 reporter updates its marked PR comment for the same PR head instead of adding a comment.
+
+### Runner Stalls
+
+The watchdog is polled on the runner task, so it cannot see, let alone end, a step that blocks that
+task. The run is therefore polled beside a tick on the same task, due every 250 milliseconds. A step
+that blocks inside its poll delays the tick until it returns, so how late the tick is polled is how
+long the task was held. A stall of one second or more goes to the scenario log with every scenario
+live during it:
+
+```text
+runner task stalled for <duration>
+scenario live during runner stall: <identity> attempt=<n> phase=<phase> phase_age=<age> age=<age>
+```
+
+The log line is a diagnostic, not a failure: a stall delays every wait and bound the other scenarios
+measure, and the line says when and for how long. Backup steps hand their archive reads, rewrites,
+digests and fixture generation, and the inspection of stopped nodes' databases, to blocking tasks;
+the native metadata restore scenario, whose archive holds lifecycle and offset records above 32 MiB
+each, held the runner task for about 30 seconds while it inspected three restored nodes before they
+did.
 
 ## Diagnostic Lane
 
@@ -1436,7 +1554,7 @@ verdict.
 | Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
 | Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
+| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
 
 The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
 every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
@@ -1714,7 +1832,11 @@ contract.
    Failures carry no credentials and no payload values.
 5. **Never block the runner task.** Every scenario and the suite watchdog share it. A synchronous
    loop needs a bound of its own, as the port draw has, and blocking work belongs on a blocking or
-   spawned task.
+   spawned task: a step hands its file, encoding, digest or database work to `off_the_runner` in
+   `tests/common/runner_offload.rs` and awaits it, and the
+   [runner-lag observer](#runner-stalls) logs a step that still holds the task. A duration a scenario injects for a product deadline to race is timed on a task
+   of its own, as [injected holds](#product-deadlines-and-harness-deadlines) are, because another
+   scenario can still stall the runner task.
 6. **Make cancellation release it.** Whatever a scenario starts belongs to the scenario's world or
    its cluster, so dropping the run releases it: spawned work behind handles that abort on drop,
    child processes killed on drop, and node tasks through the single task owner, which asks a node
@@ -1746,6 +1868,8 @@ The harness guarantees:
 - A cluster's cleanup costs one budget whatever its size, and releases what a node held only after
   that node's task has ended.
 - `finished` is published only after cleanup has completed.
+- A gate a step holds is released its injected duration after the hold observed it, however long
+  the runner task is stalled.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -1797,6 +1921,7 @@ clock. The `tests` job runs them beside the separate scenario job.
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
+| Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as

@@ -68,14 +68,17 @@ fn numeric_slots_offer_a_named_placeholder_rather_than_nothing() {
             "completed_resource_version",
         ),
         (
-            "CREATE INGESTOR i FROM KAFKA c TOPIC t OFFSET BY DOMAIN INSTANCES ",
+            "CREATE KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN INSTANCES ",
             "instance_count",
         ),
         (
-            "CREATE INGESTOR i FROM MQTT c TOPIC t MODE ACK PARALLEL MAX ",
+            "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' MODE ACK PARALLEL MAX ",
             "max_in_flight",
         ),
-        ("CREATE INGESTOR i FROM MQTT c TOPIC t QOS ", "mqtt_qos"),
+        (
+            "CREATE MQTT TOPIC INGESTOR i FROM c TOPIC 't' QOS ",
+            "mqtt_qos",
+        ),
         (
             "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
             "max_instances",
@@ -150,8 +153,8 @@ fn route_construction_offers_its_head_then_names_the_body() {
 /// Contexts that accept only `SET` must not offer the clauses they will reject.
 #[test]
 fn set_only_route_contexts_offer_only_set() {
-    let input = "CREATE INGESTOR i FROM ENDPOINT e MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX \
-                 SIZE 1MiB DECODE USING c TO s BRANCHED BY b ";
+    let input = "CREATE HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
+                 1MiB DECODE USING c TO s BRANCHED BY b ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"SET".to_string()));
     for rejected in ["INHERIT", "INVOKE", "WHERE"] {
@@ -279,18 +282,19 @@ fn create_if_not_exists_completion_suggests_compound_keyword_without_leakage() {
 
 #[test]
 fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-    let input = "CREATE INGESTOR i FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE ";
+    let input =
+        "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"ACK".to_string()));
-    assert!(suggestions.contains(&"NO_ACK".to_string()));
+    assert!(suggestions.contains(&"NO ACK".to_string()));
     assert!(!suggestions.contains(&"JSON".to_string()));
     assert!(!suggestions.contains(&"AVRO".to_string()));
 }
 
 #[test]
 fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
-    let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX \
-                 SIZE 1MiB DECODE USING sch TO s ";
+    let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
+                 1MiB DECODE USING sch TO s ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"UNBRANCHED".to_string()));
     assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -299,9 +303,9 @@ fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
 
 #[test]
 fn ingestor_bare_by_is_rejected() {
-    let input = "CREATE INGESTOR i TO s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
-                 DECODE USING sch BY u_branch FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON GENERAL \
-                 ERROR LOG;";
+    let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
+                 1MiB DECODE USING sch TO s BY u_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
 
     let error = parse_statement(input).expect_err("bare BY is not a branch selection mode");
     assert!(!error.current_context().diagnostics().is_empty());
@@ -543,7 +547,8 @@ fn alter_context_suggestions_include_all_supported_model_families() {
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"REORDERER".to_string()));
     assert!(suggestions.contains(&"EMITTER".to_string()));
-    assert!(suggestions.contains(&"INGESTOR".to_string()));
+    assert!(suggestions.contains(&"KAFKA TOPIC INGESTOR".to_string()));
+    assert!(suggestions.contains(&"CLIENT PRODUCER INGESTOR".to_string()));
     assert!(suggestions.contains(&"REINGESTOR".to_string()));
     assert!(suggestions.contains(&"GENERATOR".to_string()));
     assert!(suggestions.contains(&"SCHEMA".to_string()));
@@ -1069,8 +1074,8 @@ fn runtime_nodes_require_supported_error_policy_blocks() {
     let external_cases = [
         (
             "ingestor",
-            "CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE \
-             NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO \
+            "CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint \
+             MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO \
              notifications BRANCHED BY user_id_branch SET user_id = message.user_id FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
             " ON GENERAL ERROR LOG;",
@@ -1333,7 +1338,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         &[]
     )]
 #[case::alter_ingestor(
-        "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON \
+        "ALTER HTTP ENDPOINT INGESTOR event_source SET FROM ingress_b MODE NO ACK ON \
              QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
              occurred_at, SET FILTER WHERE input.active, REPLACE ROUTE TO events INHERIT ALL \
              UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
@@ -1341,7 +1346,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         &[]
     )]
 #[case::alter_client_ingestor(
-        "ALTER INGESTOR submit_events SET FROM CLIENT SCHEMA event MODE ACK PARALLEL MAX 8 ACK \
+        "ALTER CLIENT PRODUCER INGESTOR submit_events SET FROM SCHEMA event MODE ACK PARALLEL MAX 8 ACK \
              TIMEOUT 20s RETRY POLICY BACKOFF 50ms MAX 2s ON QUIESCE SUSPEND, SET QUIESCE SUSPEND;",
         None,
         &[]
@@ -1488,8 +1493,8 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::client_ingestor(
         r#"
-            CREATE INGESTOR submit_events
-                FROM CLIENT SCHEMA event
+            CREATE CLIENT PRODUCER INGESTOR submit_events
+                FROM SCHEMA event
                     MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
                     ON QUIESCE SUSPEND
                 TIMESTAMP NOW
@@ -1505,11 +1510,11 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::ingestor(
         r#"
-            CREATE INGESTOR kafka_notifications
+            CREATE KAFKA TOPIC INGESTOR kafka_notifications
                 FROM
-                    KAFKA kafka_main
-                    TOPIC notifications
-                    OFFSET BY CONSUMER GROUP nervix_consumer
+                    kafka_main
+                    TOPIC 'notifications'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications
@@ -1524,11 +1529,11 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::prometheus_ingestor(
         r#"
-            CREATE INGESTOR prom_samples
-                FROM PROMETHEUS prom_main
+            CREATE PROMETHEUS QUERY INGESTOR prom_samples
+                FROM prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
                 EVERY 15s
-                ON QUIESCE SUSPEND DECODE USING sample_codec
+                MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
                 TO samples
                     BRANCHED BY source_branch SET source = message.source
                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB

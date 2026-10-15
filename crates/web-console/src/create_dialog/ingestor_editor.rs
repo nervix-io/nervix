@@ -13,10 +13,9 @@
 
 use leptos::prelude::*;
 use nervix_models::{
-    EndpointSourceEntity, HttpSourceEntity, IngestQuiesceOverflow, IngestSourceKind,
-    KafkaSourceEntity, MqttQos, MqttSession, MqttSourceEntity, NatsSourceEntity,
-    PrometheusSourceEntity, PulsarSourceEntity, RabbitMqSourceEntity, RedisSourceEntity,
-    SqsSourceEntity,
+    HttpSourceEntity, IngestQuiesceOverflow, IngestSourceKind, KafkaSourceEntity, MqttQos,
+    MqttSession, MqttSourceEntity, NatsSourceEntity, PrometheusSourceEntity, PulsarSourceEntity,
+    RabbitMqSourceEntity, RedisSourceEntity, SqsSourceEntity,
 };
 
 use super::{
@@ -319,7 +318,7 @@ pub(super) fn IngestorEditor(
         </Show>
         <Show when=move || signals.ingestor.get().source.quiesce == Some(QuiesceChoice::Buffer) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::BufferSize />
-            <Show when=move || source_kind() != Some(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint)) fallback=|| ()>
+            <Show when=move || !signals.ingestor.get().source.reads_endpoint() fallback=|| ()>
                 <fieldset class="create-field create-ingestor-overflow">
                     <legend>"On overflow"</legend>
                     <button type="button" data-overflow="oldest" class:active=move || signals.ingestor.get().source.overflow == Some(IngestQuiesceOverflow::DropOldest)

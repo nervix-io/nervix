@@ -248,9 +248,12 @@ async fn then_archive_has_the_size_and_digest_the_console_shows(
     selector: String,
 ) {
     let archive = archive_path(world, &file);
-    let bytes = std::fs::read(&archive).expect("the scenario's archive is readable");
-    let digest = blake3::hash(&bytes).to_hex().to_string();
-    then_selector_contains_text(world, selector.clone(), format!("{} bytes", bytes.len())).await;
+    let (length, digest) = off_the_runner(move || {
+        let bytes = std::fs::read(&archive).expect("the scenario's archive is readable");
+        (bytes.len(), blake3::hash(&bytes).to_hex().to_string())
+    })
+    .await;
+    then_selector_contains_text(world, selector.clone(), format!("{length} bytes")).await;
     then_selector_contains_text(world, selector, digest).await;
 }
 

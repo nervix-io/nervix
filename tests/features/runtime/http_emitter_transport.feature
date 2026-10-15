@@ -29,8 +29,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -91,8 +91,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -150,8 +150,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -205,8 +205,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -267,11 +267,11 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR from_a FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR from_a FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_a INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR from_b FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR from_b FROM ingress_b MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_b INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -330,8 +330,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -393,8 +393,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -454,8 +454,8 @@ Feature: HTTP emitter transport failures and TLS identity
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

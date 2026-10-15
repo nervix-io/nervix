@@ -102,8 +102,8 @@ Feature: Generator node
         PATH '/left'
         TYPE HTTP;
 
-      CREATE INGESTOR left_ingestor
-        FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR left_ingestor
+        FROM left_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO left_notifications
@@ -169,7 +169,7 @@ Feature: Generator node
       CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
       CREATE VHOST edge generator-lru-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR notification_source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR notification_source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TIMESTAMP NOW
         TO notifications INHERIT ALL BRANCHED BY tenant_branch
           SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -272,8 +272,8 @@ Feature: Generator node
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR generator_metric_ingestor
-        FROM ENDPOINT generator_metric_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR generator_metric_ingestor
+        FROM generator_metric_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_metric_codec
         TIMESTAMP NOW
         TO generator_metrics
@@ -354,8 +354,8 @@ Feature: Generator node
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -430,8 +430,8 @@ Feature: Generator node
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -523,8 +523,8 @@ Feature: Generator node
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -600,8 +600,8 @@ Feature: Generator node
       CREATE RELAY generated_values SCHEMA generated_value UNBRANCHED;
       CREATE VHOST edge generator-snapshot-{{test_id}}.example.com;
       CREATE ENDPOINT generator_source_endpoint ON edge PATH '/values' TYPE HTTP;
-      CREATE INGESTOR generator_source
-        FROM ENDPOINT generator_source_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR generator_source
+        FROM generator_source_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_source_codec
         TIMESTAMP NOW
         TO generator_source_values
@@ -681,8 +681,8 @@ Feature: Generator node
       CREATE RELAY generator_error_records SCHEMA generator_error_record UNBRANCHED;
       CREATE VHOST edge generator-errors-{{test_id}}.example.com;
       CREATE ENDPOINT generator_error_endpoint ON edge PATH '/values' TYPE HTTP;
-      CREATE INGESTOR generator_error_ingestor
-        FROM ENDPOINT generator_error_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR generator_error_ingestor
+        FROM generator_error_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_error_codec
         TIMESTAMP NOW
         TO generator_error_sources

@@ -11561,7 +11561,7 @@ mod tests {
             ChoiceControl::HashCodec => nervix_client_wire::ChoiceTarget::Codec,
             ChoiceControl::HashKey => nervix_client_wire::ChoiceTarget::CodecField,
             ChoiceControl::IngestSourceRef => {
-                nervix_client_wire::ChoiceTarget::IngestEndpointSource
+                nervix_client_wire::ChoiceTarget::IngestHttpEndpointSource
             }
             ChoiceControl::IngestCodec => nervix_client_wire::ChoiceTarget::IngestCodec,
             ChoiceControl::IngestTimestampField | ChoiceControl::IngestInputField => {

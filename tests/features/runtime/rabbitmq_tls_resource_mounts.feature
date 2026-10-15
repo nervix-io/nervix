@@ -38,8 +38,8 @@ Feature: RabbitMQ TLS resource mounts
           'addr' = '{{rabbitmq_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_tls QUEUE notifications_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_tls QUEUE 'notifications_{{test_id}}' INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

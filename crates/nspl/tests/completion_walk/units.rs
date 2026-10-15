@@ -213,21 +213,8 @@ fn synthetic_names_never_lex_as_keywords() {
     // branch, so every name the walker can produce must lex as a single unknown word.
     let materializer = Materializer::new();
 
-    for stem in [
-        "relay",
-        "schema",
-        "field",
-        "session_subscription",
-        "udf",
-        "consumer_group",
-        "queue_group",
-        "mqtt_topic_filter",
-    ] {
-        let label = if stem.contains("group") || stem.contains("filter") {
-            stem.to_string()
-        } else {
-            format!("{stem}_name")
-        };
+    for stem in ["relay", "schema", "field", "session_subscription", "udf"] {
+        let label = format!("{stem}_name");
         let text = materializer
             .materialize(&label, 0)
             .unwrap_or_else(|error| panic!("{label} must materialize: {error}"))
@@ -477,7 +464,7 @@ fn completion_never_goes_silent_on_a_reachable_branch() {
         "",
         "CREATE CODEC nx_codec",
         "CREATE SCHEMA nx_schema (",
-        "CREATE INGESTOR nx_ingestor FROM MQTT nx_client",
+        "CREATE MQTT TOPIC INGESTOR nx_ingestor FROM nx_client",
     ] {
         let report = Walker::new(Grammar::Server, budget(), 4).run(seed);
         let dead_ends = report

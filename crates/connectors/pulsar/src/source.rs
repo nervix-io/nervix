@@ -32,7 +32,7 @@ use nervix_connector::{
     client_config_value, client_tls_paths, optional_bool_client_config_value,
     optional_client_config_value, read_tls_file,
 };
-use nervix_models::{ClientConfigEntry, PulsarSubscriptionName, TopicName};
+use nervix_models::{ClientConfigEntry, PulsarSubscriptionName, PulsarTopicName};
 use nervix_primitives::time::{Instant, sleep_until};
 use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
@@ -78,7 +78,7 @@ type PulsarSourceResult<T> = Result<T, Report<PulsarSourceError>>;
 /// shared subscription it joins, and the name its consumers register under.
 pub struct PulsarSourceSettings<'a> {
     pub config: &'a [ClientConfigEntry],
-    pub topic: &'a TopicName,
+    pub topic: &'a PulsarTopicName,
     pub subscription: PulsarSubscriptionName,
     /// Each instance's consumer registers under this name suffixed with its instance index.
     pub consumer_name: String,

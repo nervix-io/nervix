@@ -31,8 +31,8 @@ Feature: Sentry emission
       ON edge
       PATH '/errors'
       TYPE HTTP;
-      CREATE INGESTOR error_source
-      FROM ENDPOINT error_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR error_source
+      FROM error_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
       TIMESTAMP NOW
       TO errors

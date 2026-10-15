@@ -45,8 +45,8 @@ Feature: Websocket client TLS resource mounts
           'endpoint' = '{{mock_wss_dns_addr}}/ws/{{test_id}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_tls MODE NO_ACK SEQUENTIAL
+        CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_tls MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

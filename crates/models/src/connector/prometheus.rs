@@ -2,7 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Prometheus client Model, the query source Model, and what it declares.
+//! - **Owns.** The Prometheus client Model, the query source Model with its delivery mode, and
+//!   what it declares.
 //! - **Depends on.** The shared source declarations, the domain clock's period and the names a
 //!   body references.
 //! - **Must not know.** The Prometheus HTTP API, its configuration keys, or how a query is
@@ -19,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use super::{configured_client::configured_client, entity_union::connector_sources};
 use crate::{
     ClientName, ConnectorKind, DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    IngestSourceCapabilities, PositionClass, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Prometheus: unpooled CreateClientPrometheus => PrometheusConfigEntry);
@@ -33,6 +34,7 @@ pub struct PrometheusQuerySource {
     pub client: ClientName,
     pub query: String,
     pub every: DomainClockPeriod,
+    pub mode: PrometheusIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -42,6 +44,7 @@ impl SourceEntity for PrometheusQuerySource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Prometheus),
+        position_class: PositionClass::None,
     };
 }
 
@@ -66,7 +69,24 @@ impl SourceBody for PrometheusQuerySource {
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        IngestAcknowledgement::Unacknowledged
+        self.mode.acknowledgement()
+    }
+}
+
+/// How a query's results are delivered. A result is read again on the next evaluation, so none
+/// waits on an acknowledgement.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PrometheusIngestMode {
+    NoAck,
+}
+
+impl PrometheusIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
+        }
     }
 }
 
@@ -74,6 +94,8 @@ connector_sources! {
     connector Prometheus = "PROMETHEUS";
     /// What a Prometheus source reads.
     pub enum PrometheusSource;
+    /// The alterations of the ingestors that read a Prometheus entity.
+    pub enum PrometheusIngestorAlteration;
     /// The entities a Prometheus source reads.
     pub enum PrometheusSourceEntity {
         Query(PrometheusQuerySource) = "QUERY", "Prometheus";
