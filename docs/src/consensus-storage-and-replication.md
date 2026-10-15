@@ -215,6 +215,20 @@ The independent paths matter when a follower has slow storage: its append answer
 longer than a heartbeat deadline, while management traffic still prevents an election. Changing the
 heartbeat interval does not change the append stream's five-second progress bound.
 
+### A Quorum Over A Lossy Link
+
+When only a bare quorum of voters is reachable, such as two of three while the third is down, every
+commit needs all of them and the leader's link to each. When such a link loses packets but stays up,
+TCP recovers them by retransmission under the host kernel's retransmission timeout, which grows
+exponentially while the losses continue; Nervix does not tune it. An exchange whose deadline passes
+before its retransmission arrives fails and is retried: a heartbeat at its soft deadline, and an
+append stream at its five-second setup or progress bound. Commits can therefore stall, leadership
+can move between the reachable voters, and a control command, which needs several commits in
+sequence, can time out.
+
+Nervix sets no bound on such a stall. It lasts until the loss ends or another voter becomes
+reachable, and it loses no committed entry.
+
 ### Follower Memory And Backpressure
 
 A follower takes a Commands-budget reservation before it decodes an append batch. It retains that

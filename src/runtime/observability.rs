@@ -81,6 +81,9 @@ pub(crate) struct IngestorDescribe {
     pub(crate) ready: bool,
     pub(crate) quiesce_state: Option<String>,
     pub(crate) quiesce_counters: IngestorQuiesceCounters,
+    /// Pending acknowledgements and rejections this node's source hosts discarded after a
+    /// reconnect, because the broker redelivers them.
+    pub(crate) transport_redeliveries_total: u64,
     pub(crate) memory_backpressure_paused: bool,
     pub(crate) transient_error: Option<String>,
     pub(crate) reconnect_backoff: Option<String>,
@@ -594,6 +597,16 @@ impl Runtime {
             Some(control) => control.counters(),
             None => IngestorQuiesceCounters::default(),
         };
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let transport_redeliveries_total = self
+            .inner
+            .metrics
+            .ingestor_transport_redeliveries(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
             // An ingestor that did not start describes its own start report. One that recorded no
@@ -612,6 +625,7 @@ impl Runtime {
                 ready: false,
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
+                transport_redeliveries_total,
                 memory_backpressure_paused,
                 transient_error,
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -626,6 +640,7 @@ impl Runtime {
                 ready: self.ingestor_ready(domain, ingestor),
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
+                transport_redeliveries_total,
                 memory_backpressure_paused,
                 transient_error: transient.error.clone(),
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -665,6 +680,7 @@ impl Runtime {
             ready: self.ingestor_ready(domain, ingestor),
             quiesce_state,
             quiesce_counters,
+            transport_redeliveries_total,
             memory_backpressure_paused,
             transient_error: transient.error.clone(),
             reconnect_backoff: transient.reconnect_backoff.clone(),

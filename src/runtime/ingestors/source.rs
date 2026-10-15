@@ -31,7 +31,7 @@ use nervix_connector::{
     SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePlan,
     SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
-use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
+use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
 
 use super::{
@@ -93,6 +93,10 @@ impl IngestorSpec {
                 .supports_quiesce(self.declared_input.quiesce_mode()),
             instances,
             acknowledgement,
+            self.declared_input
+                .source_kind()
+                .capabilities()
+                .position_class,
         )
     }
 }
@@ -203,8 +207,11 @@ impl<P> BrokerSourceStart<'_, P> {
                 .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
-                acknowledgement: plan.acknowledgement,
-                retry,
+                policy: BrokerSourcePolicy {
+                    acknowledgement: plan.acknowledgement,
+                    retry,
+                    position_class: plan.capabilities.position_class(),
+                },
             }));
         }
         Ok(SourceStart {
@@ -222,8 +229,19 @@ impl<P> BrokerSourceStart<'_, P> {
 /// One broker source instance, which the host runs under the broker loop.
 pub(super) struct BrokerSourceInstance<C> {
     pub(super) source: C,
+    pub(super) policy: BrokerSourcePolicy,
+}
+
+/// How the host drives one broker source instance.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BrokerSourcePolicy {
+    /// How its messages are grouped and how long their acknowledgement trees are waited on.
     pub(super) acknowledgement: SourceAckPolicy,
+    /// How the host backs off after a failed resume, batch or rejection.
     pub(super) retry: ParsedRetryPolicy,
+    /// What its positions mean once the connection that delivered them is gone, which decides
+    /// what the host does with a rejection the source could not complete.
+    pub(super) position_class: PositionClass,
 }
 
 impl<C> SourceInstance for BrokerSourceInstance<C>
@@ -235,16 +253,11 @@ where
         host: RuntimeSourceHost,
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
-        let Self {
-            source,
-            acknowledgement,
-            retry,
-        } = *self;
+        let Self { source, policy } = *self;
         Box::pin(run_source_instance_with_retry(
             source,
             SourceHost::new(host),
-            acknowledgement,
-            retry,
+            policy,
             shutdown,
         ))
     }
@@ -500,6 +513,9 @@ pub(super) struct RuntimeSourceHost {
     /// Counts the unacknowledged payloads this host did not deliver because the node's extension
     /// workers had no room to unfold them.
     unfolding_refused: prometheus::IntCounter,
+    /// Counts the positions this host discarded after a reconnect because the broker redelivers
+    /// them.
+    transport_redeliveries: prometheus::IntCounter,
 }
 
 impl RuntimeSourceHost {
@@ -521,6 +537,11 @@ impl RuntimeSourceHost {
         let quiesce_observation = spec.quiesce.observation();
         let dispatcher = spec.runtime.inner.remote_dispatcher.load();
         let unfolding_refused = spec.runtime.inner.metrics.ingestor_unfolding_refused(
+            &spec.domain,
+            &spec.ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+        let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
             &spec.domain,
             &spec.ingestor,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
@@ -550,6 +571,7 @@ impl RuntimeSourceHost {
             flush_each_intake: spec.flush_each_intake,
             unacknowledged_admission: spec.unacknowledged_admission,
             unfolding_refused,
+            transport_redeliveries,
         }
     }
 
@@ -1185,6 +1207,16 @@ impl SourceHostServices for RuntimeSourceHost {
             self.domain.as_str(),
         ));
     }
+
+    fn record_transport_redeliveries(&self, positions: usize) {
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            positions,
+            "discarded positions of a lost connection that the broker redelivers"
+        );
+        self.transport_redeliveries.inc_by(positions.arch_into());
+    }
 }
 
 impl RuntimeSourceHost {
@@ -1582,12 +1614,16 @@ enum BatchDisposition<P> {
 pub(super) async fn run_source_instance_with_retry<C>(
     mut source: C,
     mut host: SourceHost,
-    acknowledgement: SourceAckPolicy,
-    retry_policy: ParsedRetryPolicy,
+    policy: BrokerSourcePolicy,
     mut shutdown: watch::Receiver<bool>,
 ) where
     C: BrokerSourceConnector,
 {
+    let BrokerSourcePolicy {
+        acknowledgement,
+        retry: retry_policy,
+        position_class,
+    } = policy;
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
     let mut pending_rejection: Option<Vec<C::Position>> = None;
@@ -1638,6 +1674,14 @@ pub(super) async fn run_source_instance_with_retry<C>(
             match resumed {
                 Ok(SourceResume::Ready) => {
                     ready = true;
+                    if position_class == PositionClass::BrokerRedelivered
+                        && let Some(positions) = pending_rejection.take()
+                    {
+                        // The connection that delivered these positions is gone, and the broker
+                        // redelivers everything it did not acknowledge. Rejecting them on the new
+                        // connection could only fail again, so they are counted and dropped.
+                        host.record_transport_redeliveries(positions.len());
+                    }
                     if pending_rejection.is_none() {
                         retry_delay = retry_policy.backoff;
                         host.mark_ready();
@@ -1671,9 +1715,11 @@ pub(super) async fn run_source_instance_with_retry<C>(
             }
         }
 
-        // A failed rewind leaves the connector's cursor beyond an unacknowledged message.
-        // Reestablish its assignment and retry that same rewind before reading another batch:
-        // acknowledging a later Kafka offset would otherwise commit past the missing record.
+        // A failed rewind of a replayable source leaves the connector's cursor beyond an
+        // unacknowledged message. Reestablish its assignment and retry that same rewind before
+        // reading another batch: acknowledging a later Kafka offset would otherwise commit past the
+        // missing record. Only a replayable source still holds a pending rejection here, because a
+        // resume discards a broker-redelivered one and a source without positions never keeps one.
         if let Some(positions) = pending_rejection.take() {
             if let Err(error) = source.reject(&positions).await {
                 host.report_error(format!("{error:#}"));
@@ -1737,7 +1783,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
         }
         host.clear_transient_error();
 
-        match handle_batch(&mut source, &mut host, acknowledgement, messages).await {
+        match handle_batch(&mut source, &mut host, policy, messages).await {
             BatchDisposition::Accepted => {
                 retry_delay = retry_policy.backoff;
             }
@@ -1805,12 +1851,14 @@ fn batch_request(acknowledgement: SourceAckPolicy) -> SourceBatchRequest {
 async fn handle_batch<C>(
     source: &mut C,
     host: &mut SourceHost,
-    acknowledgement: SourceAckPolicy,
+    policy: BrokerSourcePolicy,
     messages: Vec<C::Message>,
 ) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
+    let acknowledgement = policy.acknowledgement;
+    let position_class = policy.position_class;
     let positions = messages
         .iter()
         .map(|message| message.position().clone())
@@ -1839,7 +1887,7 @@ where
         Err(error) => {
             host.report_error(format!("{error:#}"));
             if mode == SourceIntakeMode::Acknowledged {
-                return reject_batch(source, host, positions).await;
+                return reject_batch(source, host, position_class, positions).await;
             }
             return BatchDisposition::Accepted;
         }
@@ -1858,7 +1906,7 @@ where
                 outcome.acknowledgements.len(),
                 positions.len(),
             ));
-            return reject_batch(source, host, positions).await;
+            return reject_batch(source, host, position_class, positions).await;
         }
         for acknowledgement in outcome.acknowledgements {
             nervix_primitives::task::consume_budget().await;
@@ -1866,7 +1914,7 @@ where
                 SourceAcknowledgementOutcome::Ack => {}
                 SourceAcknowledgementOutcome::NoAck(reason) => {
                     host.handle_ack_failure(reason);
-                    return reject_batch(source, host, positions).await;
+                    return reject_batch(source, host, position_class, positions).await;
                 }
                 SourceAcknowledgementOutcome::Shutdown => return BatchDisposition::Shutdown,
             }
@@ -1877,25 +1925,32 @@ where
 
     if let Err(error) = source.acknowledge(&positions).await {
         host.report_error(format!("{error:#}"));
-        return reject_batch(source, host, positions).await;
+        return reject_batch(source, host, position_class, positions).await;
     }
     BatchDisposition::Accepted
 }
 
+/// Rejects `positions` so the source presents them again, and decides by the source's position
+/// class what a rejection that failed leaves pending.
 async fn reject_batch<C>(
     source: &mut C,
     host: &mut SourceHost,
+    position_class: PositionClass,
     positions: Vec<C::Position>,
 ) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
-    match source.reject(&positions).await {
-        Ok(()) => BatchDisposition::Retry,
-        Err(error) => {
-            host.report_error(format!("{error:#}"));
+    let Err(error) = source.reject(&positions).await else {
+        return BatchDisposition::Retry;
+    };
+    host.report_error(format!("{error:#}"));
+    match position_class {
+        PositionClass::Replayable | PositionClass::BrokerRedelivered => {
             BatchDisposition::RetryRejection(positions)
         }
+        // A source without positions has nothing a later rejection could name.
+        PositionClass::None => BatchDisposition::Retry,
     }
 }
 
@@ -2238,6 +2293,9 @@ mod tests {
         fn handle_ack_failure(&self, reason: String) {
             self.observations.lock().reported_errors.push(reason);
         }
+        fn record_transport_redeliveries(&self, positions: usize) {
+            panic!("a replayable test source discarded {positions} positions after a reconnect");
+        }
     }
 
     #[async_trait]
@@ -2253,6 +2311,14 @@ mod tests {
         fn record_poll_error(&self, reason: String) {
             self.observations.lock().poll_errors.push(reason.clone());
             self.report_error(reason);
+        }
+    }
+
+    fn replayable(acknowledgement: SourceAckPolicy) -> BrokerSourcePolicy {
+        BrokerSourcePolicy {
+            acknowledgement,
+            retry: acknowledgement.retry(),
+            position_class: PositionClass::Replayable,
         }
     }
 
@@ -2285,7 +2351,7 @@ mod tests {
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
+        run_source_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
         drop(shutdown_tx);
         observations
     }
@@ -2507,8 +2573,7 @@ mod tests {
         run_source_instance_with_retry(
             source,
             host,
-            SourceAckPolicy::None,
-            SourceAckPolicy::None.retry(),
+            replayable(SourceAckPolicy::None),
             shutdown_rx,
         )
         .await;
@@ -2542,8 +2607,7 @@ mod tests {
         let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
             source,
             host,
-            SourceAckPolicy::None,
-            SourceAckPolicy::None.retry(),
+            replayable(SourceAckPolicy::None),
             shutdown_rx,
         ));
         started.notified().await;
@@ -2570,8 +2634,7 @@ mod tests {
         let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
             source,
             host,
-            SourceAckPolicy::None,
-            SourceAckPolicy::None.retry(),
+            replayable(SourceAckPolicy::None),
             shutdown_rx,
         ));
         started.notified().await;
@@ -2762,7 +2825,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             retry: retry_policy(),
         };
-        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
+        run_source_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
         drop(shutdown_tx);
 
         let observations = observations.lock();
@@ -2815,6 +2878,10 @@ mod shuttle_tests;
 #[cfg(test)]
 #[path = "source_extension_tests.rs"]
 mod extension_tests;
+
+#[cfg(test)]
+#[path = "source_reconnect_tests.rs"]
+mod reconnect_tests;
 
 impl Drop for RuntimeSourceHost {
     fn drop(&mut self) {

@@ -296,6 +296,7 @@ class InventoryTests(unittest.TestCase):
             "columnar-json-rows",
             "bounded-write-limits",
             "connector-row-request-division",
+            "connector-confirmation-window",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",
@@ -313,6 +314,7 @@ class InventoryTests(unittest.TestCase):
             "console-restore-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
+            "ingestor-describe-envelope",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",

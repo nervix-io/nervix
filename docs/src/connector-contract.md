@@ -51,6 +51,62 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Connector hygiene standard
+
+The following standard applies to each connector crate, its declarations, and the server paths
+that compose and report it. It also applies when another feature adds or changes one of those
+paths.
+
+- **One source for names.** The vocabulary's `ConnectorKind` display supplies connector names;
+  source and sink entity names come from their vocabulary declarations. Configuration errors,
+  transport and HTTP-client labels, metrics, logs, dataflow identifiers and `DESCRIBE` output
+  derive their names from those sources. A required namespace or prefix is derived once and
+  reused, rather than introducing another spelling or case table. Protocol field names and
+  external configuration passed through to a driver retain their external contract.
+- **Typed causes until reporting.** A connector owns semantic error enums using `thiserror` and
+  propagates context with `error-stack`. Preserve a driver's typed error beneath the connector's
+  operation context instead of replacing it with its `Display` text. A cause that Nervix can
+  classify is a typed variant, not a free-text `reason` or `Result<_, String>`. Text received as
+  part of an external protocol remains external data; it does not replace an available typed
+  cause. Render a report only at the boundary that presents it, retaining the cause for callers
+  that must decide whether to retry, reject a record or fail a start. Sensitive payloads and
+  credentials stay out of rendered diagnostics.
+- **Annotations describe the actual outcome.** A `nervix::error_boundary(outcome|library, ...)`
+  contract belongs on the exact error type or return contract it classifies, with a reason
+  describing that path. An annotation may call a result a record rejection only when the
+  implementation actually returns that record's rejection. A failed connection, refused start
+  or failed request is not made record-specific by its annotation. [Errors And
+  Diagnostics](./errors-and-diagnostics.md) owns these classifications and reporting boundaries.
+- **Unit tests exercise the owning paths.** Cover each implemented publish path, window or batch
+  algorithm, header and metadata mapping, and acknowledgement operation through its production
+  owner. Include successful delivery and the supported rejection, transient and unanswered
+  outcomes, partial confirmations, ordering and bounds where the path has those states. Exercise
+  source polling, reads and close when the connector owns them. A path the connector does not
+  implement needs no fictional test. Unit tests complement the public Cucumber scenarios and
+  concurrency checks required by the behavior; they do not replace them.
+- **Properties cover encodings and measures.** Each connector-owned encoding or encoded-size
+  measure has a bounded Bolero property over valid current values, registered in
+  `tests/bolero-targets.toml` for ordinary and fuzz execution with its source-adjacent corpus.
+  Lossless conversions compare the complete original value; size properties compare the measure
+  with the exact production encoding, including headers and framing that count toward the limit,
+  and exercise the limit boundaries. Lossy or one-way mappings assert their declared contract.
+  A crate using a shared encoding or measure exercises that shared owner rather than copying
+  its implementation. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) owns
+  registration, budgets, execution and retained failure evidence.
+
+A connector change keeps this chapter and the relevant ingestor or emitter manual current, runs
+`just validate` and the focused checks for its changed paths, and leaves the architecture ratchet
+at or below its baseline. Documentation changes also run `just book`. Execution-mode evidence
+follows the changed protocol or lifecycle, as [Data-Plane
+Concurrency](./data-plane-concurrency.md) describes; changing labels or documentation alone does
+not introduce a synchronization claim.
+
+Before closing a connector epic, review changes landed from parallel work for additional name
+sources, free-text causes, inaccurate boundary annotations, and publish, mapping, batch or
+acknowledgement paths missing their unit or property coverage. Record the review, evidence and
+any compliance tasks on the owning ClickUp epic and tasks. Implementation reports and temporary
+audit findings are not repository documentation.
+
 ### DNS for HTTP and Iceberg
 
 The node loads and validates one `nervix-dns` resolver at startup, and every integration below
@@ -319,7 +375,8 @@ that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, which typed metadata scope exists,
-whether quiesce is supported, the nonzero instance count, and the supported acknowledgement mode.
+whether quiesce is supported, the nonzero instance count, the supported acknowledgement mode, and
+the position class the source's entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
@@ -446,12 +503,21 @@ For broker sources, `None` admits without an ACK root; `Sequential` requests one
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
 timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
 transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. If rejection itself fails, the host retains those positions, suspends
-the source, and reestablishes its assignment. It retries the same rejection before polling any
-later batch or committing a later position, so a retried rejection must not depend on a poll. The
-[Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a
-consumer-group rebalance has moved away, because only a poll can assign that partition again. A
-transport without an acknowledged delivery mode has no redelivery guarantee from Nervix. The
+source's delivery policy. What the host does when rejection itself fails depends on the position
+class each source entity declares, which states what its positions still mean once the connection
+that delivered them is gone. The host handles each class once:
+
+| Position class | Entities | After a failed rejection |
+| --- | --- | --- |
+| `replayable` | Kafka, Pulsar | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+| `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+
+A transport acknowledgement that fails because the connection died is handled the same way: the
+host rejects the positions, that rejection fails on the same lost connection, and the class decides.
+A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
+whose acknowledgement the broker never received is ingested again. A transport without an
+acknowledged delivery mode has no redelivery guarantee from Nervix. The
 sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
 modes are in [Ingestors](./ingestors.md) and
 [Shutdown And Recovery](./shutdown.md#connector-contracts).
@@ -559,6 +625,32 @@ queue within the remaining stop deadline; Kafka uses it. A sink may keep its cli
 publish failure when reopening it would discard staged work or a persistent session, or, as the
 HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
 transient failure its pending work is still waiting out.
+
+A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
+`ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
+identity, its execution time and the future through which the broker answers for it: a
+confirmation, a refusal for good with the message its message error reports, or a failure that
+leaves the record's outcome unknown. The connector maps its driver's answer to one of those three;
+the window decides nothing else about the driver. A record's deadline is `ACK TIMEOUT` after its own
+hand-over. While the window holds `MAX` records it waits for the oldest answer until the oldest's
+deadline and no longer before the sink hands over another record, so at most `MAX` records await
+answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was handed over, the
+window waits for each remaining answer, oldest first and each until its own deadline. An answer
+given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
+could not take a record for a reason that is not the record's own, the oldest answer failed or
+missed its deadline, or a deadline is past the monotonic clock's range. The window holds the
+publish's outcome, and both ways of ending a publish go through it, so before it reports a failure
+it settles every answer the broker already gave, the oldest's included: a confirmed record is
+delivered and a refused one rejected, and the host's retry never resends a record the broker
+confirmed. A record without an answer, or whose answer failed, stays unresolved and is sent again,
+which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property
+`connector-confirmation-window` holds the window to a reference model of this rule over scripted
+answers given within, at, past or never by each deadline, failed answers and driver failures, and
+the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
+hold its settlement while answers arrive concurrently with the publish. The Kafka, Pulsar, NATS
+JetStream and MQTT sinks still await their answers through windows of their own, which drop their
+in-flight records when the driver refuses to take one, so a retry can resend records their broker
+already confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
@@ -1092,8 +1184,9 @@ drain boundary. This chapter does not redefine those output formats.
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
-   source or sink contract implementation. Add its composition mapping in the server; do not
-   teach the contract or registry about the driver.
+   source or sink contract implementation. A brokered sink that awaits its broker's answers in
+   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. Add
+   its composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
    three-node execution and failure paths. Confirm the crate boundary and run the repository's
    validation and connector tests.

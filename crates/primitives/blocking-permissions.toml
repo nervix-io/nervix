@@ -117,6 +117,13 @@ path = "tests/common/client_conformance.rs"
 reason = "The harness is not a node; the probe drives the C binding, whose calls block their thread by contract."
 
 [[permission]]
+bound = "One job per awaiting step: reading, verifying, digesting or rewriting one scenario's archives, generating one fixture file, or decoding the databases of one stopped cluster's nodes. Each archive is bounded by the scenario that wrote it, and the job ends when that work ends."
+items = ["task::spawn_blocking"]
+owner = "The scenario harness's runner offload for synchronous step work."
+path = "tests/common/runner_offload.rs"
+reason = "The harness is not a node; Cucumber polls every scenario and the suite watchdog from one runner task, which a step's file, encoding and database work would otherwise stall."
+
+[[permission]]
 bound = "One join of a polling thread that leaves the group within one poll interval of being asked."
 items = ["task::spawn_blocking"]
 owner = "The scenario harness's external Kafka group member."
