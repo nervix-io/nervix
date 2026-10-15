@@ -10,6 +10,7 @@
 
 [[method]]
 checks = [
+  "test-selection",
   "checks",
   "tests",
   "scenarios",
