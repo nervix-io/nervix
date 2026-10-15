@@ -458,11 +458,9 @@ impl IcebergSink {
         staged: &arrow_schema::Schema,
         table: &::iceberg::spec::Schema,
     ) -> SinkStartResult<()> {
-        let mapped =
-            ::iceberg::arrow::arrow_schema_to_schema_auto_assign_ids(staged).map_err(|error| {
-                Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
-                    .attach_printable(format!("mapped Iceberg schema cannot be written: {error}"))
-            })?;
+        let mapped = ::iceberg::arrow::arrow_schema_to_schema_auto_assign_ids(staged)
+            .change_context(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+            .attach_printable("mapped Iceberg schema cannot be written")?;
         for column in mapped.as_struct().fields() {
             let Some(target) = table.as_struct().field_by_name(&column.name) else {
                 return Err(
@@ -1742,6 +1740,28 @@ mod tests {
             *error.current_context(),
             SinkStartError::InvalidConfiguration { sink: ICEBERG }
         );
+    }
+
+    #[test]
+    fn iceberg_open_retains_the_schema_conversion_cause() {
+        let table =
+            arrow_schema_to_schema_auto_assign_ids(&arrow_schema::Schema::new(vec![Field::new(
+                "user_id",
+                DataType::Int64,
+                true,
+            )]))
+            .expect("table schema converts to Iceberg");
+        let unsupported =
+            arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Null, true)]);
+
+        let error = IcebergSink::validate_table_schema(&unsupported, &table)
+            .expect_err("an unsupported mapped type fails at open");
+
+        assert_eq!(
+            *error.current_context(),
+            SinkStartError::InvalidConfiguration { sink: ICEBERG }
+        );
+        assert!(error.contains::<::iceberg::Error>());
     }
 
     #[test]
