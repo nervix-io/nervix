@@ -1390,6 +1390,12 @@ chain as its message. The shared C binding classifies a failure from the current
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
 
+Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
+Failure and cancellation abandon the partial temporary archive; they perform no destructor
+finalization that could replace the cause, panic, or start asynchronous cleanup. If the enclosing
+command deadline cancels local construction, the caller receives its typed `RetryDeadline`.
+The client opens no upload call until archive finalization and flush have both succeeded.
+
 A Rust client subscribe or unsubscribe runs on a task of its own, so that an attempt its caller
 stops waiting for still completes. Its caller classifies that task's report by its current
 context, and recovers the session and sends the request again exactly as for any other call; a
