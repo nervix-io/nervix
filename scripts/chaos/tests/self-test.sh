@@ -18,6 +18,7 @@ fi
 "${script_dir}/output-boundary-self-test.sh"
 "${script_dir}/image-package-self-test.sh"
 "${script_dir}/startup-status-self-test.sh"
+"${script_dir}/backup-fixture-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2

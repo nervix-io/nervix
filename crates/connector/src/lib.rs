@@ -8,7 +8,8 @@
 //!   mounts they read files from, the TLS material and HTTP client settings built from those
 //!   entries, service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
 //!   read a source stamps arrival with, the transport-header trait a source message implements,
-//!   and the typed ingest metadata row with its Kafka, syslog and header scopes.
+//!   the typed ingest metadata row with its Kafka, syslog and header scopes, and the confirmation
+//!   window a brokered sink awaits its broker's answers through.
 //! - **Depends on.** The vocabulary, Arrow, `error-stack` and Tokio, the node's bounded executor a
 //!   sink host hands a connector, and the TLS, HTTP client, URL and template libraries a client
 //!   configuration is built with.
@@ -41,6 +42,7 @@
 )]
 
 mod client_config;
+mod confirmation_window;
 mod http_client;
 mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
@@ -57,6 +59,9 @@ pub use client_config::{
     ResolvedClientConfig, client_config_value, client_tls_paths, next_retry_delay,
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
     render_client_config_template,
+};
+pub use confirmation_window::{
+    BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError,
 };
 pub use http_client::{HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{

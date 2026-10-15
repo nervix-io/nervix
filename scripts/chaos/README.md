@@ -48,8 +48,13 @@ exact Kafka positions with the original complete cut. The restored domain stays 
 the source traffic continues. The result records the cut's engagement and release times and freeze duration
 under `results/backup-progress.json`. After the cut, the runner checks renewed source and sink
 progress, stops the producer, and checks the exact accepted-input ledger. Identical replay
-duplicates are counted separately in `results/ledger.json`. This run uses domain-owned Kafka
-offsets and requires both those offsets and branch lifecycle state in the archive. Restore reports,
+duplicates are counted separately in `results/ledger.json`. This run installs the baseline graph
+with its Kafka ingestor's `OFFSET BY CONSUMER GROUP 'chaos_baseline'` replaced by
+`OFFSET BY DOMAIN`, so it uses domain-owned Kafka offsets, and it requires both those offsets and
+branch lifecycle state in the archive. A fixture without exactly one such clause stops the run with
+a setup error before the graph is installed. Every verifier self-check derives the backup graph
+from the checked-in fixture in the same way, so a fixture change that breaks the backup run fails
+the self-check of every scenario rather than only the soak's backup entries. Restore reports,
 both archive descriptions and the compared state inventories stay under `backup/`. This packaged
 workload exercises one-node and three-node publication; the large guest-save and post-START
 branch-isolation workloads run in the public Cucumber and diagnostic suites.
@@ -1477,6 +1482,12 @@ controls without Docker. `just coverage-chaos-output-boundary` retains their she
 `just test-chaos-startup-status` exercises real bounded startup publication with a stalled copy,
 a native refusal, exhausted run time and reporting failure. `just coverage-chaos-startup-status`
 retains coverage of that owner and its controls.
+`just test-chaos-backup-fixture` derives the backup run's graph from the checked-in baseline
+fixture and requires that exactly the Kafka ingestor's line changes, by its consumer-group offset
+clause alone, and that a graph holding no such clause or two is refused. The full self-test runs it
+too. `just coverage-chaos-backup-fixture` retains kcov's report of that owner and its controls;
+kcov stops attributing lines once a traced value holds the fixture's text, so that report
+under-counts the lines the test executes.
 `just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` measures the complete baseline
 controller against the supplied prebuilt image. It keeps coverage under
 `target/chaos-baseline-coverage/` and the actual run under
