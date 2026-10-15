@@ -2104,11 +2104,10 @@ done
 phase "NSPL graph installation"
 nspl_fixture="$(<"${fixture_file}")"
 if [[ "${scenario}" == backup ]]; then
-    # The backup scenario needs source positions owned by the domain archive. Other chaos
-    # scenarios retain their consumer-group boundary.
-    [[ "${nspl_fixture}" == *'OFFSET BY CONSUMER GROUP chaos_baseline'* ]] \
+    # shellcheck source=backup-scenario.sh
+    source "${script_dir}/backup-scenario.sh"
+    nspl_fixture="$(backup_graph_fixture "${nspl_fixture}")" \
         || setup_error 'the backup fixture no longer contains its expected Kafka offset clause'
-    nspl_fixture="${nspl_fixture/OFFSET BY CONSUMER GROUP chaos_baseline/OFFSET BY DOMAIN}"
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
@@ -2224,8 +2223,7 @@ if [[ "${scenario}" != "baseline" ]]; then
         source "${script_dir}/degraded-links-scenario.sh"
         run_degraded_links
     elif [[ "${scenario}" == backup ]]; then
-        # shellcheck source=backup-scenario.sh
-        source "${script_dir}/backup-scenario.sh"
+        # Graph installation sourced backup-scenario.sh.
         run_backup_scenario
     elif [[ "${scenario}" == stale-follower ]]; then
         # shellcheck source=stale-follower-scenario.sh

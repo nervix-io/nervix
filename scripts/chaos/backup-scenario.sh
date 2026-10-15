@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
-# Sourced by run-baseline.sh after the packaged cluster and graph are ready.
+# Sourced by run-baseline.sh before graph installation: the run installs the graph that
+# backup_graph_fixture prints, and run_backup_scenario starts once the packaged cluster and that
+# graph are ready.
 
 backup_fail() {
     printf 'backup chaos failure: %s\n' "$*" >&2
     return 1
+}
+
+# The backup scenario needs source positions owned by the domain archive. Other chaos scenarios
+# retain their consumer-group boundary. Prints the backup form of the baseline graph text $1, or
+# fails when that text lacks the Kafka offset clause it replaces.
+backup_graph_fixture() {
+    local baseline_graph="$1"
+    [[ "${baseline_graph}" == *'OFFSET BY CONSUMER GROUP chaos_baseline'* ]] || return 1
+    printf '%s' "${baseline_graph/OFFSET BY CONSUMER GROUP chaos_baseline/OFFSET BY DOMAIN}"
 }
 
 run_backup_scenario() {
