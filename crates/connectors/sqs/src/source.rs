@@ -86,7 +86,7 @@ impl SqsSourcePlan {
         dns: DnsResolver,
     ) -> SqsSourceResult<Self> {
         let client = Self::client_from_config(config, dns).await?;
-        let queue_url = Self::queue_url(&client, queue.as_str()).await?;
+        let queue_url = SqsSource::queue_url(&client, queue.as_str()).await?;
         Ok(Self { client, queue_url })
     }
 
@@ -128,45 +128,6 @@ impl SqsSourcePlan {
             .load()
             .await;
         Ok(SqsClient::new(&sdk_config))
-    }
-
-    async fn queue_url(client: &SqsClient, queue: &str) -> SqsSourceResult<String> {
-        let response = match client.get_queue_url().queue_name(queue).send().await {
-            Ok(response) => response,
-            Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
-        };
-        Self::require_queue_url(queue, response.queue_url().map(ToOwned::to_owned))
-    }
-
-    fn queue_lookup_error<R: Debug + 'static>(
-        queue: &str,
-        error: &SdkError<GetQueueUrlError, R>,
-    ) -> Report<SqsSourceError> {
-        let failure = FailedRequest::new(error);
-        let missing = error
-            .as_service_error()
-            .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
-        if missing {
-            return Report::new(SqsSourceError::MissingQueue {
-                queue: queue.to_string(),
-            })
-            .attach_printable(failure.description());
-        }
-        failure.report(
-            SqsSourceError::ResolveQueue {
-                queue: queue.to_string(),
-            },
-            "SQS GetQueueUrl failed",
-        )
-    }
-
-    fn require_queue_url(queue: &str, queue_url: Option<String>) -> SqsSourceResult<String> {
-        match queue_url {
-            Some(queue_url) => Ok(queue_url),
-            None => Err(Report::new(SqsSourceError::MissingQueueUrl {
-                queue: queue.to_string(),
-            })),
-        }
     }
 }
 
@@ -272,6 +233,47 @@ pub struct SqsSource {
     queue_url: String,
 }
 
+impl SqsSource {
+    async fn queue_url(client: &SqsClient, queue: &str) -> SqsSourceResult<String> {
+        let response = match client.get_queue_url().queue_name(queue).send().await {
+            Ok(response) => response,
+            Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
+        };
+        Self::require_queue_url(queue, response.queue_url().map(ToOwned::to_owned))
+    }
+
+    fn queue_lookup_error<R: Debug + 'static>(
+        queue: &str,
+        error: &SdkError<GetQueueUrlError, R>,
+    ) -> Report<SqsSourceError> {
+        let failure = FailedRequest::new(error);
+        let missing = error
+            .as_service_error()
+            .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
+        if missing {
+            return Report::new(SqsSourceError::MissingQueue {
+                queue: queue.to_string(),
+            })
+            .attach_printable(failure.description());
+        }
+        failure.report(
+            SqsSourceError::ResolveQueue {
+                queue: queue.to_string(),
+            },
+            "SQS GetQueueUrl failed",
+        )
+    }
+
+    fn require_queue_url(queue: &str, queue_url: Option<String>) -> SqsSourceResult<String> {
+        match queue_url {
+            Some(queue_url) => Ok(queue_url),
+            None => Err(Report::new(SqsSourceError::MissingQueueUrl {
+                queue: queue.to_string(),
+            })),
+        }
+    }
+}
+
 #[async_trait]
 impl SourceConnector for SqsSource {
     type Plan = SqsSourcePlan;
@@ -371,7 +373,7 @@ mod tests {
             GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
             (),
         );
-        let missing = SqsSourcePlan::queue_lookup_error("missing-queue", &missing);
+        let missing = SqsSource::queue_lookup_error("missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
             SqsSourceError::MissingQueue { queue } if queue == "missing-queue"
@@ -381,7 +383,7 @@ mod tests {
         let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             "connection refused".into(),
         ));
-        let connection = SqsSourcePlan::queue_lookup_error("orders", &refused);
+        let connection = SqsSource::queue_lookup_error("orders", &refused);
         assert!(matches!(
             connection.current_context(),
             SqsSourceError::ResolveQueue { queue } if queue == "orders"
@@ -397,7 +399,7 @@ mod tests {
         let unresolved = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             Box::new(carried),
         ));
-        let unresolved = SqsSourcePlan::queue_lookup_error("orders", &unresolved);
+        let unresolved = SqsSource::queue_lookup_error("orders", &unresolved);
         assert!(matches!(
             unresolved.current_context(),
             SqsSourceError::ResolveQueue { queue } if queue == "orders"
@@ -409,11 +411,11 @@ mod tests {
         );
 
         assert_eq!(
-            SqsSourcePlan::require_queue_url("orders", Some("queue-url".to_string()))
+            SqsSource::require_queue_url("orders", Some("queue-url".to_string()))
                 .expect("a returned queue URL should be accepted"),
             "queue-url"
         );
-        let no_url = SqsSourcePlan::require_queue_url("orders", None)
+        let no_url = SqsSource::require_queue_url("orders", None)
             .expect_err("a successful response without a queue URL must fail");
         assert!(matches!(
             no_url.current_context(),
