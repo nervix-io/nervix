@@ -1254,6 +1254,11 @@ test-coverage-backup-packages:
         --package nervix-client-wire --package nervix-consensus --package nervix-interconnect \
         --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-primitives
 
+# Add the unit tests of one workspace package to the instrumented profile, such as a connector crate
+# whose patch the scenario suite exercises only in part.
+test-coverage-package-lib package *args:
+    cargo llvm-cov --no-report --lib --package {{ package }} {{ args }}
+
 # Extend an existing instrumented profile with focused public regressions after a correction.
 test-coverage-scenario-filter feature filter:
     #!/usr/bin/env bash
