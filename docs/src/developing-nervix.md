@@ -243,6 +243,15 @@ For repository-wide validation:
 just validate
 ```
 
+The `checks`, `tests`, and `scenarios` CI jobs install the Go formatters through
+`scripts/install_go_ci_tool.py`: dockerfmt is pinned to v0.5.4 and ghokin to v3.9.0. The installer
+uses Go 1.26 in each job, keeps the public Go checksum database enabled, and disallows an implicit
+toolchain download. It retries only a transport failure while reading that database, at most three
+attempts within eight minutes. A checksum mismatch, compiler failure, or invalid module version
+fails on the first attempt. Each attempt is retained in the job's
+`go-tool-bootstrap-<job>` artifact. Run `just test-go-ci-tool` to exercise the classifier and
+workflow wiring without network access.
+
 CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
 `just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
 Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to select another

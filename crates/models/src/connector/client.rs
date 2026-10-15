@@ -34,8 +34,8 @@ use crate::{
     AckWindow, AlterIngestorError, AlterIngestorOperation, CanonicalNsplError, ClientName,
     CreateIngestor, EmitSinkCapabilities, EmitterBatchRequirement, EmitterPublishingMode,
     IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration, IngestorEntityModel,
-    IngestorInput, RetryPolicy, SchemaName, SinkBody, SinkEntity, SinkReference, SourceEntity,
-    SourceMetadataScope, SourceReferenceKind,
+    IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody, SinkEntity, SinkReference,
+    SourceEntity, SourceMetadataScope, SourceReferenceKind,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -79,6 +79,7 @@ impl SourceEntity for ClientProducerSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Schema,
+        position_class: PositionClass::None,
     };
 }
 

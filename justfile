@@ -2332,7 +2332,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-com
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2433,7 +2433,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2597,6 +2597,16 @@ validate-nspl-docs:
 # Check the shared R2 configuration used by native CI jobs and Docker builds.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
+
+# Exercise the pinned Go formatter bootstrap and its CI wiring without network access.
+test-go-ci-tool:
+    python3 -m unittest scripts.tests.test_go_ci_tool
+
+# Measure the installer's Python lines separately from Rust's ordinary LCOV.
+coverage-go-ci-tool:
+    mkdir -p target/go-ci-tool
+    COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
+    COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
 test-docs: typed-ratchet-source-build
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
