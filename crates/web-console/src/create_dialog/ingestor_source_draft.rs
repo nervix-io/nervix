@@ -14,22 +14,22 @@
 
 use std::num::NonZeroU64;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    ChannelName, ClientName, ClientSourceEntity, ConsumerGroupName, DomainClockPeriod,
-    EndpointEndpointSource, EndpointIngestMode, EndpointName, EndpointSource, EndpointSourceEntity,
-    HttpRequestSource, HttpSource, HttpSourceEntity, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestSourceKind, KafkaIngestMode, KafkaOffsetMode, KafkaSource,
-    KafkaSourceEntity, KafkaTopicSource, ModelName, MqttIngestMode, MqttQos, MqttSession,
-    MqttSource, MqttSourceEntity, MqttTopicSource, NatsIngestMode, NatsSource, NatsSourceEntity,
-    NatsSubjectSource, NodeRef, PrometheusQuerySource, PrometheusSource, PrometheusSourceEntity,
-    PulsarSource, PulsarSourceEntity, PulsarSubscriptionName, PulsarTopicSource, QueueGroupName,
-    QueueName, RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RabbitMqSourceEntity,
-    RedisPubSubIngestMode, RedisPubSubSource, RedisSource, RedisSourceEntity, RetryPolicy,
-    SqsIngestMode, SqsQueueSource, SqsSource, SqsSourceEntity, SubjectName, SyslogListenerSource,
-    SyslogSource, SyslogSourceEntity, TopicName, WebsocketsConnectionSource, WebsocketsIngestMode,
-    WebsocketsSource, WebsocketsSourceEntity, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
-    ZeroMqSourceEntity,
+    ClientName, ClientSourceEntity, DomainClockPeriod, EndpointIngestMode, EndpointName,
+    HttpEndpointSource, HttpRequestIngestMode, HttpRequestSource, HttpSourceEntity,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestSourceKind,
+    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSourceEntity, KafkaTopicName,
+    KafkaTopicSource, ModelName, MqttIngestMode, MqttQos, MqttSession, MqttSourceEntity,
+    MqttTopicFilter, MqttTopicSource, NatsIngestMode, NatsQueueGroupName, NatsSourceEntity,
+    NatsSubjectName, NatsSubjectSource, NodeRef, PrometheusIngestMode, PrometheusQuerySource,
+    PrometheusSourceEntity, PulsarSourceEntity, PulsarSubscriptionName, PulsarTopicName,
+    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueName, RabbitMqQueueSource,
+    RabbitMqSourceEntity, RedisChannelName, RedisPubSubIngestMode, RedisPubSubSource,
+    RedisSourceEntity, RetryPolicy, SqsIngestMode, SqsQueueName, SqsQueueSource, SqsSourceEntity,
+    SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity, WebsocketsConnectionSource,
+    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode,
+    ZeroMqPullSource, ZeroMqSourceEntity,
 };
 use thiserror::Error;
 
@@ -39,8 +39,7 @@ use super::SelectedReference;
 pub(super) enum DeliveryChoice {
     AckSequential,
     AckParallel,
-    NoAckSequential,
-    NoAckParallel,
+    NoAck,
 }
 
 impl DeliveryChoice {
@@ -48,8 +47,7 @@ impl DeliveryChoice {
         match self {
             Self::AckSequential => "ack-sequential",
             Self::AckParallel => "ack-parallel",
-            Self::NoAckSequential => "no-ack-sequential",
-            Self::NoAckParallel => "no-ack-parallel",
+            Self::NoAck => "no-ack",
         }
     }
 
@@ -57,8 +55,7 @@ impl DeliveryChoice {
         match self {
             Self::AckSequential => "ACK SEQUENTIAL",
             Self::AckParallel => "ACK PARALLEL",
-            Self::NoAckSequential => "NO_ACK SEQUENTIAL",
-            Self::NoAckParallel => "NO_ACK PARALLEL",
+            Self::NoAck => "NO ACK",
         }
     }
 
@@ -166,6 +163,14 @@ impl IngestSourceDraft {
         }
     }
 
+    /// Whether the chosen pair reads an endpoint this cluster serves rather than a client.
+    pub(super) fn reads_endpoint(&self) -> bool {
+        let Some(kind) = self.kind else {
+            return false;
+        };
+        kind.capabilities().reference.endpoint_type().is_some()
+    }
+
     pub(super) fn current_reference(&self) -> Option<&ModelName> {
         self.reference
             .as_ref()
@@ -180,11 +185,10 @@ impl IngestSourceDraft {
             ) => &[
                 DeliveryChoice::AckSequential,
                 DeliveryChoice::AckParallel,
-                DeliveryChoice::NoAckParallel,
+                DeliveryChoice::NoAck,
             ],
             Some(IngestSourceKind::Mqtt(MqttSourceEntity::Topic)) => &[
-                DeliveryChoice::NoAckSequential,
-                DeliveryChoice::NoAckParallel,
+                DeliveryChoice::NoAck,
                 DeliveryChoice::AckSequential,
                 DeliveryChoice::AckParallel,
             ],
@@ -193,19 +197,17 @@ impl IngestSourceDraft {
                 | IngestSourceKind::Sqs(SqsSourceEntity::Queue),
             ) => &[DeliveryChoice::AckSequential],
             Some(
-                IngestSourceKind::Nats(NatsSourceEntity::Subject)
+                IngestSourceKind::Http(HttpSourceEntity::Request | HttpSourceEntity::Endpoint)
+                | IngestSourceKind::Nats(NatsSourceEntity::Subject)
                 | IngestSourceKind::Redis(RedisSourceEntity::PubSub)
+                | IngestSourceKind::Prometheus(PrometheusSourceEntity::Query)
                 | IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull)
-                | IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint)
-                | IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection)
+                | IngestSourceKind::Websockets(
+                    WebsocketsSourceEntity::Connection | WebsocketsSourceEntity::Endpoint,
+                )
                 | IngestSourceKind::Syslog(SyslogSourceEntity::Listener),
-            ) => &[DeliveryChoice::NoAckSequential],
-            Some(
-                IngestSourceKind::Client(ClientSourceEntity::Producer)
-                | IngestSourceKind::Http(HttpSourceEntity::Request)
-                | IngestSourceKind::Prometheus(PrometheusSourceEntity::Query),
-            )
-            | None => &[],
+            ) => &[DeliveryChoice::NoAck],
+            Some(IngestSourceKind::Client(ClientSourceEntity::Producer)) | None => &[],
         }
     }
 
@@ -239,9 +241,10 @@ impl IngestSourceDraft {
                 IngestSourceKind::Http(HttpSourceEntity::Request)
                 | IngestSourceKind::Prometheus(PrometheusSourceEntity::Query),
             ) => &[QuiesceChoice::Suspend, QuiesceChoice::Buffer],
-            Some(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint)) => {
-                &[QuiesceChoice::Reject, QuiesceChoice::Buffer]
-            }
+            Some(
+                IngestSourceKind::Http(HttpSourceEntity::Endpoint)
+                | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint),
+            ) => &[QuiesceChoice::Reject, QuiesceChoice::Buffer],
             Some(IngestSourceKind::Client(ClientSourceEntity::Producer)) | None => &[],
         }
     }
@@ -261,132 +264,133 @@ impl IngestSourceDraft {
                 IngestSourceDraftError::Reference
             }));
         }
-        let quiesce = self.build_quiesce(kind)?;
-        let source = match kind {
+        let quiesce = self.build_quiesce()?;
+        let source: IngestSource = match kind {
             IngestSourceKind::Client(ClientSourceEntity::Producer) => {
                 return Err(Report::new(IngestSourceDraftError::ClientSource));
             }
-            IngestSourceKind::Http(HttpSourceEntity::Request) => {
-                IngestSource::Http(HttpSource::Request(HttpRequestSource {
-                    client: self.client()?,
-                    every: self.every()?,
-                    quiesce,
-                }))
+            IngestSourceKind::Http(HttpSourceEntity::Request) => HttpRequestSource {
+                client: self.client()?,
+                every: self.every()?,
+                mode: HttpRequestIngestMode::NoAck,
+                quiesce,
             }
-            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => {
-                IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
-                    client: self.client()?,
-                    topic: TopicName::parse(self.topic.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Topic))?,
-                    offset_mode: self.offset_mode()?,
-                    instances: self.instances()?,
-                    mode: self.kafka_mode()?,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => HttpEndpointSource {
+                endpoint: self.endpoint()?,
+                mode: EndpointIngestMode::NoAck,
+                quiesce,
             }
-            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => {
-                IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
-                    client: self.client()?,
-                    topic: TopicName::parse(self.topic.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Topic))?,
-                    subscription: PulsarSubscriptionName::parse(self.subscription.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Subscription))?,
-                    instances: self.instances()?,
-                    mode: self.kafka_mode()?,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => KafkaTopicSource {
+                client: self.client()?,
+                topic: KafkaTopicName::parse(&self.topic)
+                    .change_context(IngestSourceDraftError::Topic)?,
+                offset_mode: self.offset_mode()?,
+                instances: self.instances()?,
+                mode: self.kafka_mode()?,
+                quiesce,
             }
-            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => {
-                IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
-                    client: self.client()?,
-                    topic: self.required(&self.topic, IngestSourceDraftError::Topic)?,
-                    instances: self.instances()?,
-                    mode: self.mqtt_mode()?,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => PulsarTopicSource {
+                client: self.client()?,
+                topic: PulsarTopicName::parse(&self.topic)
+                    .change_context(IngestSourceDraftError::Topic)?,
+                subscription: PulsarSubscriptionName::parse(&self.subscription)
+                    .change_context(IngestSourceDraftError::Subscription)?,
+                instances: self.instances()?,
+                mode: self.kafka_mode()?,
+                quiesce,
             }
-            IngestSourceKind::Nats(NatsSourceEntity::Subject) => {
-                IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
-                    client: self.client()?,
-                    subject: SubjectName::parse(self.subject.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Subject))?,
-                    queue_group: QueueGroupName::parse(self.queue_group.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::QueueGroup))?,
-                    instances: self.instances()?,
-                    mode: NatsIngestMode::NoAckSequential,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => MqttTopicSource {
+                client: self.client()?,
+                topic: MqttTopicFilter::parse(&self.topic)
+                    .change_context(IngestSourceDraftError::Topic)?,
+                instances: self.instances()?,
+                mode: self.mqtt_mode()?,
+                quiesce,
             }
-            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => {
-                IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
-                    client: self.client()?,
-                    queue: QueueName::parse(self.queue.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Queue))?,
-                    instances: self.instances()?,
-                    mode: RabbitMqIngestMode::AckSequential {
-                        timeout: self.ack_timeout()?,
-                        retry_policy: self.retry_policy()?,
-                    },
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Nats(NatsSourceEntity::Subject) => NatsSubjectSource {
+                client: self.client()?,
+                subject: NatsSubjectName::parse(&self.subject)
+                    .change_context(IngestSourceDraftError::Subject)?,
+                queue_group: NatsQueueGroupName::parse(&self.queue_group)
+                    .change_context(IngestSourceDraftError::QueueGroup)?,
+                instances: self.instances()?,
+                mode: NatsIngestMode::NoAck,
+                quiesce,
             }
-            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => {
-                IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
-                    client: self.client()?,
-                    channel: ChannelName::parse(self.channel.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Channel))?,
-                    mode: RedisPubSubIngestMode::NoAckSequential,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => RabbitMqQueueSource {
+                client: self.client()?,
+                queue: RabbitMqQueueName::parse(&self.queue)
+                    .change_context(IngestSourceDraftError::Queue)?,
+                instances: self.instances()?,
+                mode: RabbitMqIngestMode::AckSequential {
+                    timeout: self.ack_timeout()?,
+                    retry_policy: self.retry_policy()?,
+                },
+                quiesce,
             }
-            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
-                IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
-                    client: self.client()?,
-                    query: self.required(&self.query, IngestSourceDraftError::Query)?,
-                    every: self.every()?,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => RedisPubSubSource {
+                client: self.client()?,
+                channel: RedisChannelName::parse(&self.channel)
+                    .change_context(IngestSourceDraftError::Channel)?,
+                mode: RedisPubSubIngestMode::NoAck,
+                quiesce,
             }
-            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => {
-                IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                    client: self.client()?,
-                    mode: ZeroMqIngestMode::NoAckSequential,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => PrometheusQuerySource {
+                client: self.client()?,
+                query: self.required(&self.query, IngestSourceDraftError::Query)?,
+                every: self.every()?,
+                mode: PrometheusIngestMode::NoAck,
+                quiesce,
             }
-            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => {
-                IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
-                    client: self.client()?,
-                    queue: QueueName::parse(self.queue.trim())
-                        .map_err(|_| Report::new(IngestSourceDraftError::Queue))?,
-                    instances: self.instances()?,
-                    mode: SqsIngestMode::AckSequential {
-                        timeout: self.ack_timeout()?,
-                        retry_policy: self.retry_policy()?,
-                    },
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => ZeroMqPullSource {
+                client: self.client()?,
+                mode: ZeroMqIngestMode::NoAck,
+                quiesce,
             }
-            IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint) => {
-                IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
-                    endpoint: self.endpoint()?,
-                    mode: EndpointIngestMode::NoAckSequential,
-                    quiesce,
-                }))
+            .into(),
+            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => SqsQueueSource {
+                client: self.client()?,
+                queue: SqsQueueName::parse(&self.queue)
+                    .change_context(IngestSourceDraftError::Queue)?,
+                instances: self.instances()?,
+                mode: SqsIngestMode::AckSequential {
+                    timeout: self.ack_timeout()?,
+                    retry_policy: self.retry_policy()?,
+                },
+                quiesce,
             }
+            .into(),
             IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
-                IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
+                WebsocketsConnectionSource {
                     client: self.client()?,
-                    mode: WebsocketsIngestMode::NoAckSequential,
+                    mode: WebsocketsIngestMode::NoAck,
                     quiesce,
-                }))
+                }
+                .into()
             }
-            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
-                IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
-                    client: self.client()?,
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+                WebsocketsEndpointSource {
+                    endpoint: self.endpoint()?,
+                    mode: EndpointIngestMode::NoAck,
                     quiesce,
-                }))
+                }
+                .into()
             }
+            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => SyslogListenerSource {
+                client: self.client()?,
+                mode: SyslogIngestMode::NoAck,
+                quiesce,
+            }
+            .into(),
         };
         if !source.supports_quiesce(source.quiesce()) {
             return Err(Report::new(IngestSourceDraftError::UnsupportedQuiesce));
@@ -445,8 +449,8 @@ impl IngestSourceDraft {
         match self.offset {
             Some(OffsetChoice::Domain) => Ok(KafkaOffsetMode::Domain),
             Some(OffsetChoice::ConsumerGroup) => Ok(KafkaOffsetMode::ConsumerGroup(
-                ConsumerGroupName::parse(self.consumer_group.trim())
-                    .map_err(|_| Report::new(IngestSourceDraftError::ConsumerGroup))?,
+                KafkaConsumerGroupName::parse(&self.consumer_group)
+                    .change_context(IngestSourceDraftError::ConsumerGroup)?,
             )),
             None => Err(Report::new(IngestSourceDraftError::Offset)),
         }
@@ -483,27 +487,21 @@ impl IngestSourceDraft {
                 timeout: self.ack_timeout()?,
                 retry_policy: self.retry_policy()?,
             }),
-            Some(DeliveryChoice::NoAckParallel) => Ok(KafkaIngestMode::NoAckParallel),
-            Some(DeliveryChoice::NoAckSequential) | None => {
-                Err(Report::new(IngestSourceDraftError::Mode))
-            }
+            Some(DeliveryChoice::NoAck) => Ok(KafkaIngestMode::NoAck),
+            None => Err(Report::new(IngestSourceDraftError::Mode)),
         }
     }
 
     fn mqtt_mode(&self) -> error_stack::Result<MqttIngestMode, IngestSourceDraftError> {
         match self.delivery {
-            Some(DeliveryChoice::NoAckSequential | DeliveryChoice::NoAckParallel) => {
+            Some(DeliveryChoice::NoAck) => {
                 let session = self
                     .mqtt_session
                     .ok_or_else(|| Report::new(IngestSourceDraftError::MqttSession))?;
                 let qos = self
                     .mqtt_qos
                     .ok_or_else(|| Report::new(IngestSourceDraftError::MqttQos))?;
-                if self.delivery == Some(DeliveryChoice::NoAckSequential) {
-                    Ok(MqttIngestMode::NoAckSequential { session, qos })
-                } else {
-                    Ok(MqttIngestMode::NoAckParallel { session, qos })
-                }
+                Ok(MqttIngestMode::NoAck { session, qos })
             }
             Some(DeliveryChoice::AckSequential | DeliveryChoice::AckParallel) => {
                 if self.mqtt_session != Some(MqttSession::Persistent)
@@ -530,10 +528,7 @@ impl IngestSourceDraft {
         }
     }
 
-    fn build_quiesce(
-        &self,
-        kind: IngestSourceKind,
-    ) -> error_stack::Result<IngestQuiesceMode, IngestSourceDraftError> {
+    fn build_quiesce(&self) -> error_stack::Result<IngestQuiesceMode, IngestSourceDraftError> {
         let choice = self
             .quiesce
             .ok_or_else(|| Report::new(IngestSourceDraftError::Quiesce))?;
@@ -550,7 +545,9 @@ impl IngestSourceDraft {
             QuiesceChoice::Buffer => {
                 let max_size =
                     self.required(&self.buffer_size, IngestSourceDraftError::BufferSize)?;
-                if kind == IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint) {
+                // An endpoint holds what arrives in a bounded buffer and has no older message to
+                // drop, so its buffer names no overflow.
+                if self.reads_endpoint() {
                     Ok(IngestQuiesceMode::EndpointBuffer { max_size })
                 } else {
                     let overflow = self
@@ -633,10 +630,10 @@ pub(super) enum IngestSourceDraftError {
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
-        CodecName, CreateStatement, EndpointSourceEntity, GeneralErrorPolicy,
-        IngestQuiesceOverflow, IngestSourceKind, KafkaSourceEntity, Model, ModelKind, ModelName,
-        MqttQos, MqttSession, MqttSourceEntity, NatsSourceEntity, NodeRef, PulsarSourceEntity,
-        RedisSourceEntity, RequestedResourceVersion, Statement, WebsocketsSourceEntity,
+        CodecName, CreateStatement, GeneralErrorPolicy, HttpSourceEntity, IngestQuiesceOverflow,
+        IngestSourceKind, KafkaSourceEntity, Model, ModelKind, ModelName, MqttQos, MqttSession,
+        MqttSourceEntity, NatsSourceEntity, NodeRef, PulsarSourceEntity, RedisSourceEntity,
+        RequestedResourceVersion, Statement, WebsocketsSourceEntity,
     };
     use nervix_nspl::statement::parse_statement;
 
@@ -667,8 +664,8 @@ mod tests {
         draft.offset = Some(OffsetChoice::Domain);
         draft.delivery = Some(match kind {
             IngestSourceKind::Kafka(KafkaSourceEntity::Topic)
-            | IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => DeliveryChoice::NoAckParallel,
-            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => DeliveryChoice::NoAckSequential,
+            | IngestSourceKind::Pulsar(PulsarSourceEntity::Topic)
+            | IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => DeliveryChoice::NoAck,
             _ => DeliveryChoice::AckSequential,
         });
         draft.ack_max = "2".into();
@@ -679,7 +676,10 @@ mod tests {
         draft.mqtt_session = Some(MqttSession::Clean);
         draft.mqtt_qos = Some(MqttQos::AtMostOnce);
         draft.quiesce = Some(match kind {
-            IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint) => QuiesceChoice::Reject,
+            IngestSourceKind::Http(HttpSourceEntity::Endpoint)
+            | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+                QuiesceChoice::Reject
+            }
             IngestSourceKind::Nats(NatsSourceEntity::Subject)
             | IngestSourceKind::Redis(RedisSourceEntity::PubSub)
             | IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
@@ -747,7 +747,7 @@ mod tests {
         draft.mqtt_session = Some(MqttSession::Persistent);
         draft.mqtt_qos = Some(MqttQos::AtLeastOnce);
         assert!(draft.build().is_ok());
-        draft.delivery = Some(DeliveryChoice::NoAckSequential);
+        draft.delivery = Some(DeliveryChoice::NoAck);
         draft.mqtt_session = Some(MqttSession::Clean);
         assert!(draft.build().is_err());
     }
@@ -776,7 +776,7 @@ mod tests {
         let mut kafka = complete(IngestSourceKind::Kafka(KafkaSourceEntity::Topic));
         kafka.quiesce = Some(QuiesceChoice::Buffer);
         assert!(kafka.build().is_err());
-        let mut endpoint = complete(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint));
+        let mut endpoint = complete(IngestSourceKind::Http(HttpSourceEntity::Endpoint));
         endpoint.quiesce = Some(QuiesceChoice::Drop);
         assert!(endpoint.build().is_err());
     }
@@ -786,7 +786,7 @@ mod tests {
         let mut draft = complete(IngestSourceKind::Kafka(KafkaSourceEntity::Topic));
         draft.invalidate_references();
         assert!(draft.build().is_err());
-        draft.choose_kind(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint));
+        draft.choose_kind(IngestSourceKind::Http(HttpSourceEntity::Endpoint));
         assert!(draft.reference.is_none());
         assert!(draft.topic.is_empty());
         assert!(draft.quiesce.is_none());

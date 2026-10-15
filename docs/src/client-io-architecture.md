@@ -1,11 +1,11 @@
 # Client Ingestors And Emitters
 
 Authenticated applications participate in a Nervix graph through persisted, domain-owned
-`FROM CLIENT` ingestors and `TO CLIENT` emitters. Producers submit native Arrow batches; consumers
-receive constructed Arrow output and explicitly acknowledge, retry, or reject each delivery
-attempt. An attached client-to-client path completes its input only after the application ACK.
-Endpoint configuration survives a restart. Payloads, attachments, delivery attempts and ACK state
-are volatile, so applications own replayable input and idempotent effects.
+`CLIENT PRODUCER` ingestors and `TO CLIENT` emitters. Producers submit native Arrow batches;
+consumers receive constructed Arrow output and explicitly acknowledge, retry, or reject each
+delivery attempt. An attached client-to-client path completes its input only after the application
+ACK. Endpoint configuration survives a restart. Payloads, attachments, delivery attempts and ACK
+state are volatile, so applications own replayable input and idempotent effects.
 
 The native endpoints, automatic restoration, shared C binding, and Rust/Python paced drivers are
 implemented. This chapter connects their delivered contracts. The following chapters remain the
@@ -45,7 +45,7 @@ The data plane executes plans without reading Models or reparsing executable NSP
 | Layer | Responsibility on this path |
 | --- | --- |
 | Vocabulary | Schemas, domain generations, endpoint contracts, typed attachment/delivery identities, limits and outcomes |
-| Language | Current `CLIENT` grammar, semantic Models, canonical rendering and composed completion |
+| Language | `CLIENT PRODUCER INGESTOR` and `TO CLIENT` grammar, semantic Models, canonical rendering and composed completion |
 | Decisions | Validate the candidate graph and produce typed source, route, sink and message-error plans |
 | Data plane | One ingestor endpoint/admission owner; concrete branch route tasks; relay ownership; emitter host and competing-consumer attempt owner |
 | Control plane | Commit configuration, install revisions, establish generations, coordinate scoped holds and ownership handoff |
@@ -132,8 +132,8 @@ CREATE BRANCH by_tenant SCHEMA tenant_key TTL 10m;
 CREATE RELAY application_events
   SCHEMA application_event BRANCHED BY by_tenant CAPACITY 16;
 
-CREATE INGESTOR submit_events
-  FROM CLIENT SCHEMA application_event
+CREATE CLIENT PRODUCER INGESTOR submit_events
+  FROM SCHEMA application_event
     MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 100ms MAX 2s
     ON QUIESCE SUSPEND
@@ -621,8 +621,8 @@ same-generation reopening with buffered input:
 
 ```nspl
 BEGIN;
-ALTER INGESTOR simulated_readings
-  SET FROM CLIENT SCHEMA reading
+ALTER CLIENT PRODUCER INGESTOR simulated_readings
+  SET FROM SCHEMA reading
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 100ms MAX 2s
     ON QUIESCE SUSPEND;

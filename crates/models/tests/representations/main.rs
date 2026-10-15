@@ -3,8 +3,8 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** The Bolero properties over the vocabulary's text, serde and archived forms: names,
-//!   timestamps, domain-clock values, JSON paths, batch limits, identities, and whole Models and
-//!   statements as they are archived. Each form has a round-trip property over its valid domain
+//!   external names, timestamps, domain-clock values, JSON paths, batch limits, identities, and
+//!   whole Models and statements as they are archived. Each form has a round-trip property over its valid domain
 //!   and, where its input can be malformed, a separate property over arbitrary input.
 //! - **Depends on.** The vocabulary and the generators of `nervix-arbitrary`.
 //! - **Must not know.** The language, persistence owners above the vocabulary, or runtime state.
@@ -16,6 +16,7 @@
 
 mod batch_limits;
 mod domain_clock;
+mod external_names;
 mod identities;
 mod json_paths;
 mod models;

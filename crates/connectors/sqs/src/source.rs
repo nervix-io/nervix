@@ -38,7 +38,7 @@ use nervix_connector::{
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, QueueName};
+use nervix_models::{ClientConfigEntry, SqsQueueName};
 use thiserror::Error;
 
 use crate::connection::{FailedRequest, SqsTrust};
@@ -82,7 +82,7 @@ impl SqsSourcePlan {
     /// `dns`, and the URL of `queue`, which must already exist.
     pub async fn connect(
         config: &[ClientConfigEntry],
-        queue: &QueueName,
+        queue: &SqsQueueName,
         dns: DnsResolver,
     ) -> SqsSourceResult<Self> {
         let client = Self::client_from_config(config, dns).await?;

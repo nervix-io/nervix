@@ -52,17 +52,17 @@ Feature: Positive count settings
       """
     And these NSPL commands fail with "instances must be greater than 0"
       """
-      CREATE INGESTOR no_instances
-        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP counts INSTANCES 0
-          MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR no_instances
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' INSTANCES 0
+          MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And these NSPL commands fail with "parallel max in-flight must be greater than zero"
       """
-      CREATE INGESTOR empty_ack_window
-        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP counts
+      CREATE KAFKA TOPIC INGESTOR empty_ack_window
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts'
           MODE ACK PARALLEL MAX 0 BATCH TIMEOUT 1s ACK TIMEOUT 1s
           RETRY POLICY BACKOFF 10ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec

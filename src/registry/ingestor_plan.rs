@@ -25,17 +25,17 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerPolicy,
-    ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, ConsumerGroupName,
-    CreateIngestor, CreateSchema, DomainName, EndpointEndpointSource, EndpointName, EndpointSource,
-    FlushPolicy, HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
-    KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model,
-    ModelName, MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
-    PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource,
-    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
-    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
-    WebsocketsConnectionSource, WebsocketsSource, ZeroMqPullSource, ZeroMqSource,
+    ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, CreateIngestor,
+    CreateSchema, DomainName, EndpointName, FlushPolicy, HttpEndpointSource, HttpRequestSource,
+    HttpSource, IngestAcknowledgement, IngestQuiesceMode, IngestSource, IngestSourceKind,
+    IngestTimestampSource, IngestorInput, IngestorName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaSource, KafkaTopicSource, MessageErrorOperation, Model, ModelName, MqttIngestMode,
+    MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource, PrometheusQuerySource,
+    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
+    RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource, ResolvedBranching,
+    ScheduledNode, SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, SqsQueueSource,
+    SqsSource, SyslogListenerSource, SyslogSource, WebsocketsConnectionSource,
+    WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource, ZeroMqSource,
     parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
@@ -141,7 +141,7 @@ client_plan!(HttpIngestorStartPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KafkaOffsetPlan {
     /// The broker keeps them for this consumer group.
-    ConsumerGroup(ConsumerGroupName),
+    ConsumerGroup(nervix_models::KafkaConsumerGroupName),
     /// The domain keeps them as node-owned state, originated by the scheduled primary.
     Domain(KafkaDomainOffsetPlacement),
 }
@@ -154,35 +154,35 @@ pub(crate) struct KafkaDomainOffsetPlacement {
 }
 
 client_plan!(KafkaIngestorStartPlan {
-    topic: nervix_models::TopicName,
+    topic: nervix_models::KafkaTopicName,
     offsets: KafkaOffsetPlan,
     instances: NonZeroU64,
     mode: KafkaIngestMode,
 });
 client_plan!(PulsarIngestorStartPlan {
-    topic: nervix_models::TopicName,
+    topic: nervix_models::PulsarTopicName,
     subscription: nervix_models::PulsarSubscriptionName,
     instances: NonZeroU64,
     mode: PulsarIngestMode,
 });
 client_plan!(MqttIngestorStartPlan {
-    topic: String,
+    topic: nervix_models::MqttTopicFilter,
     instances: NonZeroU64,
     mode: MqttIngestMode,
 });
 client_plan!(NatsIngestorStartPlan {
-    subject: nervix_models::SubjectName,
-    queue_group: nervix_models::QueueGroupName,
+    subject: nervix_models::NatsSubjectName,
+    queue_group: nervix_models::NatsQueueGroupName,
     instances: NonZeroU64,
     mode: nervix_models::NatsIngestMode,
 });
 client_plan!(RabbitMqIngestorStartPlan {
-    queue: nervix_models::QueueName,
+    queue: nervix_models::RabbitMqQueueName,
     instances: NonZeroU64,
     mode: RabbitMqIngestMode,
 });
 client_plan!(RedisPubSubIngestorStartPlan {
-    channel: nervix_models::ChannelName,
+    channel: nervix_models::RedisChannelName,
     mode: nervix_models::RedisPubSubIngestMode,
 });
 client_plan!(PrometheusIngestorStartPlan {
@@ -193,7 +193,7 @@ client_plan!(ZeroMqIngestorStartPlan {
     mode: nervix_models::ZeroMqIngestMode,
 });
 client_plan!(SqsIngestorStartPlan {
-    queue: nervix_models::QueueName,
+    queue: nervix_models::SqsQueueName,
     instances: NonZeroU64,
     mode: SqsIngestMode,
 });
@@ -766,7 +766,12 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+                IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                    endpoint: expected,
+                    mode,
+                    ..
+                }))
+                | IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
                     endpoint: expected,
                     mode,
                     ..
@@ -937,6 +942,7 @@ mod tests {
             source: IngestSource::Http(HttpSource::Request(HttpRequestSource {
                 client: named("upstream"),
                 every: cadence(),
+                mode: nervix_models::HttpRequestIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientHttp(CreateClientHttp {
@@ -959,7 +965,7 @@ mod tests {
                 topic: named("events"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(named("nervix")),
                 instances: nonzero!(1u64),
-                mode: KafkaIngestMode::NoAckParallel,
+                mode: KafkaIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientKafka(CreateClientKafka {
@@ -972,7 +978,7 @@ mod tests {
                 topic: named("events"),
                 offsets: KafkaOffsetPlan::ConsumerGroup(named("nervix")),
                 instances: nonzero!(1u64),
-                mode: KafkaIngestMode::NoAckParallel,
+                mode: KafkaIngestMode::NoAck,
             }),
             reads_headers: true,
         }
@@ -985,7 +991,7 @@ mod tests {
                 topic: named("events"),
                 subscription: named("nervix"),
                 instances: nonzero!(1u64),
-                mode: PulsarIngestMode::NoAckParallel,
+                mode: PulsarIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientPulsar(CreateClientPulsar {
@@ -998,14 +1004,14 @@ mod tests {
                 topic: named("events"),
                 subscription: named("nervix"),
                 instances: nonzero!(1u64),
-                mode: PulsarIngestMode::NoAckParallel,
+                mode: PulsarIngestMode::NoAck,
             }),
             reads_headers: true,
         }
     }
 
     fn mqtt_mode() -> MqttIngestMode {
-        MqttIngestMode::NoAckSequential {
+        MqttIngestMode::NoAck {
             session: MqttSession::Clean,
             qos: MqttQos::AtMostOnce,
         }
@@ -1015,7 +1021,8 @@ mod tests {
         SourceCase {
             source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                 client: named("upstream"),
-                topic: "events/#".to_string(),
+                topic: nervix_models::MqttTopicFilter::parse("events/#")
+                    .expect("valid topic filter"),
                 instances: nonzero!(1u64),
                 mode: mqtt_mode(),
                 quiesce: IngestQuiesceMode::Drop,
@@ -1027,7 +1034,8 @@ mod tests {
             }),
             plan: SourceStartPlan::Mqtt(MqttIngestorStartPlan {
                 client: client(),
-                topic: "events/#".to_string(),
+                topic: nervix_models::MqttTopicFilter::parse("events/#")
+                    .expect("valid topic filter"),
                 instances: nonzero!(1u64),
                 mode: mqtt_mode(),
             }),
@@ -1042,7 +1050,7 @@ mod tests {
                 subject: named("events"),
                 queue_group: named("nervix"),
                 instances: nonzero!(1u64),
-                mode: nervix_models::NatsIngestMode::NoAckSequential,
+                mode: nervix_models::NatsIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientNats(CreateClientNats {
@@ -1055,7 +1063,7 @@ mod tests {
                 subject: named("events"),
                 queue_group: named("nervix"),
                 instances: nonzero!(1u64),
-                mode: nervix_models::NatsIngestMode::NoAckSequential,
+                mode: nervix_models::NatsIngestMode::NoAck,
             }),
             reads_headers: true,
         }
@@ -1097,7 +1105,7 @@ mod tests {
             source: IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
                 client: named("upstream"),
                 channel: named("events"),
-                mode: nervix_models::RedisPubSubIngestMode::NoAckSequential,
+                mode: nervix_models::RedisPubSubIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             })),
             source_model: Model::ClientRedis(CreateClientRedis {
@@ -1109,7 +1117,7 @@ mod tests {
             plan: SourceStartPlan::RedisPubSub(RedisPubSubIngestorStartPlan {
                 client: client(),
                 channel: named("events"),
-                mode: nervix_models::RedisPubSubIngestMode::NoAckSequential,
+                mode: nervix_models::RedisPubSubIngestMode::NoAck,
             }),
             reads_headers: false,
         }
@@ -1121,6 +1129,7 @@ mod tests {
                 client: named("upstream"),
                 query: "up".to_string(),
                 every: cadence(),
+                mode: nervix_models::PrometheusIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientPrometheus(CreateClientPrometheus {
@@ -1141,7 +1150,7 @@ mod tests {
         SourceCase {
             source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                 client: named("upstream"),
-                mode: nervix_models::ZeroMqIngestMode::NoAckSequential,
+                mode: nervix_models::ZeroMqIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientZeroMq(CreateClientZeroMq {
@@ -1151,7 +1160,7 @@ mod tests {
             }),
             plan: SourceStartPlan::ZeroMq(ZeroMqIngestorStartPlan {
                 client: client(),
-                mode: nervix_models::ZeroMqIngestMode::NoAckSequential,
+                mode: nervix_models::ZeroMqIngestMode::NoAck,
             }),
             reads_headers: false,
         }
@@ -1190,9 +1199,9 @@ mod tests {
 
     fn endpoint_case() -> SourceCase {
         SourceCase {
-            source: IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+            source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
                 endpoint: named("upstream"),
-                mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                mode: nervix_models::EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
                 },
@@ -1206,7 +1215,7 @@ mod tests {
             }),
             plan: SourceStartPlan::Endpoint(EndpointIngestorStartPlan {
                 endpoint: named("upstream"),
-                mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                mode: nervix_models::EndpointIngestMode::NoAck,
             }),
             reads_headers: true,
         }
@@ -1217,7 +1226,7 @@ mod tests {
             source: IngestSource::Websockets(WebsocketsSource::Connection(
                 WebsocketsConnectionSource {
                     client: named("upstream"),
-                    mode: nervix_models::WebsocketsIngestMode::NoAckSequential,
+                    mode: nervix_models::WebsocketsIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 },
             )),
@@ -1229,7 +1238,7 @@ mod tests {
             }),
             plan: SourceStartPlan::Websockets(WebsocketsIngestorStartPlan {
                 client: client(),
-                mode: nervix_models::WebsocketsIngestMode::NoAckSequential,
+                mode: nervix_models::WebsocketsIngestMode::NoAck,
                 signaling_protocol: None,
             }),
             reads_headers: false,
@@ -1240,6 +1249,7 @@ mod tests {
         SourceCase {
             source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
                 client: named("upstream"),
+                mode: nervix_models::SyslogIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
             source_model: Model::ClientSyslog(CreateClientSyslog {
@@ -1304,7 +1314,7 @@ mod tests {
             topic: named("events"),
             offset_mode: KafkaOffsetMode::Domain,
             instances: nonzero!(2u64),
-            mode: KafkaIngestMode::NoAckParallel,
+            mode: KafkaIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         }));
         let domain = named::<DomainName>("sales");

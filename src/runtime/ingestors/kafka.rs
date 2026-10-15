@@ -166,7 +166,7 @@ struct KafkaPartitionWatch {
     inspector: TopicPartitionInspector,
     domain: DomainName,
     ingestor: IngestorName,
-    topic: nervix_models::TopicName,
+    topic: nervix_models::KafkaTopicName,
     events: RuntimeEvents,
     rebalance: watch::Sender<u64>,
 }

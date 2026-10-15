@@ -269,7 +269,10 @@ The vocabulary is the innermost owner, and its Model operations report the same 
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
 typed fields: the field, input relay, route target, or materialized dependency, or the stored and
-requested names when an alteration targets another Model. An input, route, or dependency operation
+requested names when an alteration targets another Model. An ingestor alteration whose head names
+another connector and entity than the stored ingestor reads is refused with both typed kinds, which
+its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
+KAFKA TOPIC INGESTOR cannot alter it`. An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
 conversion. Canonical NSPL rendering refuses only a value the language has no spelling for: a NaN or
@@ -668,21 +671,24 @@ sequenceDiagram
 
 ### Registry Validation And Planning
 
-Registry validation and planning refuse invalid models before graph activation. Validation names
-the owning node, the route when the rule is route-local, the operation, and relevant fields or
+Registry validation and planning refuse invalid models before graph activation. Validation names the
+owning node, the route when the rule is route-local, the operation, and relevant fields or
 references. A branch mismatch in an error route, for example, identifies the source route, error
 relay, and both branch declarations. A flush-based route without `FLUSH EACH` or `FLUSH IMMEDIATE`
 fails validation; the registry does not supply a cadence. The current registry reports this as an
-invalid-model failure naming the node and output in its diagnostic. Planning failures likewise
-retain the selected entity or placement so an operator can correct the request. A relocation the
-graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`: a member
-that does not exist names the domain and the member, a server-listener ingestor names the ingestor,
-a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides request
-different strategies lists every member of that group, and an override outside the unit names its
-member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. See [Control
-Plane](./control-plane.md) for activation and [Typed States And Validation
-Boundaries](./typed-states.md) for required state.
+invalid-model failure naming the node and output in its diagnostic. An ingestor whose body names a
+client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
+refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
+or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. Planning failures
+likewise retain the selected entity or placement so an operator can correct the request. A
+relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
+a member that does not exist names the domain and the member, a server-listener ingestor names the
+ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
+request different strategies lists every member of that group, and an override outside the unit
+names its member. The failed command renders the chain, such as `relocation plan failed: junction
+'chain_distant' is not part of the relocation`. See [Control Plane](./control-plane.md) for
+activation and [Typed States And Validation Boundaries](./typed-states.md) for required state.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before

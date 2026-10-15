@@ -137,8 +137,8 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 
 | Desired behavior | NSPL graph element |
 | --- | --- |
-| Decode an external feed and construct initial branches | `INGESTOR` |
-| Accept typed batches an application publishes and construct initial branches | `INGESTOR ... FROM CLIENT SCHEMA` |
+| Decode an external feed and construct initial branches | `<CONNECTOR> <ENTITY> INGESTOR`, such as `KAFKA TOPIC INGESTOR` |
+| Accept typed batches an application publishes and construct initial branches | `CLIENT PRODUCER INGESTOR ... FROM SCHEMA` |
 | Filter, transform, or fan out records without changing branch identity | `JUNCTION` |
 | Suppress repeated keys for a time bound | `DEDUPLICATOR` |
 | Order records by expressions within a time bound | `REORDERER` |
@@ -164,9 +164,10 @@ relay. Do not use them to scan across branches.
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
   whether or not it has materialized state. Treat coverage as path-gated, allow a valid
   zero-effect rule, use lower `RANK` numbers for stronger claims, and never invent hard separation.
-- Endpoint and Syslog ingestors follow live cluster membership because their listeners execute on
-  every cluster node. Every client-source ingestor, including an outbound WebSocket client, keeps
-  its existing live primary and replicas through ordinary schedule recomputation.
+- `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors follow live cluster
+  membership because their listeners execute on every cluster node. Every other ingestor, a
+  `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
+  schedule recomputation.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
@@ -178,8 +179,8 @@ relay. Do not use them to scan across branches.
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
-  use only `NO_ACK` source/sink modes, and configure TLS identity and framing for the client
-  direction that consumes it.
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO_ACK` on a syslog emitter, and
+  configure TLS identity and framing for the client direction that consumes it.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
@@ -261,27 +262,36 @@ relay. Do not use them to scan across branches.
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
-  `NO_ACK`.
+  an ingestor's `NO ACK` or an emitter's `NO_ACK`.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.
+- Every ingestor head names its connector and entity, such as `CREATE KAFKA TOPIC INGESTOR`, and
+  its body after `FROM` names no connector. Its client belongs to the head's connector, and an
+  `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint of `TYPE HTTP` or `TYPE WEBSOCKETS`.
+  Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
+  and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
+  reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
+- Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
+  channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
+  external system names it and within the rules of `Ingestors` → `External Names`.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
-  `RETRY AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT
-  QOS 1`. Do not mix mode bodies between source types or infer a default.
-- Every client ingestor declares `FROM CLIENT SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX
-  <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE SUSPEND` and nothing else as its
-  source: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO_ACK`. The schema is the exact
-  contract producers declare, including optionality and sensitivity, and a paced domain requires
-  its timestamp source. Changing its schema, mode, timestamp, filter, routes other than `FLUSH`, or
-  branch declarations ends attached producers. The Rust client may restore a producer handle with a
-  fresh attachment after a session gap or relocation only when the domain `START` generation and
-  endpoint contract still match; unresolved sent batches remain of unknown outcome. A row that
-  fails on a route follows that route's `ON MESSAGE ERROR` policy, so under `LOG` its whole batch
-  fails processing as `rejected`.
+  `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
+  PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+- Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
+  ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
+  SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The
+  schema is the exact contract producers declare, including optionality and sensitivity, and a
+  paced domain requires its timestamp source. Changing its schema, mode, timestamp, filter, routes
+  other than `FLUSH`, or branch declarations ends attached producers. The Rust client may restore a
+  producer handle with a fresh attachment after a session gap or relocation only when the domain
+  `START` generation and endpoint contract still match; unresolved sent batches remain of unknown
+  outcome. A row that fails on a route follows that route's `ON MESSAGE ERROR` policy, so under
+  `LOG` its whole batch fails processing as `rejected`.
 - Every client emitter declares `TO CLIENT SCHEMA <output_schema> MODE ACK SEQUENTIAL|ACK
   PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`, a required `BATCH` row and
   byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
@@ -367,10 +377,10 @@ Choose checks relevant to the configured graph:
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
-  with its owner and state, and a client ingestor's admission, producers, outstanding batches and
-  bytes, and admitted batches. A client emitter's description also counts active consumers,
-  forwarded credit and retained output, incomplete application batches, retries, ACKs and
-  rejections.
+  with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a
+  client ingestor's admission, producers, outstanding batches and bytes, and admitted batches. A
+  client emitter's description also counts active consumers, forwarded credit and retained output,
+  incomplete application batches, retries, ACKs and rejections.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports

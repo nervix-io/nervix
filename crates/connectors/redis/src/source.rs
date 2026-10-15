@@ -31,7 +31,7 @@ use nervix_connector::{
     SourceMessage, SourceResult, SourceResume, client_config_value,
 };
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
-use nervix_models::{ChannelName, ClientConfigEntry};
+use nervix_models::{ClientConfigEntry, RedisChannelName};
 use nervix_primitives::{net::TcpStream, sync::StdArc, time::timeout};
 use redis::{
     Client as RedisClient, ConnectionAddr, Msg,
@@ -76,7 +76,7 @@ pub struct RedisPubSubSourcePlan {
     client: RedisClient,
     dns: DnsResolver,
     tls: Option<StdArc<rustls::ClientConfig>>,
-    channel: ChannelName,
+    channel: RedisChannelName,
 }
 
 trait RedisStream: AsyncRead + AsyncWrite {}
@@ -86,7 +86,7 @@ type ConnectedStream = Box<dyn RedisStream + Send + Unpin>;
 impl RedisPubSubSourcePlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
-        channel: ChannelName,
+        channel: RedisChannelName,
         dns: DnsResolver,
     ) -> RedisPubSubSourceResult<Self> {
         let addr = client_config_value(&config, "addr", "Redis")
@@ -373,7 +373,7 @@ mod tests {
                 key: "addr".to_string(),
                 value: addr.to_string(),
             }],
-            ChannelName::parse("events").expect("a plain channel name parses"),
+            RedisChannelName::parse("events").expect("a plain channel name parses"),
             dns,
         )
         .expect("the Redis address is valid")
@@ -381,7 +381,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_plan_requires_the_address_before_it_subscribes() {
-        let channel = ChannelName::parse("events").expect("a plain channel name parses");
+        let channel = RedisChannelName::parse("events").expect("a plain channel name parses");
         let fixture = Fixture::start().await;
         let dns = fixture.dns;
         let error = RedisPubSubSourcePlan::new(Vec::new(), channel, dns)

@@ -10,7 +10,10 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use crate::{EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName, WireSchemaName};
+use crate::{
+    EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName, SourceReferenceKind,
+    WireSchemaName,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinFunctionScope {
@@ -22,6 +25,9 @@ pub enum BuiltinFunctionScope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SemanticReference {
     Model(ModelKind),
+    /// The client or endpoint an ingestor's body reads through, which the pair its head names
+    /// narrows to one connector or one endpoint type.
+    SourceReference(SourceReferenceKind),
     SchemaField(SchemaName),
     WireSchemaField(ModelKind, WireSchemaName),
     RelayField(RelayName),

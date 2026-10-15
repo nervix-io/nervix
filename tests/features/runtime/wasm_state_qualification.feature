@@ -49,9 +49,9 @@ Feature: WASM guest-state qualification across crash windows
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_qualification_restart_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_qualification_restart_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_qualification_restart_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_qualification_restart_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -166,9 +166,9 @@ Feature: WASM guest-state qualification across crash windows
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_qualification_failover_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_qualification_failover_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_qualification_failover_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_qualification_failover_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -291,9 +291,9 @@ Feature: WASM guest-state qualification across crash windows
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_qualification_cluster_restart_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_qualification_cluster_restart_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_qualification_cluster_restart_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_qualification_cluster_restart_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec

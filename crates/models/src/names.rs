@@ -312,7 +312,7 @@ declare_names! {
     InferencerName => Allowed,
     /// A WASM processor declared with `CREATE WASM PROCESSOR`.
     WasmProcessorName => Allowed,
-    /// An ingestor declared with `CREATE INGESTOR`.
+    /// An ingestor declared with `CREATE <CONNECTOR> <ENTITY> INGESTOR`.
     IngestorName => Allowed,
     /// A reingestor declared with `CREATE REINGESTOR`.
     ReingestorName => Allowed,
@@ -360,8 +360,6 @@ declare_names! {
     TopicName => Allowed,
     /// A queue of an external broker.
     QueueName => Allowed,
-    /// A NATS queue group.
-    QueueGroupName => Allowed,
     /// A channel of an external broker.
     ChannelName => Allowed,
     /// A NATS subject.
@@ -370,10 +368,6 @@ declare_names! {
     TableName => Allowed,
     /// A collection of an external document database.
     CollectionName => Allowed,
-    /// A Kafka consumer group.
-    ConsumerGroupName => Allowed,
-    /// A Pulsar subscription.
-    PulsarSubscriptionName => Allowed,
 }
 
 /// Generate the widening of an entity's own name into the kind-erased [`ModelName`].

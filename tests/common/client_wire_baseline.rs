@@ -574,8 +574,8 @@ async fn configure_graph(process: &ServerProcess, domain: &str, host: &str) -> R
         CREATE VHOST client_wire_edge {host};
         CREATE ENDPOINT client_wire_ingress
           ON client_wire_edge PATH '/records' TYPE HTTP;
-        CREATE INGESTOR client_wire_source
-          FROM ENDPOINT client_wire_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR client_wire_source
+          FROM client_wire_ingress MODE NO ACK
           ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING client_wire_codec
           TO client_wire_records INHERIT ALL
           BRANCHED BY client_wire_by_tenant SET tenant = message.tenant

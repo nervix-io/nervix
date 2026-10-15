@@ -17,10 +17,10 @@
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
-    ClientSourceEntity, DomainName, EndpointSourceEntity, FieldName, HttpSourceEntity,
-    IngestSourceKind, KafkaSourceEntity, MqttSourceEntity, NatsSourceEntity, NodeRef,
-    PlacementPolicy, PrometheusSourceEntity, PulsarSourceEntity, RabbitMqSourceEntity,
-    RedisSourceEntity, RequestedResourceVersion, ResourceName, SqsSourceEntity, SyslogSourceEntity,
+    ClientSourceEntity, DomainName, FieldName, HttpSourceEntity, IngestSourceKind,
+    KafkaSourceEntity, MqttSourceEntity, NatsSourceEntity, NodeRef, PlacementPolicy,
+    PrometheusSourceEntity, PulsarSourceEntity, RabbitMqSourceEntity, RedisSourceEntity,
+    RequestedResourceVersion, ResourceName, SqsSourceEntity, SyslogSourceEntity,
     WebsocketsSourceEntity, ZeroMqSourceEntity,
 };
 
@@ -51,7 +51,8 @@ pub enum ChoiceTarget {
     Codec,
     /// Fields of the output schema selected by one configured codec.
     CodecField,
-    IngestHttpSource,
+    IngestHttpRequestSource,
+    IngestHttpEndpointSource,
     IngestKafkaSource,
     IngestPulsarSource,
     IngestMqttSource,
@@ -61,8 +62,8 @@ pub enum ChoiceTarget {
     IngestPrometheusSource,
     IngestZeroMqSource,
     IngestSqsSource,
-    IngestEndpointSource,
-    IngestWebsocketsSource,
+    IngestWebsocketsConnectionSource,
+    IngestWebsocketsEndpointSource,
     IngestSyslogSource,
     IngestCodec,
     IngestUnbranchedRelay,
@@ -89,7 +90,8 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     SignalingProtocol,
     Codec,
     CodecField,
-    IngestHttpSource,
+    IngestHttpRequestSource,
+    IngestHttpEndpointSource,
     IngestKafkaSource,
     IngestPulsarSource,
     IngestMqttSource,
@@ -99,8 +101,8 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     IngestPrometheusSource,
     IngestZeroMqSource,
     IngestSqsSource,
-    IngestEndpointSource,
-    IngestWebsocketsSource,
+    IngestWebsocketsConnectionSource,
+    IngestWebsocketsEndpointSource,
     IngestSyslogSource,
     IngestCodec,
     IngestUnbranchedRelay,
@@ -117,7 +119,8 @@ impl ChoiceTarget {
     pub const fn for_ingest_source(kind: IngestSourceKind) -> Self {
         match kind {
             IngestSourceKind::Client(ClientSourceEntity::Producer) => Self::Schema,
-            IngestSourceKind::Http(HttpSourceEntity::Request) => Self::IngestHttpSource,
+            IngestSourceKind::Http(HttpSourceEntity::Request) => Self::IngestHttpRequestSource,
+            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => Self::IngestHttpEndpointSource,
             IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => Self::IngestKafkaSource,
             IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => Self::IngestPulsarSource,
             IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => Self::IngestMqttSource,
@@ -129,11 +132,11 @@ impl ChoiceTarget {
             }
             IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => Self::IngestZeroMqSource,
             IngestSourceKind::Sqs(SqsSourceEntity::Queue) => Self::IngestSqsSource,
-            IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint) => {
-                Self::IngestEndpointSource
-            }
             IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
-                Self::IngestWebsocketsSource
+                Self::IngestWebsocketsConnectionSource
+            }
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+                Self::IngestWebsocketsEndpointSource
             }
             IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => Self::IngestSyslogSource,
         }
@@ -141,7 +144,12 @@ impl ChoiceTarget {
 
     pub const fn ingest_source_kind(self) -> Option<IngestSourceKind> {
         match self {
-            Self::IngestHttpSource => Some(IngestSourceKind::Http(HttpSourceEntity::Request)),
+            Self::IngestHttpRequestSource => {
+                Some(IngestSourceKind::Http(HttpSourceEntity::Request))
+            }
+            Self::IngestHttpEndpointSource => {
+                Some(IngestSourceKind::Http(HttpSourceEntity::Endpoint))
+            }
             Self::IngestKafkaSource => Some(IngestSourceKind::Kafka(KafkaSourceEntity::Topic)),
             Self::IngestPulsarSource => Some(IngestSourceKind::Pulsar(PulsarSourceEntity::Topic)),
             Self::IngestMqttSource => Some(IngestSourceKind::Mqtt(MqttSourceEntity::Topic)),
@@ -157,11 +165,11 @@ impl ChoiceTarget {
             }
             Self::IngestZeroMqSource => Some(IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull)),
             Self::IngestSqsSource => Some(IngestSourceKind::Sqs(SqsSourceEntity::Queue)),
-            Self::IngestEndpointSource => {
-                Some(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint))
-            }
-            Self::IngestWebsocketsSource => Some(IngestSourceKind::Websockets(
+            Self::IngestWebsocketsConnectionSource => Some(IngestSourceKind::Websockets(
                 WebsocketsSourceEntity::Connection,
+            )),
+            Self::IngestWebsocketsEndpointSource => Some(IngestSourceKind::Websockets(
+                WebsocketsSourceEntity::Endpoint,
             )),
             Self::IngestSyslogSource => {
                 Some(IngestSourceKind::Syslog(SyslogSourceEntity::Listener))

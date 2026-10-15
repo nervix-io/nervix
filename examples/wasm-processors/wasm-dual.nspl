@@ -63,8 +63,8 @@ CREATE VHOST edge http-wasm-dual.example.com;
 
 CREATE ENDPOINT wasm_metrics_ingress ON edge PATH '/wasm-metrics' TYPE HTTP;
 
-CREATE INGESTOR metric_source
-  FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB
+CREATE HTTP ENDPOINT INGESTOR metric_source
+  FROM wasm_metrics_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
   DECODE USING metric_codec
   TO raw_metrics
     INHERIT ALL

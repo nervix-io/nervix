@@ -39,8 +39,8 @@ Feature: SQS TLS resource mounts
           'region' = 'us-east-1',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR sqs_notifications
-        FROM SQS sqs_tls QUEUE notifications_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE SQS QUEUE INGESTOR sqs_notifications
+        FROM sqs_tls QUEUE 'notifications_{{test_id}}' INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

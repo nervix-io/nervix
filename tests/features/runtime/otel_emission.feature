@@ -42,8 +42,8 @@ Feature: OTEL emission
       ON edge
       PATH '/audit'
       TYPE HTTP;
-      CREATE INGESTOR audit_source
-      FROM ENDPOINT audit_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR audit_source
+      FROM audit_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING audit_event_codec
       TIMESTAMP NOW
       TO audit_events
@@ -192,8 +192,8 @@ Feature: OTEL emission
       ON edge
       PATH '/metric'
       TYPE HTTP;
-      CREATE INGESTOR metric_source
-      FROM ENDPOINT metric_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+      FROM metric_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_count_codec
       TO request_counts
       INHERIT ALL

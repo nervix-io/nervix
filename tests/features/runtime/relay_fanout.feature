@@ -33,8 +33,8 @@ Feature: Relay fan-out
       CREATE VHOST edge http-{{test_id}}-fanout.example.com;
       CREATE ENDPOINT relay_fanout_ingress ON edge PATH '/relay-fanout' TYPE HTTP;
 
-      CREATE INGESTOR relay_fanout_source
-        FROM ENDPOINT relay_fanout_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR relay_fanout_source
+        FROM relay_fanout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

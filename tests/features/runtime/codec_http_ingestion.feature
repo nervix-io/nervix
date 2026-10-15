@@ -51,8 +51,8 @@ Feature: HTTP codec ingestion
       CREATE RELAY json_values SCHEMA json_value UNBRANCHED;
       CREATE VHOST edge json-values-{{test_id}}.example.com;
       CREATE ENDPOINT json_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR json_values_ingestor
-        FROM ENDPOINT json_values_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR json_values_ingestor
+        FROM json_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_value_codec
         TO json_values
         INHERIT ALL
@@ -199,8 +199,8 @@ Feature: HTTP codec ingestion
       CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
       CREATE VHOST edge exact-values-{{test_id}}.example.com;
       CREATE ENDPOINT exact_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR exact_values_ingestor
-        FROM ENDPOINT exact_values_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR exact_values_ingestor
+        FROM exact_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_value_codec
         TO exact_values
         INHERIT ALL
@@ -252,8 +252,8 @@ Feature: HTTP codec ingestion
       CREATE RELAY single_values SCHEMA single_value UNBRANCHED;
       CREATE VHOST edge single-values-{{test_id}}.example.com;
       CREATE ENDPOINT single_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR single_values_ingestor
-        FROM ENDPOINT single_values_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR single_values_ingestor
+        FROM single_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING single_value_codec
         TO single_values
         INHERIT ALL
@@ -306,8 +306,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -371,8 +371,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR metrics_ingestor
-        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
+        FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
         TO metrics_stream
         INHERIT ALL
@@ -429,8 +429,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-      CREATE INGESTOR shaped_metrics_ingestor
-        FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR shaped_metrics_ingestor
+        FROM shaped_metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shaped_metrics_codec
         TO shaped_metrics_stream
         INHERIT ALL
@@ -502,8 +502,8 @@ Feature: HTTP codec ingestion
         PATH '/loose'
         TYPE HTTP;
 
-      CREATE INGESTOR strict_notifications_source
-        FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR strict_notifications_source
+        FROM strict_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING strict_notification_codec
         TO strict_notifications
         INHERIT ALL
@@ -512,8 +512,8 @@ Feature: HTTP codec ingestion
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR loose_notifications_source
-        FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR loose_notifications_source
+        FROM loose_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING loose_notification_codec
         TO loose_notifications
         INHERIT ALL
@@ -574,8 +574,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR metrics_ingestor
-        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
+        FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
         TO metrics_stream
         INHERIT ALL
@@ -627,8 +627,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

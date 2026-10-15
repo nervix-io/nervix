@@ -24,8 +24,8 @@ CREATE CODEC chaos_state_json
 
 CREATE RELAY chaos_state_records SCHEMA chaos_state_record BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE INGESTOR chaos_state_ingestor
-  FROM KAFKA chaos_kafka TOPIC chaos_state_input OFFSET BY CONSUMER GROUP chaos_stateful MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+CREATE KAFKA TOPIC INGESTOR chaos_state_ingestor
+  FROM chaos_kafka TOPIC 'chaos_state_input' OFFSET BY CONSUMER GROUP 'chaos_stateful' MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_state_json
   TO chaos_state_records
     INHERIT ALL
@@ -120,8 +120,8 @@ CREATE CODEC chaos_profile_json
 
 CREATE RELAY chaos_profiles SCHEMA chaos_profile BRANCHED BY chaos_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
-CREATE INGESTOR chaos_profile_ingestor
-  FROM KAFKA chaos_kafka TOPIC chaos_profile_input OFFSET BY CONSUMER GROUP chaos_profiles MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+CREATE KAFKA TOPIC INGESTOR chaos_profile_ingestor
+  FROM chaos_kafka TOPIC 'chaos_profile_input' OFFSET BY CONSUMER GROUP 'chaos_profiles' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_profile_json
   TO chaos_profiles
     INHERIT ALL

@@ -34,8 +34,8 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-integers-{{test_id}}.example.com;
       CREATE ENDPOINT operand_ingress ON edge PATH '/operands' TYPE HTTP;
-      CREATE INGESTOR operand_source
-        FROM ENDPOINT operand_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR operand_source
+        FROM operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
         TO operands
           INHERIT ALL
@@ -138,8 +138,8 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-narrow-{{test_id}}.example.com;
       CREATE ENDPOINT narrow_operand_ingress ON edge PATH '/operands' TYPE HTTP;
-      CREATE INGESTOR narrow_operand_source
-        FROM ENDPOINT narrow_operand_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR narrow_operand_source
+        FROM narrow_operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING narrow_operand_batch_codec
         TO narrow_operands
           INHERIT ALL
@@ -239,8 +239,8 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-floats-{{test_id}}.example.com;
       CREATE ENDPOINT measurement_ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE INGESTOR measurement_source
-        FROM ENDPOINT measurement_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR measurement_source
+        FROM measurement_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_batch_codec
         TO measurements
           INHERIT ALL
@@ -322,8 +322,8 @@ Feature: Checked numeric execution
       CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
       CREATE VHOST edge checked-routes-{{test_id}}.example.com;
       CREATE ENDPOINT operand_ingress ON edge PATH '/operands' TYPE HTTP;
-      CREATE INGESTOR operand_source
-        FROM ENDPOINT operand_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR operand_source
+        FROM operand_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
         TO operands
           INHERIT ALL

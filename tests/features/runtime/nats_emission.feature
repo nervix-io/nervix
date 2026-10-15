@@ -54,9 +54,9 @@ Feature: NATS emission
           'addr' = '{{nats_addr}}'
         };
 
-      CREATE INGESTOR columnar_events_in
-        FROM NATS nats_main SUBJECT columnar_in_{{test_id}}
-        QUEUE GROUP columnar_in_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+      CREATE NATS SUBJECT INGESTOR columnar_events_in
+        FROM nats_main SUBJECT 'columnar_in_{{test_id}}'
+        QUEUE GROUP 'columnar_in_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING columnar_event_codec
         TO columnar_events
         INHERIT ALL
@@ -143,8 +143,8 @@ Feature: NATS emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -228,9 +228,9 @@ Feature: NATS emission
           'addr' = '{{nats_addr}}'
         };
 
-      CREATE INGESTOR narrow_events_in
-        FROM NATS nats_main SUBJECT narrow_in_{{test_id}}
-        QUEUE GROUP narrow_in_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+      CREATE NATS SUBJECT INGESTOR narrow_events_in
+        FROM nats_main SUBJECT 'narrow_in_{{test_id}}'
+        QUEUE GROUP 'narrow_in_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING narrow_event_codec
         TO narrow_events
         INHERIT ALL
@@ -306,9 +306,9 @@ Feature: NATS emission
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_ingress TOPIC jetstream_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP jetstream_boundary_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'jetstream_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'jetstream_boundary_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec

@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub source and sink
-//!   Models with their delivery mode, and what each entity declares.
+//!   Models with their delivery mode, the channel name a source subscribes to with the rule it
+//!   follows, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The Redis driver, its configuration keys, or how a channel is subscribed
 //!   or published to.
@@ -19,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
@@ -29,13 +31,26 @@ use crate::{
 
 configured_client!(Redis: pooled CreateClientRedis => RedisConfigEntry);
 
+/// The longest channel Nervix subscribes to, in bytes.
+const REDIS_CHANNEL_MAX: usize = 1024;
+
+external_names! {
+    /// A Redis Pub/Sub channel: 1 to 1,024 bytes. A Redis channel is binary-safe, so any text is a
+    /// channel, and a `*` is the character itself: a pattern subscription is another entity.
+    pub struct RedisChannelName => redis_channel_rule;
+}
+
+fn redis_channel_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, REDIS_CHANNEL_MAX)
+}
+
 /// One Pub/Sub channel a Redis client subscribes to.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RedisPubSubSource {
     pub client: ClientName,
-    pub channel: ChannelName,
+    pub channel: RedisChannelName,
     pub mode: RedisPubSubIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -78,13 +93,13 @@ impl SourceBody for RedisPubSubSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum RedisPubSubIngestMode {
-    NoAckSequential,
+    NoAck,
 }
 
 impl RedisPubSubIngestMode {
     pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -93,6 +108,8 @@ connector_sources! {
     connector Redis = "REDIS";
     /// What a Redis source reads.
     pub enum RedisSource;
+    /// The alterations of the ingestors that read a Redis entity.
+    pub enum RedisIngestorAlteration;
     /// The entities a Redis source reads.
     pub enum RedisSourceEntity {
         PubSub(RedisPubSubSource) = "PUBSUB", "Redis Pub/Sub";

@@ -25,8 +25,8 @@ Feature: Runtime persistence
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -44,7 +44,7 @@ Feature: Runtime persistence
       """
     Then the last command output contains
       """
-      CREATE INGESTOR http_notifications
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
       """
     Then within "5s" node "node-1" eventually reports describe relay as "not exists"
       """
@@ -89,8 +89,8 @@ Feature: Runtime persistence
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_restart_sensor;
       CREATE VHOST edge http-{{test_id}}-restart-readings.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL
@@ -161,8 +161,8 @@ Feature: Runtime persistence
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_flushed_sensor;
       CREATE VHOST edge http-{{test_id}}-flushed-readings.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL

@@ -55,8 +55,8 @@ Feature: Narrow schedule activation on ownership change
         PATH '/narrow'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
@@ -236,8 +236,8 @@ Feature: Narrow schedule activation on ownership change
         PATH '/gauge'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
@@ -384,8 +384,8 @@ Feature: Narrow schedule activation on ownership change
         PATH '/wait-ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR state_source
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR state_source
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
@@ -395,8 +395,8 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
         INHERIT ALL
@@ -559,8 +559,8 @@ Feature: Narrow schedule activation on ownership change
         PATH '/window'
         TYPE HTTP;
 
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -698,8 +698,8 @@ Feature: Narrow schedule activation on ownership change
         PATH '/group'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
@@ -897,8 +897,8 @@ Feature: Narrow schedule activation on ownership change
         PATH '/move-ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR state_source
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR state_source
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
@@ -908,8 +908,8 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
         INHERIT ALL

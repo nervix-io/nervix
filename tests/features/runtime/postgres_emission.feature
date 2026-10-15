@@ -32,8 +32,8 @@ Feature: Postgres emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC postgres_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'postgres_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -114,8 +114,8 @@ Feature: Postgres emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-conflict-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC postgres_conflict_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'postgres_conflict_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -200,8 +200,8 @@ Feature: Postgres emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-postgres-poison-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC postgres_poison_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'postgres_poison_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -300,8 +300,8 @@ Feature: Postgres emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-postgres-values-error-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC postgres_values_error_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'postgres_values_error_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -383,8 +383,8 @@ Feature: Postgres emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-postgres-batch-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC postgres_batch_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'postgres_batch_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

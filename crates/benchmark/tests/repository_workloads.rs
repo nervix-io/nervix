@@ -241,7 +241,7 @@ fn hot_path_workloads_render_the_publisher_matrix_and_remote_placement() {
             .render_implementation_with_parameters("nervix", inputs, &settings.parameters)
             .assured("the repository hot-path Nervix template is valid");
         assert_eq!(
-            statements_starting_with(&graph, "CREATE INGESTOR"),
+            statements_starting_with(&graph, "CREATE KAFKA TOPIC INGESTOR"),
             LANES.arch_into(),
             "{slug} must create one publisher per requested lane"
         );

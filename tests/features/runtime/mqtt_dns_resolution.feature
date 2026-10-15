@@ -40,8 +40,8 @@ Feature: MQTT name resolution
         'client_id' = 'nervix-dns-out-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -113,8 +113,8 @@ Feature: MQTT name resolution
         'client_id' = 'nervix-dns-out-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -171,8 +171,8 @@ Feature: MQTT name resolution
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -251,9 +251,9 @@ Feature: MQTT name resolution
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_ingress TOPIC mqtt_dns_boundary_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP mqtt_dns_boundary_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'mqtt_dns_boundary_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'mqtt_dns_boundary_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -328,8 +328,8 @@ Feature: MQTT name resolution
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL

@@ -43,8 +43,8 @@ Feature: Tolerant conversions
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge tolerant-conversions-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_reading_batch_codec
         TO raw_readings
           INHERIT ALL
@@ -149,8 +149,8 @@ Feature: Tolerant conversions
       CREATE RELAY conversion_errors SCHEMA conversion_error UNBRANCHED;
       CREATE VHOST edge owned-conversion-{{test_id}}.example.com;
       CREATE ENDPOINT conversion_ingress ON edge PATH '/conversions' TYPE HTTP;
-      CREATE INGESTOR conversion_source
-        FROM ENDPOINT conversion_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR conversion_source
+        FROM conversion_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conversion_input_batch_codec
         TO conversion_inputs
           INHERIT ALL
@@ -226,8 +226,8 @@ Feature: Tolerant conversions
       CREATE RELAY routed_errors SCHEMA routed_error UNBRANCHED;
       CREATE VHOST edge conversion-arms-{{test_id}}.example.com;
       CREATE ENDPOINT routed_ingress ON edge PATH '/routed-values' TYPE HTTP;
-      CREATE INGESTOR routed_value_source
-        FROM ENDPOINT routed_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routed_value_source
+        FROM routed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_value_batch_codec
         TO routed_values
           INHERIT ALL
@@ -337,8 +337,8 @@ Feature: Tolerant conversions
       CREATE RELAY inferred_measurements SCHEMA inferred_measurement UNBRANCHED;
       CREATE VHOST edge infer-tolerant-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE INGESTOR raw_measurement_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR raw_measurement_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_measurement_batch_codec
         TO raw_measurements
           INHERIT ALL
