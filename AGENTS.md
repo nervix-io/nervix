@@ -1176,11 +1176,23 @@ build and the existing tests, and nothing in it changes behavior.
   Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
   randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
+- Check verifies its exact tested merge before excluding ordinary suites for documentation-only
+  changes. `test-selection` records the changed paths and requirements; its selection is not
+  property execution evidence. `no-docker` never authorizes a test exclusion. The reusable Bolero
+  call is excluded as a whole only for verified prose changes without `fuzz`; once called, its
+  ordinary properties and requested sanitizer execution remain mandatory even on single-job
+  reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
+  owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
-  Rust cast expressions, and struct fields whose presence depends on `cfg(feature = "testing")`.
+  Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
+  functions whose cyclomatic complexity exceeds 30.
   The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
   import aliases, qualified paths and conditional documentation attributes are not those facts.
+  Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
+  `just install-cargo-crap` builds through kache; another version is refused, and an analysis that
+  misses a source never reads as zero. That count is the mandatory complexity verdict: a new
+  function above 30 fails `just validate` and the `checks` job, and decomposing it is the repair.
   Source discovery includes tracked and newly authored Rust. CI fails when a structural count
   exceeds `debt-baseline.json`.
   A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
@@ -1204,7 +1216,7 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  fourteen-family contract matrix, source/compiler scope, qualification and review limits. A new
+  fifteen-family contract matrix, source/compiler scope, qualification and review limits. A new
   or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
   resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
   and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive
@@ -1350,7 +1362,8 @@ build and the existing tests, and nothing in it changes behavior.
   and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
   authenticated publisher's marked PR comment, after verifying the current PR head. CI uses the
   same command with the tested merge commit's coordinates and a separate PR head fence. Coverage
-  percentages and reporting failures never fail a build; the complexity check remains independent.
+  percentages and reporting failures never fail a build; the complexity verdict is the
+  `just ratchet` count of functions above cyclomatic complexity 30, which reads no coverage.
   The Turmoil job publishes its current-source report with `--scope turmoil` under a separate
   comment marker; those counters remain outside the ordinary coverage and CRAP gate.
   `just test-patch-coverage` exercises accounting and publication, and

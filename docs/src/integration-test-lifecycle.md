@@ -46,6 +46,13 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
+path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
+validation and title checks remain enabled. This exclusion records a source decision rather than
+scenario execution, and cancellation of a required run never supplies successful evidence. Explicit
+mode labels retain their own selections. [Documentation-only Selection](./property-testing-and-fuzzing.md#documentation-only-selection)
+owns the allowed paths, immutable event snapshot and retained CI selection record.
+
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
 `tests/features`. Its lifecycle owners live in `tests/common`.
 
@@ -252,7 +259,7 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report |
+| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report. The CRAP step runs the pinned cargo-crap, which the job builds through kache |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -1413,7 +1420,9 @@ revision, drops dependency, toolchain and generated records by class, leaves out
 collections of other modes, and fails rather than publish a report that misses an input or a
 workspace member. It passes that one report to `just coverage-patch`, so library properties
 contribute to patch coverage alongside server and client tests. Patch coverage and comment
-publication are advisory and never change the build verdict; the complexity check is independent.
+publication are advisory and never change the build verdict. The complexity verdict is the
+`just ratchet` count of functions above cyclomatic complexity 30, which the `checks` job enforces
+and which reads no coverage.
 The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
 artifact retains the report, its merge record `target/coverage-merge/record.json` and
 `target/patch-coverage.md`.
