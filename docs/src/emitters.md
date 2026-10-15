@@ -1026,7 +1026,12 @@ TO MQTT <client> TOPIC <topic>
 QoS 0 acknowledges client acceptance. QoS 1 waits for `PUBACK`; QoS 2 waits for the complete
 exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
-policy. A definitive record rejection, such as an invalid topic or payload-format rejection,
+policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
+is not the record's own, the emitter keeps every answer the broker already gave and retries only
+the records without one; `DESCRIBE EMITTER` shows why, such as
+`the broker did not answer within ACK TIMEOUT 10s`. A record the emitter stopped waiting for stays
+with the client, which sends it again after a reconnect that resumes the session, beside the
+emitter's own retry, so the broker can receive it twice. A definitive record rejection, such as an invalid topic or payload-format rejection,
 follows `ON MESSAGE ERROR`. So does a record whose `PUBLISH` packet would exceed the Maximum Packet
 Size the broker declared when the client connected, or the largest packet MQTT can express: the
 emitter rejects it before handing it to the client, which would otherwise lose its connection on a
