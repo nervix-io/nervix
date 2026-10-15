@@ -99,6 +99,20 @@ validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 validate-workflows *workflows:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
+# Exercise exact-source CI selection and strict property gates, including validation-only reruns.
+test-ci-selection:
+    python3 -m unittest scripts.tests.test_ci_test_selection scripts.tests.test_bolero_coverage
+
+# Keep Python policy/contract coverage separate from product property campaigns.
+coverage-ci-selection:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/ci-selection
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file target/ci-selection/python.coverage --branch --source=scripts.ci_test_selection,scripts.tests.test_ci_test_selection,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_ci_test_selection scripts.tests.test_bolero_coverage
+    "${coverage[@]}" lcov --data-file target/ci-selection/python.coverage -o target/ci-selection/python.lcov
+    "${coverage[@]}" report --data-file target/ci-selection/python.coverage --include=scripts/ci_test_selection.py --fail-under=90
+
 # Qualify every way a run must fail: a property mismatch, a sanitizer finding, a case timeout, an
 # engine failure, discovery of ignored, unregistered and missing targets, a selection of nothing
 # and a corrupt replay record, with saved inputs, minimization and exact replay.
@@ -108,7 +122,7 @@ qualify-bolero: bolero-deps
 # Exercise the inventory and runner's validation and failure paths, and the runner load recorder
 # the sanitizer shards keep their measurements with.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_record_runner_load
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_ci_test_selection scripts.tests.test_record_runner_load
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
