@@ -569,14 +569,16 @@ driver the resolver's `DnsLookupError` as the failure of the lookup. The driver 
 cause of its connection error, and the connector finds it there by type and keeps it as the context
 beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
 an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
-`SqsSourceError` of receiving or deleting beneath the source's `SourceError`. An SQS source looks
-its queue up while its ingestor starts; the runtime keeps that failure's text, the lookup failure
-included, as the reason of the ingestor's start failure rather than as a typed cause. The failure's
-message names the host and the lookup failure, which `DESCRIBE EMITTER` and `DESCRIBE INGESTOR`
-show. Any other failure to reach the service, such as a refused connection or a certificate that
-does not name the configured host, is described by every cause of the driver's connection error,
-which describes the connection and carries neither credentials nor a record; a response from the
-service keeps its existing description. None is a record rejection, and none acknowledges input.
+`SqsSourceError` of looking its queue up, receiving or deleting beneath the source's `SourceError`.
+An SQS source looks its queue up when an instance resumes, so that failure is `SourceError::Resume`
+above the typed lookup failure: a queue the service does not have is `SqsSourceError::MissingQueue`,
+which names it, and the source host shows the deepest cause as the source's transient error and
+retries it. The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER`
+and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection
+or a certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and carries neither credentials nor a record; a
+response from the service keeps its existing description. None is a record rejection, and none
+acknowledges input.
 
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the
