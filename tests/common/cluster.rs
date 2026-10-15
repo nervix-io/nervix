@@ -56,6 +56,7 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+use nervix_recovery::Discarded as _;
 use paced_interconnect::PacedInterconnect;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
@@ -200,12 +201,24 @@ pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
+/// A loopback TCP proxy in front of one dependency that a scenario can pause, and whose forwarded
+/// connections it can reset, without touching the dependency other scenarios share.
 #[derive(Debug)]
 pub(crate) struct StallableTcpProxy {
     local_addr: std::net::SocketAddr,
     paused: watch::Sender<bool>,
+    /// Signalled to reset every connection the proxy forwards at that moment.
+    resets: watch::Sender<()>,
     cancellation: CancellationToken,
     task: JoinHandle<()>,
+}
+
+/// What ended one connection the proxy forwarded.
+enum ForwardingEnd {
+    /// Both directions ended: a peer closed or failed its side, or the proxy stopped.
+    Finished,
+    /// The scenario asked the proxy to reset the connections it forwards.
+    ResetRequested,
 }
 
 impl StallableTcpProxy {
@@ -213,6 +226,7 @@ impl StallableTcpProxy {
         let listener = TokioTcpListener::bind((HOST, 0)).await?;
         let local_addr = listener.local_addr()?;
         let (paused, paused_rx) = watch::channel(false);
+        let (resets, resets_rx) = watch::channel(());
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let task = nervix_primitives::task::spawn(async move {
@@ -227,34 +241,42 @@ impl StallableTcpProxy {
                 };
                 let target_host = target_host.clone();
                 let paused = paused_rx.clone();
+                // Only a reset requested after this connection was accepted resets it.
+                let mut resets = resets_rx.clone();
+                resets.mark_unchanged();
                 let connection_cancellation = task_cancellation.child_token();
                 nervix_primitives::task::spawn(async move {
-                    let Ok(upstream) =
+                    let Ok(mut upstream) =
                         TcpStream::connect((target_host.as_str(), target_port)).await
                     else {
                         return;
                     };
-                    let (downstream_read, downstream_write) = downstream.into_split();
-                    let (upstream_read, upstream_write) = upstream.into_split();
-                    let upstream_copy = copy_through_stall_gate(
-                        downstream_read,
-                        upstream_write,
-                        paused.clone(),
-                        connection_cancellation.clone(),
-                    );
-                    let downstream_copy = copy_through_stall_gate(
-                        upstream_read,
-                        downstream_write,
+                    let mut downstream = downstream;
+                    let end = forward_through_stall_gate(
+                        &mut downstream,
+                        &mut upstream,
                         paused,
+                        resets,
                         connection_cancellation,
-                    );
-                    let _ = tokio::join!(upstream_copy, downstream_copy);
+                    )
+                    .await;
+                    if let ForwardingEnd::ResetRequested = end {
+                        // An abortive close: both peers see the connection reset at once instead
+                        // of an orderly end of stream, and anything still buffered is discarded.
+                        downstream
+                            .set_zero_linger()
+                            .discarded("a socket that cannot be reset still closes when dropped");
+                        upstream
+                            .set_zero_linger()
+                            .discarded("a socket that cannot be reset still closes when dropped");
+                    }
                 });
             }
         });
         Ok(Self {
             local_addr,
             paused,
+            resets,
             cancellation,
             task,
         })
@@ -266,6 +288,47 @@ impl StallableTcpProxy {
 
     pub(crate) fn set_paused(&self, paused: bool) {
         self.paused.send_replace(paused);
+    }
+
+    /// Reset every connection the proxy forwards now, as a dependency that drops its clients
+    /// does: each peer sees its connection reset. The proxy keeps listening, so a client that
+    /// connects again is forwarded as before.
+    pub(crate) fn reset_connections(&self) {
+        self.resets.send_replace(());
+    }
+}
+
+/// Forward one accepted connection in both directions through the stall gate until it ends or a
+/// reset is requested.
+async fn forward_through_stall_gate(
+    downstream: &mut TcpStream,
+    upstream: &mut TcpStream,
+    paused: watch::Receiver<bool>,
+    mut resets: watch::Receiver<()>,
+    cancellation: CancellationToken,
+) -> ForwardingEnd {
+    let (downstream_read, downstream_write) = downstream.split();
+    let (upstream_read, upstream_write) = upstream.split();
+    let upstream_copy = copy_through_stall_gate(
+        downstream_read,
+        upstream_write,
+        paused.clone(),
+        cancellation.clone(),
+    );
+    let downstream_copy =
+        copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation);
+    let both_directions = async { tokio::join!(upstream_copy, downstream_copy) };
+    nervix_primitives::select! {
+        (upstream_copied, downstream_copied) = both_directions => {
+            upstream_copied.discarded("a forwarded connection ends with whichever side failed");
+            downstream_copied.discarded("a forwarded connection ends with whichever side failed");
+            ForwardingEnd::Finished
+        }
+        requested = resets.changed() => match requested {
+            Ok(()) => ForwardingEnd::ResetRequested,
+            // The proxy itself stopped, and its cancellation ends both directions anyway.
+            Err(_) => ForwardingEnd::Finished,
+        },
     }
 }
 
