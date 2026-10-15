@@ -875,10 +875,33 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
 
-      - name: Install CRAP
+      - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-crap,just,toml-cli
+          tool: just,toml-cli
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          pr-comment: "false"
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      # The CRAP step runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      - name: Install the pinned complexity analyzer
+        run: just install-cargo-crap
 
       - name: Download tests coverage
         uses: actions/download-artifact@v4
@@ -930,6 +953,35 @@ jobs:
             lcov-workspace.info
             target/coverage-merge/record.json
             target/patch-coverage.md
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
