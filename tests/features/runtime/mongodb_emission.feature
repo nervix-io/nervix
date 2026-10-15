@@ -459,8 +459,8 @@ Feature: MongoDB emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-mongodb-write-concern-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC mongodb_write_concern_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'mongodb_write_concern_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
