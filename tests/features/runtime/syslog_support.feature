@@ -359,6 +359,7 @@ Feature: Syslog support
       """
       CREATE SCHEMA syslog_message (message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE CODEC syslog_codec_v2 FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
       CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
         'protocol' = 'tcp',
@@ -383,7 +384,7 @@ Feature: Syslog support
     Then ingestor "syslog_intake" reaches the dispatch pause
     When these NSPL commands begin executing in the background
       """
-      ALTER RELAY syslog_events SET CAPACITY 8;
+      ALTER SYSLOG LISTENER INGESTOR syslog_intake SET DECODE USING syslog_codec_v2;
       """
     And ingestor "syslog_intake" leaves the dispatch pause
     Then the entity gate pause for domain "{{domain}}" is reached
