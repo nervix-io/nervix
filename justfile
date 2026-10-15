@@ -1910,9 +1910,10 @@ benchmark *args:
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
 
-# Measure the load driver's preparation controls with ordinary native coverage.
-coverage-benchmark-load output="target/benchmark-load.lcov":
-    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- empty_topic_setup
+# Measure the load driver's tests whose names contain `filter` with ordinary native coverage; by
+# default its preparation controls, and every test with an empty filter.
+coverage-benchmark-load output="target/benchmark-load.lcov" filter="empty_topic_setup":
+    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(filter) }}
 
 # Build the pinned Flink image with its matching Kafka SQL connector.
 benchmark-flink-image:
