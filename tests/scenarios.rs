@@ -23205,15 +23205,16 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         .expect("failed to close Syslog TCP test sender");
 }
 
-#[when(expr = "a Syslog TCP sender publishes {int} numbered frames to {string}")]
+#[when(expr = "a Syslog TCP sender publishes {int} numbered frames to node {string} at {string}")]
 async fn when_syslog_tcp_sender_publishes_numbered_frames(
     world: &mut ScenarioWorld,
     count: usize,
+    node_id: String,
     addr: String,
 ) {
     use tokio::io::AsyncWriteExt as _;
 
-    let addr = expand_placeholders(world, &addr);
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
     let mut stream = connect_syslog_tcp(&addr).await;
     let mut frames = Vec::new();
     for sequence in 0..count {
@@ -23234,9 +23235,13 @@ async fn when_syslog_tcp_sender_publishes_numbered_frames(
         .expect("the Syslog sender closes after writing its frames");
 }
 
-#[when(expr = "a live Syslog TCP sender connects to {string}")]
-async fn when_live_syslog_sender_connects(world: &mut ScenarioWorld, addr: String) {
-    let addr = expand_placeholders(world, &addr);
+#[when(expr = "a live Syslog TCP sender connects to node {string} at {string}")]
+async fn when_live_syslog_sender_connects(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    addr: String,
+) {
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
     world.syslog_live_sender = Some(connect_syslog_tcp(&addr).await);
 }
 
@@ -23255,11 +23260,16 @@ async fn when_live_syslog_sender_writes(world: &mut ScenarioWorld, message: Stri
         .expect("the established Syslog connection stays writable");
 }
 
-#[when(expr = "a fresh Syslog TCP sender writes message {string} to {string}")]
-async fn when_fresh_syslog_sender_writes(world: &mut ScenarioWorld, message: String, addr: String) {
+#[when(expr = "a fresh Syslog TCP sender writes message {string} to node {string} at {string}")]
+async fn when_fresh_syslog_sender_writes(
+    world: &mut ScenarioWorld,
+    message: String,
+    node_id: String,
+    addr: String,
+) {
     use tokio::io::AsyncWriteExt as _;
 
-    let addr = expand_placeholders(world, &addr);
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
     let mut sender = connect_syslog_tcp(&addr).await;
     let payload = format!("<34>1 2003-10-11T22:14:15.003Z edge-1 listener 123 ID47 - {message}");
     sender
@@ -23269,9 +23279,16 @@ async fn when_fresh_syslog_sender_writes(world: &mut ScenarioWorld, message: Str
     sender.shutdown().await.expect("the new sender closes");
 }
 
-#[when(expr = "the Syslog listener at {string} fails its next accept through the fault hook")]
-async fn when_syslog_listener_accept_fails(world: &mut ScenarioWorld, addr: String) {
-    let addr = expand_placeholders(world, &addr);
+#[when(
+    expr = "the Syslog listener on node {string} at {string} fails its next accept through the \
+            fault hook"
+)]
+async fn when_syslog_listener_accept_fails(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    addr: String,
+) {
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
     world.syslog_listener_fault = Some(world.fault_injection.fail_next_syslog_stream_accept(addr));
 }
 
@@ -23303,6 +23320,16 @@ async fn then_relay_subscription_receives_numbered_syslog_frames_once(
         .map(|sequence| vec![format!("\"message\":\"handoff-{sequence:04}\"")])
         .collect::<Vec<_>>();
     receive_expected_fragment_sets(world, &duration, expected, UnmatchedPayloads::Fail, None).await;
+}
+
+/// Resolve the configured listener address to the selected node's bound address.
+fn node_syslog_ingestor_addr(world: &ScenarioWorld, node_id: &str, configured: &str) -> String {
+    let node_id = expand_placeholders(world, node_id);
+    let configured = expand_placeholders(world, configured);
+    world
+        .cluster()
+        .syslog_ingestor_addr(&node_id, &configured)
+        .expect("failed to resolve node-local Syslog ingestor address")
 }
 
 /// A TCP connection to a Syslog listener, retried while the listener starts.

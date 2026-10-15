@@ -348,7 +348,7 @@ Feature: Syslog support
       | 3            | 1             |
 
   @syslog_suspend_handoff @deloxide_stress
-  Scenario Outline: A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes
+  Scenario Outline: A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -374,7 +374,7 @@ Feature: Syslog support
       """
     Given ingestor "syslog_intake" pauses inside dispatch
     And the entity gate for domain "{{domain}}" pauses after engagement
-    When a Syslog TCP sender publishes 80 numbered frames to "{{syslog_ingest_addr}}"
+    When a Syslog TCP sender publishes 80 numbered frames to node "<node_id>" at "{{syslog_ingest_addr}}"
     Then ingestor "syslog_intake" reaches the dispatch pause
     When these NSPL commands begin executing in the background
       """
@@ -388,12 +388,14 @@ Feature: Syslog support
     And the relay subscription does not receive a payload within "1s"
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | node_id |
+      | 1            | 0             | node-1  |
+      | 3            | 1             | node-1  |
+      | 3            | 1             | node-2  |
+      | 3            | 1             | node-3  |
 
   @syslog_listener_rebind @deloxide_stress
-  Scenario Outline: A Syslog accept error keeps an established TCP connection on <cluster_size> nodes
+  Scenario Outline: A Syslog accept error keeps an established TCP connection on <cluster_size> nodes via <node_id>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -417,20 +419,20 @@ Feature: Syslog support
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
-    When a live Syslog TCP sender connects to "{{syslog_ingest_addr}}"
+    When a live Syslog TCP sender connects to node "<node_id>" at "{{syslog_ingest_addr}}"
     And the live Syslog TCP sender writes message "before-error"
     Then within "10s" the relay subscription receives a payload
       """
       "message":"before-error"
       """
-    When the Syslog listener at "{{syslog_ingest_addr}}" fails its next accept through the fault hook
+    When the Syslog listener on node "<node_id>" at "{{syslog_ingest_addr}}" fails its next accept through the fault hook
     Then the Syslog listener accept fault fires
     When the live Syslog TCP sender writes message "after-error"
     Then within "10s" the relay subscription receives a payload
       """
       "message":"after-error"
       """
-    When a fresh Syslog TCP sender writes message "after-rebind" to "{{syslog_ingest_addr}}"
+    When a fresh Syslog TCP sender writes message "after-rebind" to node "<node_id>" at "{{syslog_ingest_addr}}"
     Then within "10s" the relay subscription receives a payload
       """
       "message":"after-rebind"
@@ -438,9 +440,11 @@ Feature: Syslog support
     And the relay subscription does not receive a payload within "1s"
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | node_id |
+      | 1            | 0             | node-1  |
+      | 3            | 1             | node-1  |
+      | 3            | 1             | node-2  |
+      | 3            | 1             | node-3  |
 
   Scenario Outline: Syslog TCP intake reassembles a <framing> frame split across two reads
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

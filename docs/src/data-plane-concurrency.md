@@ -249,10 +249,11 @@ channel send. After decoding a frame, the connection completes that send even wh
 change races a full channel; it observes the pause before its next read. An accept error removes
 only the listening socket, leaving the connection tasks and channel owned by the same source until
 resume rebinds the socket. Source close aborts those tasks. The registered Syslog Shuttle check
-explores the full-channel handoff against a pause change. One- and three-node Cucumber scenarios
-check the delivered frame count through entity quiescence and keep one connection streaming after
-an injected accept failure while the source rebinds its listening socket. The test-only fault
-channel enters through the source plan; no shared lock or map is reached per frame.
+explores the full-channel handoff against a pause change. One-node and three-node Cucumber
+scenarios exercise every listener. They check the delivered frame count through entity quiescence
+and keep one connection streaming after an injected accept failure while the source rebinds its
+listening socket. The test-only fault channel enters through the source plan; no shared lock or map
+is reached per frame.
 
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
