@@ -1649,7 +1649,7 @@ admitted in place, so these consumers remain available until the node's own grap
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
-record acknowledgement resolve; this includes roots created for `NO_ACK` sources. Ownership
+record acknowledgement resolve; this includes roots created for sources in `MODE NO ACK`. Ownership
 handoff does not complete until its replication acknowledgement and committed activation have been
 observed. These owners keep admitted work visible while the supporting interconnect consumers are
 still running.

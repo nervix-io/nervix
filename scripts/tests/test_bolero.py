@@ -183,6 +183,8 @@ class InventoryTests(unittest.TestCase):
             "nspl-format-text",
             "models-names",
             "models-name-validation",
+            "models-external-names",
+            "models-external-name-validation",
             "models-timestamps",
             "models-timestamp-text",
             "models-domain-clock",

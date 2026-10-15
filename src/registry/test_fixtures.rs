@@ -17,7 +17,7 @@ use std::{fs, num::NonZeroU64, path::PathBuf};
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
     ClientConfigEntry, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
-    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, ConsumerGroupName,
+    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat,
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
     CreateClientKafka, CreateClientSyslog, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
@@ -25,13 +25,13 @@ use nervix_models::{
     CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitSink, EmitterName,
     EmitterPublishingMode, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference,
     FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, Inheritance, JsonType, JunctionName,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink,
-    KafkaTopicSource, MaterializedRelayState, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs, ProcessorOutputs, ReingestorName,
-    RelayBranching, RelayName, ResolvedBranching, RetryPolicy, ScheduledNode, ScheduledNodes,
-    SchemaField, SchemaFingerprint, SchemaName, SignalingProtocolOnConnect, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, TopicName, VhostName, WindowBound, WindowProcessorName,
-    WireSchemaField, WireSchemaName,
+    KafkaConfigEntry, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
+    KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState, Model, ModelIndex,
+    ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
+    ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, RetryPolicy,
+    ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint, SchemaName,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, TopicName,
+    VhostName, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName,
 };
 use nonzero_ext::nonzero;
 
@@ -508,9 +508,9 @@ pub(in crate::registry) fn ingestor_statement(
         input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
             source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                 client: ClientName::parse(client).expect("valid identifier"),
-                topic: TopicName::parse("notifications").expect("valid identifier"),
+                topic: nervix_models::KafkaTopicName::parse("notifications").expect("valid topic"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                    KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                 ),
                 instances: nonzero!(1u64),
                 mode: KafkaIngestMode::AckSequential {

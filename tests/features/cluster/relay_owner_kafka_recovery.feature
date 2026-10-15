@@ -25,9 +25,9 @@ Feature: Kafka acknowledgements across relay-owner recovery
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR relay_handoff_source
-        FROM KAFKA relay_handoff_kafka TOPIC relay_handoff_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP relay_handoff_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR relay_handoff_source
+        FROM relay_handoff_kafka TOPIC 'relay_handoff_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'relay_handoff_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING relay_handoff_codec
         TO relay_handoff_records INHERIT ALL

@@ -118,8 +118,9 @@ scheduler-selected state replicas to that relay; it does not add another placeme
 runtime-node kind. See [Materialized Relay State](processors.md#materialized-relay-state) for
 dependency behavior.
 
-Endpoint-source and Syslog ingestors execute on every cluster node and therefore cannot be
-constrained by a placement rule. Member names are unqualified; a name shared by more than one
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors execute on every cluster
+node and therefore cannot be constrained by a placement rule. An ingestor's head fixes the pair it
+reads, so altering an ingestor never changes whether it can be a placement member. Member names are unqualified; a name shared by more than one
 eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
@@ -221,9 +222,9 @@ activation. A conflicting candidate is rejected before it replaces the active gr
 Every single-owner ingestor keeps its existing primary and replica assignment across schedule
 recomputation while all assigned cluster nodes are live. This includes outbound WebSocket-client
 ingestors. Model changes, cluster-node joins and uncordons, and soft placement changes therefore do
-not migrate those ingestors. Endpoint-source and Syslog ingestors are the only ingestors that
-instead follow live cluster membership, because their server listeners execute on every cluster
-node.
+not migrate those ingestors. `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`
+ingestors are the only ingestors that instead follow live cluster membership, because their server
+listeners execute on every cluster node.
 
 When a new `REQUIRE COLOCATION` relationship becomes effective, Nervix consolidates the complete
 colocation group onto one eligible cluster node. Existing assignments are preserved only when

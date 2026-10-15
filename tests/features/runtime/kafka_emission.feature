@@ -48,8 +48,8 @@ Feature: Kafka emission
       CREATE RELAY events SCHEMA incoming_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -137,10 +137,10 @@ Feature: Kafka emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
-      CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_headers_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress
+        TOPIC 'notifications_headers_in_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -222,8 +222,8 @@ Feature: Kafka emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
-      CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -300,9 +300,9 @@ Feature: Kafka emission
         'message.timeout.ms' = '100',
         'socket.timeout.ms' = '100'
       };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_ingress TOPIC mode_boundary_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP mode_boundary_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'mode_boundary_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'mode_boundary_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -361,9 +361,9 @@ Feature: Kafka emission
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_notifications
-      FROM KAFKA kafka_main TOPIC detached_confirming_in_{{test_id}}
-        OFFSET BY CONSUMER GROUP detached_confirming_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+      FROM kafka_main TOPIC 'detached_confirming_in_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'detached_confirming_group_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications

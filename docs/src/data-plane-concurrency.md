@@ -2110,6 +2110,16 @@ nodes with a replica, the deduplicator, window and guest-save restore scenarios 
 lifecycle and branch checkpoint announcements with the replica's lifecycle handle, where the
 replica task takes them under the same lock.
 
+The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
+the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
+and three nodes. Its paired stress registration reaches the occupancy holders mutex under bounded
+scheduling disturbance. Metadata inspection keeps ONNX's operator concurrency at one, so loading
+and optimization run on the bulk worker the executor admitted. Debug phase events distinguish
+worker queue delay, session initialization and release while the thirty-second product bound stays
+in place. The dependency's own locks and threads remain outside Deloxide; the isolated native owner
+regression measures the live temporary session's process thread count, and the public branch-batch
+scenario retains its exact interleaved-branch output oracle.
+
 Shuttle checks the production handoff's delivery/refusal and close races, including counter drain,
 through the registered replay-capable harness, in the Shuttle build where no detector is installed.
 The queue internals and OS wakeups are opaque; the relaxed refusal counter publishes no other

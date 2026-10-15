@@ -550,9 +550,10 @@ mod tests {
     #[cfg(feature = "testing")]
     use nervix_models::ModelName;
     use nervix_models::{
-        AckMode, BranchSelection, CodecName, CreateIngestor, CreateJunction,
-        EndpointEndpointSource, EndpointName, EndpointSource, GeneralErrorPolicy, IngestSource,
-        IngestorName, ModelKind, ProcessorInputs, SyslogListenerSource, SyslogSource,
+        AckMode, BranchSelection, CodecName, CreateIngestor, CreateJunction, EndpointName,
+        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, IngestorName, ModelKind,
+        ProcessorInputs, SyslogListenerSource, SyslogSource, WebsocketsEndpointSource,
+        WebsocketsSource,
     };
     use nonzero_ext::nonzero;
 
@@ -940,6 +941,7 @@ mod tests {
         };
         transport.source = IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
             client: named("syslog_listener"),
+            mode: nervix_models::SyslogIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         }));
         models.push(syslog_client("syslog_listener"));
@@ -1114,11 +1116,11 @@ mod tests {
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint(EndpointSource::Endpoint(
-                                    EndpointEndpointSource {
+                                source: IngestSource::Http(HttpSource::Endpoint(
+                                    HttpEndpointSource {
                                         endpoint: EndpointName::parse("ingest_http")
                                             .expect("valid identifier"),
-                                        mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                                        mode: nervix_models::EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
                                         },
@@ -1207,11 +1209,11 @@ mod tests {
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint(EndpointSource::Endpoint(
-                                    EndpointEndpointSource {
+                                source: IngestSource::Websockets(WebsocketsSource::Endpoint(
+                                    WebsocketsEndpointSource {
                                         endpoint: EndpointName::parse("ingest_ws")
                                             .expect("valid identifier"),
-                                        mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                                        mode: nervix_models::EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
                                         },

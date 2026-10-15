@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The MQTT client Model, the topic source and sink Models with their session,
-//!   quality-of-service and delivery modes, and what each entity declares.
+//!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
+//!   MQTT holds it to, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The MQTT driver, its configuration keys, or how a topic filter is
 //!   subscribed or published to.
@@ -22,6 +23,7 @@ use strum::AsRefStr;
 use super::{
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
+    external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
@@ -32,14 +34,43 @@ use crate::{
 
 configured_client!(Mqtt: unpooled CreateClientMqtt => MqttConfigEntry);
 
-/// One topic filter an MQTT client subscribes to. The filter is kept exactly as written, because
-/// MQTT topics are case-sensitive and routinely hold `/`, `.`, `+` or `#`.
+/// The longest topic filter MQTT carries, in bytes.
+const MQTT_TOPIC_FILTER_MAX: usize = 65_535;
+
+external_names! {
+    /// An MQTT topic filter: 1 to 65,535 bytes without the NUL character, whose levels are joined by
+    /// `/` and may be empty. `+` stands for one level and `#` for every remaining level, each only as
+    /// a whole level, and `#` only as the last one, as MQTT itself requires.
+    pub struct MqttTopicFilter => mqtt_topic_filter_rule;
+}
+
+fn mqtt_topic_filter_rule(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, MQTT_TOPIC_FILTER_MAX)?;
+    if text.contains('\0') {
+        return Err(ExternalNameError::InvalidChar { ch: '\0' });
+    }
+    let mut levels = text.split('/').peekable();
+    while let Some(level) = levels.next() {
+        if level.len() > 1
+            && let Some(wildcard) = level.chars().find(|ch| matches!(ch, '+' | '#'))
+        {
+            return Err(ExternalNameError::WildcardInsideLevel { wildcard });
+        }
+        if level == "#" && levels.peek().is_some() {
+            return Err(ExternalNameError::WildcardBeforeLastLevel { wildcard: '#' });
+        }
+    }
+    Ok(())
+}
+
+/// One topic filter an MQTT client subscribes to, kept exactly as written: MQTT topics are
+/// case-sensitive and routinely hold `/`, `.`, `+` or `#`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct MqttTopicSource {
     pub client: ClientName,
-    pub topic: String,
+    pub topic: MqttTopicFilter,
     pub instances: NonZeroU64,
     pub mode: MqttIngestMode,
     pub quiesce: IngestQuiesceMode,
@@ -134,11 +165,7 @@ impl MqttQos {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum MqttIngestMode {
-    NoAckSequential {
-        session: MqttSession,
-        qos: MqttQos,
-    },
-    NoAckParallel {
+    NoAck {
         session: MqttSession,
         qos: MqttQos,
     },
@@ -157,14 +184,14 @@ pub enum MqttIngestMode {
 impl MqttIngestMode {
     pub const fn session(&self) -> MqttSession {
         match self {
-            Self::NoAckSequential { session, .. } | Self::NoAckParallel { session, .. } => *session,
+            Self::NoAck { session, .. } => *session,
             Self::AckSequential { .. } | Self::AckParallel { .. } => MqttSession::Persistent,
         }
     }
 
     pub const fn qos(&self) -> MqttQos {
         match self {
-            Self::NoAckSequential { qos, .. } | Self::NoAckParallel { qos, .. } => *qos,
+            Self::NoAck { qos, .. } => *qos,
             Self::AckSequential { .. } | Self::AckParallel { .. } => MqttQos::AtLeastOnce,
         }
     }
@@ -172,7 +199,7 @@ impl MqttIngestMode {
     pub const fn is_ack(&self) -> bool {
         match self {
             Self::AckSequential { .. } | Self::AckParallel { .. } => true,
-            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => false,
+            Self::NoAck { .. } => false,
         }
     }
 
@@ -196,9 +223,7 @@ impl MqttIngestMode {
                 timeout,
                 retry: retry_policy,
             },
-            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => {
-                IngestAcknowledgement::Unacknowledged
-            }
+            Self::NoAck { .. } => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -207,6 +232,8 @@ connector_sources! {
     connector Mqtt = "MQTT";
     /// What an MQTT source reads.
     pub enum MqttSource;
+    /// The alterations of the ingestors that read an MQTT entity.
+    pub enum MqttIngestorAlteration;
     /// The entities an MQTT source reads.
     pub enum MqttSourceEntity {
         Topic(MqttTopicSource) = "TOPIC", "MQTT";

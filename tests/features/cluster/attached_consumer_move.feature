@@ -26,9 +26,9 @@ Feature: Attached acknowledgements across consumer moves
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR moved_sink_source
-        FROM KAFKA moved_sink_kafka TOPIC moved_sink_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP moved_sink_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR moved_sink_source
+        FROM moved_sink_kafka TOPIC 'moved_sink_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'moved_sink_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING moved_sink_codec
         TO moved_sink_records INHERIT ALL
@@ -124,9 +124,9 @@ Feature: Attached acknowledgements across consumer moves
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR owner_move_source
-        FROM KAFKA owner_move_kafka TOPIC owner_move_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP owner_move_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR owner_move_source
+        FROM owner_move_kafka TOPIC 'owner_move_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'owner_move_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING owner_move_codec
         TO owner_move_records INHERIT ALL UNBRANCHED

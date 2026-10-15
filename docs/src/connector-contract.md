@@ -176,7 +176,7 @@ A failed lookup reaches the driver as the resolver's `DnsLookupError`, which the
 cause of its connection error. The connector finds it there and reports `MqttConnectionError::Resolve`
 with the host and the lookup failure; every other failure keeps the driver's own description. A
 source reports the failure as a resume failure and retries on its declared `RETRY POLICY`, or on
-the host's reconnect cadence in a `NO_ACK` mode. A sink's event loop reports it as the emitter's
+the host's reconnect cadence in `MODE NO ACK`. A sink's event loop reports it as the emitter's
 transient error and reconnects on the emitter's retry policy. Neither acknowledges undelivered
 data: a source that cannot connect receives nothing, and a QoS 1 or 2 sink confirms a record only
 once the broker acknowledges it, so the input stays unacknowledged while the broker name does not
@@ -340,7 +340,8 @@ decides on a payload, which may retain it, or a WebSocket session must retain th
 message ends. Header support and each
 system's mapping are explicit: HTTP endpoint and polling headers, WebSocket upgrade headers,
 Kafka record headers, NATS headers, Pulsar properties, RabbitMQ AMQP headers, and SQS attributes
-retain their connector-specific semantics. Other source families do not offer header reads.
+retain their connector-specific semantics. Other connector and entity pairs do not offer header
+reads.
 `read_header` and `read_headers` are validated against those capabilities; header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior.
@@ -368,7 +369,7 @@ returns the share negatively; admitted records remain pending through keepalives
 waits until their terminal outcome or the silence bound. A relay owner whose relay memory has no
 room for the acknowledgement watches of a delivery holds the delivery back unadmitted instead of
 refusing it, and the host's dispatch waits for that admission within its five-minute bound. A
-source in a `NO_ACK` mode therefore stops reading while its delivery is held, as under any relay
+source in `MODE NO ACK` therefore stops reading while its delivery is held, as under any relay
 backpressure, and its output is delivered once the relay owner has room rather than lost. In an
 acknowledged mode the held rows' shares stay pending without keepalives, so a hold longer than the
 source's `ACK TIMEOUT` rejects their positions and the source delivers them again, possibly after the
@@ -416,7 +417,7 @@ acknowledgements early. A source started on the destination node after handoff u
 open intake.
 
 A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
-`NO_ACK` mode, cannot be presented again either. An acknowledged batch the extension workers refuse
+`MODE NO ACK`, cannot be presented again either. An acknowledged batch the extension workers refuse
 is rejected for its source to deliver again, and an endpoint refuses a body its sender sends again;
 a live unacknowledged payload follows its source's unacknowledged admission instead, which each
 source's composition declares. Waiting holds the source's loop, so a source waits for a place only
@@ -431,8 +432,8 @@ when its transport stays connected with bounded memory while nothing reads it:
 | MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
 | Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
 | WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
-| Kafka `NO_ACK PARALLEL` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
-| Pulsar `NO_ACK PARALLEL` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
+| `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
+| `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
 
 A waiting payload races the ingestor's stop and every new quiesce decision. The stop drops it. A
 new decision, for a source whose input passes through the quiesce control, hands the payload to the
@@ -931,21 +932,54 @@ sequenceDiagram
   path and query. The source host cancels a pending resume when shutdown or quiesce changes its
   lifecycle state. DNS and connection failures remain infrastructure outcomes for the host to retry;
   a resolved address alone never completes a Syslog record or an input acknowledgement.
+- **WebSocket client source.** The WebSocket connector crate supplies the outbound
+  `WEBSOCKETS CONNECTION` source through `SourceConnector` and `BrokerSourceConnector`. It has
+  no emitter or listening endpoint. Its plan carries resolved client configuration, the node
+  resolver and an optional compiled signaling protocol. `open` prepares local transport and TLS
+  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  signaling handshake, and only then reports readiness. Accepted data from a successful
+  handshake is queued for polling before new socket frames. Text and binary frames become raw
+  payload bytes for the host to decode; protocol control frames remain transport concerns.
+  Suspension drops the connection while retaining queued payloads, and close also clears that
+  queue. Transport failure requires another resume of the retained source.
+  The host composer currently resolves the named signaling protocol and chooses buffered intake,
+  a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
+  the executor. Holding its polling loop would also stop answering the peer's pings. These
+  transport requirements belong in a connector-owned contract declaration; the composer
+  currently hard-codes them instead. The source ownership header names this boundary violation.
+  The source's position carries no external acknowledgement, and its acknowledge and reject operations are
+  no-ops; reconnection supplies no durable replay guarantee. The host owns graph intake, routing,
+  quiesce, admission and retry cadence. Server endpoint listeners use the server's request-scoped
+  source and share only the signaling engine with this outbound connector.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
-  client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
-  frames become payload; the host still owns intake and routing. Domain activation resolves the
-  endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
-  when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
-  The compiler never chooses a graph route or an endpoint listener. A number keeps its value
-  between a frame and the programs that read and write it: a protobuf `double` to its bits.
+  client sources and server endpoint sessions. Its ordered send and wait clauses, acceptance
+  policy, per-connection state and handshake timeout govern when frames become payload; the
+  caller supplies the accepted-data sink, and the host still owns intake and routing. Domain
+  activation resolves the endpoint's VHOST and signaling reference first. The runtime binds the
+  pinned protobuf resource, when present, and hands its send and wait message descriptors to the
+  compiler. The compiled artifact retains the wire format, compiled jaq programs and timeout;
+  each connection owns its handshake state. The compiler never chooses a graph route or an
+  endpoint listener. A number keeps its value between a frame and the programs that read and
+  write it: a protobuf `double` to its bits.
+  The compiler currently also receives the configuration Model's `SignalingWireFormat` and
+  `SignalingProtocolOnConnect`, and parses the latter's timeout text. This contradicts the
+  connector engine's typed-plan input boundary: the decision layer must convert those Model
+  fields and the duration into a typed signaling plan before compilation. The crate and
+  signaling module's ownership headers name this violation; sharing the engine with endpoint
+  sessions does not transfer Model conversion, resource resolution or routing into the connector.
+  The accepted-data callback is currently the crate's own `SignalingDataSink` interface. Its
+  host service belongs in the shared connector contract; the signaling module's header names
+  this separate host-interface ownership violation.
   Registered conversion properties exercise complete messages with explicit scalar presence:
   double and float bits, full-width integers, booleans, strings, ordered repeated fields and
   absent defaults. The generated JSON omits empty repeated fields, which protobuf does not
   distinguish from absent ones. A separate malformed-frame property refuses invalid field tags,
   truncated fixed-width and length-delimited fields, oversized varints and incomplete packed
   float elements through the production decoder.
-- **Server endpoint intake.** The endpoint source binds one prepared intake lifetime to all of its
-  configured routes before reporting readiness. Domain definitions and bound lifetimes share one
+- **Server endpoint intake.** `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors share one
+  server-owned intake; each head names the protocol its endpoint serves, and the registry refuses an
+  endpoint of another `TYPE` before activation. The endpoint source binds one prepared intake
+  lifetime to all of its configured routes before reporting readiness. Domain definitions and bound lifetimes share one
   immutable publication. HTTP resolves it once per request; a WebSocket retains its route and
   signaling protocol for the connection, including data accepted during signaling. Close or drop
   ends that exact lifetime before withdrawing it, so a retained route cannot attach to a replacement
@@ -1048,8 +1082,11 @@ drain boundary. This chapter does not redefine those output formats.
 
 ## Adding an integration
 
-1. Define its vocabulary Model and capabilities, then add NSPL grammar and completion for the
-   public statement form. Keep external driver configuration raw only where pass-through is its
+1. Declare each entity it serves in the vocabulary: one Model per entity with its capabilities,
+   its delivery modes, and a typed name, checked by the entity's own rule, for each external name
+   its statement writes. The connector and entity together name the statement's head, such as
+   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
+   and its completion. Keep external driver configuration raw only where pass-through is its
    intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;

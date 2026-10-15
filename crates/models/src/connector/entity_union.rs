@@ -2,23 +2,26 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The shape every connector's entities and the two unions over them are declared in:
-//!   a data enum over the entity Models, the kind that names each entity, and the conversions from
-//!   an entity Model into the enums that hold it.
-//! - **Depends on.** The source and sink declarations each entity Model implements.
+//! - **Owns.** The shape every connector's entities and the unions over them are declared in: a
+//!   data enum over the entity Models, the kind that names each entity, the alterations of the
+//!   ingestors that read each entity, and the conversions from an entity Model or its operations
+//!   into the enums that hold them.
+//! - **Depends on.** The source and sink declarations each entity Model implements, and the
+//!   alteration operations an ingestor applies.
 //! - **Must not know.** Any one connector, entity or capability.
 //!
 //! A connector module declares its own entities with [`connector_sources`] and
-//! [`connector_sinks`]. The unions are declared once each with [`entity_union`], which lists
-//! connectors and never entities, so adding an entity to a connector touches that connector's
-//! module alone.
+//! [`connector_sinks`]. The unions are declared once each with [`entity_union`] and
+//! [`ingestor_alteration_union`], which list connectors and never entities, so adding an entity to
+//! a connector touches that connector's module alone.
 
 #![cfg_attr(
     nervix_lint,
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-/// Declares the kind that names each source entity of one connector.
+/// Declares the kind that names each source entity of one connector, and the pair each entity
+/// Model is a source of.
 ///
 /// Each line gives the entity's keyword and the label a form shows for it. What the entity
 /// declares is read from its Model's [`SourceEntity`](crate::SourceEntity) implementation, so the
@@ -77,16 +80,35 @@ macro_rules! connector_source_kinds {
                 }
             }
         }
+
+        $(
+            impl $crate::IngestorEntityModel for $Model {
+                const KIND: $crate::IngestSourceKind =
+                    $crate::IngestSourceKind::$Connector($Entity::$Variant);
+            }
+        )+
     };
 }
 
-/// Declares the sources of one connector: the union of its entity Models and the kind that names
-/// each entity.
+/// The guarantee every operation of an alteration relies on to find its pair's Model in the input
+/// it changes.
+pub(crate) const ALTERED_PAIR_CHECKED: &str =
+    "apply_alter compared the stored pair with the pair the alteration's head names before \
+     applying any operation, and no operation changes the pair an input reads";
+
+/// Declares the sources of one connector: the union of its entity Models, the kind that names each
+/// entity, and the alterations of the ingestors that read each entity.
+///
+/// An alteration of one entity holds operations whose `SET FROM` states that entity's own Model,
+/// so it can set no source of another entity, and its operations decode a transport's payloads
+/// with the codec `SET DECODE USING` names.
 macro_rules! connector_sources {
     (
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$source_meta:meta])*
         pub enum $Source:ident;
+        $(#[$alteration_meta:meta])*
+        pub enum $Alteration:ident;
         $(#[$entity_meta:meta])*
         pub enum $Entity:ident {
             $(
@@ -169,6 +191,100 @@ macro_rules! connector_sources {
             impl From<$Model> for $crate::IngestSource {
                 fn from(source: $Model) -> Self {
                     Self::$Connector($Source::$Variant(source))
+                }
+            }
+        )+
+
+        $(#[$alteration_meta])*
+        #[derive(
+            Debug,
+            Clone,
+            PartialEq,
+            Eq,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::rkyv::Archive,
+            ::rkyv::Serialize,
+            ::rkyv::Deserialize,
+        )]
+        pub enum $Alteration {
+            $(
+                $(#[$variant_meta])*
+                $Variant(Vec<$crate::AlterTransportIngestorOperation<$Model>>),
+            )+
+        }
+
+        impl $Alteration {
+            /// The entity whose ingestors this alteration changes.
+            pub const fn entity(&self) -> $Entity {
+                match self {
+                    $(Self::$Variant(_) => $Entity::$Variant,)+
+                }
+            }
+
+            /// Applies the operations in order to an ingestor that reads this entity.
+            pub(crate) fn apply_to(
+                &self,
+                ingestor: &mut $crate::CreateIngestor,
+            ) -> ::error_stack::Result<(), $crate::AlterIngestorError> {
+                match self {
+                    $(
+                        Self::$Variant(operations) => {
+                            ingestor.apply_transport_operations(operations)
+                        }
+                    )+
+                }
+            }
+
+            /// The canonical NSPL of each operation, in order.
+            pub(crate) fn operations_to_nspl(
+                &self,
+            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalNsplError> {
+                match self {
+                    $(
+                        Self::$Variant(operations) => {
+                            $crate::canonical::alter_transport_ingestor_operations_to_nspl(
+                                operations,
+                            )
+                        }
+                    )+
+                }
+            }
+        }
+
+        $(
+            impl From<Vec<$crate::AlterTransportIngestorOperation<$Model>>> for $Alteration {
+                fn from(operations: Vec<$crate::AlterTransportIngestorOperation<$Model>>) -> Self {
+                    Self::$Variant(operations)
+                }
+            }
+
+            impl From<Vec<$crate::AlterTransportIngestorOperation<$Model>>>
+                for $crate::IngestorAlteration
+            {
+                fn from(operations: Vec<$crate::AlterTransportIngestorOperation<$Model>>) -> Self {
+                    Self::$Connector($Alteration::$Variant(operations))
+                }
+            }
+
+            impl $crate::connector::source::AlteredIngestorSource for $Model {
+                fn set_into(&self, input: &mut $crate::IngestorInput) {
+                    let source = ::meticulous::OptionExt::verified(
+                        input.transport_source_mut(),
+                        $crate::connector::entity_union::ALTERED_PAIR_CHECKED,
+                    );
+                    *source = self.clone().into();
+                }
+
+                fn set_quiesce_of(
+                    input: &mut $crate::IngestorInput,
+                    quiesce: $crate::IngestQuiesceMode,
+                ) -> ::error_stack::Result<(), $crate::AlterIngestorError> {
+                    let source = ::meticulous::OptionExt::verified(
+                        input.transport_source_mut(),
+                        $crate::connector::entity_union::ALTERED_PAIR_CHECKED,
+                    );
+                    source.set_quiesce(quiesce)
                 }
             }
         )+
@@ -459,7 +575,78 @@ macro_rules! entity_union {
     };
 }
 
+/// Declares the union of every connector's ingestor alterations, which an
+/// `ALTER <CONNECTOR> <ENTITY> INGESTOR` statement holds.
+///
+/// A line names a connector with the alteration enum its module declared, whose variants name the
+/// connector's entities. The union states the pair the statement's head names, applies the
+/// operations to an ingestor that reads it, and writes them back as canonical NSPL.
+macro_rules! ingestor_alteration_union {
+    (
+        $(#[$union_meta:meta])*
+        pub enum $Union:ident;
+        $($Connector:ident($Alteration:ident),)+
+    ) => {
+        $(#[$union_meta])*
+        #[derive(
+            Debug,
+            Clone,
+            PartialEq,
+            Eq,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::rkyv::Archive,
+            ::rkyv::Serialize,
+            ::rkyv::Deserialize,
+        )]
+        pub enum $Union {
+            $($Connector($Alteration),)+
+        }
+
+        impl $Union {
+            /// The connector and entity the statement's head names.
+            pub const fn kind(&self) -> $crate::IngestSourceKind {
+                match self {
+                    $(
+                        Self::$Connector(alteration) => {
+                            $crate::IngestSourceKind::$Connector(alteration.entity())
+                        }
+                    )+
+                }
+            }
+
+            /// Applies the operations in order to an ingestor that reads the head's pair.
+            pub(crate) fn apply_to(
+                &self,
+                ingestor: &mut $crate::CreateIngestor,
+            ) -> ::error_stack::Result<(), $crate::AlterIngestorError> {
+                match self {
+                    $(Self::$Connector(alteration) => alteration.apply_to(ingestor),)+
+                }
+            }
+
+            /// The canonical NSPL of each operation, in order.
+            pub(crate) fn operations_to_nspl(
+                &self,
+            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalNsplError> {
+                match self {
+                    $(Self::$Connector(alteration) => alteration.operations_to_nspl(),)+
+                }
+            }
+        }
+
+        $(
+            impl From<$Alteration> for $Union {
+                fn from(alteration: $Alteration) -> Self {
+                    Self::$Connector(alteration)
+                }
+            }
+        )+
+    };
+}
+
 pub(crate) use connector_sinks;
 pub(crate) use connector_source_kinds;
 pub(crate) use connector_sources;
 pub(crate) use entity_union;
+pub(crate) use ingestor_alteration_union;

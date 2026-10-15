@@ -14,8 +14,8 @@ Feature: Client producers across real node process faults
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -110,8 +110,8 @@ Feature: Client producers across real node process faults
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -208,8 +208,8 @@ Feature: Client producers across real node process faults
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW

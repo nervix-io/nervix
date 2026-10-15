@@ -186,9 +186,9 @@ pub(super) mod tests {
         ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
         CodecWireFormat, CreateCodec, CreateEndpoint, CreateJsonWireSchema, CreateRelay,
         CreateSchema, CreateVhost, DomainConfig, DomainPace, DomainState, DomainStatus,
-        EndpointEndpointSource, EndpointIngestMode, EndpointName, JsonType, OutputBranch,
-        ParseAsType, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
-        VhostName, WireSchemaField, WireSchemaName,
+        EndpointIngestMode, EndpointName, HttpEndpointSource, JsonType, OutputBranch, ParseAsType,
+        ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName, VhostName,
+        WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nonzero_ext::nonzero;
@@ -298,9 +298,9 @@ pub(super) mod tests {
                                 .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::from(EndpointEndpointSource {
+                                    source: IngestSource::from(HttpEndpointSource {
                                         endpoint,
-                                        mode: EndpointIngestMode::NoAckSequential,
+                                        mode: EndpointIngestMode::NoAck,
                                         quiesce: IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
                                         },

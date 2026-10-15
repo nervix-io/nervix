@@ -40,8 +40,8 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
         ));
     }
     commands.push_str(
-        "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 30s \
-         RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND TIMESTAMP AT occurred_at ",
+        "CREATE CLIENT PRODUCER INGESTOR source FROM SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT \
+         30s RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND TIMESTAMP AT occurred_at ",
     );
     for index in 0..relays {
         commands.push_str(&format!(

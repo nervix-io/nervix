@@ -15,8 +15,8 @@ use leptos::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{ChoiceTarget, ChoiceValue};
 use nervix_models::{
-    DomainName, EndpointSourceEntity, FieldName, HttpSourceEntity, KafkaSourceEntity, ModelKind,
-    ModelName, MqttSourceEntity, NatsSourceEntity, NodeRef, ParseAsType, PrometheusSourceEntity,
+    DomainName, FieldName, HttpSourceEntity, KafkaSourceEntity, ModelKind, ModelName,
+    MqttSourceEntity, NatsSourceEntity, NodeRef, ParseAsType, PrometheusSourceEntity,
     PulsarSourceEntity, RabbitMqSourceEntity, RedisSourceEntity, RequestedResourceVersion,
     ResourceName, SqsSourceEntity, SyslogSourceEntity, WebsocketsSourceEntity, ZeroMqSourceEntity,
 };
@@ -595,7 +595,7 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
         signals.ingestor.update(|draft| {
             draft
                 .source
-                .choose_kind(IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint))
+                .choose_kind(IngestSourceKind::Http(HttpSourceEntity::Endpoint))
         });
         let source = ChoiceValue::Model(node(ModelKind::Endpoint, "incoming"));
         select_choice(signals, ChoiceControl::IngestSourceRef, source.clone());
@@ -609,7 +609,7 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
                 .choice_query(ChoiceControl::IngestSourceRef)
                 .assured("endpoint lookup has a captured domain")
                 .target,
-            ChoiceTarget::IngestEndpointSource,
+            ChoiceTarget::IngestHttpEndpointSource,
         );
         signals.ingestor.update(|draft| {
             draft.routes[0].branch.choose_branched();
@@ -829,7 +829,7 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
                 "create-ingestor-queue",
             ),
             (
-                IngestSourceKind::Endpoint(EndpointSourceEntity::Endpoint),
+                IngestSourceKind::Http(HttpSourceEntity::Endpoint),
                 "create-ingestor-timestamp",
             ),
             (

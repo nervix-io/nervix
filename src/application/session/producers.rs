@@ -429,7 +429,7 @@ impl SessionProducers {
                 format!(
                     "ingestor '{}' reads {}, not client batches",
                     ingestor.as_str(),
-                    model.input.source_label()
+                    model.input.source_phrase()
                 ),
             ));
         }

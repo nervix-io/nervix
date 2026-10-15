@@ -119,7 +119,7 @@ native settings. Vector measures its native maximum before serialization, while 
 Arrow batch, so byte caps do not imply byte-for-byte equivalence.
 
 `kafka-filter-map` also exposes `ingestor_mode`, the ingestor's whole `MODE` clause, so the same
-graph can be measured under acknowledgement instead of the `NO_ACK PARALLEL` default. The clause
+graph can be measured under acknowledgement instead of the `NO ACK` default. The clause
 contains spaces, so quote it twice when overriding it through a `just` recipe — the outer quotes
 are consumed by the shell and the inner ones survive into the recipe:
 

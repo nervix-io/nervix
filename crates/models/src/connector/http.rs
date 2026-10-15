@@ -2,12 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The HTTP client Model, the polled request source and the request sink Models, and
-//!   what each entity declares.
+//! - **Owns.** The HTTP client Model, the polled request source with its delivery mode, the source
+//!   that reads an HTTP endpoint this cluster serves, the request sink Model, and what each entity
+//!   declares.
 //! - **Depends on.** The shared source and sink declarations, expressions, the domain clock's
 //!   period and the names a body references.
-//! - **Must not know.** The HTTP client library, its configuration keys, or how a request is
-//!   built, sent or classified.
+//! - **Must not know.** The HTTP client library, its configuration keys, how a request is built,
+//!   sent or classified, or how an endpoint is published, routed to or served.
 
 #![cfg_attr(
     nervix_lint,
@@ -23,9 +24,10 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, Expression,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled CreateClientHttp => HttpConfigEntry);
@@ -37,6 +39,7 @@ configured_client!(Http: unpooled CreateClientHttp => HttpConfigEntry);
 pub struct HttpRequestSource {
     pub client: ClientName,
     pub every: DomainClockPeriod,
+    pub mode: HttpRequestIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
@@ -70,7 +73,66 @@ impl SourceBody for HttpRequestSource {
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        IngestAcknowledgement::Unacknowledged
+        self.mode.acknowledgement()
+    }
+}
+
+/// How the responses to a polled request are delivered. The next request reads the endpoint
+/// again, so no response waits on an acknowledgement.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpRequestIngestMode {
+    NoAck,
+}
+
+impl HttpRequestIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
+        }
+    }
+}
+
+/// One endpoint of `TYPE HTTP` this cluster serves, whose requests are the payloads. Every node of
+/// the cluster serves it.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct HttpEndpointSource {
+    pub endpoint: EndpointName,
+    pub mode: EndpointIngestMode,
+    pub quiesce: IngestQuiesceMode,
+}
+
+impl SourceEntity for HttpEndpointSource {
+    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+        reads_headers: true,
+        metadata: SourceMetadataScope::Headers,
+        executes_on_every_cluster_node: true,
+        reference: SourceReferenceKind::Endpoint(EndpointType::Http),
+    };
+}
+
+impl SourceBody for HttpEndpointSource {
+    fn reference(&self) -> SourceReference<'_> {
+        SourceReference::Endpoint(&self.endpoint)
+    }
+
+    fn quiesce(&self) -> &IngestQuiesceMode {
+        &self.quiesce
+    }
+
+    fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
+        &mut self.quiesce
+    }
+
+    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
+        self.mode.supports_quiesce(quiesce)
+    }
+
+    fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        self.mode.acknowledgement()
     }
 }
 
@@ -78,9 +140,12 @@ connector_sources! {
     connector Http = "HTTP";
     /// What an HTTP source reads.
     pub enum HttpSource;
+    /// The alterations of the ingestors that read an HTTP entity.
+    pub enum HttpIngestorAlteration;
     /// The entities an HTTP source reads.
     pub enum HttpSourceEntity {
         Request(HttpRequestSource) = "REQUEST", "HTTP polling";
+        Endpoint(HttpEndpointSource) = "ENDPOINT", "HTTP endpoint";
     }
 }
 

@@ -217,10 +217,15 @@ and runs the Roto tests before **Completed** appears. Compilation, type, or test
 signature and source editable. A completed function is available to `udf::` calls in later
 commands under the same session and domain.
 
-An ingestor form offers all 13 current source families: HTTP polling, Kafka, Pulsar, MQTT, NATS,
-RabbitMQ, Redis Pub/Sub, Prometheus, ZeroMQ, SQS, endpoint, WebSocket client, and Syslog. Its
-source client or endpoint is a typed choice limited to that source family. The source's own fields,
-delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. The
+An ingestor form offers every connector and entity an ingestor reads through a transport:
+`HTTP REQUEST`, `HTTP ENDPOINT`, `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`,
+`RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
+`WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
+typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
+names. The preview writes the statement under that pair's head. The source's own fields,
+delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. A topic,
+queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
+typed, case and spaces included, and the form refuses a name its entity's rule refuses. The
 decoding codec list contains only codecs that support decoding. Timestamp behavior must be chosen
 explicitly: source timestamp, `NOW`, or `AT` a typed field from the codec's output schema.
 

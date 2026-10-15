@@ -70,8 +70,8 @@ Feature: Relay correlation
         ON edge
         PATH '/right-alias'
         TYPE HTTP;
-        CREATE INGESTOR left_profile_ingestor
-        FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor
+        FROM left_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec
         TO left_profiles
         INHERIT ALL
@@ -80,8 +80,8 @@ Feature: Relay correlation
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR left_profile_alias_ingestor
-        FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR left_profile_alias_ingestor
+        FROM left_alias_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec
         TO left_profile_aliases
         INHERIT ALL
@@ -90,8 +90,8 @@ Feature: Relay correlation
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR right_profile_ingestor
-        FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR right_profile_ingestor
+        FROM right_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec
         TO right_profiles
         INHERIT ALL
@@ -100,8 +100,8 @@ Feature: Relay correlation
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR right_profile_alias_ingestor
-        FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR right_profile_alias_ingestor
+        FROM right_alias_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec
         TO right_profile_aliases
         INHERIT ALL

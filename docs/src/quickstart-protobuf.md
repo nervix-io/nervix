@@ -64,8 +64,8 @@ CREATE RELAY proto_orders SCHEMA order_record UNBRANCHED;
 
 CREATE ENDPOINT proto_ingress ON edge PATH '/proto-orders' TYPE HTTP;
 
-CREATE INGESTOR proto_order_source
-  FROM ENDPOINT proto_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR proto_order_source
+  FROM proto_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_protobuf_codec
   TO proto_orders
     INHERIT ALL

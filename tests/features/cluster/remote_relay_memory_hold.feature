@@ -22,11 +22,11 @@ Feature: Remote relay delivery held back while the relay memory budget is full
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR remote_hold_source
-        FROM KAFKA remote_hold_kafka TOPIC remote_hold_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP remote_hold_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR remote_hold_source
+        FROM remote_hold_kafka TOPIC 'remote_hold_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'remote_hold_group_{{test_id}}'
           INSTANCES 1
-          MODE NO_ACK PARALLEL
+          MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING remote_hold_codec
         TO remote_hold_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG

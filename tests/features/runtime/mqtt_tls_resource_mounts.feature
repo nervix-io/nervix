@@ -38,8 +38,8 @@ Feature: MQTT TLS resource mounts
           'client_id' = 'nervix-cucumber-mqtt-tls-{{test_id}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_tls TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_tls TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -35,8 +35,8 @@ Feature: SQS name resolution
         <client_config>,
         'region' = 'us-east-1'
       };
-      CREATE INGESTOR sqs_in
-        FROM SQS sqs_main QUEUE dns_in_{{test_id}} INSTANCES 1
+      CREATE SQS QUEUE INGESTOR sqs_in
+        FROM sqs_main QUEUE 'dns_in_{{test_id}}' INSTANCES 1
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -144,9 +144,9 @@ Feature: SQS name resolution
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_ingress TOPIC sqs_dns_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP sqs_dns_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'sqs_dns_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'sqs_dns_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -223,8 +223,8 @@ Feature: SQS name resolution
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE INGESTOR sqs_in
-        FROM SQS sqs_main QUEUE dns_in_{{test_id}} INSTANCES 1
+      CREATE SQS QUEUE INGESTOR sqs_in
+        FROM sqs_main QUEUE 'dns_in_{{test_id}}' INSTANCES 1
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications

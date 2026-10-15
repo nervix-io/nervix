@@ -570,7 +570,7 @@ mod tests {
                     nervix_models::TransportIngestorInput {
                         source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                             client: named("zmq"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
+                            mode: ZeroMqIngestMode::NoAck,
                             quiesce: IngestQuiesceMode::Suspend,
                         })),
                         codec: named("payload_codec"),

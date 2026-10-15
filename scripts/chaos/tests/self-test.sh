@@ -14,6 +14,9 @@ if ! chaos_jq_supported; then
 fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/output-boundary-self-test.sh"
+"${script_dir}/image-package-self-test.sh"
+"${script_dir}/startup-status-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
@@ -810,9 +813,10 @@ heal_sidecar="$(docker run --detach --label com.gaiaadm.pumba.skip=true \
     --network "container:${heal_target}" "${chaos_probe_image}" sleep 120)"
 "${network_faults}" heal --run-id "${cleanup_run_id}" --nettools "${chaos_nettools_image}" \
     --output "${tmp_dir}/heal-report.txt" || fail 'healing did not clear faults left by a killed injector'
-grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
-    && grep -Fq 'removed Pumba INPUT rule' "${tmp_dir}/heal-report.txt" \
-    || fail 'healing did not report the owned rules it removed'
+if ! grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
+    || ! grep -Fq 'removed Pumba INPUT rule' "${tmp_dir}/heal-report.txt"; then
+    fail 'healing did not report the owned rules it removed'
+fi
 if docker inspect "${heal_sidecar}" >/dev/null 2>&1; then
     fail 'healing left a Pumba sidecar joined to a run-owned namespace'
 fi

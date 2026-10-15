@@ -39,9 +39,9 @@ Feature: HTTP client TLS resource mounts
           'timeout_ms' = 5000,
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_tls EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_tls EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
