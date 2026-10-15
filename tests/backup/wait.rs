@@ -76,7 +76,7 @@ fn then_cli_wait_exposes_reference(world: &mut ScenarioWorld) {
 }
 
 #[then("the recovered CLI backup keeps its execution reference and both quiesced cuts")]
-fn then_cli_recovery_keeps_identity_and_cuts(world: &mut ScenarioWorld) {
+async fn then_cli_recovery_keeps_identity_and_cuts(world: &mut ScenarioWorld) {
     let report = cli_json(last_cli_output(world));
     assert_eq!(
         report["execution_reference"],
@@ -85,9 +85,7 @@ fn then_cli_recovery_keeps_identity_and_cuts(world: &mut ScenarioWorld) {
     let path = report["output"]
         .as_str()
         .assured("the report names the verified archive");
-    let description =
-        nervix_backup::describe_archive(std::fs::File::open(path).assured("the archive exists"))
-            .assured("the recovered archive verifies");
+    let description = described_archive(PathBuf::from(path)).await;
     for suffix in ["_a", "_b"] {
         let domain = scenario_domain(world, &format!("{{{{backup_base}}}}{suffix}"));
         let captured = description
@@ -181,13 +179,18 @@ async fn then_cli_recovers_archive_to_stdout(world: &mut ScenarioWorld) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let description = nervix_backup::describe_archive(output.stdout.as_slice())
-        .assured("stdout carries a complete verified archive");
-    assert_eq!(description.domains.len(), backup.summary.domains.len());
-    assert_eq!(
-        blake3::hash(&output.stdout).to_hex().as_str(),
-        backup.summary.digest.to_string()
-    );
+    let archive = output.stdout.clone();
+    let summary = backup.summary.clone();
+    off_the_runner(move || {
+        let description = nervix_backup::describe_archive(archive.as_slice())
+            .assured("stdout carries a complete verified archive");
+        assert_eq!(description.domains.len(), summary.domains.len());
+        assert_eq!(
+            blake3::hash(&archive).to_hex().as_str(),
+            summary.digest.to_string()
+        );
+    })
+    .await;
     let report: serde_json::Value =
         serde_json::from_slice(&output.stderr).assured("the JSON report goes to stderr");
     assert_eq!(report["execution_reference"], backup.reference.as_str());
@@ -321,12 +324,8 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
 }
 
 #[then(expr = "backup archive {string} retains both native recovery cuts")]
-fn then_archive_retains_native_recovery_cuts(world: &mut ScenarioWorld, file: String) {
-    let archive = archive_path(world, &file);
-    let description = nervix_backup::describe_archive(
-        std::fs::File::open(archive).assured("native recovery downloads its archive"),
-    )
-    .assured("the recovered native archive verifies");
+async fn then_archive_retains_native_recovery_cuts(world: &mut ScenarioWorld, file: String) {
+    let description = described_archive(archive_path(world, &file)).await;
     assert_eq!(
         description.domains.len(),
         last_backup(world).summary.domains.len()
@@ -359,12 +358,8 @@ fn then_archive_retains_native_recovery_cuts(world: &mut ScenarioWorld, file: St
 }
 
 #[then(expr = "backup archive {string} contains both delayed quiesced domain cuts")]
-fn then_archive_contains_delayed_cuts(world: &mut ScenarioWorld, file: String) {
-    let archive = archive_path(world, &file);
-    let description = nervix_backup::describe_archive(
-        std::fs::File::open(archive).assured("the client downloaded the archive"),
-    )
-    .assured("the archive is complete and valid");
+async fn then_archive_contains_delayed_cuts(world: &mut ScenarioWorld, file: String) {
+    let description = described_archive(archive_path(world, &file)).await;
     let domains: BTreeMap<_, _> = description
         .domains
         .iter()

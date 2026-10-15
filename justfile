@@ -2594,9 +2594,19 @@ test-nspl-backup-completion:
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
 
-# Check the shared R2 configuration used by native CI jobs and Docker builds.
+# Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
+# job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
+
+# Retain the kache remote contract's own measured line coverage beside the other Python tooling.
+coverage-kache-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/kache-ci"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.tests.test_kache_ci -m unittest scripts.tests.test_kache_ci
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" -o "{{ cargo_target_dir }}/kache-ci/python.lcov"
 
 # Exercise the pinned Go formatter bootstrap and its CI wiring without network access.
 test-go-ci-tool:
@@ -3255,7 +3265,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
