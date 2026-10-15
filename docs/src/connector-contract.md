@@ -319,7 +319,8 @@ that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, which typed metadata scope exists,
-whether quiesce is supported, the nonzero instance count, and the supported acknowledgement mode.
+whether quiesce is supported, the nonzero instance count, the supported acknowledgement mode, and
+the position class the source's entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
@@ -446,12 +447,21 @@ For broker sources, `None` admits without an ACK root; `Sequential` requests one
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
 timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
 transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. If rejection itself fails, the host retains those positions, suspends
-the source, and reestablishes its assignment. It retries the same rejection before polling any
-later batch or committing a later position, so a retried rejection must not depend on a poll. The
-[Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a
-consumer-group rebalance has moved away, because only a poll can assign that partition again. A
-transport without an acknowledged delivery mode has no redelivery guarantee from Nervix. The
+source's delivery policy. What the host does when rejection itself fails depends on the position
+class each source entity declares, which states what its positions still mean once the connection
+that delivered them is gone. The host handles each class once:
+
+| Position class | Entities | After a failed rejection |
+| --- | --- | --- |
+| `replayable` | Kafka, Pulsar | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+| `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+
+A transport acknowledgement that fails because the connection died is handled the same way: the
+host rejects the positions, that rejection fails on the same lost connection, and the class decides.
+A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
+whose acknowledgement the broker never received is ingested again. A transport without an
+acknowledged delivery mode has no redelivery guarantee from Nervix. The
 sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
 modes are in [Ingestors](./ingestors.md) and
 [Shutdown And Recovery](./shutdown.md#connector-contracts).

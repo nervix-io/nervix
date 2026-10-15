@@ -84,6 +84,7 @@ const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
 const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
 const INGESTOR_QUIESCE_REJECTED_TOTAL: &str = "ingestor_quiesce_rejected_total";
 const INGESTOR_UNFOLDING_REFUSED_TOTAL: &str = "ingestor_unfolding_refused_total";
+const INGESTOR_TRANSPORT_REDELIVERIES_TOTAL: &str = "ingestor_transport_redeliveries_total";
 const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
 const CLIENT_INGESTOR_PRODUCERS: &str = "client_ingestor_producers";
 const CLIENT_INGESTOR_FORWARDED_PRODUCERS: &str = "client_ingestor_forwarded_producers";
@@ -1615,6 +1616,7 @@ struct PrometheusMetrics {
     ingestor_quiesce_dropped_total: IntCounterVec,
     ingestor_quiesce_rejected_total: IntCounterVec,
     ingestor_unfolding_refused_total: IntCounterVec,
+    ingestor_transport_redeliveries_total: IntCounterVec,
     session_subscriptions: IntGaugeVec,
     session_subscription_dropped_rows_total: IntCounterVec,
     client_ingestor_producers: IntGaugeVec,
@@ -1852,6 +1854,20 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
+        let ingestor_transport_redeliveries_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_TRANSPORT_REDELIVERIES_TOTAL,
+                "Total pending acknowledgements and rejections an ingestor discarded after its \
+                 source reconnected, because the broker redelivers what the lost connection did \
+                 not acknowledge.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
 
         registry.register(Box::new(messages_total.clone())).assured(
             "this registry is built here and each metric is registered once under a distinct name",
@@ -1918,6 +1934,12 @@ impl PrometheusMetrics {
             );
         registry
             .register(Box::new(ingestor_unfolding_refused_total.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        registry
+            .register(Box::new(ingestor_transport_redeliveries_total.clone()))
             .assured(
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
@@ -2159,6 +2181,7 @@ impl PrometheusMetrics {
             ingestor_quiesce_dropped_total,
             ingestor_quiesce_rejected_total,
             ingestor_unfolding_refused_total,
+            ingestor_transport_redeliveries_total,
             session_subscriptions,
             session_subscription_dropped_rows_total,
             client_ingestor_producers,
@@ -3426,6 +3449,25 @@ impl RuntimeMetrics {
         self.series
             .prometheus
             .ingestor_unfolding_refused_total
+            .with_label_values(&[
+                domain.as_str(),
+                ingestor.as_str(),
+                physical_node_label(physical_node_id),
+            ])
+    }
+
+    /// The count of positions a source host of `ingestor` on `physical_node_id` discarded after a
+    /// reconnect because the broker redelivers them. The series exists from the first time a
+    /// source host or a describe of the ingestor asks for it.
+    pub(crate) fn ingestor_transport_redeliveries(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        physical_node_id: Option<&ClusterNodeName>,
+    ) -> IntCounter {
+        self.series
+            .prometheus
+            .ingestor_transport_redeliveries_total
             .with_label_values(&[
                 domain.as_str(),
                 ingestor.as_str(),

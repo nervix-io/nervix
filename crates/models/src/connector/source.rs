@@ -26,6 +26,7 @@ use std::{
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
 
 use super::{
     ClientIngestorAlteration, ClientSourceEntity, HttpIngestorAlteration, HttpSource,
@@ -211,6 +212,26 @@ impl SourceReference<'_> {
     }
 }
 
+/// What a source's message positions still mean once the connection that delivered them is gone,
+/// and so what a host does with an acknowledgement or a rejection it could not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum PositionClass {
+    /// A position names a place in a log the source can seek back to on any connection, such as
+    /// a Kafka offset. A rejection that failed is retried with the same positions after the
+    /// source reconnects, before it reads again.
+    Replayable,
+    /// A position names one delivery on one connection, such as a RabbitMQ delivery tag, an SQS
+    /// receipt handle or an MQTT packet identifier. Once that connection is lost the broker
+    /// redelivers everything it delivered and was not acknowledged, so after a reconnect an
+    /// acknowledgement or a rejection still pending for it is discarded and counted as a
+    /// transport redelivery.
+    BrokerRedelivered,
+    /// The source keeps no position: nothing is acknowledged or rejected on the transport, so
+    /// nothing is ever pending.
+    None,
+}
+
 /// What every source of one entity declares, whatever its statement says.
 ///
 /// This lives in the vocabulary so the registry can validate an ingestor, and a host can prepare
@@ -226,6 +247,8 @@ pub struct IngestSourceCapabilities {
     pub executes_on_every_cluster_node: bool,
     /// What its body names to read from.
     pub reference: SourceReferenceKind,
+    /// What its message positions mean once the connection that delivered them is gone.
+    pub position_class: PositionClass,
 }
 
 /// The declaration one source entity's Model makes for every statement of that entity.

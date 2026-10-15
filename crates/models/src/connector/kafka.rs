@@ -27,8 +27,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Kafka: unpooled CreateClientKafka => KafkaConfigEntry);
@@ -86,6 +86,7 @@ impl SourceEntity for KafkaTopicSource {
         metadata: SourceMetadataScope::Kafka,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
+        position_class: PositionClass::Replayable,
     };
 }
 
