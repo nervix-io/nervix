@@ -767,7 +767,7 @@ fn shuttle_a_decoded_frame_racing_suspension_is_handed_off_once() {
             })
             .await;
 
-            let reader = nervix_primitives::task::spawn(async move { connection.await });
+            let reader = nervix_primitives::task::spawn(connection);
             let pauser_tx = pause_tx.clone();
             let pauser = nervix_primitives::task::spawn(async move {
                 pauser_tx.send_replace(true);
