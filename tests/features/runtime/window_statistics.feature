@@ -17,7 +17,7 @@ Feature: Window statistics
       CREATE RELAY overflow_summaries SCHEMA overflow_summary BRANCHED BY overflow_branch;
       CREATE VHOST edge overflow-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR overflow_ingestor FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR overflow_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING overflow_codec
         TO overflow_readings INHERIT ALL BRANCHED BY overflow_branch SET tenant = message.tenant
         FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -95,7 +95,7 @@ Feature: Window statistics
       CREATE RELAY run_summaries SCHEMA run_summary BRANCHED BY run_branch;
       CREATE VHOST edge run-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/runs' TYPE HTTP;
-      CREATE INGESTOR run_ingestor FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR run_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING run_codec
         TO run_readings INHERIT ALL BRANCHED BY run_branch
         SET tenant = message.tenant
@@ -185,8 +185,8 @@ Feature: Window statistics
       CREATE RELAY reading_statistics SCHEMA reading_statistics BRANCHED BY by_reading_tenant;
       CREATE VHOST edge statistics-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL
@@ -312,8 +312,8 @@ Feature: Window statistics
       CREATE RELAY sparse_summaries SCHEMA sparse_summary BRANCHED BY by_sparse_tenant;
       CREATE VHOST edge sparse-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sparse' TYPE HTTP;
-      CREATE INGESTOR sparse_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sparse_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sparse_reading_codec
         TO sparse_readings
         INHERIT ALL
@@ -437,8 +437,8 @@ Feature: Window statistics
       CREATE RELAY measurement_summaries SCHEMA measurement_summary BRANCHED BY by_measurement_tenant;
       CREATE VHOST edge outlier-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE INGESTOR measurement_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
         TO measurements
         INHERIT ALL
@@ -582,8 +582,8 @@ Feature: Window statistics
       CREATE RELAY reading_summaries SCHEMA reading_summary BRANCHED BY by_restart_tenant;
       CREATE VHOST edge restart-statistics-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL

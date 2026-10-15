@@ -24,7 +24,7 @@ Feature: Delivery latency metrics
       CREATE RELAY emitted_readings SCHEMA reading BRANCHED BY tenants;
       CREATE VHOST edge delivery-latency-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TIMESTAMP AT occurred_at
         TO raw_readings INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant

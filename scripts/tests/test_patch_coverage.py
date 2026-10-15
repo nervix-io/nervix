@@ -146,6 +146,18 @@ class PatchCoverageTests(unittest.TestCase):
         self.assertEqual(measured.project_executable, 2)
         self.assertIsNone(self.measure(report).files[0].executable)
 
+    def test_path_modules_measure_the_tracked_file_their_dot_dot_segments_name(self) -> None:
+        restore = self.root / "tests" / "restore.py"
+        restore.parent.mkdir()
+        restore.write_text("def restore():\n    return 1\n")
+        self.commit()
+        report = self.report("coverage.lcov", "/ci/workspace/src/../tests/restore.py", {1: 1, 2: 0})
+        measured = self.measure(report, source_root=Path("/ci/workspace"))
+        self.assertEqual(
+            [(item.path, item.covered, item.executable) for item in measured.files],
+            [("tests/restore.py", 1, 2)],
+        )
+
     def test_artifact_source_roots_union_reports_from_distinct_ci_workspaces(self) -> None:
         self.source.write_text("def answer():\n    result = 2\n    return result\n")
         self.commit()
@@ -177,6 +189,14 @@ class PatchCoverageTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 0)
                 self.assertIn("patch coverage:", errors.getvalue())
+
+    def test_an_unreadable_checkout_is_advisory(self) -> None:
+        failure = patch_coverage.MergeError("git ls-files failed: not a repository")
+        with mock.patch.object(patch_coverage.Checkout, "load", side_effect=failure):
+            with redirect_stderr(io.StringIO()) as errors:
+                status = patch_coverage.main(["--base", self.base], root=self.root)
+        self.assertEqual(status, 0)
+        self.assertIn("patch coverage: git ls-files failed", errors.getvalue())
 
     def test_invalid_source_root_metadata_is_advisory_and_never_supplies_a_default(self) -> None:
         metadata = self.root / "source-root.txt"
@@ -326,14 +346,13 @@ class WorkflowTests(unittest.TestCase):
         report = step_section(coverage, "Report patch line coverage")
         self.assertIn("continue-on-error: true", report)
         self.assertIn("if: always()", report)
-        self.assertIn('just coverage-patch "$BASE_SHA"', report)
+        self.assertIn('just coverage-patch "$BASE_SHA" lcov-workspace.info', report)
         self.assertIn('--pr-head "$PR_HEAD_SHA"', report)
         self.assertIn("pull-requests: write", coverage)
         self.assertIn("fetch-depth: 0", coverage)
         self.assertIn("target/patch-coverage.md", coverage)
-        self.assertIn("--source-root-file coverage-inputs/tests/coverage-source-root.txt", report)
-        self.assertIn("--source-root-file coverage-inputs/scenarios/coverage-source-root.txt", report)
-        self.assertIn("--source-root-file coverage-inputs/native-extras/coverage-source-root.txt", report)
+        # The merged report is repository-relative, so it needs no producer's checkout root.
+        self.assertNotIn("--source-root-file", report)
         extras = job_section(workflow, "extra-tests")
         self.assertIn("just coverage-patch-runner", step_section(extras, "Patch coverage reporter"))
         self.assertIn("target/patch-coverage/python.lcov", extras)

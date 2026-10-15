@@ -752,10 +752,10 @@ fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
     };
     ingestor.input =
         nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-            source: nervix_models::IngestSource::Endpoint(nervix_models::EndpointSource::Endpoint(
-                nervix_models::EndpointEndpointSource {
+            source: nervix_models::IngestSource::Http(nervix_models::HttpSource::Endpoint(
+                nervix_models::HttpEndpointSource {
                     endpoint: named("ingress"),
-                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                    mode: nervix_models::EndpointIngestMode::NoAck,
                     quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },

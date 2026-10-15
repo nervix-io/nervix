@@ -13,7 +13,7 @@ Feature: Logical ingestion time and admission
       CREATE RELAY admission_errors SCHEMA admission_error UNBRANCHED;
       CREATE VHOST edge batch-clock-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_batch_codec
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -74,7 +74,7 @@ Feature: Logical ingestion time and admission
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ingestion-clock-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -140,7 +140,7 @@ Feature: Logical ingestion time and admission
       CREATE RELAY summaries SCHEMA summary BRANCHED BY tenants;
       CREATE VHOST edge ingestion-window-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP <timestamp_source>
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -199,7 +199,7 @@ Feature: Logical ingestion time and admission
       CREATE RELAY observations SCHEMA request UNBRANCHED;
       CREATE VHOST edge retained-clock-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP AT occurred_at
         TO observations INHERIT ALL
@@ -242,12 +242,12 @@ Feature: Logical ingestion time and admission
       CREATE VHOST edge quiesced-clock-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT clock_ingress ON edge PATH '/clock' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP NOW
         TO buffered_events INHERIT ALL
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR clock_source FROM ENDPOINT clock_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR clock_source FROM clock_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
         TIMESTAMP NOW
         TO observations INHERIT ALL SET observed_at = now(), samples = 1
@@ -263,7 +263,7 @@ Feature: Logical ingestion time and admission
       """
     When these NSPL commands begin executing in the background
       """
-      ALTER INGESTOR source SET DECODE USING delivery_codec;
+      ALTER HTTP ENDPOINT INGESTOR source SET DECODE USING delivery_codec;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     And within "5s" node "node-1" eventually reports describe ingestor "source" as "status: quiesced"

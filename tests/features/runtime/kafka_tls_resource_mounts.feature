@@ -38,8 +38,8 @@ Feature: Kafka TLS resource mounts
           'security.protocol' = 'ssl',
           'ssl.ca.location' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_tls TOPIC tls_notifications_{{test_id}} OFFSET BY CONSUMER GROUP tls_notifications_group_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_tls TOPIC 'tls_notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'tls_notifications_group_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

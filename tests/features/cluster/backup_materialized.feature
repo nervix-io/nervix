@@ -49,7 +49,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE RELAY generated SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge backup-materialized-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -335,7 +335,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE RELAY state SCHEMA event BRANCHED BY by_sequence WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-paced-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TIMESTAMP AT occurred_at
         TO state INHERIT ALL BRANCHED BY by_sequence SET sequence = message.sequence
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -404,7 +404,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE RELAY state SCHEMA event UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-ipc-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

@@ -60,8 +60,8 @@ Feature: Bounded execution and transient memory
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge transformed-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/notifications' TYPE HTTP;
-      CREATE INGESTOR notification_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR notification_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_in
         TO notifications
         INHERIT ALL
@@ -115,8 +115,8 @@ Feature: Bounded execution and transient memory
       CREATE RELAY retained_events SCHEMA retained_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-retained-unfolding.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR retained_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR retained_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retained_codec
         TO retained_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -126,7 +126,7 @@ Feature: Bounded execution and transient memory
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When these NSPL commands begin executing in the background
       """
-      ALTER INGESTOR retained_source SET DECODE USING delivery_codec;
+      ALTER HTTP ENDPOINT INGESTOR retained_source SET DECODE USING delivery_codec;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "status: quiesced"
@@ -178,9 +178,9 @@ Feature: Bounded execution and transient memory
         'method' = 'GET',
         'timeout_ms' = 5000
       };
-      CREATE INGESTOR polled_source
-        FROM HTTP polled_http EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING polled_codec
+      CREATE HTTP REQUEST INGESTOR polled_source
+        FROM polled_http EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
         TO polled_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION polled_subscription TO polled_events;

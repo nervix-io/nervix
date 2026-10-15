@@ -30,8 +30,8 @@ Feature: Guest saves above the bulk budget
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC backup_guest_in_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'backup_guest_in_{{test_id}}'
           OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec

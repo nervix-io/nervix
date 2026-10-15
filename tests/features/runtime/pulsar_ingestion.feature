@@ -26,8 +26,8 @@ Feature: Pulsar ingestion
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
-        CREATE INGESTOR pulsar_notifications
-        FROM PULSAR pulsar_main TOPIC notifications_{{test_id}} SUBSCRIPTION nervix_cucumber_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE PULSAR TOPIC INGESTOR pulsar_notifications
+        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -86,8 +86,8 @@ Feature: Pulsar ingestion
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
-        CREATE INGESTOR pulsar_notifications
-        FROM PULSAR pulsar_main TOPIC notifications_reconnect_{{test_id}} SUBSCRIPTION nervix_cucumber_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE PULSAR TOPIC INGESTOR pulsar_notifications
+        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

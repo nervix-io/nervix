@@ -37,8 +37,8 @@ Feature: NATS TLS resource mounts
           'addr' = '{{nats_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR nats_notifications
-        FROM NATS nats_tls SUBJECT notifications_{{test_id}} QUEUE GROUP nats_tls_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+        CREATE NATS SUBJECT INGESTOR nats_notifications
+        FROM nats_tls SUBJECT 'notifications_{{test_id}}' QUEUE GROUP 'nats_tls_notifications_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -646,9 +646,9 @@ mod tests {
     fn an_ingestor_admits_keys_of_every_branching_its_routes_write() {
         let text = "CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant_shard;\nCREATE \
                     RELAY regions SCHEMA order_event BRANCHED BY by_region;\nCREATE RELAY audit \
-                    SCHEMA order_event UNBRANCHED;\nCREATE INGESTOR source FROM ENDPOINT ingress \
-                    MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING \
-                    order_codec TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET tenant = \
+                    SCHEMA order_event UNBRANCHED;\nCREATE HTTP ENDPOINT INGESTOR source FROM \
+                    ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec \
+                    TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET tenant = \
                     message.tenant, shard = message.shard FLUSH IMMEDIATE ON MESSAGE ERROR LOG TO \
                     regions INHERIT ALL BRANCHED BY by_region SET region = message.tenant FLUSH \
                     IMMEDIATE ON MESSAGE ERROR LOG TO audit INHERIT ALL UNBRANCHED FLUSH \

@@ -18,8 +18,8 @@ Feature: Real process crash recovery
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_window_tenant;
       CREATE VHOST window_edge window-crash-{{test_id}}.example.com;
       CREATE ENDPOINT window_ingress ON window_edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR window_source
-        FROM ENDPOINT window_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR window_source
+        FROM window_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_window_tenant
         SET tenant = message.tenant
@@ -105,8 +105,8 @@ Feature: Real process crash recovery
       CREATE RELAY copied_readings SCHEMA reading BRANCHED BY by_reading_tenant;
       CREATE VHOST reading_edge readings-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON reading_edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_reading_tenant
         SET tenant = message.tenant
@@ -233,8 +233,8 @@ Feature: Real process crash recovery
       CREATE RELAY crash_unique SCHEMA crash_event BRANCHED BY by_crash_tenant;
       CREATE VHOST crash_edge crash-{{test_id}}.example.com;
       CREATE ENDPOINT crash_ingress ON crash_edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR crash_source
-        FROM ENDPOINT crash_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR crash_source
+        FROM crash_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING crash_event_codec
         TO crash_input
           INHERIT ALL

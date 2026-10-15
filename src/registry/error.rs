@@ -15,7 +15,10 @@
 use std::fmt;
 
 use error_stack::{Context, Report};
-use nervix_models::{BranchSelection, DomainName, FieldName, ModelKind, ModelName, RelayName};
+use nervix_models::{
+    BranchSelection, ClientName, ConnectorKind, DomainName, EndpointName, EndpointType, FieldName,
+    IngestSourceKind, ModelKind, ModelName, RelayName,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -116,6 +119,30 @@ pub(crate) enum RegistryError {
     DeserializeValue,
     #[error("stored model has an invalid archive header; recreate the stored data")]
     InvalidModelArchive,
+    #[error(
+        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a {required} client, but \
+         client '{client}' is a {found} client"
+    )]
+    IngestorClientConnectorMismatch {
+        domain: DomainName,
+        ingestor: ModelName,
+        kind: IngestSourceKind,
+        client: ClientName,
+        required: ConnectorKind,
+        found: ConnectorKind,
+    },
+    #[error(
+        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a TYPE {required} endpoint, \
+         but endpoint '{endpoint}' is TYPE {found}"
+    )]
+    IngestorEndpointTypeMismatch {
+        domain: DomainName,
+        ingestor: ModelName,
+        kind: IngestSourceKind,
+        endpoint: EndpointName,
+        required: EndpointType,
+        found: EndpointType,
+    },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,
@@ -325,15 +352,6 @@ pub(crate) enum RegistryError {
         domain: String,
         identifier: String,
         blockers: String,
-    },
-    #[error(
-        "cannot alter model '{identifier}' in domain '{domain}' into a non-placement-eligible \
-         shape because it is pinned by placements {placements}"
-    )]
-    PlacementMemberPinned {
-        domain: String,
-        identifier: String,
-        placements: String,
     },
 }
 

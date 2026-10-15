@@ -26,7 +26,7 @@ Feature: HTTP emitter lifecycle
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-lifecycle-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -104,7 +104,7 @@ Feature: HTTP emitter lifecycle
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-drain-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -184,7 +184,7 @@ Feature: HTTP emitter lifecycle
       CREATE RELAY rejected_requests SCHEMA rejected UNBRANCHED;
       CREATE VHOST edge http-body-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -371,7 +371,7 @@ Feature: HTTP emitter lifecycle
       CREATE RELAY backup SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-impact-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -482,9 +482,9 @@ Feature: HTTP emitter lifecycle
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR source
-        FROM KAFKA kafka_main TOPIC http_recovery_{{test_id}}
-          OFFSET BY CONSUMER GROUP http_recovery_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR source
+        FROM kafka_main TOPIC 'http_recovery_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_recovery_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -543,7 +543,7 @@ Feature: HTTP emitter lifecycle
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -599,9 +599,9 @@ Feature: HTTP emitter lifecycle
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR source
-        FROM KAFKA kafka_main TOPIC http_stop_{{test_id}}
-          OFFSET BY CONSUMER GROUP http_stop_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR source
+        FROM kafka_main TOPIC 'http_stop_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_stop_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

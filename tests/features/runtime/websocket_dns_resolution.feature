@@ -25,8 +25,8 @@ Feature: WebSocket client name resolution
       CREATE CLIENT ws_main TYPE WEBSOCKETS WITH SIGNALING PROTOCOL initial_frame CONFIG {
         'endpoint' = '{{websocket_forwarded_addr}}/ws/{{test_id}}'
       };
-      CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

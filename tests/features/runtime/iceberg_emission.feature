@@ -23,8 +23,8 @@ Feature: Iceberg emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-iceberg-dns-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC iceberg_dns_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'iceberg_dns_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -160,8 +160,8 @@ Feature: Iceberg emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-iceberg-values-error-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC iceberg_values_error_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'iceberg_values_error_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TIMESTAMP NOW
       TO notifications
@@ -327,8 +327,8 @@ Feature: Iceberg emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -413,8 +413,8 @@ Feature: Iceberg emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_missing_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_missing_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -513,8 +513,8 @@ Feature: Iceberg emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_namespace_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_namespace_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -619,8 +619,8 @@ Feature: Iceberg emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_temp_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_temp_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -709,8 +709,8 @@ Feature: Iceberg emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_shutdown_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_shutdown_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -791,8 +791,8 @@ Feature: Iceberg emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_init_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_init_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -893,8 +893,8 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_dns_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC iceberg_ack_notifications_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'iceberg_ack_notifications_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

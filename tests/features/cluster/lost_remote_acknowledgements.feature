@@ -27,9 +27,9 @@ Feature: Remote record acknowledgements lost between nodes
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR lost_ack_source
-        FROM KAFKA lost_ack_kafka TOPIC lost_ack_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP lost_ack_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR lost_ack_source
+        FROM lost_ack_kafka TOPIC 'lost_ack_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING lost_ack_codec
         TO lost_ack_records INHERIT ALL

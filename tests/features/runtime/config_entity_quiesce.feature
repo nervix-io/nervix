@@ -28,8 +28,8 @@ Feature: Config entity quiesce classification
       CREATE VHOST config_edge http-{{test_id}}-config.example.com;
       CREATE ENDPOINT config_ingress ON config_edge PATH '/config-quiesce' TYPE HTTP;
 
-      CREATE INGESTOR config_source
-        FROM ENDPOINT config_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR config_source
+        FROM config_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING config_event_codec
         TO config_events
         INHERIT ALL

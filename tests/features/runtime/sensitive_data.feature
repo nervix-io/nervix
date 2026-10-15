@@ -33,8 +33,8 @@ Feature: Sensitive data
         PATH '/sensitive'
         TYPE HTTP;
 
-      CREATE INGESTOR sensitive_notifications
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
+        FROM sensitive_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -108,8 +108,8 @@ Feature: Sensitive data
         PATH '/sensitive'
         TYPE HTTP;
 
-      CREATE INGESTOR sensitive_notifications
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
+        FROM sensitive_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -229,8 +229,8 @@ Feature: Sensitive data
         PATH '/sensitive'
         TYPE HTTP;
 
-      CREATE INGESTOR sensitive_notifications
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sensitive_notifications
+        FROM sensitive_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

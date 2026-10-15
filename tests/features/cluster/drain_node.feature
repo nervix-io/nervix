@@ -87,8 +87,8 @@ Feature: Drain node
       CREATE RELAY control_output SCHEMA drain_event UNBRANCHED;
       CREATE VHOST edge drain-{{test_id}}.example.com;
       CREATE ENDPOINT drain_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR drain_source
-        FROM ENDPOINT drain_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR drain_source
+        FROM drain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
         TO stalled_output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -197,8 +197,8 @@ Feature: Drain node
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
@@ -281,9 +281,9 @@ Feature: Drain node
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR event_source
-        FROM KAFKA wait_kafka TOPIC wait_events_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_wait_events_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR event_source
+        FROM wait_kafka TOPIC 'wait_events_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_events_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 500ms
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -293,10 +293,10 @@ Feature: Drain node
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR state_source
-        FROM KAFKA wait_kafka TOPIC wait_state_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_wait_state_{{test_id}}
-          MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR state_source
+        FROM wait_kafka TOPIC 'wait_state_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_wait_state_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
         TO event_state
         INHERIT ALL
@@ -409,8 +409,8 @@ Feature: Drain node
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE INGESTOR kafka_a
-        FROM KAFKA kafka_main TOPIC notifications_a_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_a_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR kafka_a
+        FROM kafka_main TOPIC 'notifications_a_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_a_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -419,8 +419,8 @@ Feature: Drain node
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR kafka_b
-        FROM KAFKA kafka_main TOPIC notifications_b_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_b_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR kafka_b
+        FROM kafka_main TOPIC 'notifications_b_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_b_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -429,8 +429,8 @@ Feature: Drain node
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR kafka_c
-        FROM KAFKA kafka_main TOPIC notifications_c_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_c_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR kafka_c
+        FROM kafka_main TOPIC 'notifications_c_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_c_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

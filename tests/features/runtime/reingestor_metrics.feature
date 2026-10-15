@@ -30,8 +30,8 @@ Feature: Reingestor metrics
         CREATE RELAY audit_notifications SCHEMA notification BRANCHED BY by_audit_reingestor_metrics_node;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
-        CREATE INGESTOR reingestor_metrics_source
-        FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_source
+        FROM reingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

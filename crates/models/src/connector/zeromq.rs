@@ -77,13 +77,13 @@ impl SourceBody for ZeroMqPullSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ZeroMqIngestMode {
-    NoAckSequential,
+    NoAck,
 }
 
 impl ZeroMqIngestMode {
     pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -92,6 +92,8 @@ connector_sources! {
     connector ZeroMq = "ZEROMQ";
     /// What a ZeroMQ source reads.
     pub enum ZeroMqSource;
+    /// The alterations of the ingestors that read a ZeroMQ entity.
+    pub enum ZeroMqIngestorAlteration;
     /// The entities a ZeroMQ source reads.
     pub enum ZeroMqSourceEntity {
         Pull(ZeroMqPullSource) = "PULL", "ZeroMQ";

@@ -2,11 +2,15 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** WebSocket client configuration, DNS-backed connections, signaling before source
-//!   readiness, source frame delivery, and reconnect lifecycle operations.
-//! - **Depends on.** The connector contract, compiled signaling engine, typed client
-//!   configuration, the node resolver, Tokio, and WebSocket transport.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume, signaling
+//!   before readiness, accepted-frame storage, payload delivery, and suspend and close operations.
+//! - **Depends on.** The source contract, typed plans and host services, compiled signaling engine,
+//!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
+//! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
+//!   schedules, registry state, endpoint listeners, or host intake, admission and retry loops.
+//!
+//! Current boundary violation: the composer hard-codes the source's buffering, flush and
+//! admission requirements instead of reading a connector-owned declaration from the contract.
 
 #![cfg_attr(
     nervix_lint,

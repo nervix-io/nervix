@@ -26,8 +26,8 @@ Feature: Bounded window sketches
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sketches' TYPE HTTP;
-      CREATE INGESTOR sketch_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
         TO sketch_inputs
         INHERIT ALL
@@ -96,8 +96,8 @@ Feature: Bounded window sketches
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sketches' TYPE HTTP;
-      CREATE INGESTOR sketch_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
         TO sketch_inputs INHERIT ALL BRANCHED BY sketch_branch
         SET tenant = message.tenant
@@ -173,8 +173,8 @@ Feature: Bounded window sketches
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketch-failover-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sketches' TYPE HTTP;
-      CREATE INGESTOR sketch_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
         TO sketch_inputs INHERIT ALL BRANCHED BY sketch_branch
         SET tenant = message.tenant

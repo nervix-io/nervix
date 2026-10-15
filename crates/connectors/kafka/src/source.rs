@@ -34,7 +34,7 @@ use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
-use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, Timestamp, TopicName};
+use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::{Arc, watch},
     time::{Instant, sleep_until},
@@ -180,7 +180,7 @@ pub enum KafkaSourceOffsetMode {
 #[derive(Clone)]
 pub struct KafkaSourcePlan {
     pub config: Vec<ClientConfigEntry>,
-    pub topic: TopicName,
+    pub topic: KafkaTopicName,
     pub offset_mode: KafkaSourceOffsetMode,
     pub enable_auto_commit: bool,
 }
@@ -349,7 +349,7 @@ impl SourceMessage for KafkaSourceMessage {
 
 pub struct KafkaSource {
     consumer: StreamConsumer,
-    topic: nervix_models::TopicName,
+    topic: nervix_models::KafkaTopicName,
     offset_mode: KafkaSourceOffsetMode,
     enable_auto_commit: bool,
     instance_index: u64,

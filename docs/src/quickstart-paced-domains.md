@@ -56,8 +56,8 @@ CREATE VHOST replay_edge replay.example.com;
 
 CREATE ENDPOINT replay_ingress ON replay_edge PATH '/events' TYPE HTTP;
 
-CREATE INGESTOR replay_source
-  FROM ENDPOINT replay_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR replay_source
+  FROM replay_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_event_codec
   TIMESTAMP AT occurred_at
   TO replay_orders

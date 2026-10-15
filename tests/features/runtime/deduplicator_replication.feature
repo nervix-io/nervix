@@ -35,8 +35,8 @@ Feature: Deduplicator state replication
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
