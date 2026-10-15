@@ -116,6 +116,7 @@ COPY examples/paced-simulation/rust ./examples/paced-simulation/rust
 COPY tests/scenarios.rs ./tests/scenarios.rs
 COPY scripts/kache_remote.py ./scripts/kache_remote.py
 COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
+COPY scripts/wasm_bindgen.py ./scripts/wasm_bindgen.py
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -176,8 +177,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && echo "using LIBCLANG_PATH=${LIBCLANG_PATH}" \
     && echo "using cargo-sonic target CPUs: ${SONIC_TARGET_CPUS}" \
     && rustup target add "${RUST_TARGET}" wasm32-unknown-unknown \
+    && wasm_bindgen_bin="$(python3 scripts/wasm_bindgen.py install)" \
     && cd crates/web-console \
-    && RUSTFLAGS="-D warnings" trunk build --release \
+    && PATH="${wasm_bindgen_bin}:${PATH}" RUSTFLAGS="-D warnings" trunk build --release --offline \
     && cd /app \
     && case "${NERVIX_DIAGNOSTIC_SELECTION}" in \
     "") \
