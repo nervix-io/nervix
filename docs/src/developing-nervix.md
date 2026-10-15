@@ -36,6 +36,15 @@ Install:
 - `just` (latest release)
 - `zellij`
 
+`just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
+from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
+GitHub without retrying. So the build installs that exact version with `cargo install --locked`
+into `target/tools/wasm-bindgen-<version>`, through the configured compiler wrapper, puts it first
+on `PATH` and runs `trunk build --offline`. Cargo checks the crate against the registry index and
+retries its own transient network failures. Offline, trunk stops at once when the CLI is missing or
+reports another version. The image's `builder` stage runs the same installer,
+`python3 scripts/wasm_bindgen.py install`, before its own offline trunk build.
+
 ## Build Container Images
 
 ```bash
@@ -329,6 +338,21 @@ just lint-audit
 around an inaccurate lint, each attributed to the commits and debt counts that introduced it.
 [Architecture Rules And The Debt Ratchet](architecture-enforcement.md#auditing-lint-workarounds)
 states the candidates, the attribution and the review contract.
+
+The complexity verdict is the ratchet's `functions_over_complexity_30` count: the functions that
+the pinned cargo-crap scores above cyclomatic complexity 30. `just ratchet` builds that version
+first with `just install-cargo-crap`, into `target/tools/cargo-crap-<version>/` through the
+configured wrapper, and refuses a binary of another version. A new function above 30 raises the
+count and fails `just validate` and CI's `checks` job, which name it among the listed sites:
+
+```bash
+just install-cargo-crap
+just ratchet --show functions_over_complexity_30
+```
+
+Decompose the function rather than moving the number. The
+[function complexity](architecture-enforcement.md#function-complexity) section states the
+analyzer's scope, its limits and every failure that refuses an incomplete analysis.
 
 Declare `#[cfg_attr(nervix_lint, nervix::context(...))]` at the source's owning execution boundary.
 Choose recurring, lifecycle, observer, outside or bounded; every kind requires a reason, and
@@ -870,7 +894,7 @@ just test-native-coverage
 ### The ordinary workspace report
 
 Every ordinary coverage consumer reads one report, `lcov-workspace.info`: patch line coverage, the
-complexity check and the `coverage-merged` artifact. `just coverage-merge` builds it from the
+CRAP report and the `coverage-merged` artifact. `just coverage-merge` builds it from the
 ordinary producers' reports, and fails, writing no report, rather than publish an incomplete one.
 
 `just test-coverage` and `just test-scenarios-coverage` export `lcov-workspace.info` from every
@@ -922,7 +946,7 @@ workspace members the report measures. CI retains the report and its record as t
 `coverage-merged` artifact.
 
 Without inputs, the merge rewrites in place the `lcov-workspace.info` that `just test-coverage`
-wrote, into the shape CI publishes, and the complexity check and patch line coverage read it:
+wrote, into the shape CI publishes, and the CRAP report and patch line coverage read it:
 
 ```bash
 just test-coverage
@@ -940,14 +964,15 @@ CI runs `just coverage-patch` against the merged ordinary workspace report and u
 comment with patch line coverage, project line coverage, per-file totals and uncovered added line
 numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
 Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
-publication does not fail CI. The independent complexity check retains its own verdict.
+publication does not fail CI. The complexity verdict is the `just ratchet` count of functions
+above cyclomatic complexity 30, which reads no coverage.
 
 The label-enabled Turmoil job publishes a separate **Turmoil patch coverage** comment using
 `--scope turmoil` after its canonical instrumented suite and independent replay qualification
 pass. The scope selects a distinct marker, so the two jobs update their own comments regardless
 of completion order. This report describes only the current Turmoil build's product sources;
-it does not merge modeled counters into the ordinary complexity gate. Failed collection keeps
-its verdict and diagnostics without publishing a successful coverage report.
+it does not merge modeled counters into the ordinary report or its CRAP report. Failed
+collection keeps its verdict and diagnostics without publishing a successful coverage report.
 
 Run the same calculation manually after collecting coverage for the committed source revision:
 
