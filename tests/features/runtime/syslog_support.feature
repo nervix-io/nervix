@@ -364,11 +364,16 @@ Feature: Syslog support
         'protocol' = 'tcp',
         'addr' = '{{syslog_ingest_addr}}'
       };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
-        ON QUIESCE SUSPEND DECODE USING syslog_codec
-        TO syslog_events INHERIT ALL UNBRANCHED
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
@@ -411,11 +416,16 @@ Feature: Syslog support
         'protocol' = 'tcp',
         'addr' = '{{syslog_ingest_addr}}'
       };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
-        ON QUIESCE SUSPEND DECODE USING syslog_codec
-        TO syslog_events INHERIT ALL UNBRANCHED
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
