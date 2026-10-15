@@ -4,6 +4,8 @@
 `just coverage-patch <base> <report> [--report <another-report>]` measures the committed
 patch from its merge base to HEAD. `--pr <number>` publishes through the authenticated
 GitHub CLI. Reports must describe the checked-out sources, including line coordinates.
+Sources map onto tracked files exactly as `just coverage-merge` maps them, so the merged
+repository-relative report needs no producer's checkout root.
 """
 
 from __future__ import annotations
@@ -19,9 +21,10 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
+from scripts.coverage_merge import Checkout, MergeError, Tracked
 from scripts.native_coverage import RunnerError, lcov_records
 
 COMMENT_MARKER = "<!-- nervix-patch-coverage -->"
@@ -105,24 +108,16 @@ class Coverage:
 
     @classmethod
     def load(cls, root: Path, reports: Sequence[Path], source_roots: Sequence[Path] | None = None) -> Coverage:
-        tracked = set(command(["git", "ls-files", "-z"], root=root).split("\0"))
-        origins = sorted({path.resolve() for path in source_roots or [root]}, key=lambda path: len(path.parts), reverse=True)
+        checkout = Checkout.load(root)
+        origins = sorted({PurePosixPath(os.path.abspath(path)) for path in source_roots or [root]}, key=lambda path: len(path.parts), reverse=True)
         merged: dict[str, dict[int, int]] = {}
         for report in reports:
             with (root / report).open(encoding="utf-8") as content:
                 for record in lcov_records(content):
-                    path = Path(record.source)
-                    if path.is_absolute():
-                        for origin in origins:
-                            if path.is_relative_to(origin):
-                                path = path.relative_to(origin)
-                                break
-                        else:
-                            continue
-                    source = path.as_posix()
-                    if source not in tracked:
+                    located = checkout.locate(record.source, origins)
+                    if not isinstance(located, Tracked):
                         continue
-                    lines = merged.setdefault(source, {})
+                    lines = merged.setdefault(located.path, {})
                     for entry in record.lines:
                         if not entry.startswith("DA:"):
                             continue
@@ -281,7 +276,7 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
             if not repo:
                 repo = command(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root=root).strip()
             Publication(repo, options.pr, options.pr_head or patch.head, options.scope).publish(body)
-    except (OSError, RunnerError, RuntimeError, ValueError, SyntaxError, KeyError, subprocess.SubprocessError) as error:
+    except (OSError, MergeError, RunnerError, RuntimeError, ValueError, SyntaxError, KeyError, subprocess.SubprocessError) as error:
         print(f"patch coverage: {error}", file=sys.stderr)
     return 0
 

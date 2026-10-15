@@ -28,8 +28,8 @@ Feature: Memory pressure
         ON edge
         PATH '/memory-pressure'
         TYPE HTTP;
-      CREATE INGESTOR memory_pressure_source
-        FROM ENDPOINT memory_pressure_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR memory_pressure_source
+        FROM memory_pressure_ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 3s DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -33,8 +33,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-functions-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR text_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR text_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING text_input_codec
         TO text_inputs
           INHERIT ALL
@@ -91,8 +91,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_errors SCHEMA binary_error UNBRANCHED;
       CREATE VHOST edge bytes-error-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR encoded_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR encoded_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING encoded_codec
         TO encoded_inputs
           INHERIT ALL
@@ -147,8 +147,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_texts SCHEMA binary_text UNBRANCHED;
       CREATE VHOST edge bytes-wire-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR binary_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR binary_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
         TO binary_inputs
           INHERIT ALL
@@ -198,8 +198,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR binary_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR binary_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
         TO binary_inputs
           INHERIT ALL

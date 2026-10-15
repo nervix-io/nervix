@@ -6,11 +6,12 @@ Nervix separates the syslog message format from syslog network transport:
 - a codec that uses that wire schema decodes RFC 3164 and RFC 5424 messages and encodes RFC 5424
   messages
 - a `TYPE SYSLOG` client declares a UDP, TCP, or TLS socket endpoint
-- a `FROM SYSLOG` ingestor receives transport frames and passes each frame to its declared codec
+- a `SYSLOG LISTENER` ingestor receives transport frames and passes each frame to its declared codec
 - a `TO SYSLOG` emitter sends codec output with the selected syslog transport framing
 
-The pieces are intentionally independent. A Kafka ingestor can decode a syslog payload with a
-codec that uses the `SYSLOG` wire schema, and a syslog listener can pass its frames to a JSON codec.
+The pieces are intentionally independent. A `KAFKA TOPIC` ingestor can decode a syslog payload
+with a codec that uses the `SYSLOG` wire schema, and a `SYSLOG LISTENER` ingestor can pass its
+frames to a JSON codec.
 Pairing the format and transport pieces creates a conventional syslog receiver or forwarder.
 `SYSLOG` is a reserved NSPL keyword.
 
@@ -172,15 +173,17 @@ configuration error, with the setting or path that failed. They do not include T
 
 ## Ingestor
 
-The syslog source has one delivery mode and no `INSTANCES` clause:
+A `SYSLOG LISTENER` ingestor reads through a `TYPE SYSLOG` client. It has one delivery mode,
+`NO ACK`, and no `INSTANCES` clause:
 
 ```nspl,ignore
-FROM SYSLOG <client>
-MODE NO_ACK SEQUENTIAL
-ON QUIESCE SUSPEND
-  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
-DECODE USING <codec>
+CREATE [IF NOT EXISTS] SYSLOG LISTENER INGESTOR <name>
+  FROM <client>
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
+  DECODE USING <codec>
 ```
 
 Every live Nervix node runs the listener on the client's configured `addr`. The listener is not

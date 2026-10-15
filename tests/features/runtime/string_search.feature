@@ -23,8 +23,8 @@ Feature: Practical string search and normalization
       CREATE RELAY search_errors SCHEMA search_error UNBRANCHED;
       CREATE VHOST edge text-search-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/text' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO source_texts INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

@@ -49,8 +49,8 @@ Feature: Multi-source DAG routing
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC dag_kafka_{{test_id}} OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'dag_kafka_{{test_id}}' OFFSET BY CONSUMER GROUP 'dag_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO kafka_ingress
         INHERIT ALL
@@ -59,8 +59,8 @@ Feature: Multi-source DAG routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_main QUEUE dag_rabbit_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_main QUEUE 'dag_rabbit_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO rabbit_ingress
         INHERIT ALL

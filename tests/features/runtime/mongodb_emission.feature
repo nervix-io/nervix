@@ -32,8 +32,8 @@ Feature: MongoDB emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mongodb-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC mongodb_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'mongodb_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -115,8 +115,8 @@ Feature: MongoDB emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mongodb-conflict-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC mongodb_conflict_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'mongodb_conflict_notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -199,8 +199,8 @@ Feature: MongoDB emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-mongodb-poison-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC mongodb_poison_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'mongodb_poison_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -283,8 +283,8 @@ Feature: MongoDB emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-mongodb-batch-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC mongodb_batch_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'mongodb_batch_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -354,8 +354,8 @@ Feature: MongoDB emission
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-mongodb-range-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC mongodb_range_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'mongodb_range_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

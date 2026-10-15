@@ -15,8 +15,8 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -31,8 +31,8 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -81,8 +81,8 @@ Feature: Published endpoint route lifetimes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge lifetime-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE WEBSOCKETS;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

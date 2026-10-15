@@ -21,9 +21,9 @@ Feature: HTTP client ingestion
         'method' = 'GET',
         'timeout_ms' = 5000
       };
-      CREATE INGESTOR http_notifications
-      FROM HTTP http_main EVERY 1s
-      ON QUIESCE SUSPEND DECODE USING notification_codec
+      CREATE HTTP REQUEST INGESTOR http_notifications
+      FROM http_main EVERY 1s
+      MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       BRANCHED BY by_http_notifications
@@ -74,9 +74,9 @@ Feature: HTTP client ingestion
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_main EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_main EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -129,9 +129,9 @@ Feature: HTTP client ingestion
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_main EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_main EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

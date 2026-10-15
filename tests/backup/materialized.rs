@@ -40,8 +40,8 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
         ));
     }
     commands.push_str(
-        "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 30s \
-         RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND TIMESTAMP AT occurred_at ",
+        "CREATE CLIENT PRODUCER INGESTOR source FROM SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT \
+         30s RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND TIMESTAMP AT occurred_at ",
     );
     for index in 0..relays {
         commands.push_str(&format!(
@@ -311,16 +311,13 @@ async fn when_materialized_summary_subscription_is_closed(world: &mut ScenarioWo
     expr = "backup {string} contains {int} materialized relays with {int} records each and more \
             than 32 MiB of columns"
 )]
-fn then_large_materialized_archive_is_complete(
+async fn then_large_materialized_archive_is_complete(
     world: &mut ScenarioWorld,
     file: String,
     relays: usize,
     records: usize,
 ) {
-    let archive = nervix_backup::describe_archive(
-        std::fs::File::open(archive_path(world, &file)).assured("archive opens"),
-    )
-    .assured("archive verifies");
+    let archive = described_archive(archive_path(world, &file)).await;
     let domain = scenario_domain(world, &world.domain);
     let entry = archive
         .domains

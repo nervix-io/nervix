@@ -46,10 +46,10 @@ Feature: Branch namespace
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'
         };
-      CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main
-        TOPIC branch_namespace_{{test_id}}
-        MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main
+        TOPIC 'branch_namespace_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -185,8 +185,8 @@ Feature: Branch namespace
       CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
-        TYPE HTTP; CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

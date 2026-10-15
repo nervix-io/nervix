@@ -309,8 +309,8 @@ Feature: NSPL file formatting
   Scenario: An MQTT topic keeps its exact case through formatting
     Given an NSPL file "pipeline.nspl" containing
       """
-      create ingestor sensor_readings
-        from mqtt mqtt_main topic 'Sensors' mode no_ack sequential on quiesce drop
+      create mqtt topic ingestor sensor_readings
+        from mqtt_main topic 'Sensors' mode no ack on quiesce drop
         decode using reading_codec
         to readings unbranched flush immediate on message error log
         on general error log;
@@ -319,7 +319,8 @@ Feature: NSPL file formatting
     Then the formatter exits with code 0
     And the NSPL file "pipeline.nspl" contains
       """
-      FROM MQTT mqtt_main TOPIC 'Sensors' MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+      CREATE MQTT TOPIC INGESTOR sensor_readings
+        FROM mqtt_main TOPIC 'Sensors' MODE NO ACK ON QUIESCE DROP
       """
 
   Scenario: A dollar-quoted value ending in part of its delimiter keeps its value

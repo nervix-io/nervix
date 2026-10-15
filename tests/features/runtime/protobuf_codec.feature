@@ -42,8 +42,8 @@ Feature: Protobuf codec
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -105,8 +105,8 @@ Feature: Protobuf codec
       CREATE RELAY echoed_readings SCHEMA reading UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT readings_endpoint ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR http_readings
-        FROM ENDPOINT readings_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_readings
+        FROM readings_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_reading_codec
         TO readings
         INHERIT ALL
@@ -124,9 +124,9 @@ Feature: Protobuf codec
           ENCODE USING transforming_reading_codec
         INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR kafka_readings
-        FROM KAFKA kafka_main TOPIC readings_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_readings_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_readings
+        FROM kafka_main TOPIC 'readings_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_readings_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING transforming_reading_codec
         TO echoed_readings

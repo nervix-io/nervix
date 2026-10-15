@@ -33,8 +33,8 @@ CREATE CLIENT chaos_kafka
     'auto.offset.reset' = 'earliest'
   };
 
-CREATE INGESTOR chaos_ingestor
-  FROM KAFKA chaos_kafka TOPIC chaos_input OFFSET BY CONSUMER GROUP chaos_baseline MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+CREATE KAFKA TOPIC INGESTOR chaos_ingestor
+  FROM chaos_kafka TOPIC 'chaos_input' OFFSET BY CONSUMER GROUP 'chaos_baseline' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_json
   TO chaos_records
     INHERIT ALL

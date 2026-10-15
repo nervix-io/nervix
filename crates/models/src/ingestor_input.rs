@@ -22,7 +22,6 @@
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::AsRefStr;
 
 use crate::{
     ClientProducerSource, ClientSourceEntity, CodecName, IngestAcknowledgement, IngestQuiesceMode,
@@ -53,23 +52,7 @@ pub struct TransportIngestorInput {
     pub codec: CodecName,
 }
 
-/// Which of the two input contracts an ingestor declares, for diagnostics that name it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
-pub enum IngestorInputKind {
-    #[strum(serialize = "transport")]
-    Transport,
-    #[strum(serialize = "CLIENT")]
-    Client,
-}
-
 impl IngestorInput {
-    pub const fn kind(&self) -> IngestorInputKind {
-        match self {
-            Self::Transport(_) => IngestorInputKind::Transport,
-            Self::Client(_) => IngestorInputKind::Client,
-        }
-    }
-
     /// The connector and entity of the source, which capability decisions read: whether its
     /// messages carry headers, which metadata they expose, and where it executes.
     pub const fn source_kind(&self) -> IngestSourceKind {
@@ -79,9 +62,10 @@ impl IngestorInput {
         }
     }
 
-    /// The NSPL keyword of the source's connector, as `DESCRIBE` and diagnostics name it.
-    pub fn source_label(&self) -> &'static str {
-        self.source_kind().connector().keyword()
+    /// The phrase that names the pair this input reads, its connector's keyword then its entity's,
+    /// as the statement's head, `DESCRIBE` and diagnostics name it.
+    pub fn source_phrase(&self) -> &'static str {
+        self.source_kind().phrase()
     }
 
     /// Whether this input executes on every live cluster node rather than on one scheduled owner.
@@ -119,10 +103,34 @@ impl IngestorInput {
         }
     }
 
+    /// The mutable form of [`Self::transport_source`], which an alteration sets.
+    pub(crate) fn transport_source_mut(&mut self) -> Option<&mut IngestSource> {
+        match self {
+            Self::Transport(input) => Some(&mut input.source),
+            Self::Client(_) => None,
+        }
+    }
+
+    /// The source application clients produce into. A transport input has none.
+    pub(crate) fn client_source_mut(&mut self) -> Option<&mut ClientProducerSource> {
+        match self {
+            Self::Transport(_) => None,
+            Self::Client(source) => Some(source),
+        }
+    }
+
     /// The codec that decodes a transport's payloads. A client source has none.
     pub fn codec(&self) -> Option<&CodecName> {
         match self {
             Self::Transport(input) => Some(&input.codec),
+            Self::Client(_) => None,
+        }
+    }
+
+    /// The mutable form of [`Self::codec`], which an alteration sets.
+    pub(crate) fn codec_mut(&mut self) -> Option<&mut CodecName> {
+        match self {
+            Self::Transport(input) => Some(&mut input.codec),
             Self::Client(_) => None,
         }
     }

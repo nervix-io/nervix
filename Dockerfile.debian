@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG RUST_VERSION=1.99
-ARG KACHE_VERSION=0.28.1
+ARG KACHE_VERSION=1.2.1
 ARG DEBIAN_IMAGE=debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 ARG LLVM_VERSION=23
 ARG FLATBUFFERS_VERSION=25.12.19
@@ -114,7 +114,7 @@ COPY src ./src
 COPY crates ./crates
 COPY examples/paced-simulation/rust ./examples/paced-simulation/rust
 COPY tests/scenarios.rs ./tests/scenarios.rs
-COPY scripts/configure_kache_remote.sh ./scripts/configure_kache_remote.sh
+COPY scripts/kache_remote.py ./scripts/kache_remote.py
 COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
@@ -134,7 +134,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}" \
     && : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}" \
     && export KACHE_CONFIG=/tmp/kache.toml \
-    && bash scripts/configure_kache_remote.sh "${KACHE_CONFIG}" \
+    && python3 scripts/kache_remote.py configure "${KACHE_CONFIG}" \
     && export KACHE_DAEMON_IDLE_TIMEOUT=0 \
     && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}${NERVIX_DIAGNOSTIC_SELECTION:+-${NERVIX_DIAGNOSTIC_SELECTION}}" \
     && export KACHE_NAMESPACE="${KACHE_MANIFEST_KEY}" \
@@ -201,8 +201,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       && cp "/app/target/${RUST_TARGET}/release/nervix-deadlock-report" /artifacts/diagnostic/nervix-deadlock-report;; \
     *) echo "unknown NERVIX_DIAGNOSTIC_SELECTION=${NERVIX_DIAGNOSTIC_SELECTION}" >&2; exit 1 ;; \
     esac \
-    && kache save-manifest --manifest-key "${KACHE_MANIFEST_KEY}" --namespace "${KACHE_NAMESPACE}" \
-    && kache sync --push
+    && python3 scripts/kache_remote.py publish --job-status success /tmp/kache-report
 
 FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS onnxruntime-base
 

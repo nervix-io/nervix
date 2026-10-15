@@ -44,8 +44,8 @@ Feature: Branched session subscriptions
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR sensitive_branch_source
-        FROM ENDPOINT sensitive_branch_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sensitive_branch_source
+        FROM sensitive_branch_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
         TO public_notifications
           SET tenant = message.tenant,
@@ -105,10 +105,10 @@ Feature: Branched session subscriptions
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-subscription-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main
+        TOPIC 'notifications_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -180,10 +180,10 @@ Feature: Branched session subscriptions
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-subscription-filter-map-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main
+        TOPIC 'notifications_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL

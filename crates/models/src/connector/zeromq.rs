@@ -23,8 +23,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(ZeroMq: unpooled CreateClientZeroMq => ZeroMqConfigEntry);
@@ -45,6 +45,7 @@ impl SourceEntity for ZeroMqPullSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::ZeroMq),
+        position_class: PositionClass::None,
     };
 }
 
@@ -77,13 +78,13 @@ impl SourceBody for ZeroMqPullSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ZeroMqIngestMode {
-    NoAckSequential,
+    NoAck,
 }
 
 impl ZeroMqIngestMode {
     pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
-            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
     }
 }
@@ -92,6 +93,8 @@ connector_sources! {
     connector ZeroMq = "ZEROMQ";
     /// What a ZeroMQ source reads.
     pub enum ZeroMqSource;
+    /// The alterations of the ingestors that read a ZeroMQ entity.
+    pub enum ZeroMqIngestorAlteration;
     /// The entities a ZeroMQ source reads.
     pub enum ZeroMqSourceEntity {
         Pull(ZeroMqPullSource) = "PULL", "ZeroMQ";

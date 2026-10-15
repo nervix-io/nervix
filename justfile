@@ -562,7 +562,8 @@ test-primitives-compile:
 # and the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
 # `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
 # `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@remote_ack_owners`, `@udf_column_builder`,
-# `@vhost_tls_rebinding` and `@inferencer_branch_batches` scenarios and then the
+# `@vhost_tls_rebinding`, `@inferencer_branch_batches` and `@inferencer_inspection_admission`
+# scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
 # in a session of its own within its bound and the inventory's budget, and the lane fails on an
@@ -1066,8 +1067,8 @@ test-coverage: tests-deps
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
-        --package nervix-server --lcov --output-path lcov.info
+    # The checkout path the report's sources lie below, which `coverage-merge` strips from them.
+    pwd -P > coverage-source-root.txt
 
 test-scenarios-coverage: tests-deps
     #!/usr/bin/env bash
@@ -1094,8 +1095,7 @@ test-scenarios-coverage: tests-deps
     uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
         -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
-    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
-        --package nervix-server --lcov --output-path lcov.info
+    pwd -P > coverage-source-root.txt
 
 # Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
 # Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
@@ -1103,10 +1103,34 @@ test-scenarios-coverage: tests-deps
 coverage-clean-workspace:
     cargo llvm-cov clean --workspace
 
-# Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
-# workspace package, so crate lines the server's tests executed are measured as CI measures them.
+# Rewrite lcov-workspace.info and its checkout path from the profiles the last coverage recipe
+# collected, over the sources of every workspace package, so crate lines the server's tests executed
+# are measured as CI measures them. `coverage-merge` then maps it onto the repository.
 coverage-report-workspace *args:
-    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info {{ args }}
+    pwd -P > coverage-source-root.txt
+
+# Merge ordinary coverage into the one repository-relative lcov-workspace.info that every coverage
+# consumer reads, and record its inputs, counts and dropped records in
+# target/coverage-merge/record.json. An input is a producer's artifact directory or one report, each
+# with the coverage-source-root.txt its producer wrote; CI names the three ordinary artifacts, and
+# without inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
+# writing no report, when the report would be incomplete.
+coverage-merge *inputs:
+    python3 -m scripts.coverage_merge --output lcov-workspace.info --record {{ quote(cargo_target_dir + "/coverage-merge/record.json") }} {{ inputs }}
+
+# Exercise the merge's source mapping, its integrity failures and its CI contract.
+test-coverage-merge:
+    python3 -m unittest scripts.tests.test_coverage_merge
+
+# Retain the merge's own measured line coverage beside the other Python tooling reports.
+coverage-merge-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/coverage-merge"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" --branch --source=scripts.coverage_merge,scripts.tests.test_coverage_merge -m unittest scripts.tests.test_coverage_merge
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
 
 # Check the same merged workspace coverage and complexity limit locally as CI does.
 check-coverage report="lcov-workspace.info":
@@ -2308,7 +2332,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-com
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2409,7 +2433,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2570,9 +2594,29 @@ test-nspl-backup-completion:
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
 
-# Check the shared R2 configuration used by native CI jobs and Docker builds.
+# Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
+# job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
+
+# Retain the kache remote contract's own measured line coverage beside the other Python tooling.
+coverage-kache-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/kache-ci"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.tests.test_kache_ci -m unittest scripts.tests.test_kache_ci
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" -o "{{ cargo_target_dir }}/kache-ci/python.lcov"
+
+# Exercise the pinned Go formatter bootstrap and its CI wiring without network access.
+test-go-ci-tool:
+    python3 -m unittest scripts.tests.test_go_ci_tool
+
+# Measure the installer's Python lines separately from Rust's ordinary LCOV.
+coverage-go-ci-tool:
+    mkdir -p target/go-ci-tool
+    COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
+    COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
 test-docs: typed-ratchet-source-build
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
@@ -2677,6 +2721,20 @@ deps-down:
 chaos *args:
     exec bash scripts/chaos/chaos.sh {{ args }}
 
+# Prove the network preflight and its retained failure outcomes through the external controller.
+test-chaos-network-preflight *cases:
+    exec bash scripts/chaos/tests/network-preflight-self-test.sh {{ cases }}
+
+# Retain source coverage of network-preflight failure recording and live fault controls.
+coverage-chaos-network-preflight image="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE={{ quote(image) }} kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/chaos.sh") }},{{ quote(invocation_directory() / "scripts/chaos/network-faults.sh") }},{{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/network-preflight-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-network-preflight-coverage") }} scripts/chaos/chaos.sh self-test
+
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
@@ -2684,6 +2742,63 @@ test-chaos-rate-probe:
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
+
+# Pin baseline preparation accounting and the production output-boundary observations.
+test-chaos-output-boundary selection="all":
+    exec bash scripts/chaos/tests/output-boundary-self-test.sh {{ quote(selection) }}
+
+# Preserve the package probe's native refusal and exact retained container lifetime.
+test-chaos-image-package:
+    exec bash scripts/chaos/tests/image-package-self-test.sh
+
+# Bound startup artifact publication by the controller's actual remaining budget.
+test-chaos-startup-status:
+    exec bash scripts/chaos/tests/startup-status-self-test.sh
+
+# Measure successful publication and decisive native/deadline/reporting refusals.
+coverage-chaos-startup-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-startup-status-coverage") }} scripts/chaos/tests/startup-status-self-test.sh
+
+# Requires kcov; retains coverage of the output-boundary owner and its focused controls.
+coverage-chaos-output-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    # kcov's Bash descriptor exchange cannot handle an inherited limit near INT_MAX.
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-output-boundary-coverage") }} scripts/chaos/tests/output-boundary-self-test.sh
+
+# Measure package-command refusals, retained state and successful probes without Docker.
+coverage-chaos-image-package:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-image-package-coverage") }} scripts/chaos/tests/image-package-self-test.sh
+
+# Measure the full baseline controller against a supplied immutable image, including its self-check.
+coverage-chaos-baseline image nodes="3" timeout="840" run_id="baseline-coverage":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-baseline-coverage") }} scripts/chaos/run-baseline.sh --scenario baseline --image {{ quote(image) }} --nodes {{ quote(nodes) }} --timeout {{ quote(timeout) }} --artifacts {{ quote(cargo_target_dir / "chaos-baseline-coverage-runs") }} --run-id {{ quote(run_id) }}
 
 # Retain shell coverage of packet sampling, evidence parsing and effect controls.
 coverage-chaos-degraded-evidence:
@@ -3150,7 +3265,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \

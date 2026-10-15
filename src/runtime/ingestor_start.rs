@@ -589,9 +589,12 @@ mod tests {
                                     source: IngestSource::Mqtt(MqttSource::Topic(
                                         MqttTopicSource {
                                             client,
-                                            topic: "notifications".to_string(),
+                                            topic: nervix_models::MqttTopicFilter::parse(
+                                                "notifications",
+                                            )
+                                            .expect("valid topic filter"),
                                             instances: nonzero!(2u64),
-                                            mode: MqttIngestMode::NoAckSequential {
+                                            mode: MqttIngestMode::NoAck {
                                                 session: MqttSession::Clean,
                                                 qos: MqttQos::AtMostOnce,
                                             },
@@ -718,7 +721,8 @@ mod tests {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                                 client,
-                                topic: "notifications".to_string(),
+                                topic: nervix_models::MqttTopicFilter::parse("notifications")
+                                    .expect("valid topic filter"),
                                 instances: nonzero!(1u64),
                                 mode: MqttIngestMode::AckSequential {
                                     timeout: "oops".to_string(),

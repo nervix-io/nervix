@@ -4,13 +4,14 @@
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, node-stop, phase-deadline,
 //!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver, materialized-state diagnostic and gRPC-receiver regressions with Rust's test
-//!   runner, and the stand-in nodes and clients those regressions talk to.
+//!   HTTP-receiver, materialized-state diagnostic, gRPC-receiver, runner-lag and runner-offload
+//!   regressions with Rust's test runner, and the stand-in nodes and clients those regressions talk
+//!   to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   gRPC-receiver and materialized-state diagnostic harness modules, the product's shutdown
-//!   coordinator a stopping node is read through, and the client wire session protocol the
-//!   stand-in nodes answer status requests with.
+//!   gRPC-receiver, runner-lag, runner-offload and materialized-state diagnostic harness modules,
+//!   the product's shutdown coordinator a stopping node is read through, and the client wire
+//!   session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -19,6 +20,10 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/injected_hold.rs"]
+mod injected_hold;
+#[path = "common/injected_hold_tests.rs"]
+mod injected_hold_tests;
 #[path = "common/materialized_state_diagnostics.rs"]
 mod materialized_state_diagnostics;
 #[path = "common/materialized_state_diagnostics_tests.rs"]
@@ -35,6 +40,14 @@ mod phase_deadline;
 mod port_pool;
 #[path = "common/redis_client.rs"]
 mod redis_client;
+#[path = "common/runner_lag.rs"]
+mod runner_lag;
+#[path = "common/runner_lag_tests.rs"]
+mod runner_lag_tests;
+#[path = "common/runner_offload.rs"]
+mod runner_offload;
+#[path = "common/runner_offload_tests.rs"]
+mod runner_offload_tests;
 #[path = "common/scenario_phase.rs"]
 #[allow(
     dead_code,

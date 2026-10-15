@@ -156,8 +156,9 @@ ALTER EMITTER <name>
   SET COMMIT EACH <duration> MAX SIZE <bytes>
   [, ...];
 
-ALTER INGESTOR <name>
-  SET FROM <source> |
+ALTER <CONNECTOR> <ENTITY> INGESTOR <name>
+  SET FROM <body> |
+  SET QUIESCE <quiesce body> |
   SET DECODE USING <codec> |
   SET TIMESTAMP NOW | SET TIMESTAMP AT <field> | DROP TIMESTAMP |
   SET FILTER WHERE <expr> | DROP FILTER WHERE |
@@ -207,8 +208,9 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
 ```
 
 Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
-`ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, or `ALTER PLACEMENT`
-execute in written order. See
+`ALTER EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, or
+`ALTER PLACEMENT` execute in written order. An ingestor's `ALTER` repeats the connector and entity
+the ingestor reads, such as `ALTER KAFKA TOPIC INGESTOR`, and never changes them. See
 [Streams And State](relay.md#altering-relays) for relay operations,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
@@ -228,7 +230,8 @@ The rest of the graph is built with:
 - `CREATE CLIENT`
 - `CREATE VHOST`
 - `CREATE ENDPOINT`
-- `CREATE INGESTOR`
+- `CREATE <CONNECTOR> <ENTITY> INGESTOR`, such as `CREATE KAFKA TOPIC INGESTOR` or
+  `CREATE CLIENT PRODUCER INGESTOR`; see [Ingestors](ingestors.md)
 - `CREATE GENERATOR`
 - `CREATE INFERENCER`
 - `CREATE JUNCTION`
@@ -395,7 +398,7 @@ initialized output and it is not exposed as `input` or `message`.
 
 This surface is available on:
 
-- `CREATE INGESTOR`
+- `CREATE <CONNECTOR> <ENTITY> INGESTOR`
 - `CREATE INFERENCER`
 - `CREATE JUNCTION`
 - `CREATE DEDUPLICATOR`
@@ -565,8 +568,8 @@ Example:
 CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
-CREATE INGESTOR notifications_in
-  FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR notifications_in
+  FROM ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications

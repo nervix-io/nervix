@@ -53,7 +53,14 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("jaq_capture", "'{captured: .}'"),
     ("jaq_matcher", "'. == null'"),
     ("jaq_program", "'.'"),
+    // External names follow their own system's rules and are quoted, so each filler satisfies the
+    // rule of its kind.
+    ("kafka_consumer_group", "'nx-group'"),
+    ("kafka_topic", "'nx.topic'"),
     ("message_count", "100"),
+    ("mqtt_topic_filter", "'nx/topic'"),
+    ("nats_queue_group", "'nx-workers'"),
+    ("nats_subject", "'nx.subject'"),
     ("protobuf_message", "'nx.Message'"),
     ("node_id", "nx-node"),
     ("number", "1"),
@@ -64,7 +71,12 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("otel_scope_name", "'nx/scope'"),
     ("otel_scope_version", "'1.0'"),
     ("placement_rank", "1"),
+    ("pulsar_subscription", "'nx-subscription'"),
+    ("pulsar_topic", "'nx-topic'"),
+    ("rabbitmq_queue", "'nx.queue'"),
+    ("redis_channel", "'nx.channel'"),
     ("relay_capacity", "1024"),
+    ("sqs_queue", "'nx-queue'"),
     ("string", "'nx_value'"),
     ("string_literal", "'nx_value'"),
     ("time_rate", "1.0"),
@@ -90,9 +102,6 @@ const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("value_expression", "1"),
     ("where_expression", "1 = 1"),
 ];
-
-/// Placeholders that name something but do not end in `_name`.
-const EXTRA_NAME_LABELS: &[&str] = &["consumer_group", "mqtt_topic_filter", "queue_group"];
 
 /// What shape of continuation a completion label describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,9 +208,6 @@ impl Materializer {
         }
         if let Some(stem) = label.strip_suffix("_name") {
             return Ok(Materialized::verbatim(&synthetic_name(stem, occurrence)));
-        }
-        if EXTRA_NAME_LABELS.contains(&label) {
-            return Ok(Materialized::verbatim(&synthetic_name(label, occurrence)));
         }
         Err(MaterializeError::UnfilledPlaceholder)
     }

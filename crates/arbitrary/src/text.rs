@@ -5,13 +5,12 @@ use std::{fmt::Debug, num::NonZeroU64, str::FromStr};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
-    CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod,
-    DomainClockSkew, DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName,
-    InferencerName, IngestorName, JunctionName, LookupName, ModelName, PlacementName,
-    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
-    RequestedResourceVersion, ResourceName, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    CollectionName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainClockSkew,
+    DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
+    IngestorName, JunctionName, LookupName, ModelName, PlacementName, QueueName, ReingestorName,
+    RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
+    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
 use crate::{Arbitrary, Domain};
@@ -49,7 +48,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 358] = [
+pub const KEYWORDS: [&str; 364] = [
     "create",
     "delete",
     "add",
@@ -246,6 +245,11 @@ pub const KEYWORDS: [&str; 358] = [
     "subject",
     "queue",
     "channel",
+    "request",
+    "connection",
+    "listener",
+    "producer",
+    "pull",
     "offset",
     "offsets",
     "consumer",
@@ -267,6 +271,7 @@ pub const KEYWORDS: [&str; 358] = [
     "reject",
     "after",
     "ack",
+    "no",
     "no_ack",
     "jetstream",
     "parallel",
@@ -441,7 +446,6 @@ spelled_like_any_word!(
     ClusterNodeName,
     CodecName,
     CollectionName,
-    ConsumerGroupName,
     CorrelatorName,
     DeduplicatorName,
     DomainName,
@@ -455,8 +459,6 @@ spelled_like_any_word!(
     LookupName,
     ModelName,
     PlacementName,
-    PulsarSubscriptionName,
-    QueueGroupName,
     QueueName,
     ReingestorName,
     ReordererName,

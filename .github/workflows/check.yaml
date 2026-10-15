@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
-  KACHE_VERSION: "0.28.1"
+  KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   TINYGO_VERSION: "0.41.1"
 
@@ -49,6 +49,11 @@ jobs:
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
         with:
@@ -96,12 +101,10 @@ jobs:
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install ghokin
-        run: |
-          go install github.com/antham/ghokin/v3@v3.9.0
+        run: python3 scripts/install_go_ci_tool.py ghokin "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install apt deps and current GitHub CLI
         run: |
@@ -123,39 +126,24 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Validate
         run: |
@@ -164,9 +152,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -175,6 +180,14 @@ jobs:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
   # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
   diagnostic-evidence:
@@ -218,34 +231,24 @@ jobs:
           linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Check diagnostic evidence and report tool coverage
         run: just coverage-deadlock
@@ -265,6 +268,18 @@ jobs:
             target/native-coverage/test-deadlock-*/**/executions.jsonl
             target/native-coverage/test-deadlock-*/**/export.log
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
   # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
   # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
@@ -351,34 +366,24 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}-${SELECTION}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       # The bound covers the prerequisites, the diagnostic builds and workloads inside the
       # inventory's budget, and the coverage export. At its end the collector and the lane each
@@ -408,6 +413,18 @@ jobs:
             target/deloxide/test-deloxide/
           if-no-files-found: warn
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
         run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
@@ -431,6 +448,11 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
         with:
@@ -458,7 +480,7 @@ jobs:
       - name: Setup Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
 
       - name: Install TinyGo
         run: |
@@ -473,8 +495,7 @@ jobs:
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install playwright
         run: |
@@ -492,39 +513,24 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
         run: |
@@ -533,7 +539,6 @@ jobs:
 
       - name: Tests coverage
         run: |
-          pwd > coverage-source-root.txt
           just toolchains-install
           just test-coverage
 
@@ -544,7 +549,6 @@ jobs:
           name: coverage-tests
           path: |
             lcov-workspace.info
-            lcov.info
             coverage-source-root.txt
           if-no-files-found: warn
 
@@ -553,7 +557,7 @@ jobs:
         run: |
           if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
             kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
-            for attempt in {1..10}; do
+            for _ in {1..10}; do
               [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
               sleep 1
             done
@@ -573,9 +577,26 @@ jobs:
             ${{ runner.temp }}/runner-load.log
           if-no-files-found: warn
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -584,6 +605,14 @@ jobs:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
       - name: Upload test logs
         if: always()
@@ -606,6 +635,11 @@ jobs:
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
         with:
@@ -633,7 +667,7 @@ jobs:
       - name: Setup Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
 
       - name: Install TinyGo
         run: |
@@ -648,8 +682,7 @@ jobs:
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install playwright
         run: |
@@ -667,39 +700,24 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
         run: |
@@ -711,7 +729,6 @@ jobs:
 
       - name: Scenario coverage
         run: |
-          pwd > coverage-source-root.txt
           just toolchains-install
           just test-scenarios-coverage
 
@@ -723,7 +740,6 @@ jobs:
           overwrite: true
           path: |
             lcov-workspace.info
-            lcov.info
             coverage-source-root.txt
             target/paced-simulation/python.lcov
           if-no-files-found: warn
@@ -733,7 +749,7 @@ jobs:
         run: |
           if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
             kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
-            for attempt in {1..10}; do
+            for _ in {1..10}; do
               [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
               sleep 1
             done
@@ -761,9 +777,26 @@ jobs:
             cat tests/logs/suite-summary.md >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -773,6 +806,14 @@ jobs:
           overwrite: true
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
       - name: Upload scenario logs
         if: always()
@@ -800,13 +841,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
 
-      - name: Install CRAP and LCOV
+      - name: Install CRAP
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-crap,just,toml-cli
-
-      - name: Install LCOV
-        run: sudo apt-get update && sudo apt-get install -y lcov
 
       - name: Download tests coverage
         uses: actions/download-artifact@v4
@@ -826,18 +864,11 @@ jobs:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
 
+      # One repository-relative report of the ordinary producers, which every step below reads. The
+      # merge leaves out the collections of other modes the native extras artifact holds, and fails
+      # rather than publish an incomplete report.
       - name: Merge coverage
-        run: |
-          lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
-            --add-tracefile coverage-inputs/scenarios/lcov-workspace.info \
-            --output-file lcov-workspace.info
-          lcov --add-tracefile coverage-inputs/tests/lcov.info \
-            --add-tracefile coverage-inputs/scenarios/lcov.info \
-            --output-file lcov.info
-          while IFS= read -r report; do
-            lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
-            lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
-          done < <(find coverage-inputs -path '*/ordinary/*/lcov.info' -o -name python.lcov)
+        run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
 
       - name: Report patch line coverage
         if: always()
@@ -850,10 +881,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           just coverage-patch "$BASE_SHA" lcov-workspace.info \
-            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
-            --source-root-file coverage-inputs/tests/coverage-source-root.txt \
-            --source-root-file coverage-inputs/scenarios/coverage-source-root.txt \
-            --source-root-file coverage-inputs/native-extras/coverage-source-root.txt
+            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA"
 
       - name: Check CRAP
         run: just check-coverage
@@ -866,9 +894,8 @@ jobs:
           overwrite: true
           path: |
             lcov-workspace.info
-            lcov.info
+            target/coverage-merge/record.json
             target/patch-coverage.md
-            coverage-inputs/**/coverage-source-root.txt
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
@@ -972,39 +999,41 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Client conformance
         run: |
           just toolchains-install
           just test-client-conformance
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1110,34 +1139,24 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
@@ -1160,11 +1179,17 @@ jobs:
           just coverage-patch-runner
           pwd > target/coverage-source-root.txt
 
+      - name: Ordinary coverage merge
+        run: just coverage-merge-runner
+
       - name: Paced simulation Python open policy
         run: just coverage-paced-simulation-python
 
       - name: Release evidence gate
         run: just coverage-release-evidence
+
+      - name: Kache remote contract
+        run: just coverage-kache-ci
 
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
@@ -1217,11 +1242,25 @@ jobs:
             target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
+            target/coverage-merge/python.lcov
             target/paced-simulation/python.lcov
             target/release-evidence-coverage/python.lcov
+            target/kache-ci/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1308,34 +1347,24 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
       # each in its own process, then the proof that a failing schedule persists and replays.
@@ -1359,6 +1388,18 @@ jobs:
             target/native-coverage/**/export.log
             target/native-coverage/**/models.json
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1447,34 +1488,24 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       # Every registered Loom model of a production owner explored to exhaustion. The proof that
       # each model fails under the ordering weakening it exists to detect runs in the
@@ -1496,6 +1527,18 @@ jobs:
             target/native-coverage/**/export.log
             target/native-coverage/**/models.json
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1598,39 +1641,41 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Loom ordering qualification
         run: |
           just toolchains-install
           just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1716,34 +1761,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Turmoil simulations
         run: |
@@ -1780,6 +1815,18 @@ jobs:
             target/turmoil.lcov
             target/turmoil-patch-coverage.md
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()

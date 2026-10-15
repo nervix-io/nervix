@@ -61,7 +61,7 @@ impl MqttIngestorStartPlan {
             client_id_conflict: MqttSourcePlan::client_id_conflict(&client.config, instances),
             default_client_id: ingestor.name.as_str().to_string(),
             share_group: format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str()),
-            topic,
+            topic: topic.as_str().to_string(),
             session: mode.session(),
             qos: mode.qos(),
             manual_acks: mode.is_ack(),

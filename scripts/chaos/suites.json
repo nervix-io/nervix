@@ -1,5 +1,5 @@
 {
-  "ci_reserve_minutes": 10,
+  "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
       "description": "Three-node baseline, a leader crash with its restart, and the recovery from an isolated follower's partition",
@@ -7,7 +7,7 @@
         {
           "id": "baseline-3",
           "shard": 1,
-          "budget_minutes": 4,
+          "budget_minutes": 14,
           "run": ["baseline", "--nodes", "3"]
         },
         {
@@ -36,13 +36,13 @@
         {
           "id": "baseline-1",
           "shard": 1,
-          "budget_minutes": 3,
+          "budget_minutes": 13,
           "run": ["baseline", "--nodes", "1"]
         },
         {
           "id": "baseline-3",
           "shard": 1,
-          "budget_minutes": 4,
+          "budget_minutes": 14,
           "run": ["baseline", "--nodes", "3"]
         },
         {

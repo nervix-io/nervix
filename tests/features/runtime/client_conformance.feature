@@ -69,8 +69,8 @@ Feature: Cross-language client conformance
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
       CREATE VHOST edge conformance-{{test_id}}.example.com;
       CREATE ENDPOINT typed_ingress ON edge PATH '/typed' TYPE HTTP;
-      CREATE INGESTOR typed_source
-        FROM ENDPOINT typed_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR typed_source
+        FROM typed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec
         TO typed_rows
           SET id = message.id,
@@ -344,8 +344,8 @@ Feature: Cross-language client conformance
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY typed_rows SCHEMA typed_in_row BRANCHED BY by_tenant;
-      CREATE INGESTOR typed_in
-        FROM CLIENT SCHEMA typed_in_row
+      CREATE CLIENT PRODUCER INGESTOR typed_in
+        FROM SCHEMA typed_in_row
           MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW

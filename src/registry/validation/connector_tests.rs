@@ -16,16 +16,16 @@ use std::fs;
 
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
-    CodecName, CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientS3,
-    CreateClientSqs, CreateWireSchema, EmitterPublishingMode, EndpointEndpointSource,
-    EndpointSource, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, IcebergTableSink, IngestorName, JsonType, KafkaIngestMode,
-    KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
-    MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelLogsSink,
-    OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs,
-    ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink, SignalingProtobufConfig,
-    SyslogCollectorSink, SyslogListenerSource, SyslogSink, TopicName, WireSchemaField,
-    WireSchemaName, ZeroMqPushSink, ZeroMqSink,
+    CodecName, CodecWireFormat, CreateClientHttp, CreateClientS3, CreateClientSqs,
+    CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend, IcebergTableSink,
+    IngestSource, IngestorName, JsonType, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode,
+    KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState,
+    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource,
+    OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink,
+    ProcessorInputs, ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink,
+    SignalingProtobufConfig, SyslogCollectorSink, SyslogListenerSource, SyslogSink,
+    WireSchemaField, WireSchemaName, ZeroMqPushSink, ZeroMqSink,
 };
 use nonzero_ext::nonzero;
 
@@ -35,8 +35,8 @@ use crate::registry::{
     storage::Registry,
     test_fixtures::{
         TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_schema, branch_schema_with_types,
-        branched_by, client_model, codec, emitter, explicitly_unbranched_relay, ingestor_statement,
-        jaq_native_codec, named, protobuf_codec, relay, relay_branched_by,
+        branched_by, client_model, codec, emitter, endpoint, explicitly_unbranched_relay,
+        ingestor_statement, jaq_native_codec, named, protobuf_codec, relay, relay_branched_by,
         relay_branched_by_relay_branch, schema, signaling_protocol, temp_db_path,
         unbranched_transforming_outputs, vhost, wire_schema,
     },
@@ -809,7 +809,14 @@ fn mqtt_instances_greater_than_one_are_valid() {
             schema("event_schema"),
             wire_schema("event_wire"),
             codec("event_codec", "event_schema"),
-            client_model("mqtt_main"),
+            Model::ClientMqtt(nervix_models::CreateClientMqtt {
+                name: named("mqtt_main"),
+                mount: None,
+                config: vec![nervix_models::MqttConfigEntry {
+                    key: "addr".to_string(),
+                    value: "mqtt://localhost:1883".to_string(),
+                }],
+            }),
             relay("notifications", "event_schema"),
             Model::Ingestor(CreateIngestor {
                 name: IngestorName::parse("mqtt_ing").expect("valid identifier"),
@@ -818,9 +825,10 @@ fn mqtt_instances_greater_than_one_are_valid() {
                     nervix_models::TransportIngestorInput {
                         source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
                             client: ClientName::parse("mqtt_main").expect("valid identifier"),
-                            topic: "notifications".to_string(),
+                            topic: nervix_models::MqttTopicFilter::parse("notifications")
+                                .expect("valid topic filter"),
                             instances: nonzero!(2u64),
-                            mode: MqttIngestMode::NoAckSequential {
+                            mode: MqttIngestMode::NoAck {
                                 session: MqttSession::Clean,
                                 qos: MqttQos::AtMostOnce,
                             },
@@ -893,12 +901,13 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                     nervix_models::TransportIngestorInput {
                         source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                             client: ClientName::parse("broker").expect("valid identifier"),
-                            topic: TopicName::parse("notifications").expect("valid identifier"),
+                            topic: nervix_models::KafkaTopicName::parse("notifications")
+                                .expect("valid topic"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
                             instances: nonzero!(1u64),
-                            mode: KafkaIngestMode::NoAckParallel,
+                            mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1100,9 +1109,9 @@ fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
         let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
             unreachable!("the fixture builds a transport ingestor")
         };
-        input.source = IngestSource::Endpoint(EndpointSource::Endpoint(EndpointEndpointSource {
+        input.source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
             endpoint: named("ingress"),
-            mode: nervix_models::EndpointIngestMode::NoAckSequential,
+            mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::Reject {
                 retry_after: retry_after.to_string(),
             },
@@ -1260,12 +1269,14 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                                 client: ClientName::parse("broker").expect("valid identifier"),
-                                topic: TopicName::parse("notifications").expect("valid identifier"),
+                                topic: nervix_models::KafkaTopicName::parse("notifications")
+                                    .expect("valid topic"),
                                 offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                    KafkaConsumerGroupName::parse("cg")
+                                        .expect("valid consumer group"),
                                 ),
                                 instances: nonzero!(1u64),
-                                mode: KafkaIngestMode::NoAckParallel,
+                                mode: KafkaIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
                             })),
                             codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1341,12 +1352,13 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                     nervix_models::TransportIngestorInput {
                         source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                             client: ClientName::parse("broker").expect("valid identifier"),
-                            topic: TopicName::parse("notifications").expect("valid identifier"),
+                            topic: nervix_models::KafkaTopicName::parse("notifications")
+                                .expect("valid topic"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
                             instances: nonzero!(1u64),
-                            mode: KafkaIngestMode::NoAckParallel,
+                            mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1432,12 +1444,13 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                     nervix_models::TransportIngestorInput {
                         source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                             client: ClientName::parse("broker").expect("valid identifier"),
-                            topic: TopicName::parse("notifications").expect("valid identifier"),
+                            topic: nervix_models::KafkaTopicName::parse("notifications")
+                                .expect("valid topic"),
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
                             instances: nonzero!(1u64),
-                            mode: KafkaIngestMode::NoAckParallel,
+                            mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
                         codec: CodecName::parse("event_codec").expect("valid identifier"),
@@ -1692,6 +1705,7 @@ fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
                         nervix_models::TransportIngestorInput {
                             source: IngestSource::from(SyslogListenerSource {
                                 client: named("collector"),
+                                mode: nervix_models::SyslogIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Drop,
                             }),
                             codec: named("event_codec"),
@@ -1703,11 +1717,89 @@ fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
                 }),
             ],
         )
-        .expect_err("a SYSLOG ingestor must reject a KAFKA client");
+        .expect_err("a SYSLOG LISTENER ingestor must reject a KAFKA client");
 
-    assert_invalid_model_reason(
-        &error,
-        "SYSLOG ingestor requires a SYSLOG client, found KAFKA client 'collector'",
+    assert_eq!(
+        error.current_context(),
+        &RegistryError::IngestorClientConnectorMismatch {
+            domain: domain.clone(),
+            ingestor: named("syslog_ing"),
+            kind: nervix_models::IngestSourceKind::Syslog(
+                nervix_models::SyslogSourceEntity::Listener
+            ),
+            client: named("collector"),
+            required: nervix_models::ConnectorKind::Syslog,
+            found: nervix_models::ConnectorKind::Kafka,
+        }
+    );
+    assert_eq!(
+        error.current_context().to_string(),
+        "SYSLOG LISTENER ingestor 'syslog_ing' in domain 'default' requires a SYSLOG client, but \
+         client 'collector' is a KAFKA client"
+    );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn an_endpoint_ingestor_rejects_an_endpoint_of_the_other_type() {
+    let path = temp_db_path();
+    let registry = Registry::open(&path).expect("registry should open");
+    let domain = DomainName::parse("default").expect("valid domain");
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![
+                schema("event_schema"),
+                wire_schema("event_wire"),
+                codec("event_codec", "event_schema"),
+                vhost("edge", &["edge.example.com"]),
+                endpoint(
+                    "stream",
+                    "edge",
+                    "/stream",
+                    nervix_models::EndpointType::Websockets,
+                ),
+                relay("notifications", "event_schema"),
+                Model::Ingestor(CreateIngestor {
+                    name: named("web_in"),
+                    output_routes: unbranched_transforming_outputs("notifications"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                                endpoint: named("stream"),
+                                mode: nervix_models::EndpointIngestMode::NoAck,
+                                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                    max_size: "1MiB".to_string(),
+                                },
+                            })),
+                            codec: named("event_codec"),
+                        },
+                    ),
+                    timestamp_source: None,
+                    general_error_policy: GeneralErrorPolicy::Log,
+                    filter_where: None,
+                }),
+            ],
+        )
+        .expect_err("an HTTP ENDPOINT ingestor must reject a WEBSOCKETS endpoint");
+
+    assert_eq!(
+        error.current_context(),
+        &RegistryError::IngestorEndpointTypeMismatch {
+            domain: domain.clone(),
+            ingestor: named("web_in"),
+            kind: nervix_models::IngestSourceKind::Http(nervix_models::HttpSourceEntity::Endpoint),
+            endpoint: named("stream"),
+            required: nervix_models::EndpointType::Http,
+            found: nervix_models::EndpointType::Websockets,
+        }
+    );
+    assert_eq!(
+        error.current_context().to_string(),
+        "HTTP ENDPOINT ingestor 'web_in' in domain 'default' requires a TYPE HTTP endpoint, but \
+         endpoint 'stream' is TYPE WEBSOCKETS"
     );
 
     let _ = fs::remove_dir_all(path);

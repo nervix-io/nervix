@@ -8,10 +8,10 @@ A typical ingestor:
 CREATE BRANCH by_user
   SCHEMA user_branch TTL 5m;
 
-CREATE IF NOT EXISTS INGESTOR kafka_notifications
-  FROM KAFKA kafka_main
-  TOPIC notifications
-  OFFSET BY CONSUMER GROUP nervix_consumer
+CREATE IF NOT EXISTS KAFKA TOPIC INGESTOR kafka_notifications
+  FROM kafka_main
+  TOPIC 'notifications'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer'
   INSTANCES 1
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -25,6 +25,36 @@ CREATE IF NOT EXISTS INGESTOR kafka_notifications
   ON GENERAL ERROR LOG;
 ```
 
+An ingestor statement names the connector and the entity it reads in its head, as one phrase
+before `INGESTOR`: `KAFKA TOPIC` consumes a Kafka topic, `HTTP ENDPOINT` serves a Nervix HTTP
+endpoint, and `CLIENT PRODUCER` admits batches that applications submit. The body after `FROM`
+names no connector and holds only that pair's clauses; see
+[Supported Ingestor Types](#supported-ingestor-types). Completion offers each head as one item,
+such as `KAFKA TOPIC INGESTOR`. `ALTER` repeats the stored ingestor's connector and entity, so an
+alteration never changes what an ingestor reads; to read another connector or entity, drop the
+ingestor and create it again. `DROP INGESTOR`, `DESCRIBE INGESTOR`, `SHOW CREATE INGESTOR`,
+`SHOW INGESTORS`, and relocation address an ingestor by its name alone.
+
+```nspl,ignore
+CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> INGESTOR <name>
+  FROM <body>
+  [DECODE USING <codec>]
+  [TIMESTAMP NOW | TIMESTAMP AT <field>]
+  [FILTER WHERE <expression>]
+  TO <relay> <route body>
+  [TO <relay> <route body> ...]
+  ON GENERAL ERROR IGNORE | LOG;
+```
+
+`DECODE USING` is required under every head except `CLIENT PRODUCER`, which decodes nothing and
+does not accept it. A client the body names must be a client of the head's connector, and an
+endpoint must have the head's `TYPE`; completion after `FROM` offers only those, and any other
+reference is refused when the statement is applied, with a message that names both kinds, such as
+`requires a KAFKA client, but client 'cache' is a REDIS client`. `SHOW CREATE INGESTOR` renders the
+complete statement under its head. `DESCRIBE INGESTOR` prints the pair and the body on its `from:`
+line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' MODE
+NO ACK ON QUIESCE SUSPEND`, and `SHOW INGESTORS` prints the pair alone, such as `from=KAFKA TOPIC`.
+
 Every ingestor defines:
 
 - the destination relay or relays
@@ -34,7 +64,7 @@ Every ingestor defines:
 - a flush policy for every destination relay
 - a message error policy for every destination relay
 - the timestamp source
-- the transport-specific source
+- the connector and entity it reads, and the source body that follows `FROM`
 - the delivery mode
 - the source-specific quiesce mode and every variable it requires
 - optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
@@ -49,7 +79,7 @@ source or transport failures that are not tied to one message or output route.
 
 `MAX BATCH SIZE` counts logical Arrow value, offset, and validity bytes. It excludes unused Arrow
 buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-flight window for
-`ACK PARALLEL`; `NO_ACK` modes never accept it.
+`ACK PARALLEL`; `MODE NO ACK` never accepts it.
 
 At runtime, the ingestor:
 
@@ -89,14 +119,36 @@ keeps admitted rows together; each rejected or missing event timestamp follows t
 and source metadata. A batch containing both kinds can therefore deliver its accepted rows while
 its rejected rows reach the configured error route.
 
+## Delivery Modes
+
+Every source body declares its delivery mode with `MODE`, polled and listener sources included:
+
+- `NO ACK` is one composed phrase. Nothing waits on an acknowledgement, and it takes no variables.
+- `ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>` lets one
+  payload at a time await its acknowledgement.
+- `ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY BACKOFF
+  <duration> MAX <duration>` lets at most `n` payloads await their acknowledgement; `BATCH TIMEOUT`
+  is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
+  <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
+
+Each entity accepts only the modes it can honor, and completion offers only those:
+
+| Entity | `MODE` forms |
+| --- | --- |
+| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
+| `RABBITMQ QUEUE`, `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
+| `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
+
 ## Altering Ingestors
 
-`ALTER INGESTOR` applies one or more comma-separated operations in written order:
+`ALTER` names the connector and entity of the stored ingestor in its head and applies one or more
+comma-separated operations in written order:
 
 ```nspl,ignore
-ALTER INGESTOR <ingestor>
-    SET FROM <full source clause>
-  | SET QUIESCE <source-supported quiesce body>
+ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
+    SET FROM <complete body of the head's connector and entity>
+  | SET QUIESCE <quiesce body>
   | SET DECODE USING <codec>
   | SET TIMESTAMP NOW
   | SET TIMESTAMP AT <field>
@@ -111,14 +163,21 @@ ALTER INGESTOR <ingestor>
   [, ...];
 ```
 
-`SET FROM` accepts the complete transport-specific source body that follows `FROM` in `CREATE
-INGESTOR`. Change a client, source address, Kafka topic or offset mode, `INSTANCES`, delivery mode,
-or source-specific subscription settings by supplying that complete body, including its required
-`ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and its variables. The body must be
-one offered by the ingestor's current source type; there is no `DROP QUIESCE` operation. `ADD ROUTE`
-appends a route, while `REPLACE ROUTE` preserves the matched route's position. Duplicate routes to
-the same relay remain legal, so `DROP ROUTE` and `REPLACE ROUTE` reject an ambiguous target. An
-ingestor must retain at least one route.
+A head whose connector and entity differ from those the stored ingestor reads is refused, for
+example with `the stored ingestor reads HTTP ENDPOINT, so ALTER KAFKA TOPIC INGESTOR cannot alter
+it`. An alteration therefore never changes what an ingestor reads; drop the ingestor and create it
+again under the other head instead.
+
+`SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
+head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
+`INSTANCES`, the delivery mode, or source-specific subscription settings by supplying that complete
+body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
+its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
+for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
+`DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
+which decodes nothing. `ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched
+route's position. Duplicate routes to the same relay remain legal, so `DROP ROUTE` and
+`REPLACE ROUTE` reject an ambiguous target. An ingestor must retain at least one route.
 
 Every ingestor alteration uses `ENTITY_PAUSE`. Nervix quiesces only the affected ingestor instances
 on all live nodes and waits for their already accepted in-flight work to drain before commit. That
@@ -132,9 +191,10 @@ coordinating leader cannot leave an ingestor quiesced indefinitely.
 
 ## Quiesce Modes
 
-Every source specification ends with a required `ON QUIESCE <body>` immediately before `DECODE
-USING`. The quiesce *level* says which runtime work pauses for an alteration; an ingestor's quiesce
-*mode* says what its external source experiences while that ingestor is paused. There is no default.
+Every source body ends with a required `ON QUIESCE <body>`, which `DECODE USING` follows under every
+transport head. The quiesce *level* says which runtime work pauses for an alteration; an
+ingestor's quiesce *mode* says what its external source experiences while that ingestor is paused.
+There is no default.
 
 The shared mode vocabulary is:
 
@@ -148,24 +208,26 @@ The shared mode vocabulary is:
   side of the overflow policy. Every discard is counted.
 - `DROP` keeps the source connection and protocol maintenance active but discards and counts every
   payload received during the quiesce.
-- `REJECT RETRY AFTER <duration>` is available only to `ENDPOINT`. HTTP requests and new WebSocket
-  upgrades receive 503; HTTP includes `Retry-After`, rounded up to whole seconds. Established
-  WebSockets close with code 1013 (Try Again Later).
-- Endpoint buffering is `BUFFER MAX SIZE <bytes>` without `ON OVERFLOW`. Requests that fit receive
-  202 and are held. A full buffer, or a body that cannot fit, is rejected with HTTP 503 or a
-  WebSocket 1013 close; an acknowledged body is never discarded by buffer policy.
+- `REJECT RETRY AFTER <duration>` is available only to `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`.
+  HTTP requests and new WebSocket upgrades receive 503; HTTP includes `Retry-After`, rounded up to
+  whole seconds. Established WebSockets close with code 1013 (Try Again Later).
+- Endpoint buffering, for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`, is `BUFFER MAX SIZE <bytes>`
+  without `ON OVERFLOW`. Requests that fit receive 202 and are held. A full buffer, or a body that
+  cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an acknowledged body is never
+  discarded by buffer policy.
 
-Only modes that the source can honor are accepted or offered by completion:
+A source accepts only the modes it can honor, and completion of its body offers only those.
+`SET QUIESCE` parses every body and refuses one the stored source does not honor:
 
-| Source | Allowed `ON QUIESCE` bodies |
+| Entity | Allowed `ON QUIESCE` bodies |
 |---|---|
-| Kafka, Pulsar, RabbitMQ, SQS | `SUSPEND` |
-| MQTT | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT QOS 1` |
-| NATS, Redis Pub/Sub, WebSocket client | `BUFFER ... ON OVERFLOW ...`, `DROP` |
-| ZeroMQ | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
-| HTTP polling, Prometheus | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
-| Endpoint | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
-| Client | `SUSPEND` |
+| `KAFKA TOPIC`, `PULSAR TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | `SUSPEND` |
+| `MQTT TOPIC` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP`; `SUSPEND` requires `SESSION PERSISTENT QOS 1` |
+| `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
+| `ZEROMQ PULL`, `SYSLOG LISTENER` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
+| `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+| `CLIENT PRODUCER` | `SUSPEND` |
 
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
 and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the source session. Unexpected
@@ -223,7 +285,11 @@ continues to hold at the source.
 
 `DESCRIBE INGESTOR` renders `quiesce:`, `quiesce state: none|entity hold|ownership handoff|domain
 pause|memory pressure`, `status: quiesced` for every active hold, and the four quiesce counters.
-`SHOW CREATE` round-trips the full clause.
+It also renders `nervix_ingestor_transport_redeliveries_total`, the acknowledgements and rejections
+the node discarded after a RabbitMQ, SQS or MQTT source reconnected, because the broker redelivers
+what the lost connection did not acknowledge; see
+[Connector Crates And The Connector Contract](connector-contract.md). `SHOW CREATE` round-trips the
+full clause.
 
 ## When The Extension Workers Are Full
 
@@ -233,29 +299,29 @@ is full, what happens to a payload depends on whether its sender can present it 
 
 - An acknowledged delivery mode rejects the batch, and its source delivers it again on its
   `RETRY POLICY`.
-- An [HTTP endpoint](#http-endpoints) answers the body 503 without `Retry-After`, and an
-  established WebSocket closes with 1013, so the sender sends it again.
+- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
+  `Retry-After` and closes an established WebSocket with 1013, so the sender sends it again.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
 - A paced source has already moved past its poll, so the poll waits for a place. Waiting delays the
   next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
   due instant.
-- A source read in a `NO_ACK` mode cannot present a payload again either. The payload waits for a
+- A source read in `MODE NO ACK` cannot present a payload again either. The payload waits for a
   place when holding the source's loop keeps its transport connected with bounded memory. Otherwise
   it is refused: the ingestor reports the refusal as an error and counts the payload in
   `nervix_ingestor_unfolding_refused_total`.
 
-| Source | A payload the extension workers cannot take now | Why |
+| Entity | A payload the extension workers cannot take now | Why |
 | --- | --- | --- |
-| HTTP polling, Prometheus | Waits | Holding the loop only delays the next poll. |
-| NATS | Waits | The client keeps its connection and reads the subscription while the loop waits, holding up to 65,536 messages before it drops the newest as a slow consumer. |
-| ZeroMQ | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
-| Syslog | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
-| MQTT | Refused and counted | The client sends its keep-alive only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
-| Redis Pub/Sub | Refused and counted | The client reads every published message into an unbounded queue of its own, so a held loop would grow the node's memory without limit. |
-| WebSocket client | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the source reconnects. |
-| Kafka `NO_ACK PARALLEL` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
-| Pulsar `NO_ACK PARALLEL` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
+| `HTTP REQUEST`, `PROMETHEUS QUERY` | Waits | Holding the loop only delays the next poll. |
+| `NATS SUBJECT` | Waits | The client keeps its connection and reads the subscription while the loop waits, holding up to 65,536 messages before it drops the newest as a slow consumer. |
+| `ZEROMQ PULL` | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
+| `SYSLOG LISTENER` | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
+| `MQTT TOPIC` | Refused and counted | The client sends its keep-alive only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
+| `REDIS PUBSUB` | Refused and counted | The client reads every published message into an unbounded queue of its own, so a held loop would grow the node's memory without limit. |
+| `WEBSOCKETS CONNECTION` | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the source reconnects. |
+| `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
+| `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
 
 A wait never delays a stop or a new quiesce. Stopping the ingestor ends the wait and drops the
 payload with the rest of the ingestor's in-flight input. A new quiesce decides on the payload again,
@@ -297,8 +363,8 @@ Ingestors may declare an optional arrival filter and per-route construction clau
 CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
-CREATE IF NOT EXISTS INGESTOR notifications_in
-  FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+CREATE IF NOT EXISTS HTTP ENDPOINT INGESTOR notifications_in
+  FROM ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
@@ -337,8 +403,8 @@ General notes:
 - leader-side validation requires every required output and branch field to be initialized
 - public Models store structured expressions; the runtime never reparses NSPL
 - source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor
-  supports it; Kafka provides `metadata.topic`, `metadata.partition`, and `metadata.offset`, while
-  Syslog provides `metadata.peer_addr`
+  supports it; `KAFKA TOPIC` provides `metadata.topic`, `metadata.partition`, and
+  `metadata.offset`, while `SYSLOG LISTENER` provides `metadata.peer_addr`
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -376,13 +442,13 @@ Some ingestors receive additional source data alongside the decoded payload body
 
 The `name` argument can be any expression that returns `STRING`. Both functions are available in top-level `FILTER WHERE` and in per-route `SET` / `WHERE` expressions for these sources:
 
-- HTTP endpoints and HTTP client polling expose HTTP headers with UTF-8 values
-- WebSocket endpoints expose UTF-8 headers from the opening HTTP upgrade request
-- Kafka exposes Kafka record headers
-- NATS exposes message headers
-- Pulsar exposes message properties
-- RabbitMQ exposes AMQP message headers, converting typed AMQP values to strings
-- SQS exposes message attributes, converting string, number, and binary values to strings
+- `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
+- `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `KAFKA TOPIC` exposes Kafka record headers
+- `NATS SUBJECT` exposes message headers
+- `PULSAR TOPIC` exposes message properties
+- `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
+- `SQS QUEUE` exposes message attributes, converting string, number, and binary values to strings
 
 The same captured source envelope remains available while a supported ingestor constructs an
 `ON MESSAGE ERROR SEND TO` record, so its error-route `SET` may also call `read_header` and
@@ -396,8 +462,10 @@ SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
 
-MQTT, Redis Pub/Sub, Prometheus, Syslog, ZeroMQ, and WebSockets client ingestors do not support
-header reads. Leader-side validation rejects these functions for a source without header support.
+`MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `SYSLOG LISTENER`, `ZEROMQ PULL`,
+`WEBSOCKETS CONNECTION`, and `CLIENT PRODUCER` ingestors do not support header reads. Leader-side
+validation rejects these functions for a source without header support, with a message that names
+the source's phrase, such as `MQTT TOPIC ingestors do not support read_header or read_headers`.
 
 ## TLS Client Configuration
 
@@ -430,7 +498,8 @@ Transport-specific schemes and keys:
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
-HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
+`HTTP REQUEST` and `PROMETHEUS QUERY` ingestors resolve endpoint names through the node's
+configured DNS resolver.
 A client `timeout_ms` covers name resolution, connection establishment, TLS, and the response.
 The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` broker certificate
@@ -472,9 +541,10 @@ CREATE IF NOT EXISTS CLIENT http_tls
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter follows a
 complete native graph through admission, application ACK, credit, forwarding and recovery.
 
-A client ingestor admits typed batches that applications submit through a Nervix session instead of
-reading an external system. There is no `CREATE CLIENT`, codec, transport header, or `NO_ACK` mode:
-a submitted batch already carries the ingestor's input schema, and every batch is acknowledged.
+A client ingestor, declared under the `CLIENT PRODUCER` head, admits typed batches that applications
+submit through a Nervix session instead of reading an external system. There is no
+`CREATE CLIENT`, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
+already carries the ingestor's input schema, and every batch is acknowledged.
 
 ```nspl
 CREATE SCHEMA order_in (
@@ -483,8 +553,8 @@ CREATE SCHEMA order_in (
 CREATE SCHEMA region_key (region STRING);
 CREATE BRANCH by_region SCHEMA region_key TTL 5m;
 
-CREATE INGESTOR orders_in
-  FROM CLIENT SCHEMA order_in
+CREATE CLIENT PRODUCER INGESTOR orders_in
+  FROM SCHEMA order_in
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
     ON QUIESCE SUSPEND
   TIMESTAMP NOW
@@ -498,7 +568,8 @@ CREATE INGESTOR orders_in
 ```
 
 ```nspl,ignore
-FROM CLIENT SCHEMA <schema>
+CREATE [IF NOT EXISTS] CLIENT PRODUCER INGESTOR <name>
+  FROM SCHEMA <schema>
   MODE ACK SEQUENTIAL | ACK PARALLEL MAX <n>
   ACK TIMEOUT <duration>
   RETRY POLICY BACKOFF <duration> MAX <duration>
@@ -534,9 +605,9 @@ scheduled cluster node. A producer is opened on a session that any live node may
 node forwards the producer's batches to the ingestor's node; a console session, like every console
 session, is served only by the leader.
 
-`ALTER INGESTOR ... SET FROM CLIENT SCHEMA ...` replaces the complete source body, and
-`SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the whole
-`FROM CLIENT` clause.
+`ALTER CLIENT PRODUCER INGESTOR ... SET FROM SCHEMA ...` replaces the complete source body, and
+`SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the
+`CLIENT PRODUCER` head and the whole `FROM SCHEMA` body.
 
 ### Submitted Batches
 
@@ -629,29 +700,78 @@ new owner is committed.
 
 ### Observing Client Ingestors
 
-`SHOW INGESTORS` lists every ingestor of the domain with its source, its codec or schema, the node
-that executes it, and its state. A client ingestor adds whether it admits batches, its attached
-producers, the batches and bytes they have outstanding, and the batches holding a slot of its
-window:
+`SHOW INGESTORS` lists every ingestor of the domain with the connector and entity it reads, its
+codec or schema, the node that executes it, and its state. A client ingestor adds whether it admits
+batches, its attached producers, the batches and bytes they have outstanding, and the batches
+holding a slot of its window:
 
 ```text
-orders_in source=CLIENT schema=order_in owner=node-2 status=running admission=open producers=2 outstanding_batches=3 outstanding_bytes=2412 admitted_batches=2
+orders_in from=CLIENT PRODUCER schema=order_in owner=node-2 status=running admission=open producers=2 outstanding_batches=3 outstanding_bytes=2412 admitted_batches=2
 ```
 
-`DESCRIBE INGESTOR` renders `source: CLIENT`, `schema:`, `mode:`, `owner:`, `admission:`,
-`producers:`, `forwarded producers:`, `outstanding batches:`, `outstanding bytes:`, and
-`admitted batches:`. The node that executes the ingestor also exports the same counts and every
-answered batch as metrics; see
-[Metrics And Observability](metrics-and-observability.md#client-ingestors).
+`DESCRIBE INGESTOR` renders `from:` with the head's phrase and the complete body, such as
+`from: CLIENT PRODUCER SCHEMA order_in MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF
+100ms MAX 1s ON QUIESCE SUSPEND`, and `schema:`, `mode:`, `owner:`, `admission:`, `producers:`,
+`forwarded producers:`, `outstanding batches:`, `outstanding bytes:`, and `admitted batches:`. The
+node that executes the ingestor also exports the same counts and every answered batch as metrics;
+see [Metrics And Observability](metrics-and-observability.md#client-ingestors).
+
+## External Names
+
+An ingestor names the external entity it reads with a string literal: a topic, consumer group,
+subscription, queue, channel, subject, queue group, or MQTT topic filter. Nervix keeps the name
+exactly as written, letter case included, and sends it to the external system as written. Each
+entity validates its names when `CREATE` or `ALTER` applies, by the external system's own rule
+where it has one:
+
+| Entity | Name | Rule |
+| --- | --- | --- |
+| `KAFKA TOPIC` | `TOPIC` | 1 to 249 ASCII letters, digits, `.`, `_`, and `-`, and neither `.` nor `..`: the broker's own rule |
+| `KAFKA TOPIC` | `CONSUMER GROUP` | 1 to 255 bytes without control characters |
+| `PULSAR TOPIC` | `TOPIC` | A local name without `/`, which the client places in its `namespace` (`public/default` unless the client configures one), or a fully qualified `persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`. At most 1,024 bytes, without whitespace, control characters, or an empty level |
+| `PULSAR TOPIC` | `SUBSCRIPTION` | 1 to 255 bytes without control characters |
+| `RABBITMQ QUEUE` | `QUEUE` | 1 to 255 bytes: the AMQP 0-9-1 limit |
+| `SQS QUEUE` | `QUEUE` | 1 to 80 ASCII letters, digits, `-`, and `_`, and a FIFO queue's name ends in `.fifo`: SQS's own rule |
+| `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself, and pattern subscriptions are not offered |
+| `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
+| `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
+| `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty |
+
+A reference to a Nervix model, such as a client, endpoint, schema, codec, or relay, stays a bare
+identifier.
 
 ## Supported Ingestor Types
 
-### HTTP Client Polling
+Each subsection shows a head and the body that follows its `FROM`; `SET FROM` takes the same body
+under the same head. `DECODE USING <codec>`, the timestamp, the filter, the routes, and
+`ON GENERAL ERROR` follow the body as in every ingestor statement.
+
+| Head | Reads | Section |
+| --- | --- | --- |
+| `HTTP REQUEST` | Responses to the requests a `TYPE HTTP` client sends on a cadence | [`HTTP REQUEST`](#http-request) |
+| `HTTP ENDPOINT` | Requests to a `TYPE HTTP` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
+| `WEBSOCKETS ENDPOINT` | Frames on connections to a `TYPE WEBSOCKETS` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
+| `WEBSOCKETS CONNECTION` | Frames on the outbound connection of a `TYPE WEBSOCKETS` client | [`WEBSOCKETS CONNECTION`](#websockets-connection) |
+| `KAFKA TOPIC` | A topic, through a `TYPE KAFKA` client | [Kafka](#kafka) |
+| `PULSAR TOPIC` | A topic, through a `TYPE PULSAR` client | [Pulsar](#pulsar) |
+| `RABBITMQ QUEUE` | A queue, through a `TYPE RABBITMQ` client | [RabbitMQ](#rabbitmq) |
+| `REDIS PUBSUB` | A channel, through a `TYPE REDIS` client | [Redis Pub/Sub](#redis-pubsub) |
+| `MQTT TOPIC` | A topic filter, through a `TYPE MQTT` client | [MQTT](#mqtt) |
+| `NATS SUBJECT` | A subject, through a `TYPE NATS` client | [NATS](#nats) |
+| `ZEROMQ PULL` | The PULL socket of a `TYPE ZEROMQ` client | [ZeroMQ](#zeromq) |
+| `SYSLOG LISTENER` | The listener a `TYPE SYSLOG` client declares | [Syslog](#syslog) |
+| `SQS QUEUE` | A queue, through a `TYPE SQS` client | [SQS](#sqs) |
+| `PROMETHEUS QUERY` | A PromQL query, through a `TYPE PROMETHEUS` client | [Prometheus](#prometheus) |
+| `CLIENT PRODUCER` | Batches applications submit through their sessions | [Client Ingestors](#client-ingestors) |
+
+### `HTTP REQUEST`
 
 ```nspl,ignore
-FROM HTTP <client> EVERY <duration>
-ON QUIESCE SUSPEND
-  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+CREATE [IF NOT EXISTS] HTTP REQUEST INGESTOR <name>
+  FROM <client> EVERY <duration>
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 ```
 
 - polls a configured HTTP endpoint periodically
@@ -666,19 +786,23 @@ ON QUIESCE SUSPEND
 ### Kafka
 
 ```nspl,ignore
-FROM KAFKA <client>
-TOPIC <topic>
-OFFSET BY CONSUMER GROUP <group>|DOMAIN
-INSTANCES <count>
-MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL
-ON QUIESCE SUSPEND
+CREATE [IF NOT EXISTS] KAFKA TOPIC INGESTOR <name>
+  FROM <client>
+  TOPIC '<topic>'
+  OFFSET BY CONSUMER GROUP '<group>'|DOMAIN
+  [INSTANCES <count>]
+  MODE NO ACK
+    | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
+    | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration>
+        RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
 ```
 
 Kafka is the richest ingestion surface today.
 
 Offset modes:
 
-- `CONSUMER GROUP`: Kafka manages offsets
+- `CONSUMER GROUP '<group>'`: Kafka manages offsets
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
 
 Kafka client configuration is passed through to librdkafka. Nervix does not override
@@ -694,6 +818,11 @@ cannot seek back on a partition the ingestor still holds, the ingestor stops pol
 its assignment, and retries that seek. It cannot commit a later offset while the rejected
 position remains unresolved. Replays after a crash or assignment change may repeat records whose
 output was already written.
+
+Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
+commits the positions it has read on its own schedule, without waiting for downstream
+acknowledgement, so a failure can lose records whose positions were committed before their
+downstream work completed.
 
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
@@ -712,18 +841,22 @@ committed offsets. Topic time and size retention continue during the pause. For 
 offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
 uses the earliest retained record, skips to new records, or raises a general source error. Domain
 offsets clamp to the live watermark range and resume at the earliest retained record, exposing a
-gap. Other members of a user-named group may consume and commit while Nervix is absent. Existing
-`NO_ACK PARALLEL` auto-commit loss windows are unchanged.
+gap. Other members of a user-named group may consume and commit while Nervix is absent. Quiescing
+does not change the auto-commit loss windows of `MODE NO ACK`.
 
 ### Pulsar
 
 ```nspl,ignore
-FROM PULSAR <client>
-TOPIC <topic>
-SUBSCRIPTION <subscription>
-INSTANCES <count>
-MODE ACK PARALLEL MAX <n>|ACK SEQUENTIAL|NO_ACK PARALLEL
-ON QUIESCE SUSPEND
+CREATE [IF NOT EXISTS] PULSAR TOPIC INGESTOR <name>
+  FROM <client>
+  TOPIC '<topic>'
+  SUBSCRIPTION '<subscription>'
+  [INSTANCES <count>]
+  MODE NO ACK
+    | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
+    | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration>
+        RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
 ```
 
 Pulsar ingestors use Nervix-managed shared subscriptions. The subscription
@@ -746,11 +879,12 @@ subscription initial position and the suspension window is lost.
 ### RabbitMQ
 
 ```nspl,ignore
-FROM RABBITMQ <client>
-QUEUE <queue>
-INSTANCES <count>
-MODE ACK SEQUENTIAL
-ON QUIESCE SUSPEND
+CREATE [IF NOT EXISTS] RABBITMQ QUEUE INGESTOR <name>
+  FROM <client>
+  QUEUE '<queue>'
+  [INSTANCES <count>]
+  MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
 ```
 
 Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
@@ -775,11 +909,12 @@ anything.
 ### Redis Pub/Sub
 
 ```nspl,ignore
-FROM REDIS PUBSUB <client>
-CHANNEL <channel>
-MODE NO_ACK SEQUENTIAL
-ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
+CREATE [IF NOT EXISTS] REDIS PUBSUB INGESTOR <name>
+  FROM <client>
+  CHANNEL '<channel>'
+  MODE NO ACK
+  ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
 ```
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
@@ -795,26 +930,28 @@ source's existing retry cadence; Redis Pub/Sub does not replay messages missed w
 ### MQTT
 
 ```nspl,ignore
-FROM MQTT <client>
-TOPIC <topic-filter>
-[INSTANCES <count>]
-[SESSION CLEAN|PERSISTENT]
-[QOS 0|1]
-MODE NO_ACK SEQUENTIAL
-  | NO_ACK PARALLEL
-  | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-  | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-ON QUIESCE SUSPEND
-  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
+CREATE [IF NOT EXISTS] MQTT TOPIC INGESTOR <name>
+  FROM <client>
+  TOPIC '<topic-filter>'
+  [INSTANCES <count>]
+  [SESSION CLEAN|PERSISTENT]
+  [QOS 0|1]
+  MODE NO ACK
+    | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
+    | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration>
+        RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
+    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
 ```
 
-MQTT topic filters may be bare identifiers or string literals for filters containing `/`, `+`, or `#`.
+The topic filter is a string literal; see [External Names](#external-names) for the levels and
+wildcards it may hold.
 
 Delivery constraints:
 
-- `NO_ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
-- `NO_ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
+- `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
+- `NO ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
 - `ACK` modes require `SESSION PERSISTENT QOS 1`
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
@@ -831,19 +968,20 @@ resolver whenever it connects: on its first subscription and on every resume aft
 connection. It dials the answers in order within the client's five-second connect timeout, which
 also covers TLS and the MQTT handshake. For `mqtts`, TLS verifies the configured host name. A name
 that does not resolve is a connection failure, never a message rejection: the instance resumes
-again on its declared `RETRY POLICY`, or on the host's reconnect cadence in a `NO_ACK` mode. See
+again on its declared `RETRY POLICY`, or on the host's reconnect cadence in `MODE NO ACK`. See
 [DNS for MQTT](connector-contract.md#dns-for-mqtt).
 
 ### NATS
 
 ```nspl,ignore
-FROM NATS <client>
-SUBJECT <subject>
-QUEUE GROUP <queue_group>
-INSTANCES <count>
-MODE NO_ACK SEQUENTIAL
-ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
+CREATE [IF NOT EXISTS] NATS SUBJECT INGESTOR <name>
+  FROM <client>
+  SUBJECT '<subject>'
+  QUEUE GROUP '<queue_group>'
+  INSTANCES <count>
+  MODE NO ACK
+  ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
 ```
 
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
@@ -856,11 +994,12 @@ shifted to other members.
 ### ZeroMQ
 
 ```nspl,ignore
-FROM ZEROMQ <client>
-MODE NO_ACK SEQUENTIAL
-ON QUIESCE SUSPEND
-  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
+CREATE [IF NOT EXISTS] ZEROMQ PULL INGESTOR <name>
+  FROM <client>
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
 ```
 
 The source is a PULL socket. `SUSPEND` keeps it open but unread, so transport buffers fill and the
@@ -870,11 +1009,12 @@ data is read on resume. `BUFFER` and `DROP` keep reading locally.
 ### Syslog
 
 ```nspl,ignore
-FROM SYSLOG <client>
-MODE NO_ACK SEQUENTIAL
-ON QUIESCE SUSPEND
-  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
+CREATE [IF NOT EXISTS] SYSLOG LISTENER INGESTOR <name>
+  FROM <client>
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
 ```
 
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
@@ -890,11 +1030,12 @@ diagnostic. These failures do not acknowledge a message; Syslog has no applicati
 ### SQS
 
 ```nspl,ignore
-FROM SQS <client>
-QUEUE <queue>
-INSTANCES <count>
-MODE ACK SEQUENTIAL
-ON QUIESCE SUSPEND
+CREATE [IF NOT EXISTS] SQS QUEUE INGESTOR <name>
+  FROM <client>
+  QUEUE '<queue>'
+  [INSTANCES <count>]
+  MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
 ```
 
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
@@ -917,11 +1058,13 @@ queue.
 ### Prometheus
 
 ```nspl,ignore
-FROM PROMETHEUS <client>
-QUERY '<promql>'
-EVERY <duration>
-ON QUIESCE SUSPEND
-  | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+CREATE [IF NOT EXISTS] PROMETHEUS QUERY INGESTOR <name>
+  FROM <client>
+  QUERY '<promql>'
+  EVERY <duration>
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 ```
 
 Prometheus samples are flattened into JSON before codec decoding.
@@ -933,15 +1076,26 @@ and delivers retained results in order after resume. A scrape whose `ON INGESTIO
 the node's extension workers full waits for them; see
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
-### HTTP Endpoints
+### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
 ```nspl,ignore
-FROM ENDPOINT <endpoint> MODE NO_ACK SEQUENTIAL
-ON QUIESCE REJECT RETRY AFTER <duration>
-  | BUFFER MAX SIZE <bytes>
+CREATE [IF NOT EXISTS] HTTP ENDPOINT INGESTOR <name>
+  FROM <endpoint> MODE NO ACK
+  ON QUIESCE REJECT RETRY AFTER <duration>
+    | BUFFER MAX SIZE <bytes>
+
+CREATE [IF NOT EXISTS] WEBSOCKETS ENDPOINT INGESTOR <name>
+  FROM <endpoint> MODE NO ACK
+  ON QUIESCE REJECT RETRY AFTER <duration>
+    | BUFFER MAX SIZE <bytes>
 ```
 
-This is how Nervix receives inbound HTTP requests on its own server-side endpoints.
+This is how Nervix receives inbound HTTP requests and WebSocket connections on its own server-side
+endpoints. An `HTTP ENDPOINT` ingestor reads an endpoint declared `TYPE HTTP`, and a
+`WEBSOCKETS ENDPOINT` ingestor reads one declared `TYPE WEBSOCKETS`; completion after `FROM` offers
+only endpoints of that type. An endpoint of the other type is refused when the statement is
+applied, with a message such as `requires a TYPE HTTP endpoint, but endpoint 'stream' is TYPE
+WEBSOCKETS`. Both heads take the same body.
 
 Quiesce is enforced independently on every serving node. With `REJECT`, HTTP requests and new
 WebSocket upgrades receive 503, while established WebSockets close with 1013. With `BUFFER`, bodies
@@ -997,15 +1151,17 @@ The referenced resource bundle must contain:
 - `tls.key`
 - `ca.crt`
 
-### WebSocket Clients
+### `WEBSOCKETS CONNECTION`
 
 ```nspl,ignore
-FROM WEBSOCKETS <client> MODE NO_ACK SEQUENTIAL
-ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-  | DROP
+CREATE [IF NOT EXISTS] WEBSOCKETS CONNECTION INGESTOR <name>
+  FROM <client> MODE NO ACK
+  ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+    | DROP
 ```
 
-This opens an outbound WebSocket connection and decodes text or binary frames.
+This opens an outbound WebSocket connection through a `TYPE WEBSOCKETS` client and decodes text or
+binary frames.
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
 DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
@@ -1017,15 +1173,15 @@ Both quiesce modes continue polling the connection so keepalives and reconnect b
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
 
-A WebSocket-client ingestor is a single-owner ingestor. It keeps its existing primary and replica
-assignment through schedule recomputation while every assigned cluster node remains live, just
-like Kafka, MQTT, and the other client sources. Creating or changing another runtime node, a
+A `WEBSOCKETS CONNECTION` ingestor is a single-owner ingestor. It keeps its existing primary and
+replica assignment through schedule recomputation while every assigned cluster node remains live,
+just like Kafka, MQTT, and the other client sources. Creating or changing another runtime node, a
 cluster node joining or being uncordoned, and a soft placement-policy change do not move its
 outbound session. Failover, draining its owner, an explicit `RELOCATE`, or a newly effective
 `REQUIRE COLOCATION` group can move it; a real move closes the former owner's session and opens a
 new session on the new owner.
-Endpoint and Syslog ingestors are different because their listeners execute on every live cluster
-node.
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors are different because
+their listeners execute on every live cluster node.
 
 Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
 `TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause
@@ -1161,11 +1317,14 @@ decode failure to reject a frame.
 
 ## Instancing
 
-`INSTANCES <count>` is currently supported on source types that can safely scale through competing consumers or parallel pollers on one node:
+`INSTANCES <count>` is accepted by the entities that can safely scale through competing consumers
+or parallel pollers on one node:
 
-- Kafka
-- MQTT
-- RabbitMQ
-- SQS
+- `KAFKA TOPIC`
+- `PULSAR TOPIC`
+- `MQTT TOPIC`
+- `RABBITMQ QUEUE`
+- `SQS QUEUE`
+- `NATS SUBJECT`
 
-If omitted, the default is `INSTANCES 1`.
+`NATS SUBJECT` requires the clause. For the others, if omitted, the default is `INSTANCES 1`.

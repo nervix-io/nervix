@@ -55,7 +55,14 @@ class TurmoilCoverageTests(unittest.TestCase):
         self.assertIn("target/native-coverage-build-turmoil/turmoil-suite", failures)
         ordinary = job_section(workflow, "coverage")
         self.assertIn("needs: [tests, scenarios, extra-tests]", ordinary)
-        self.assertIn("-path '*/ordinary/*/lcov.info'", ordinary)
+        # The ordinary merge reads only the ordinary producers' artifacts, and leaves out each
+        # collection of another mode that the native extras artifact holds.
+        self.assertIn(
+            "just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras",
+            ordinary,
+        )
+        for artifact in ("coverage-shuttle", "coverage-loom", "coverage-turmoil"):
+            self.assertNotIn(artifact, ordinary)
 
 
 if __name__ == "__main__":
