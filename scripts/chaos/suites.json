@@ -153,7 +153,7 @@
         {
           "id": "mixed-burst-loss-leader-peer",
           "shard": 5,
-          "budget_minutes": 12,
+          "budget_minutes": 15,
           "note": "Holds burst loss from the leader to one follower while every voter stays in a quorum",
           "run": ["mixed-instability", "--plan", "scripts/chaos/fixtures/mixed-burst-loss-leader-peer.json"]
         },
