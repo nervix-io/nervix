@@ -27,3 +27,4 @@ just cluster-dashboard
 ```
 
 The local dashboard uses the `default` user with password `nervix`.
+
