@@ -220,9 +220,22 @@ impl std::fmt::Display for GuestSaveDifference {
 }
 
 #[then(expr = "backup archives {string} and {string} have identical guest saves above 32 MiB")]
-fn then_large_guest_saves_match(world: &mut ScenarioWorld, source: String, restored: String) {
-    let source_saves = archived_guest_saves(&archive_path(world, &source));
-    let restored_saves = archived_guest_saves(&archive_path(world, &restored));
+async fn then_large_guest_saves_match(world: &mut ScenarioWorld, source: String, restored: String) {
+    let source_path = archive_path(world, &source);
+    let restored_path = archive_path(world, &restored);
+    // Each archive holds two guest saves above 32 MiB, so both are read, digested and compared on
+    // a blocking task.
+    off_the_runner(move || {
+        assert_same_guest_saves(&source_path, &restored_path, &source, &restored);
+    })
+    .await;
+}
+
+/// Asserts that the archives at `source_path` and `restored_path`, which the scenario calls
+/// `source` and `restored`, hold byte-for-byte identical guest saves above 32 MiB.
+fn assert_same_guest_saves(source_path: &Path, restored_path: &Path, source: &str, restored: &str) {
+    let source_saves = archived_guest_saves(source_path);
+    let restored_saves = archived_guest_saves(restored_path);
     GuestSaveDifference::qualify(&source_saves);
     let differences = GuestSaveDifference::between(&source_saves, &restored_saves);
     let described = differences
