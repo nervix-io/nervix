@@ -395,16 +395,13 @@ fn branch_tenant(branch: Option<&Vec<nervix_backup::StateField>>) -> String {
     expr = "backup {string} holds a deduplicator keyspace and a window of tenant {string} above \
             32 MiB beside {int} small branches of each"
 )]
-fn then_large_branch_state_archive_is_complete(
+async fn then_large_branch_state_archive_is_complete(
     world: &mut ScenarioWorld,
     file: String,
     tenant: String,
     small_tenants: usize,
 ) {
-    let archive = nervix_backup::describe_archive(
-        std::fs::File::open(archive_path(world, &file)).assured("the archive opens"),
-    )
-    .assured("the archive verifies");
+    let archive = described_archive(archive_path(world, &file)).await;
     let domain = scenario_domain(world, &world.domain);
     let entry = archive
         .domains

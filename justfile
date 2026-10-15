@@ -99,6 +99,20 @@ validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 validate-workflows *workflows:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
+# Exercise exact-source CI selection and strict property gates, including validation-only reruns.
+test-ci-selection:
+    python3 -m unittest scripts.tests.test_ci_test_selection scripts.tests.test_bolero_coverage
+
+# Keep Python policy/contract coverage separate from product property campaigns.
+coverage-ci-selection:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/ci-selection
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file target/ci-selection/python.coverage --branch --source=scripts.ci_test_selection,scripts.tests.test_ci_test_selection,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_ci_test_selection scripts.tests.test_bolero_coverage
+    "${coverage[@]}" lcov --data-file target/ci-selection/python.coverage -o target/ci-selection/python.lcov
+    "${coverage[@]}" report --data-file target/ci-selection/python.coverage --include=scripts/ci_test_selection.py --fail-under=90
+
 # Qualify every way a run must fail: a property mismatch, a sanitizer finding, a case timeout, an
 # engine failure, discovery of ignored, unregistered and missing targets, a selection of nothing
 # and a corrupt replay record, with saved inputs, minimization and exact replay.
@@ -108,7 +122,7 @@ qualify-bolero: bolero-deps
 # Exercise the inventory and runner's validation and failure paths, and the runner load recorder
 # the sanitizer shards keep their measurements with.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_record_runner_load
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_ci_test_selection scripts.tests.test_record_runner_load
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
@@ -637,7 +651,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-consensus", "nervix-server", "nervix-deadlock"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -2599,9 +2613,19 @@ test-nspl-backup-completion:
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
 
-# Check the shared R2 configuration used by native CI jobs and Docker builds.
+# Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
+# job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci
+
+# Retain the kache remote contract's own measured line coverage beside the other Python tooling.
+coverage-kache-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/kache-ci"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.tests.test_kache_ci -m unittest scripts.tests.test_kache_ci
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" -o "{{ cargo_target_dir }}/kache-ci/python.lcov"
 
 # Exercise the pinned Go formatter bootstrap and its CI wiring without network access.
 test-go-ci-tool:
@@ -2750,6 +2774,21 @@ test-chaos-image-package:
 test-chaos-startup-status:
     exec bash scripts/chaos/tests/startup-status-self-test.sh
 
+# Derive the backup run's graph from the checked-in baseline fixture, as every verifier self-check does.
+test-chaos-backup-fixture:
+    exec bash scripts/chaos/tests/backup-fixture-self-test.sh
+
+# Measure the backup graph substitution and its refusals of a graph without exactly one clause.
+coverage-chaos-backup-fixture:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/backup-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fixture-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-fixture-coverage") }} scripts/chaos/tests/backup-fixture-self-test.sh
+
 # Measure successful publication and decisive native/deadline/reporting refusals.
 coverage-chaos-startup-status:
     #!/usr/bin/env bash
@@ -2793,7 +2832,7 @@ coverage-chaos-baseline image nodes="3" timeout="840" run_id="baseline-coverage"
     if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
         ulimit -n 65536
     fi
-    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-baseline-coverage") }} scripts/chaos/run-baseline.sh --scenario baseline --image {{ quote(image) }} --nodes {{ quote(nodes) }} --timeout {{ quote(timeout) }} --artifacts {{ quote(cargo_target_dir / "chaos-baseline-coverage-runs") }} --run-id {{ quote(run_id) }}
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/run-baseline.sh") }},{{ quote(invocation_directory() / "scripts/chaos/output-boundary.sh") }},{{ quote(invocation_directory() / "scripts/chaos/image-package-check.sh") }},{{ quote(invocation_directory() / "scripts/chaos/startup-status.sh") }},{{ quote(invocation_directory() / "scripts/chaos/backup-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/output-boundary-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/image-package-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/startup-status-self-test.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fixture-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-baseline-coverage") }} scripts/chaos/run-baseline.sh --scenario baseline --image {{ quote(image) }} --nodes {{ quote(nodes) }} --timeout {{ quote(timeout) }} --artifacts {{ quote(cargo_target_dir / "chaos-baseline-coverage-runs") }} --run-id {{ quote(run_id) }}
 
 # Retain shell coverage of packet sampling, evidence parsing and effect controls.
 coverage-chaos-degraded-evidence:
@@ -3260,7 +3299,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
