@@ -1,9 +1,30 @@
 #!/usr/bin/env bash
-# Sourced by run-baseline.sh after the packaged cluster and graph are ready.
+# Sourced by run-baseline.sh before graph installation: the run installs the graph that
+# backup_graph_fixture prints, and run_backup_scenario starts once the packaged cluster and that
+# graph are ready.
 
 backup_fail() {
     printf 'backup chaos failure: %s\n' "$*" >&2
     return 1
+}
+
+# The backup scenario needs source positions owned by the domain archive, so its Kafka ingestor
+# reads domain-owned offsets where the other chaos scenarios keep their consumer group. Prints the
+# backup form of the baseline graph text $1, or fails and prints nothing unless that text holds
+# exactly one consumer-group offset clause to replace.
+backup_graph_fixture() {
+    local baseline_graph="$1"
+    # The baseline fixture quotes the group, as Plexus spells every consumer-group name.
+    local consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline'"
+    local after_first_clause="${baseline_graph#*"${consumer_group_clause}"}"
+    if [[ "${after_first_clause}" == "${baseline_graph}" ]]; then
+        return 1
+    fi
+    # A second clause would leave one ingestor's offsets with its consumer group.
+    if [[ "${after_first_clause}" == *"${consumer_group_clause}"* ]]; then
+        return 1
+    fi
+    printf '%s' "${baseline_graph/"${consumer_group_clause}"/OFFSET BY DOMAIN}"
 }
 
 run_backup_scenario() {
