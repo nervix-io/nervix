@@ -229,8 +229,13 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `2`, so its
-16-CPU runner has 32 slots. Cucumber may take up all parsed scenarios without charging a slot.
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
+16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
+attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
+the unchanged 41-minute suite budget. The additional slots use the observed CPU and memory
+headroom; their complete-suite qualification retains runner load and the actual margin rather than
+assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
+without charging a slot.
 Admission grants feature capacity and a run slot in one decision, after both are available. A
 scenario holds both through the end of teardown. The active-scenario diagnostic names the feature
 limit or run slot a waiting scenario needs. No scenario runs alone or prevents unrelated scenarios
@@ -243,15 +248,22 @@ suite, and
 available run slots favor a queued limited successor over queued ordinary work. The web console
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
 the other three waiting behind its whole queue. Their chains can therefore make progress throughout
-the suite rather than after it. Cucumber retries a failed
-scenario twice; `--retry 0` turns retries off for a focused run.
+the suite rather than after it. Cucumber retries a failed scenario twice; `--retry 0` turns retries
+off for a focused run. The before hook reads the attempt kind from its active-scenario registration.
+Each feature queue keeps retries ahead of first attempts, and admission selects an eligible retry
+before any first attempt, including a limited feature's first attempt. A retry still needs its
+feature capacity and a run slot together: one waiting for a full feature group leaves free slots
+available to other work. Ordinary and WASM-reset queues retain FIFO order within an attempt kind;
+the web-console group retains its feature fairness. The finite retry count bounds this priority;
+first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
+capacities before dispatch continues.
 
 The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
+| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
@@ -452,6 +464,9 @@ The boundary between them is kept in four places.
   stopping the writer finishes its admitted command before counting completed writes: the response
   can arrive after all voters have already applied that command. The fixture still checks the
   storage-derived catch-up bound, append-stream limit and commands-memory budget.
+  Its initial burst of domain creation also uses one production client, retaining each command's
+  execution identity across a leadership change during finalization. A raw session's recoverable
+  disposition cannot end the fixture before follower catch-up starts.
   A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
   observability, web console, or interconnect. A readiness timeout may still move all listeners
   within the same startup budget. A changed interconnect address remains reserved while a peer

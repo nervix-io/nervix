@@ -6009,18 +6009,30 @@ async fn when_domains_are_created_in_a_burst(
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
     let mut retention_peak = observer.raft_log_retention();
-    let mut session = world
+    let leader_uri = world
         .cluster()
-        .open_session(&leader, &world.domain)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve burst leader '{leader}': {error}"));
+    let connect_options = client_connect_options(&leader_uri)
+        .unwrap_or_else(|error| panic!("failed to configure burst client: {error}"));
+    let client =
+        Client::connect_with_options(&leader_uri, client_domain(&world.domain), connect_options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to open burst client session: {error:#}"));
     for index in 0..count {
         nervix_primitives::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
-        session
-            .run_command(&format!("CREATE DOMAIN {name};"))
+        let outcome = client
+            .execute(format!("CREATE DOMAIN {name};"))
             .await
-            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
+            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error:#}"));
+        assert!(
+            outcome.succeeded(),
+            "creating domain '{name}' failed with {:?}: {}; diagnostics: {:?}",
+            outcome.disposition,
+            outcome.message,
+            outcome.diagnostics,
+        );
         let retention = observer.raft_log_retention();
         if retention.retained_bytes > retention_peak.retained_bytes {
             retention_peak = retention;
@@ -29106,14 +29118,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                world.active_scenario = Some(ActiveScenarioRegistration::start(
-                    &feature_name,
-                    &scenario_name,
-                    scenario_line,
-                ));
+                let registration =
+                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let attempt = registration.attempt();
+                world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, |reason| {
+                    .admit_with(limit, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
