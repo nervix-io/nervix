@@ -46,6 +46,13 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
+path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
+validation and title checks remain enabled. This exclusion records a source decision rather than
+scenario execution, and cancellation of a required run never supplies successful evidence. Explicit
+mode labels retain their own selections. [Documentation-only Selection](./property-testing-and-fuzzing.md#documentation-only-selection)
+owns the allowed paths, immutable event snapshot and retained CI selection record.
+
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
 `tests/features`. Its lifecycle owners live in `tests/common`.
 
