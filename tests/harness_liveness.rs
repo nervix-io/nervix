@@ -4,18 +4,22 @@
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, node-stop, phase-deadline,
 //!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver, materialized-state diagnostic, gRPC-receiver, runner-lag and runner-offload
-//!   regressions with Rust's test runner, and the stand-in nodes and clients those regressions talk
-//!   to.
+//!   HTTP-receiver, materialized-state diagnostic, generator cadence, gRPC-receiver, runner-lag
+//!   and runner-offload regressions with Rust's test runner, and the stand-in nodes and clients
+//!   those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   gRPC-receiver, runner-lag, runner-offload and materialized-state diagnostic harness modules,
-//!   the product's shutdown coordinator a stopping node is read through, and the client wire
-//!   session protocol the stand-in nodes answer status requests with.
+//!   generator cadence, gRPC-receiver, runner-lag, runner-offload and materialized-state diagnostic
+//!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
+//!   client wire session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
 mod cluster_teardown;
+#[path = "common/generator_cadence.rs"]
+mod generator_cadence;
+#[path = "common/generator_cadence_tests.rs"]
+mod generator_cadence_tests;
 #[path = "common/grpc_receiver.rs"]
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
