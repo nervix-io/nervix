@@ -25,7 +25,7 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, Expression,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, SinkBody,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
     SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
     SourceReference, SourceReferenceKind,
 };
@@ -49,6 +49,7 @@ impl SourceEntity for HttpRequestSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Http),
+        position_class: PositionClass::None,
     };
 }
 
@@ -111,6 +112,7 @@ impl SourceEntity for HttpEndpointSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Endpoint(EndpointType::Http),
+        position_class: PositionClass::None,
     };
 }
 
