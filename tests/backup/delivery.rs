@@ -223,11 +223,31 @@ fn when_kept_archive_is_moved(world: &mut ScenarioWorld, file: String) {
             summary and cuts and no new capture"
 )]
 async fn then_archive_is_the_recovered_backup(world: &mut ScenarioWorld, file: String) {
+    /// The kept archive, verified and described, with its length and digest.
+    struct KeptArchive {
+        description: nervix_backup::ArchiveDescription,
+        length: u64,
+        digest: String,
+    }
+
     let reference = world.placeholders["backup_reference"].clone();
     let archive = archive_path(world, &file);
-    let bytes = std::fs::read(&archive).assured("the scenario delivered the kept archive");
-    let description = nervix_backup::describe_archive(bytes.as_slice())
-        .assured("the kept archive verifies completely");
+    // The kept archive is read, digested and verified on a blocking task.
+    let KeptArchive {
+        description,
+        length,
+        digest,
+    } = off_the_runner(move || {
+        let bytes = std::fs::read(&archive).assured("the scenario delivered the kept archive");
+        let description = nervix_backup::describe_archive(bytes.as_slice())
+            .assured("the kept archive verifies completely");
+        KeptArchive {
+            description,
+            length: bytes.len().arch_into(),
+            digest: blake3::hash(&bytes).to_hex().to_string(),
+        }
+    })
+    .await;
     // The CLI's backup to another destination: recovery binds what a backup captures, not where
     // its archive goes.
     let recovery = nervix_models::Backup {
@@ -256,11 +276,10 @@ async fn then_archive_is_the_recovered_backup(world: &mut ScenarioWorld, file: S
     let summary = recovered
         .backup
         .assured("the recorded outcome keeps the summary of its archive");
-    let length: u64 = bytes.len().arch_into();
     assert_eq!(summary.total_bytes.get(), length);
     assert_eq!(
         summary.digest.to_string(),
-        blake3::hash(&bytes).to_hex().as_str(),
+        digest,
         "the kept archive is the one the backup assembled"
     );
     assert_eq!(summary.domains.len(), description.domains.len());

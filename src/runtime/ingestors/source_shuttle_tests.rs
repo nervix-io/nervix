@@ -1,8 +1,11 @@
 //! Source host loop engagement checks under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** Controlled source dispatch and quiesce interleavings for the host loops.
-//! - **Depends on.** The production source loops, source contract, quiesce control and Shuttle.
+//! - **Owns.** Controlled source dispatch and quiesce interleavings for the host loops, and the
+//!   interleavings of a lost broker connection with the broker loop's acknowledgements and
+//!   rejections.
+//! - **Depends on.** The production source loops, source contract, quiesce control, the
+//!   connection-bound doubles of the reconnect tests and Shuttle.
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
 
 #![cfg_attr(
@@ -17,7 +20,10 @@ use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // changes in the same scheduling step as the dispatch it counts.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
-use super::*;
+use super::{
+    reconnect_tests::{RedeliveringBroker, RedeliveringSource, RedeliveryHost, sequential_policy},
+    *,
+};
 
 const JOIN: &str = "the host loop runs until the check sends shutdown";
 
@@ -256,6 +262,9 @@ impl SourceHostServices for ChannelHost {
     fn handle_ack_failure(&self, reason: String) {
         panic!("unacknowledged channel source reported an ACK failure: {reason}");
     }
+    fn record_transport_redeliveries(&self, positions: usize) {
+        panic!("a channel source without positions discarded {positions} after a reconnect");
+    }
 }
 
 #[async_trait]
@@ -373,8 +382,11 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
             SourceFamily::Broker => nervix_primitives::task::spawn(run_source_instance_with_retry(
                 source,
                 SourceHost::new(host),
-                SourceAckPolicy::None,
-                SOURCE_RECONNECT_POLICY,
+                BrokerSourcePolicy {
+                    acknowledgement: SourceAckPolicy::None,
+                    retry: SOURCE_RECONNECT_POLICY,
+                    position_class: PositionClass::None,
+                },
                 shutdown_rx,
             )),
             SourceFamily::Paced => nervix_primitives::task::spawn(run_paced_source(
@@ -473,4 +485,59 @@ fn shuttle_paced_source_observes_engagement_during_dispatch() {
 #[test]
 fn shuttle_request_source_observes_engagement_during_dispatch() {
     explore_family(SourceFamily::Request);
+}
+
+/// A broker connection lost at any point of the loop, possibly twice, while the host acknowledges
+/// two messages one at a time.
+fn lost_connection_during_settlement(losses: usize) {
+    shuttle::future::block_on(async move {
+        let broker = RedeliveringBroker::shared([1, 2]);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
+            RedeliveringSource::new(broker.clone()),
+            SourceHost::new(RedeliveryHost::new(broker.clone(), false)),
+            sequential_policy(PositionClass::BrokerRedelivered),
+            shutdown_rx,
+        ));
+        let loser = nervix_primitives::task::spawn({
+            let broker = broker.clone();
+            async move {
+                for _ in 0..losses {
+                    nervix_primitives::task::yield_now().await;
+                    broker.lock().lose_connection();
+                }
+            }
+        });
+
+        // The source closes once both messages are acknowledged and nothing is left to redeliver,
+        // which ends the loop without a shutdown.
+        loop_task
+            .await
+            .assured("the host loop ends when its source closes");
+        loser
+            .await
+            .assured("the loss task ends after its last loss");
+        drop(shutdown);
+
+        let broker = broker.lock();
+        let mut acknowledged = broker.acknowledged.clone();
+        acknowledged.sort_unstable();
+        assert_eq!(
+            acknowledged,
+            vec![1, 2],
+            "every message is acknowledged exactly once, on the connection that delivered it"
+        );
+        assert_eq!(
+            broker.counted_redeliveries, broker.failed_rejections,
+            "each rejection a lost connection failed is discarded and counted exactly once"
+        );
+    });
+}
+
+#[test]
+fn shuttle_a_reconnect_discards_rejections_the_broker_redelivers() {
+    for losses in [1, 2] {
+        check_random(move || lost_connection_during_settlement(losses), 500);
+        check_pct(move || lost_connection_during_settlement(losses), 500, 3);
+    }
 }

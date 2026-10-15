@@ -28,8 +28,8 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Mqtt: unpooled CreateClientMqtt => MqttConfigEntry);
@@ -82,6 +82,7 @@ impl SourceEntity for MqttTopicSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
+        position_class: PositionClass::BrokerRedelivered,
     };
 }
 

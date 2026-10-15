@@ -100,6 +100,63 @@ struct NativeMetadata {
 }
 
 impl NativeMetadata {
+    /// Asserts that this archive holds every lifecycle and offset value `expected` holds, in order.
+    fn assert_holds_every_value_of(&self, expected: &Self) {
+        let branches: usize = expected
+            .lifecycles
+            .values()
+            .map(|lifecycle| lifecycle.branches.len())
+            .sum();
+        let partitions: usize = expected
+            .offsets
+            .values()
+            .map(|offsets| offsets.offsets.len())
+            .sum();
+        assert!(
+            branches > 1024 && partitions > 350_000,
+            "the expected archive holds the enlarged native metadata: {branches} branches and \
+             {partitions} partitions"
+        );
+        assert_eq!(
+            self.lifecycles.keys().collect::<Vec<_>>(),
+            expected.lifecycles.keys().collect::<Vec<_>>(),
+            "both archives hold the lifecycles of the same entities"
+        );
+        for (owner, lifecycle) in &expected.lifecycles {
+            let archived = &self.lifecycles[owner];
+            assert_eq!(archived.schema, lifecycle.schema, "{owner:?}");
+            assert_eq!(
+                archived.branches.len(),
+                lifecycle.branches.len(),
+                "{owner:?}"
+            );
+            for (index, (archived, branch)) in archived
+                .branches
+                .iter()
+                .zip(&lifecycle.branches)
+                .enumerate()
+            {
+                assert_eq!(
+                    archived, branch,
+                    "branch {index} of {owner:?}, in LRU order"
+                );
+            }
+        }
+        assert_eq!(
+            self.offsets.keys().collect::<Vec<_>>(),
+            expected.offsets.keys().collect::<Vec<_>>(),
+            "both archives hold the offsets of the same ingestors"
+        );
+        for (entity, offsets) in &expected.offsets {
+            let archived = &self.offsets[entity];
+            assert_eq!(archived.schema, offsets.schema, "{entity}");
+            assert_eq!(archived.offsets.len(), offsets.offsets.len(), "{entity}");
+            for (archived, offset) in archived.offsets.iter().zip(&offsets.offsets) {
+                assert_eq!(archived, offset, "the offsets of ingestor {entity}");
+            }
+        }
+    }
+
     fn read(path: &Path) -> Self {
         let archive = copy_of_archive(path);
         let mut metadata = Self {
@@ -147,64 +204,18 @@ impl NativeMetadata {
     expr = "backup archive {string} holds every branch lifecycle and Kafka offset of backup \
             archive {string}"
 )]
-fn then_archive_holds_the_native_metadata(
+async fn then_archive_holds_the_native_metadata(
     world: &mut ScenarioWorld,
     actual: String,
     expected: String,
 ) {
-    let actual = NativeMetadata::read(&archive_path(world, &actual));
-    let expected = NativeMetadata::read(&archive_path(world, &expected));
-    let branches: usize = expected
-        .lifecycles
-        .values()
-        .map(|lifecycle| lifecycle.branches.len())
-        .sum();
-    let partitions: usize = expected
-        .offsets
-        .values()
-        .map(|offsets| offsets.offsets.len())
-        .sum();
-    assert!(
-        branches > 1024 && partitions > 350_000,
-        "the expected archive holds the enlarged native metadata: {branches} branches and \
-         {partitions} partitions"
-    );
-    assert_eq!(
-        actual.lifecycles.keys().collect::<Vec<_>>(),
-        expected.lifecycles.keys().collect::<Vec<_>>(),
-        "both archives hold the lifecycles of the same entities"
-    );
-    for (owner, lifecycle) in &expected.lifecycles {
-        let archived = &actual.lifecycles[owner];
-        assert_eq!(archived.schema, lifecycle.schema, "{owner:?}");
-        assert_eq!(
-            archived.branches.len(),
-            lifecycle.branches.len(),
-            "{owner:?}"
-        );
-        for (index, (archived, branch)) in archived
-            .branches
-            .iter()
-            .zip(&lifecycle.branches)
-            .enumerate()
-        {
-            assert_eq!(
-                archived, branch,
-                "branch {index} of {owner:?}, in LRU order"
-            );
-        }
-    }
-    assert_eq!(
-        actual.offsets.keys().collect::<Vec<_>>(),
-        expected.offsets.keys().collect::<Vec<_>>(),
-        "both archives hold the offsets of the same ingestors"
-    );
-    for (entity, offsets) in &expected.offsets {
-        let archived = &actual.offsets[entity];
-        assert_eq!(archived.schema, offsets.schema, "{entity}");
-        assert_eq!(archived.offsets.len(), offsets.offsets.len(), "{entity}");
-        for (archived, offset) in archived.offsets.iter().zip(&offsets.offsets) {
-            assert_eq!(archived, offset, "the offsets of ingestor {entity}");
-        }
-    }
+    let actual = archive_path(world, &actual);
+    let expected = archive_path(world, &expected);
+    // Both archives hold records above 32 MiB, so they are read and compared on a blocking task.
+    off_the_runner(move || {
+        let actual = NativeMetadata::read(&actual);
+        let expected = NativeMetadata::read(&expected);
+        actual.assert_holds_every_value_of(&expected);
+    })
+    .await;
 }

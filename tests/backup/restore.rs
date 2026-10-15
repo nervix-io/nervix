@@ -262,11 +262,12 @@ fn given_restored_branch_state_checkpoint_fails(world: &mut ScenarioWorld, domai
 }
 
 #[then(expr = "client {string} observes resumed clock progress beyond backup {string}'s frontier")]
-fn then_resumed_clock_projects_downtime(world: &mut ScenarioWorld, client: String, file: String) {
-    let archive = nervix_backup::describe_archive(
-        std::fs::File::open(archive_path(world, &file)).assured("archive opens"),
-    )
-    .assured("archive verifies");
+async fn then_resumed_clock_projects_downtime(
+    world: &mut ScenarioWorld,
+    client: String,
+    file: String,
+) {
+    let archive = described_archive(archive_path(world, &file)).await;
     let domain = scenario_domain(world, &world.domain);
     let archived = archive
         .domains
@@ -360,7 +361,7 @@ async fn then_restore_eventually_completes(
     node: String,
     reference: String,
 ) {
-    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     let end = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
         let mut poll = nervix_primitives::time::interval(Duration::from_millis(100));
         loop {
@@ -383,7 +384,7 @@ async fn then_restore_eventually_completes(
     expr = "backup archives {string} and {string} have identical guest checkpoints and source \
             offsets"
 )]
-fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, after: String) {
+async fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, after: String) {
     fn checkpoints(path: &Path) -> BTreeMap<String, Vec<u8>> {
         let copy = copy_of_archive(path);
         let entries = copy
@@ -398,11 +399,34 @@ fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, af
         );
         entries
     }
-    assert_eq!(
-        checkpoints(&archive_path(world, &before)),
-        checkpoints(&archive_path(world, &after)),
-        "a stale installer did not change published state"
-    );
+    let before = archive_path(world, &before);
+    let after = archive_path(world, &after);
+    off_the_runner(move || {
+        assert_eq!(
+            checkpoints(&before),
+            checkpoints(&after),
+            "a stale installer did not change published state"
+        );
+    })
+    .await;
+}
+
+/// Asserts that archives `before` and `after` hold the same bytes in every section under one of
+/// `directories` of their domains' state, reading both on a blocking task.
+async fn assert_same_state_sections(
+    before: PathBuf,
+    after: PathBuf,
+    directories: &'static [&'static str],
+    message: &'static str,
+) {
+    off_the_runner(move || {
+        assert_eq!(
+            state_sections(&before, directories),
+            state_sections(&after, directories),
+            "{message}"
+        );
+    })
+    .await;
 }
 
 /// The bytes of every section an archive holds under one of `directories` of its domains' state.
@@ -427,39 +451,48 @@ fn state_sections(path: &Path, directories: &[&str]) -> BTreeMap<String, Vec<u8>
 }
 
 #[then(expr = "backup archives {string} and {string} have identical materialized generations")]
-fn then_restored_materialized_generations_match(
+async fn then_restored_materialized_generations_match(
     world: &mut ScenarioWorld,
     before: String,
     after: String,
 ) {
-    assert_eq!(
-        state_sections(&archive_path(world, &before), &["materialized_relay"]),
-        state_sections(&archive_path(world, &after), &["materialized_relay"]),
-        "a stale installer cannot replace the active materialized generation"
-    );
+    assert_same_state_sections(
+        archive_path(world, &before),
+        archive_path(world, &after),
+        &["materialized_relay"],
+        "a stale installer cannot replace the active materialized generation",
+    )
+    .await;
 }
 
 #[then(expr = "backup archives {string} and {string} have identical deduplicator and window state")]
-fn then_restored_branch_states_match(world: &mut ScenarioWorld, before: String, after: String) {
-    let directories = ["deduplicator", "window_processor"];
-    assert_eq!(
-        state_sections(&archive_path(world, &before), &directories),
-        state_sections(&archive_path(world, &after), &directories),
-        "a stale installer cannot replace the active deduplicator keys or windows"
-    );
-}
-
-#[then(expr = "backup archives {string} and {string} have identical deduplicator state")]
-fn then_restored_deduplicator_states_match(
+async fn then_restored_branch_states_match(
     world: &mut ScenarioWorld,
     before: String,
     after: String,
 ) {
-    assert_eq!(
-        state_sections(&archive_path(world, &before), &["deduplicator"]),
-        state_sections(&archive_path(world, &after), &["deduplicator"]),
-        "the running restore preserves each key and its original seen_at time"
-    );
+    assert_same_state_sections(
+        archive_path(world, &before),
+        archive_path(world, &after),
+        &["deduplicator", "window_processor"],
+        "a stale installer cannot replace the active deduplicator keys or windows",
+    )
+    .await;
+}
+
+#[then(expr = "backup archives {string} and {string} have identical deduplicator state")]
+async fn then_restored_deduplicator_states_match(
+    world: &mut ScenarioWorld,
+    before: String,
+    after: String,
+) {
+    assert_same_state_sections(
+        archive_path(world, &before),
+        archive_path(world, &after),
+        &["deduplicator"],
+        "the running restore preserves each key and its original seen_at time",
+    )
+    .await;
 }
 
 /// A restore step pause a scenario armed, which it releases by the node it named.
@@ -500,7 +533,8 @@ impl SectionVisitor for ArchiveCopy {
     }
 }
 
-/// Reads and verifies every section of the archive at `path`.
+/// Reads and verifies every section of the archive at `path`. A step calls it inside a job it hands
+/// off the runner task.
 pub(super) fn copy_of_archive(path: &Path) -> ArchiveCopy {
     let file = std::fs::File::open(path).expect("the archive exists");
     let mut copy = ArchiveCopy::default();
@@ -583,8 +617,8 @@ fn given_archive_path_is_saved(world: &mut ScenarioWorld, file: String, placehol
 
 /// The `SHOW CREATE` statement of every model the archive at `path` holds for `domain`, in
 /// archive order.
-fn show_create_statements(path: &Path, domain: &DomainName) -> Vec<String> {
-    let archived = archived_models(path, domain);
+async fn show_create_statements(path: PathBuf, domain: DomainName) -> Vec<String> {
+    let archived = archived_models(path, domain).await;
     let statements = parse_client_statements(&archived)
         .unwrap_or_else(|error| panic!("models.nspl parses: {error:?}\n{archived}"));
     let mut shows = Vec::with_capacity(statements.len());
@@ -616,7 +650,7 @@ async fn when_show_create_output_is_saved(
     let domain = scenario_domain(world, &domain);
     let node = expand_placeholders(world, &node);
     let mut outputs = BTreeMap::new();
-    for show in show_create_statements(&path, &domain) {
+    for show in show_create_statements(path, domain.clone()).await {
         let output = world
             .cluster()
             .run_command(&node, domain.as_str(), &show)
@@ -901,10 +935,7 @@ fn then_cli_restore_lifecycle(
 
 #[then(expr = "every node reports the resumed lifecycle archived in {string}")]
 async fn then_every_node_reports_the_archived_lifecycle(world: &mut ScenarioWorld, file: String) {
-    let description = nervix_backup::describe_archive(
-        std::fs::File::open(archive_path(world, &file)).expect("archive opens"),
-    )
-    .expect("archive describes");
+    let description = described_archive(archive_path(world, &file)).await;
     let archived = &description
         .domains
         .iter()
@@ -1103,7 +1134,7 @@ struct RestoreStreamRequest {
     archive: Vec<u8>,
 }
 
-fn restore_stream_request(
+async fn restore_stream_request(
     world: &mut ScenarioWorld,
     restore: &str,
     file: &str,
@@ -1111,7 +1142,9 @@ fn restore_stream_request(
     reference: &str,
 ) -> RestoreStreamRequest {
     let path = archive_path(world, file);
-    let archive = std::fs::read(&path).expect("the archive exists");
+    let archived = path.clone();
+    let archive =
+        off_the_runner(move || std::fs::read(archived).expect("the archive exists")).await;
     let scope = expand_placeholders(world, restore);
     let (scope, lifecycle) = scope
         .strip_suffix(" RESUME")
@@ -1160,7 +1193,7 @@ async fn when_restore_is_streamed(
     node: String,
     reference: String,
 ) {
-    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     world.last_restore_end = Some(stream_restore(&request, None, None).await);
 }
 
@@ -1175,7 +1208,7 @@ async fn when_restore_is_streamed_under_a_fresh_reference(
     node: String,
 ) {
     let reference = crate::common::raw_session::fresh_execution_reference();
-    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     world.last_restore_end = Some(stream_restore(&request, None, None).await);
 }
 
@@ -1191,7 +1224,7 @@ async fn when_restore_is_streamed_and_abandoned(
     reference: String,
     chunks: usize,
 ) {
-    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     world.last_restore_end = Some(stream_restore(&request, None, Some(chunks)).await);
 }
 
@@ -1206,15 +1239,20 @@ async fn when_restore_is_streamed_declaring_another_digest(
     node: String,
     other: String,
 ) {
-    let other = std::fs::read(archive_path(world, &other)).expect("the other archive exists");
+    let other = archive_path(world, &other);
     let reference = crate::common::raw_session::fresh_execution_reference();
-    let request = restore_stream_request(world, &restore, &file, &node, &reference);
-    assert_eq!(
-        other.len(),
-        request.archive.len(),
-        "the declared digest belongs to an archive of the same size"
-    );
-    let digest = *blake3::hash(&other).as_bytes();
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
+    let streamed_length = request.archive.len();
+    let digest = off_the_runner(move || {
+        let other = std::fs::read(other).expect("the other archive exists");
+        assert_eq!(
+            other.len(),
+            streamed_length,
+            "the declared digest belongs to an archive of the same size"
+        );
+        *blake3::hash(&other).as_bytes()
+    })
+    .await;
     world.last_restore_end = Some(stream_restore(&request, Some(digest), None).await);
 }
 
@@ -1233,7 +1271,7 @@ async fn when_restore_is_streamed_in_the_background(
         world.background_restore.is_none(),
         "a background restore stream is already running"
     );
-    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
     world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move { stream_restore(&request, None, None).await },
     )));
@@ -1466,7 +1504,8 @@ fn when_restore_conversion_is_released(world: &mut ScenarioWorld, domain: String
         .release_restore_branch_state_conversion_pause(&domain);
 }
 
-/// Writes `copy` to `target` with `sections` in place of the sections of the same path.
+/// Writes `copy` to `target` with `sections` in place of the sections of the same path. A step
+/// calls it inside a job it hands off the runner task.
 pub(super) fn write_archive(
     copy: &ArchiveCopy,
     replaced: &BTreeMap<String, Vec<u8>>,
@@ -1563,13 +1602,21 @@ fn with_declared_record_batch_body(mut stream: Vec<u8>, declared: i64) -> Vec<u8
     expr = "backup archive {string} is copied to {string} with a materialized Arrow body \
             declaring {int} bytes"
 )]
-fn given_archive_with_declared_arrow_body(
+async fn given_archive_with_declared_arrow_body(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
     declared: i64,
 ) {
-    let copy = copy_of_archive(&archive_path(world, &source));
+    let source = archive_path(world, &source);
+    let target = archive_path(world, &target);
+    off_the_runner(move || with_declared_arrow_body(&source, &target, declared)).await;
+}
+
+/// Copies the archive at `source` to `target` with its materialized Arrow section's first record
+/// batch declaring a body of `declared` bytes.
+fn with_declared_arrow_body(source: &Path, target: &Path, declared: i64) {
+    let copy = copy_of_archive(source);
     let manifest = copy
         .manifest
         .as_ref()
@@ -1587,7 +1634,7 @@ fn given_archive_with_declared_arrow_body(
     // The rewritten manifest carries the altered section's own digest, so only the Arrow scan
     // can refuse it.
     let replaced = BTreeMap::from([(entry.path.to_string(), altered)]);
-    write_archive(&copy, &replaced, &archive_path(world, &target));
+    write_archive(&copy, &replaced, target);
 }
 
 #[then("every node still answers cluster status")]
@@ -1609,12 +1656,20 @@ async fn then_every_node_answers_cluster_status(world: &mut ScenarioWorld) {
     expr = "backup archive {string} is copied to {string} with native metadata above the bulk \
             budget"
 )]
-fn given_large_native_metadata(world: &mut ScenarioWorld, source: String, target: String) {
+async fn given_large_native_metadata(world: &mut ScenarioWorld, source: String, target: String) {
+    let source = archive_path(world, &source);
+    let target = archive_path(world, &target);
+    off_the_runner(move || with_large_native_metadata(&source, &target)).await;
+}
+
+/// Copies the archive at `source` to `target` with its ingestor branch lifecycle and its Kafka
+/// offsets each enlarged above 32 MiB.
+fn with_large_native_metadata(source: &Path, target: &Path) {
     use nervix_backup::{
         BranchLifecycleEntry, KafkaOffsetsRecord, KafkaPartitionOffset, StateField, StateValue,
     };
 
-    let copy = copy_of_archive(&archive_path(world, &source));
+    let copy = copy_of_archive(source);
     let mut replaced = BTreeMap::new();
     for (path, bytes) in &copy.sections {
         if path.contains("/state/branch_lifecycle/ingestor/metric_source/") {
@@ -1666,7 +1721,7 @@ fn given_large_native_metadata(world: &mut ScenarioWorld, source: String, target
         2,
         "both native metadata records were enlarged"
     );
-    write_archive(&copy, &replaced, &archive_path(world, &target));
+    write_archive(&copy, &replaced, target);
 }
 
 #[then(
@@ -1676,25 +1731,49 @@ fn given_large_native_metadata(world: &mut ScenarioWorld, source: String, target
 async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String) {
     use nervix_backup::KafkaOffsetsRecord;
 
-    let source = copy_of_archive(&archive_path(world, &source));
-    let mut lifecycles = Vec::new();
-    let mut offsets = None;
-    for (path, bytes) in &source.sections {
-        if path.contains("/state/branch_lifecycle/") {
-            lifecycles.push(
-                BranchLifecycleRecord::decode(path, bytes).assured("source lifecycle verifies"),
-            );
-        }
-        if path.contains("/state/kafka_offset/") {
-            offsets =
-                Some(KafkaOffsetsRecord::decode(path, bytes).assured("source offsets verify"));
-        }
+    /// The native metadata records the source archive holds.
+    struct SourceMetadata {
+        lifecycles: Vec<BranchLifecycleRecord>,
+        offsets: KafkaOffsetsRecord,
     }
-    assert!(
-        !lifecycles.is_empty(),
-        "the fixture holds lifecycle records"
-    );
-    let offsets = offsets.assured("the fixture holds Kafka offsets");
+
+    /// The source lifecycles, and how many stopped nodes hold each of them and the source offsets.
+    struct NativeCopies {
+        lifecycles: Vec<BranchLifecycleRecord>,
+        lifecycle_copies: Vec<usize>,
+        offset_copies: usize,
+    }
+
+    let source = archive_path(world, &source);
+    let SourceMetadata {
+        lifecycles,
+        offsets,
+    } = off_the_runner(move || {
+        let source = copy_of_archive(&source);
+        let mut lifecycles = Vec::new();
+        let mut offsets = None;
+        for (path, bytes) in &source.sections {
+            if path.contains("/state/branch_lifecycle/") {
+                lifecycles.push(
+                    BranchLifecycleRecord::decode(path, bytes).assured("source lifecycle verifies"),
+                );
+            }
+            if path.contains("/state/kafka_offset/") {
+                offsets =
+                    Some(KafkaOffsetsRecord::decode(path, bytes).assured("source offsets verify"));
+            }
+        }
+        assert!(
+            !lifecycles.is_empty(),
+            "the fixture holds lifecycle records"
+        );
+        let offsets = offsets.assured("the fixture holds Kafka offsets");
+        SourceMetadata {
+            lifecycles,
+            offsets,
+        }
+    })
+    .await;
     let domain = scenario_domain(world, &world.domain);
     let nodes = world.cluster().node_ids();
     world
@@ -1702,29 +1781,47 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
         .shutdown()
         .await
         .assured("all test node databases close before inspection");
-    let mut lifecycle_copies = vec![0; lifecycles.len()];
-    let mut offset_copies = 0;
+    let mut databases = Vec::with_capacity(nodes.len());
     for node in &nodes {
-        nervix_primitives::task::consume_budget().await;
         let path = world
             .cluster()
             .node_base_dir(node)
             .assured("the node directory exists")
             .join("db");
-        let (found, offsets_found) = native_restore_inspection::assert_native_checkpoint_values(
-            &path,
-            &domain,
-            &lifecycles,
-            &offsets,
-        );
-        println!(
-            "Native checkpoint copies on {node}: lifecycles={found:?}, offsets={offsets_found}"
-        );
-        for (copies, found) in lifecycle_copies.iter_mut().zip(found) {
-            *copies += usize::from(found);
-        }
-        offset_copies += usize::from(offsets_found);
+        databases.push((node.clone(), path));
     }
+    // Each stopped node's database is opened and decoded on a blocking task: with records above
+    // 32 MiB, inspecting three nodes takes tens of seconds.
+    let lifecycle_count = lifecycles.len();
+    let NativeCopies {
+        lifecycles,
+        lifecycle_copies,
+        offset_copies,
+    } = off_the_runner(move || {
+        let mut lifecycle_copies = vec![0; lifecycle_count];
+        let mut offset_copies = 0;
+        for (node, path) in &databases {
+            let (found, offsets_found) = native_restore_inspection::assert_native_checkpoint_values(
+                path,
+                &domain,
+                &lifecycles,
+                &offsets,
+            );
+            println!(
+                "Native checkpoint copies on {node}: lifecycles={found:?}, offsets={offsets_found}"
+            );
+            for (copies, found) in lifecycle_copies.iter_mut().zip(found) {
+                *copies += usize::from(found);
+            }
+            offset_copies += usize::from(offsets_found);
+        }
+        NativeCopies {
+            lifecycles,
+            lifecycle_copies,
+            offset_copies,
+        }
+    })
+    .await;
     let required_copies = if nodes.len() > 1 { 2 } else { 1 };
     for (lifecycle, copies) in lifecycles.iter().zip(lifecycle_copies) {
         assert!(
@@ -1742,12 +1839,20 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
 }
 
 #[given(expr = "backup archive {string} is copied to {string} with mismatched WASM state schemas")]
-fn given_archive_with_mismatched_wasm_schemas(
+async fn given_archive_with_mismatched_wasm_schemas(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
 ) {
-    let copy = copy_of_archive(&archive_path(world, &source));
+    let source = archive_path(world, &source);
+    let target = archive_path(world, &target);
+    off_the_runner(move || with_mismatched_wasm_schemas(&source, &target)).await;
+}
+
+/// Copies the archive at `source` to `target` with every WASM state descriptor naming a schema the
+/// archive does not hold.
+fn with_mismatched_wasm_schemas(source: &Path, target: &Path) {
+    let copy = copy_of_archive(source);
     let mut replaced = BTreeMap::new();
     for (path, bytes) in &copy.sections {
         if path.contains("/state/wasm_processor/") && path.ends_with("/descriptor.rkyv") {
@@ -1764,18 +1869,26 @@ fn given_archive_with_mismatched_wasm_schemas(
         !replaced.is_empty(),
         "the archive contains WASM guest state"
     );
-    write_archive(&copy, &replaced, &archive_path(world, &target));
+    write_archive(&copy, &replaced, target);
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with an unsupported Kafka state version"
 )]
-fn given_archive_with_unsupported_kafka_state(
+async fn given_archive_with_unsupported_kafka_state(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
 ) {
-    let copy = copy_of_archive(&archive_path(world, &source));
+    let source = archive_path(world, &source);
+    let target = archive_path(world, &target);
+    off_the_runner(move || with_unsupported_kafka_state(&source, &target)).await;
+}
+
+/// Copies the archive at `source` to `target` with its Kafka domain offsets declaring a record
+/// version no reader supports.
+fn with_unsupported_kafka_state(source: &Path, target: &Path) {
+    let copy = copy_of_archive(source);
     let mut replaced = BTreeMap::new();
     for (path, bytes) in &copy.sections {
         if path.contains("/state/kafka_offset/") && path.ends_with("/offsets.rkyv") {
@@ -1788,20 +1901,28 @@ fn given_archive_with_unsupported_kafka_state(
         !replaced.is_empty(),
         "the archive contains Kafka domain offsets"
     );
-    write_archive(&copy, &replaced, &archive_path(world, &target));
+    write_archive(&copy, &replaced, target);
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with the archived branch incarnations \
             of window processor {string} advanced"
 )]
-fn given_archive_with_advanced_window_incarnations(
+async fn given_archive_with_advanced_window_incarnations(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
     processor: String,
 ) {
-    let copy = copy_of_archive(&archive_path(world, &source));
+    let source = archive_path(world, &source);
+    let target = archive_path(world, &target);
+    off_the_runner(move || with_advanced_window_incarnations(&source, &target, &processor)).await;
+}
+
+/// Copies the archive at `source` to `target` with each archived branch incarnation of window
+/// processor `processor` advanced by one.
+fn with_advanced_window_incarnations(source: &Path, target: &Path, processor: &str) {
+    let copy = copy_of_archive(source);
     let suffix = format!("/state/branch_lifecycle/window_processor/{processor}/branches.rkyv");
     let mut replaced = BTreeMap::new();
     for (path, bytes) in &copy.sections {
@@ -1825,20 +1946,25 @@ fn given_archive_with_advanced_window_incarnations(
         !replaced.is_empty(),
         "the archive holds the branch lifecycle of window processor '{processor}'"
     );
-    write_archive(&copy, &replaced, &archive_path(world, &target));
+    write_archive(&copy, &replaced, target);
 }
 
 #[then(expr = "backup archives {string} and {string} keep the WASM processor branch incarnations")]
-fn then_wasm_branch_incarnations_match(
+async fn then_wasm_branch_incarnations_match(
     world: &mut ScenarioWorld,
     source: String,
     restored: String,
 ) {
-    assert_eq!(
-        wasm_branch_incarnations(&archive_path(world, &source), 2),
-        wasm_branch_incarnations(&archive_path(world, &restored), 2),
-        "the restored WASM branches keep their incarnations"
-    );
+    let source = archive_path(world, &source);
+    let restored = archive_path(world, &restored);
+    off_the_runner(move || {
+        assert_eq!(
+            wasm_branch_incarnations(&source, 2),
+            wasm_branch_incarnations(&restored, 2),
+            "the restored WASM branches keep their incarnations"
+        );
+    })
+    .await;
 }
 
 fn wasm_branch_incarnations(path: &Path, expected: usize) -> BTreeMap<String, u64> {
@@ -1867,24 +1993,29 @@ fn wasm_branch_incarnations(path: &Path, expected: usize) -> BTreeMap<String, u6
     expr = "backup archives {string} and {string} keep all {int} WASM processor branch \
             incarnations"
 )]
-fn then_all_wasm_branch_incarnations_match(
+async fn then_all_wasm_branch_incarnations_match(
     world: &mut ScenarioWorld,
     source: String,
     restored: String,
     expected: usize,
 ) {
-    assert_eq!(
-        wasm_branch_incarnations(&archive_path(world, &source), expected),
-        wasm_branch_incarnations(&archive_path(world, &restored), expected),
-        "every restored WASM branch keeps its incarnation"
-    );
+    let source = archive_path(world, &source);
+    let restored = archive_path(world, &restored);
+    off_the_runner(move || {
+        assert_eq!(
+            wasm_branch_incarnations(&source, expected),
+            wasm_branch_incarnations(&restored, expected),
+            "every restored WASM branch keeps its incarnation"
+        );
+    })
+    .await;
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with {string} replaced by {string} in \
             the models of domain {string}"
 )]
-fn given_archive_with_models_replaced(
+async fn given_archive_with_models_replaced(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -1895,24 +2026,27 @@ fn given_archive_with_models_replaced(
     let source = archive_path(world, &source);
     let target = archive_path(world, &target);
     let domain = scenario_domain(world, &domain);
-    let copy = copy_of_archive(&source);
-    let models_path = SectionPath::domain_models(&domain).to_string();
-    let text =
-        String::from_utf8(copy.sections[&models_path].clone()).expect("models.nspl is UTF-8");
-    assert!(
-        text.contains(&needle),
-        "the models of '{domain}' hold '{needle}':\n{text}"
-    );
-    let altered = text.replace(&needle, &replacement);
-    let replaced = BTreeMap::from([(models_path, altered.into_bytes())]);
-    write_archive(&copy, &replaced, &target);
+    off_the_runner(move || {
+        let copy = copy_of_archive(&source);
+        let models_path = SectionPath::domain_models(&domain).to_string();
+        let text =
+            String::from_utf8(copy.sections[&models_path].clone()).expect("models.nspl is UTF-8");
+        assert!(
+            text.contains(&needle),
+            "the models of '{domain}' hold '{needle}':\n{text}"
+        );
+        let altered = text.replace(&needle, &replacement);
+        let replaced = BTreeMap::from([(models_path, altered.into_bytes())]);
+        write_archive(&copy, &replaced, &target);
+    })
+    .await;
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with one byte of version {int} of \
             resource {string} in domain {string} changed"
 )]
-fn given_archive_with_a_resource_byte_changed(
+async fn given_archive_with_a_resource_byte_changed(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -1923,15 +2057,19 @@ fn given_archive_with_a_resource_byte_changed(
     let source = archive_path(world, &source);
     let target = archive_path(world, &target);
     let domain = scenario_domain(world, &domain);
-    let copy = copy_of_archive(&source);
     let resource = ResourceName::parse(&resource).expect("scenario resources are valid names");
     let version = std::num::NonZeroU64::new(version).expect("versions are numbered from 1");
     let path = SectionPath::resource_archive(&domain, &resource, version).to_string();
-    let offset = usize::try_from(copy.offsets[&path]).expect("an offset fits the address space");
-    let length = copy.sections[&path].len();
-    let mut bytes = std::fs::read(&source).expect("the archive is readable");
-    bytes[offset + length / 2] ^= 0xff;
-    std::fs::write(&target, bytes).expect("the altered archive is written");
+    off_the_runner(move || {
+        let copy = copy_of_archive(&source);
+        let offset =
+            usize::try_from(copy.offsets[&path]).expect("an offset fits the address space");
+        let length = copy.sections[&path].len();
+        let mut bytes = std::fs::read(&source).expect("the archive is readable");
+        bytes[offset + length / 2] ^= 0xff;
+        std::fs::write(&target, bytes).expect("the altered archive is written");
+    })
+    .await;
 }
 
 fn streamed_restore_report(world: &ScenarioWorld) -> &nervix_models::RestoreReport {
