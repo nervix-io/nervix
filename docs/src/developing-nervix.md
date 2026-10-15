@@ -356,10 +356,10 @@ using `KACHE_KEY_SALT` and rebuild only isolated authored artifacts. `--fresh` r
 
 Cache qualification exercises fresh and Cargo-fresh analysis, an actual kache dependency hit,
 changed source/annotation/rule/dependency/configuration inputs, missing and interrupted output,
-fixture doctests twice, and cross-worktree rejection in two isolated worktrees. Kache 0.28 runs
-workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
-validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
-cross-crate metadata.
+fixture doctests twice, and cross-worktree rejection in two isolated worktrees. Kache runs
+workspace-wrapper chains other than Clippy's directly while caching ordinary dependencies; complete
+evidence is validated independently of that detail. Compiler semantic fixtures qualify resolved
+lints and cross-crate metadata.
 
 The same gate enforces source-owned architectural layers, configuration Model consumption,
 language references, awaited cluster access and declared identity/installation state. Declare

@@ -258,7 +258,7 @@ The CI jobs divide the work at the scenario boundary:
 | `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side, the two stress selections included: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
+seconds. Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
@@ -268,22 +268,78 @@ limit.
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
 `artifacts-pr` prefix, configured in the daemon's TOML file. This lets successive PR runs reuse
-their builds. Protected-branch pushes use only `artifacts`; scheduled and manually dispatched
-native jobs retain kache's read-only policy. Fork PRs still need credentials to access R2.
-Kache 0.28.1's `doctor` displays the generic read-only CI policy even when the PR prefix is
-enabled; actual uploads confirm that PR publication is active.
+their builds. Kache lets only a protected-branch push publish to `artifacts`, and no workflow runs
+on one; scheduled and manually dispatched native jobs retain kache's read-only policy. Docker image
+builds run kache inside BuildKit, which does not see the GitHub Actions environment, so their
+builder publishes to `artifacts`. Fork PRs still need credentials to access R2. Kache's `doctor`
+displays the generic read-only CI policy even when the PR prefix is enabled; the job's daemon
+reports its actual write mode, which the start step prints and publication records.
 
 CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
 name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its
 credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and
-`KACHE_BUCKET_SECRET_ACCESS_KEY`. The workflows pass these settings through kache's `KACHE_S3_*`
-environment variables and the setup action's S3 inputs. Docker image builds pass the same settings
-to their builder. The service URL is written into the daemon's TOML configuration before startup.
+`KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
+environment variables, to `python3 scripts/kache_remote.py start` right after the setup action.
+Docker image builds pass the same settings to their builder, whose build command runs
+`scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
+written into the daemon's TOML configuration before startup.
 
 For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_BUCKET_ENDPOINT` to
 `https://<account-id>.r2.cloudflarestorage.com`, without the bucket name in the URL. The bucket name
-belongs in `KACHE_BUCKET`. The configuration script rejects URLs with a bucket path; supplying the
-full bucket URL can make the remote cache appear empty.
+belongs in `KACHE_BUCKET`. `scripts/kache_remote.py` rejects URLs with a bucket path; supplying
+the full bucket URL can make the remote cache appear empty.
+
+### Cache Publication
+
+`scripts/kache_remote.py` owns the remote of every kache-backed job: the `check.yaml`, Bolero,
+`benchmark` and `build-book` jobs, and the builder stage of every Docker image build.
+
+`kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped
+runtime directory, and stops the job's daemon in its post step. It receives no S3 inputs, so its
+post step neither saves a manifest nor pushes. The `Start kache remote` step that follows it:
+
+1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the bucket, region,
+   service URL, base prefix and pull-request prefix. The credentials stay in the environment.
+2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
+   `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
+   every build variant keeps its own manifest and shards.
+3. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
+   that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
+   daemon that has not answered yet gets three polls, two seconds apart. The step prints whether
+   the daemon publishes uploads or, under kache's read-only policy, skips them.
+
+During the build the daemon publishes each entry the build stores: kache records a durable upload
+intent, uploads the entry in the background, and retries an upload that failed for a retryable
+reason every five seconds.
+
+`Publish kache cache` runs `scripts/kache_remote.py publish` whatever the job's result: just before
+the kache report where the job publishes one, and as the job's last step otherwise. For a job whose
+work succeeded, it saves the build manifest with `kache save-manifest`, then reads the daemon's
+upload counters from `kache telemetry write` every two seconds until no upload is queued or in
+flight. It waits at most 120 seconds, its kache commands included. The step's 4-minute
+`timeout-minutes` only backstops that bound. Every kache answer it reads is a versioned kache
+document, and an answer outside its schema is reported rather than read. The outcome is one of:
+
+| Outcome | When | What remains |
+| --- | --- | --- |
+| `published` | The manifest is saved and the daemon reports every upload of the job finished | Nothing |
+| `incomplete` | The budget ended with uploads queued or in flight, the manifest failed or did not finish, an upload failed for good, or the daemon stopped answering during the wait | Queued uploads go to the daemon's shutdown drain, which kache bounds at 30 seconds |
+| `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
+| `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
+| `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
+| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the phase the step reached |
+
+Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
+ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
+add a workflow warning. The record, `publication.json` and `publication.md`, lands in
+`$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
+the job summary. An image build runs `publish --job-status success` as the last command of its
+build stage, which reaches it only when every artifact has been built.
+
+No job runs `kache sync --push`. Kache's push-only sync lists every key under both prefixes before
+it decides what to push. On 2026-10-14 and 2026-10-15 that listing grew from 650,859 to 690,780
+keys, took six to eight and a half minutes in every kache-backed job, and found nothing the daemon
+had not already published.
 
 ## Product Deadlines And Harness Deadlines
 
@@ -1369,6 +1425,12 @@ A healthy suite finishes inside its budget and exits `0` or reports its failures
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
 the job's result uploads the whole `tests/logs` directory as the `scenario-logs` artifact.
 
+A suite that passes ends before its budget, so the reserve then holds the coverage export, the
+uploads and [cache publication](#cache-publication), which waits at most 120 seconds. Saving the
+manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and the daemon had
+already published every entry those jobs built. A suite that fails or runs out of its budget leaves
+publication `not-run`, so the reserve stays with the cleanup.
+
 The first split-job PR run completed its suite in 21m49s with 88.3% run-slot utilization and four
 retries. One Raft snapshot scenario failed all three attempts because its setup accepted a purge
 that preceded the backlog under test. The corrected scenario waits for a purge beyond the measured
@@ -1454,7 +1516,7 @@ verdict.
 | Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
 | Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
+| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
 
 The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
 every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
