@@ -41,6 +41,8 @@ env:
   BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
+  # Check excludes this whole call only for its verified prose-only selection without `fuzz`.
+  # Once called (or run directly), every ordinary property remains required, including on reruns.
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404

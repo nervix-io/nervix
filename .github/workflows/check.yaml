@@ -17,7 +17,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Decide from the exact tested diff before starting any ordinary producer. A validation-only
+  # rerun retains this decision; cancellation is never interpreted as completed test evidence.
+  test-selection:
+    name: test-selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tests-required: ${{ steps.selection.outputs.tests-required }}
+      bolero-required: ${{ steps.selection.outputs.bolero-required }}
+    steps:
+      - name: Checkout tested merge
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Select required suites from the tested diff
+        id: selection
+        run: python3 scripts/ci_test_selection.py --record target/ci-test-selection.json
+
+      - name: Retain the source selection
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-selection
+          path: target/ci-test-selection.json
+          if-no-files-found: error
+
   bolero:
+    needs: [test-selection]
+    if: needs.test-selection.outputs.bolero-required == 'true'
     uses: ./.github/workflows/bolero.yaml
     permissions:
       contents: read
@@ -192,6 +220,8 @@ jobs:
   # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
   diagnostic-evidence:
     name: diagnostic-evidence
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 45
     permissions:
@@ -439,6 +469,8 @@ jobs:
 
   tests:
     name: tests
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
@@ -624,6 +656,8 @@ jobs:
 
   scenarios:
     name: scenarios
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # The harness watchdog derives its budget from this limit and leaves time for logs and reports.
     timeout-minutes: 60
@@ -1063,6 +1097,8 @@ jobs:
   # coverage from that same run.
   extra-tests:
     name: extra-tests
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
     # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
     # compiler checks and modeled primitive builds.
     runs-on: blacksmith-8vcpu-ubuntu-2404
