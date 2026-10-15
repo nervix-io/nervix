@@ -51,6 +51,62 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Connector hygiene standard
+
+The following standard applies to each connector crate, its declarations, and the server paths
+that compose and report it. It also applies when another feature adds or changes one of those
+paths.
+
+- **One source for names.** The vocabulary's `ConnectorKind` display supplies connector names;
+  source and sink entity names come from their vocabulary declarations. Configuration errors,
+  transport and HTTP-client labels, metrics, logs, dataflow identifiers and `DESCRIBE` output
+  derive their names from those sources. A required namespace or prefix is derived once and
+  reused, rather than introducing another spelling or case table. Protocol field names and
+  external configuration passed through to a driver retain their external contract.
+- **Typed causes until reporting.** A connector owns semantic error enums using `thiserror` and
+  propagates context with `error-stack`. Preserve a driver's typed error beneath the connector's
+  operation context instead of replacing it with its `Display` text. A cause that Nervix can
+  classify is a typed variant, not a free-text `reason` or `Result<_, String>`. Text received as
+  part of an external protocol remains external data; it does not replace an available typed
+  cause. Render a report only at the boundary that presents it, retaining the cause for callers
+  that must decide whether to retry, reject a record or fail a start. Sensitive payloads and
+  credentials stay out of rendered diagnostics.
+- **Annotations describe the actual outcome.** A `nervix::error_boundary(outcome|library, ...)`
+  contract belongs on the exact error type or return contract it classifies, with a reason
+  describing that path. An annotation may call a result a record rejection only when the
+  implementation actually returns that record's rejection. A failed connection, refused start
+  or failed request is not made record-specific by its annotation. [Errors And
+  Diagnostics](./errors-and-diagnostics.md) owns these classifications and reporting boundaries.
+- **Unit tests exercise the owning paths.** Cover each implemented publish path, window or batch
+  algorithm, header and metadata mapping, and acknowledgement operation through its production
+  owner. Include successful delivery and the supported rejection, transient and unanswered
+  outcomes, partial confirmations, ordering and bounds where the path has those states. Exercise
+  source polling, reads and close when the connector owns them. A path the connector does not
+  implement needs no fictional test. Unit tests complement the public Cucumber scenarios and
+  concurrency checks required by the behavior; they do not replace them.
+- **Properties cover encodings and measures.** Each connector-owned encoding or encoded-size
+  measure has a bounded Bolero property over valid current values, registered in
+  `tests/bolero-targets.toml` for ordinary and fuzz execution with its source-adjacent corpus.
+  Lossless conversions compare the complete original value; size properties compare the measure
+  with the exact production encoding, including headers and framing that count toward the limit,
+  and exercise the limit boundaries. Lossy or one-way mappings assert their declared contract.
+  A crate using a shared encoding or measure exercises that shared owner rather than copying
+  its implementation. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) owns
+  registration, budgets, execution and retained failure evidence.
+
+A connector change keeps this chapter and the relevant ingestor or emitter manual current, runs
+`just validate` and the focused checks for its changed paths, and leaves the architecture ratchet
+at or below its baseline. Documentation changes also run `just book`. Execution-mode evidence
+follows the changed protocol or lifecycle, as [Data-Plane
+Concurrency](./data-plane-concurrency.md) describes; changing labels or documentation alone does
+not introduce a synchronization claim.
+
+Before closing a connector epic, review changes landed from parallel work for additional name
+sources, free-text causes, inaccurate boundary annotations, and publish, mapping, batch or
+acknowledgement paths missing their unit or property coverage. Record the review, evidence and
+any compliance tasks on the owning ClickUp epic and tasks. Implementation reports and temporary
+audit findings are not repository documentation.
+
 ### DNS for HTTP and Iceberg
 
 The node loads and validates one `nervix-dns` resolver at startup, and every integration below
