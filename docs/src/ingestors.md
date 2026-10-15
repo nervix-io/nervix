@@ -1038,18 +1038,20 @@ Suspension stops polling. Messages remain only for the queue's configured retent
 already received message remains invisible until its visibility timeout and may then be redelivered
 as a duplicate; the ingestor resumes by polling past anything the service expired.
 
-The source resolves the host of its client's `endpoint` through the node's asynchronous resolver
-each time it opens a connection, and tries the answers in order. Every request is still signed for
-the configured host, and over HTTPS the service certificate must name that host. Without
-`tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
-`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
-alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
-queue lookup the ingestor makes when it starts, a poll, or a deletion. The AWS SDK's standard retry
-mode makes up to three attempts at each such request. A failed queue lookup then fails the
-ingestor's start, with the lookup failure in its reason; a failed poll or deletion is a transient
-source failure that `DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`. A
-message is deleted only once it is acknowledged, so a lookup failure never removes one from the
-queue.
+Starting the ingestor sends no request to the service. Each source instance looks its queue up
+before its first poll and keeps the queue's URL from then on. The source resolves the host of its
+client's `endpoint` through the node's asynchronous resolver each time it opens a connection, and
+tries the answers in order. Every request is still signed for the configured host, and over HTTPS
+the service certificate must name that host. Without `tls_ca_file` the client trusts the platform's
+native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment
+variables; with it, the client trusts that CA alone and connects directly. A missing name, a silent
+name server or an unreachable answer fails the queue lookup, a poll, or a deletion. The AWS SDK's
+standard retry mode makes up to three attempts at each such request. A failed lookup, poll or
+deletion is then a transient source failure that `DESCRIBE INGESTOR` shows and the source retries
+on its `RETRY POLICY`, so an ingestor started while the service is unreachable consumes once the
+service answers. A queue that does not exist fails the lookup with its name, such as
+`SQS queue 'orders' does not exist`, and is retried the same way; Nervix never creates it. A message
+is deleted only once it is acknowledged, so a lookup failure never removes one from the queue.
 
 ### Prometheus
 

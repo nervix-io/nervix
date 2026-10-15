@@ -2,8 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The SQS client a source configuration declares, queue-URL lookup, long polling,
-//!   message attributes as ingest headers, and deleting a message once it is acknowledged.
+//! - **Owns.** The SQS client a source configuration declares, the queue-URL lookup each instance
+//!   makes when it resumes, long polling, message attributes as ingest headers, and deleting a
+//!   message once it is acknowledged.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
@@ -32,9 +33,10 @@ use aws_sdk_sqs::{
     types::{Message as SqsMessage, MessageAttributeValue},
 };
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
@@ -46,8 +48,11 @@ use crate::connection::{FailedRequest, SqsTrust};
 const SQS: &str = "sqs";
 /// How long one receive request waits for a message before the service answers empty.
 const LONG_POLL_SECONDS: i32 = 1;
+/// The JSON protocol's error type for a queue the service does not have.
+const QUEUE_DOES_NOT_EXIST: &str = "QueueDoesNotExist";
 
-/// Why an SQS source could not open its queue, receive from it, or delete a message.
+/// Why an SQS source could not build its client, look its queue up, receive from it, or delete a
+/// message.
 #[derive(Debug, Error)]
 pub enum SqsSourceError {
     #[error("invalid SQS client configuration")]
@@ -68,26 +73,27 @@ pub enum SqsSourceError {
 
 type SqsSourceResult<T> = Result<T, Report<SqsSourceError>>;
 
-/// One SQS source's client and the URL of the queue every instance polls.
+/// One SQS source's client and the queue every instance polls.
 ///
-/// The client is built and the queue resolved once; each instance polls through a clone.
+/// The client is built once, from configuration and TLS material alone, and each instance polls
+/// through a clone. Building the plan sends no request: each instance looks the queue up when it
+/// resumes.
 #[derive(Clone)]
 pub struct SqsSourcePlan {
     client: SqsClient,
-    queue_url: String,
+    queue: SqsQueueName,
 }
 
 impl SqsSourcePlan {
     /// The client `config` declares, whose every connection resolves the endpoint host through
-    /// `dns`, and the URL of `queue`, which must already exist.
-    pub async fn connect(
+    /// `dns`, polling `queue`.
+    pub async fn new(
         config: &[ClientConfigEntry],
-        queue: &SqsQueueName,
+        queue: SqsQueueName,
         dns: DnsResolver,
     ) -> SqsSourceResult<Self> {
         let client = Self::client_from_config(config, dns).await?;
-        let queue_url = SqsSource::queue_url(&client, queue.as_str()).await?;
-        Ok(Self { client, queue_url })
+        Ok(Self { client, queue })
     }
 
     async fn client_from_config(
@@ -230,10 +236,14 @@ impl SourceMessage for SqsSourceMessage {
 /// One SQS source instance polling the shared client's queue.
 pub struct SqsSource {
     client: SqsClient,
-    queue_url: String,
+    queue: SqsQueueName,
+    /// The URL every receive and deletion addresses: absent until `resume` looks the queue up, and
+    /// kept from then on, because a named queue keeps its URL.
+    queue_url: Option<String>,
 }
 
 impl SqsSource {
+    /// The URL of `queue`, which must already exist.
     async fn queue_url(client: &SqsClient, queue: &str) -> SqsSourceResult<String> {
         let response = match client.get_queue_url().queue_name(queue).send().await {
             Ok(response) => response,
@@ -249,7 +259,7 @@ impl SqsSource {
         let failure = FailedRequest::new(error);
         let missing = error
             .as_service_error()
-            .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
+            .is_some_and(Self::names_a_missing_queue);
         if missing {
             return Report::new(SqsSourceError::MissingQueue {
                 queue: queue.to_string(),
@@ -262,6 +272,16 @@ impl SqsSource {
             },
             "SQS GetQueueUrl failed",
         )
+    }
+
+    /// Whether the service answered a lookup that its queue does not exist. The SDK recognises the
+    /// query-compatible code AWS sends beside the answer; an SQS-compatible service that sends only
+    /// the JSON protocol's error type gives the same answer.
+    fn names_a_missing_queue(error: &GetQueueUrlError) -> bool {
+        if error.is_queue_does_not_exist() {
+            return true;
+        }
+        error.meta().code() == Some(QUEUE_DOES_NOT_EXIST)
     }
 
     fn require_queue_url(queue: &str, queue_url: Option<String>) -> SqsSourceResult<String> {
@@ -281,8 +301,27 @@ impl SourceConnector for SqsSource {
     async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
         Ok(Self {
             client: plan.client.clone(),
-            queue_url: plan.queue_url.clone(),
+            queue: plan.queue.clone(),
+            queue_url: None,
         })
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.queue_url.is_none()
+    }
+
+    /// Looks the queue up the first time the instance resumes. A service that cannot be reached
+    /// and a queue the service does not have both fail the resume, which the host retries on the
+    /// source's policy; neither creates the queue.
+    async fn resume(&mut self) -> SourceResult<SourceResume> {
+        if self.queue_url.is_some() {
+            return Ok(SourceResume::Ready);
+        }
+        let queue_url = Self::queue_url(&self.client, self.queue.as_str())
+            .await
+            .change_context(SourceError::Resume { connector: SQS })?;
+        self.queue_url = Some(queue_url);
+        Ok(SourceResume::Ready)
     }
 }
 
@@ -297,12 +336,15 @@ impl BrokerSourceConnector for SqsSource {
         &mut self,
         _request: SourceBatchRequest,
     ) -> SourceResult<SourceBatch<Self::Message>> {
+        let Some(queue_url) = self.queue_url.as_deref() else {
+            return Ok(SourceBatch::ResumeRequired);
+        };
         loop {
             nervix_primitives::task::consume_budget().await;
             let received = self
                 .client
                 .receive_message()
-                .queue_url(self.queue_url.clone())
+                .queue_url(queue_url)
                 .max_number_of_messages(1)
                 .message_attribute_names("All")
                 .wait_time_seconds(LONG_POLL_SECONDS)
@@ -334,10 +376,14 @@ impl BrokerSourceConnector for SqsSource {
             let Some(receipt_handle) = position.receipt_handle.as_deref() else {
                 continue;
             };
+            let queue_url = self.queue_url.as_deref().assured(
+                "a position comes from a receive, which addressed the URL `resume` looked up, and \
+                 nothing clears it",
+            );
             let deleted = self
                 .client
                 .delete_message()
-                .queue_url(self.queue_url.clone())
+                .queue_url(queue_url)
                 .receipt_handle(receipt_handle)
                 .send()
                 .await;
@@ -363,7 +409,10 @@ impl BrokerSourceConnector for SqsSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
+    use aws_sdk_sqs::{
+        error::{ConnectorError, ErrorMetadata},
+        types::error::QueueDoesNotExist,
+    };
 
     use super::*;
 
@@ -379,6 +428,30 @@ mod tests {
             SqsSourceError::MissingQueue { queue } if queue == "missing-queue"
         ));
         assert!(format!("{missing:?}").contains("service error"));
+
+        let missing_by_type = SdkError::<GetQueueUrlError, ()>::service_error(
+            GetQueueUrlError::generic(
+                ErrorMetadata::builder()
+                    .code("QueueDoesNotExist")
+                    .message("The specified queue does not exist.")
+                    .build(),
+            ),
+            (),
+        );
+        let missing_by_type = SqsSource::queue_lookup_error("missing-queue", &missing_by_type);
+        assert!(matches!(
+            missing_by_type.current_context(),
+            SqsSourceError::MissingQueue { queue } if queue == "missing-queue"
+        ));
+        let denied = SdkError::<GetQueueUrlError, ()>::service_error(
+            GetQueueUrlError::generic(ErrorMetadata::builder().code("AccessDenied").build()),
+            (),
+        );
+        let denied = SqsSource::queue_lookup_error("orders", &denied);
+        assert!(matches!(
+            denied.current_context(),
+            SqsSourceError::ResolveQueue { queue } if queue == "orders"
+        ));
 
         let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             "connection refused".into(),

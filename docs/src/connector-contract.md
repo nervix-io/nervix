@@ -220,20 +220,25 @@ use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
 cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
-lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
-error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
+lookup failure. A lookup failure reaches the connector as a cause of the driver's connection error,
+where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
 existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
-source read or acknowledgement failure. The report's message names the host and the lookup
-failure. An SQS source looks its queue up when its ingestor starts; a failure there, a lookup
-failure included, fails that start, and the runtime keeps the failure's text as the start failure's
-reason. Any other failure to reach the service, including a certificate that does not name the
-configured host, is described by every cause of the driver's connection error, which describes the
-connection and never a record; a service's own response keeps its existing description. None of
-these failures rejects a record or acknowledges input. The host retries each on its declared
-backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS source keeps the SDK's
-standard retry mode, which makes up to three attempts at a request whose connection failed, lookup
-failures included, before the source reports the failure. Pooled connections stay open when their
-host's answer changes or expires; the next connection resolves again.
+source resume, read or acknowledgement failure. The report's message names the host and the lookup
+failure. An SQS source plan builds its client from configuration and TLS material alone; each
+instance looks its queue up when it first resumes and keeps the queue's URL. A failure there, a
+lookup failure included, is a resume failure, which the host shows as the source's transient error
+and retries on the source's retry policy. A queue the service does not have is the typed
+`SqsSourceError::MissingQueue`, which names it, whether the service answers with AWS's
+query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ does, only with the
+JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
+certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and never a record; a service's own response keeps
+its existing description. None of these failures rejects a record or acknowledges input. The host
+retries each on its declared backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS
+source keeps the SDK's standard retry mode, which makes up to three attempts at a request whose
+connection failed, lookup failures included, before the source reports the failure. Pooled
+connections stay open when their host's answer changes or expires; the next connection resolves
+again.
 
 ### DNS for OTEL gRPC
 
