@@ -782,6 +782,23 @@ impl BenchmarkReport {
 }
 
 impl BenchmarkRunner {
+    /// The configuration of the producer that writes the benchmark's input records.
+    fn producer_config(bootstrap_servers: &str) -> ClientConfig {
+        let mut config = ClientConfig::new();
+        config
+            .set("bootstrap.servers", bootstrap_servers)
+            .set("acks", "all")
+            .set("enable.idempotence", "true")
+            .set("delivery.timeout.ms", "60000")
+            .set("linger.ms", "5")
+            .set("batch.size", "1048576")
+            .set("batch.num.messages", "10000")
+            .set("queue.buffering.max.messages", "1048576")
+            .set("queue.buffering.max.kbytes", "1048576")
+            .set("compression.type", "none");
+        config
+    }
+
     fn new(args: CommonArgs, shape: LoadShape) -> Result<Self> {
         ensure!(args.duration_seconds > 0, "duration must be positive");
         ensure!(args.warmup_seconds > 0, "warm-up duration must be positive");
@@ -805,17 +822,7 @@ impl BenchmarkRunner {
         );
 
         let deliveries = DeliveryContext::default();
-        let producer = ClientConfig::new()
-            .set("bootstrap.servers", &args.bootstrap_servers)
-            .set("acks", "all")
-            .set("enable.idempotence", "true")
-            .set("delivery.timeout.ms", "60000")
-            .set("linger.ms", "5")
-            .set("batch.size", "1048576")
-            .set("batch.num.messages", "10000")
-            .set("queue.buffering.max.messages", "1048576")
-            .set("queue.buffering.max.kbytes", "1048576")
-            .set("compression.type", "none")
+        let producer = Self::producer_config(&args.bootstrap_servers)
             .create_with_context(deliveries.clone())
             .context("failed to create the benchmark Kafka producer")?;
         let wait_timeout = Duration::from_secs(args.wait_timeout_seconds);
