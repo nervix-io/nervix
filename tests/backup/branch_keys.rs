@@ -75,19 +75,27 @@ impl KeyAlteration {
 /// Copies archive `source` to `target` with every branch key the sections under
 /// `domains/<domain>/state/<under>/` hold altered by `alteration`, each altered section carrying its
 /// own digest in the rewritten manifest.
-fn copy_with_altered_keys(
+async fn copy_with_altered_keys(
     world: &mut ScenarioWorld,
     source: &str,
     target: &str,
     under: &str,
-    alteration: &KeyAlteration,
+    alteration: KeyAlteration,
 ) {
-    let copy = copy_of_archive(&archive_path(world, source));
+    let source = archive_path(world, source);
+    let target = archive_path(world, target);
     let under = format!("/state/{}/", expand_placeholders(world, under));
+    off_the_runner(move || alter_keys(&source, &target, &under, &alteration)).await;
+}
+
+/// Writes the archive at `source` to `target` with every branch key the sections under `under`
+/// hold altered by `alteration`.
+fn alter_keys(source: &Path, target: &Path, under: &str, alteration: &KeyAlteration) {
+    let copy = copy_of_archive(source);
     let mut replaced = BTreeMap::new();
     let mut altered = 0_usize;
     for (path, bytes) in &copy.sections {
-        if !path.contains(&under) {
+        if !path.contains(under) {
             continue;
         }
         let encoded = if path.ends_with("/branches.rkyv") {
@@ -133,14 +141,14 @@ fn copy_with_altered_keys(
         );
     }
     assert_ne!(altered, 0, "the archive holds branch keys under '{under}'");
-    write_archive(&copy, &replaced, &archive_path(world, target));
+    write_archive(&copy, &replaced, target);
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with field {string} renamed to {string} \
             in every branch key under {string}"
 )]
-fn given_branch_key_field_renamed(
+async fn given_branch_key_field_renamed(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -153,15 +161,16 @@ fn given_branch_key_field_renamed(
         &source,
         &target,
         &under,
-        &KeyAlteration::Rename { field, name },
-    );
+        KeyAlteration::Rename { field, name },
+    )
+    .await;
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with field {string} removed from every \
             branch key under {string}"
 )]
-fn given_branch_key_field_removed(
+async fn given_branch_key_field_removed(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -173,15 +182,16 @@ fn given_branch_key_field_removed(
         &source,
         &target,
         &under,
-        &KeyAlteration::Remove { field },
-    );
+        KeyAlteration::Remove { field },
+    )
+    .await;
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with field {string} added to every \
             branch key under {string}"
 )]
-fn given_branch_key_field_added(
+async fn given_branch_key_field_added(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -193,15 +203,16 @@ fn given_branch_key_field_added(
         &source,
         &target,
         &under,
-        &KeyAlteration::Add { field },
-    );
+        KeyAlteration::Add { field },
+    )
+    .await;
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with field {string} holding a string in \
             every branch key under {string}"
 )]
-fn given_branch_key_field_retyped(
+async fn given_branch_key_field_retyped(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -213,19 +224,20 @@ fn given_branch_key_field_retyped(
         &source,
         &target,
         &under,
-        &KeyAlteration::Retype { field },
-    );
+        KeyAlteration::Retype { field },
+    )
+    .await;
 }
 
 #[given(
     expr = "backup archive {string} is copied to {string} with every branch key under {string} \
             unbranched"
 )]
-fn given_branch_keys_unbranched(
+async fn given_branch_keys_unbranched(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
     under: String,
 ) {
-    copy_with_altered_keys(world, &source, &target, &under, &KeyAlteration::Unbranch);
+    copy_with_altered_keys(world, &source, &target, &under, KeyAlteration::Unbranch).await;
 }

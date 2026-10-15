@@ -14,7 +14,8 @@ use nervix_server::runtime::native_checkpoint_inspection::{
     NativeCheckpointInspection, read_native_checkpoint_values,
 };
 
-/// The cluster must have stopped every node before opening its database. Inspection allocations
+/// The cluster must have stopped every node before opening its database, and a step runs this on a
+/// blocking task because the records it decodes can exceed 32 MiB. Inspection allocations
 /// belong to the test oracle and happen after the measured public restore interval.
 pub fn assert_native_checkpoint_values(
     path: &Path,

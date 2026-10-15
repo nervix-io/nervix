@@ -20,6 +20,8 @@ pub(crate) mod port_pool;
 pub(crate) mod producer_session;
 pub(crate) mod raw_session;
 pub(crate) mod redis_client;
+pub(crate) mod runner_lag;
+pub(crate) mod runner_offload;
 pub(crate) mod scenario_phase;
 pub(crate) mod scenario_schedule;
 pub(crate) mod server_process;
