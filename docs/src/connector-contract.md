@@ -674,6 +674,32 @@ publish failure when reopening it would discard staged work or a persistent sess
 HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
 transient failure its pending work is still waiting out.
 
+A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
+`ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
+identity, its execution time and the future through which the broker answers for it: a
+confirmation, a refusal for good with the message its message error reports, or a failure that
+leaves the record's outcome unknown. The connector maps its driver's answer to one of those three;
+the window decides nothing else about the driver. A record's deadline is `ACK TIMEOUT` after its own
+hand-over. While the window holds `MAX` records it waits for the oldest answer until the oldest's
+deadline and no longer before the sink hands over another record, so at most `MAX` records await
+answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was handed over, the
+window waits for each remaining answer, oldest first and each until its own deadline. An answer
+given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
+could not take a record for a reason that is not the record's own, the oldest answer failed or
+missed its deadline, or a deadline is past the monotonic clock's range. The window holds the
+publish's outcome, and both ways of ending a publish go through it, so before it reports a failure
+it settles every answer the broker already gave, the oldest's included: a confirmed record is
+delivered and a refused one rejected, and the host's retry never resends a record the broker
+confirmed. A record without an answer, or whose answer failed, stays unresolved and is sent again,
+which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property
+`connector-confirmation-window` holds the window to a reference model of this rule over scripted
+answers given within, at, past or never by each deadline, failed answers and driver failures, and
+the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
+hold its settlement while answers arrive concurrently with the publish. The Kafka, Pulsar, NATS
+JetStream and MQTT sinks still await their answers through windows of their own, which drop their
+in-flight records when the driver refuses to take one, so a retry can resend records their broker
+already confirmed; RabbitMQ settles its records when it loses a channel instead.
+
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
 outcome transition: success clears retry state and records in the sent metrics the rows the sink
@@ -1202,8 +1228,9 @@ drain boundary. This chapter does not redefine those output formats.
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
-   source or sink contract implementation. Add its composition mapping in the server; do not
-   teach the contract or registry about the driver.
+   source or sink contract implementation. A brokered sink that awaits its broker's answers in
+   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. Add
+   its composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
    three-node execution and failure paths. Confirm the crate boundary and run the repository's
    validation and connector tests.
