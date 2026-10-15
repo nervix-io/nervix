@@ -61,6 +61,8 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
+| Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
@@ -1385,6 +1387,26 @@ runner load, kache report, and scenario coverage. This lets a rerun publish its 
 under GitHub Actions' immutable artifact names. When the coverage job is rerun, its advisory
 reporter updates its marked PR comment for the same PR head instead of adding a comment.
 
+### Runner Stalls
+
+The watchdog is polled on the runner task, so it cannot see, let alone end, a step that blocks that
+task. The run is therefore polled beside a tick on the same task, due every 250 milliseconds. A step
+that blocks inside its poll delays the tick until it returns, so how late the tick is polled is how
+long the task was held. A stall of one second or more goes to the scenario log with every scenario
+live during it:
+
+```text
+runner task stalled for <duration>
+scenario live during runner stall: <identity> attempt=<n> phase=<phase> phase_age=<age> age=<age>
+```
+
+The log line is a diagnostic, not a failure: a stall delays every wait and bound the other scenarios
+measure, and the line says when and for how long. Backup steps hand their archive reads, rewrites,
+digests and fixture generation, and the inspection of stopped nodes' databases, to blocking tasks;
+the native metadata restore scenario, whose archive holds lifecycle and offset records above 32 MiB
+each, held the runner task for about 30 seconds while it inspected three restored nodes before they
+did.
+
 ## Diagnostic Lane
 
 `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
@@ -1732,7 +1754,9 @@ contract.
    Failures carry no credentials and no payload values.
 5. **Never block the runner task.** Every scenario and the suite watchdog share it. A synchronous
    loop needs a bound of its own, as the port draw has, and blocking work belongs on a blocking or
-   spawned task. A duration a scenario injects for a product deadline to race is timed on a task
+   spawned task: a step hands its file, encoding, digest or database work to `off_the_runner` in
+   `tests/common/runner_offload.rs` and awaits it, and the
+   [runner-lag observer](#runner-stalls) logs a step that still holds the task. A duration a scenario injects for a product deadline to race is timed on a task
    of its own, as [injected holds](#product-deadlines-and-harness-deadlines) are, because another
    scenario can still stall the runner task.
 6. **Make cancellation release it.** Whatever a scenario starts belongs to the scenario's world or
@@ -1780,11 +1804,6 @@ Its limits:
 - Provisioning a Kafka topic's partitions and waiting for a consumer group's members query the
   broker synchronously on the runner task, for up to 5 seconds per query, and every scenario of the
   run waits while one of those queries runs.
-- Backup steps read, rewrite and verify archives, and inspect the databases of stopped nodes,
-  synchronously on the runner task, and every scenario of the run waits while they do. The native
-  metadata restore scenario's archive holds lifecycle and offset records above 32 MiB each: its
-  inspection of three restored nodes has held the runner task for about 30 seconds, and its other
-  archive steps for seconds at a time.
 - Cleanup and stops give back a stopped node's consensus fault registration on the runner task, so
   when no step still holds an observer of the node's consensus state, the node's consensus database
   closes there, and every scenario of the run waits until the close has synchronized the journal and
@@ -1824,6 +1843,7 @@ clock. The `tests` job runs them beside the separate scenario job.
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
+| Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
