@@ -2107,7 +2107,7 @@ if [[ "${scenario}" == backup ]]; then
     # shellcheck source=backup-scenario.sh
     source "${script_dir}/backup-scenario.sh"
     nspl_fixture="$(backup_graph_fixture "${nspl_fixture}")" \
-        || setup_error 'the backup fixture no longer contains its expected Kafka offset clause'
+        || setup_error 'the backup fixture does not hold exactly one consumer-group Kafka offset clause to replace'
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
