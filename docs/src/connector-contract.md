@@ -380,7 +380,9 @@ the position class the source's entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
-the host never interprets one as a graph identity.
+the host never interprets one as a graph identity. Each source entity also declares its
+acknowledgement confirmation, how far its transport has confirmed positions once acknowledging them
+returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client source's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
@@ -470,8 +472,10 @@ At the start of a graceful stop, the host closes intake on the stopping node bef
 plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
 admission regardless of the ingestor's declared `ON QUIESCE` mode; already admitted payloads and
 ACK roots continue through the graph. The connector does not choose the move or finish its own
-acknowledgements early. A source started on the destination node after handoff uses that node's
-open intake.
+acknowledgements early. A batch's work stays outstanding until its source has confirmed the
+batch's positions on the transport, so both the move and the in-place drain wait for that
+confirmation; see [Confirmed acknowledgements](#confirmed-acknowledgements). A source started on
+the destination node after handoff uses that node's open intake.
 
 A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
 `MODE NO ACK`, cannot be presented again either. An acknowledged batch the extension workers refuse
@@ -501,11 +505,13 @@ stays unacknowledged until its consumer reconnects.
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
-timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
-transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. What the host does when rejection itself fails depends on the position
-class each source entity declares, which states what its positions still mean once the connection
-that delivered them is gone. The host handles each class once:
+timeout. The host takes in an acknowledged batch as one batch acknowledgement and waits for every
+accepted message's ACK outcome before acknowledging the batch's transport positions; a message a
+quiesce buffer or drop policy took over adds nothing to wait for. A failed or timed-out ACK rejects
+the positions and retries according to the source's delivery policy. What the host does when
+rejection itself fails depends on the position class each source entity declares, which states what
+its positions still mean once the connection that delivered them is gone. The host handles each
+class once:
 
 | Position class | Entities | After a failed rejection |
 | --- | --- | --- |
@@ -532,11 +538,53 @@ sequenceDiagram
     Graph-->>Host: One ACK outcome per accepted message
     alt All ACK roots succeed
         Host->>Source: Acknowledge transport positions
+        alt The transport confirms them
+            Source-->>Host: Confirmed
+            Host->>Host: Report progress, release the batch's work
+        else The confirmation fails
+            Source-->>Host: Typed acknowledgement failure
+            Host->>Host: Show the transient status
+            Host->>Source: Reject transport positions
+        end
     else Intake or an ACK root fails
         Host->>Source: Reject transport positions
         Host->>Host: Apply declared retry policy
     end
 ```
+
+### Confirmed acknowledgements
+
+`acknowledge` returns only once the source's transport has confirmed the positions, as far as the
+source's entity declares in its acknowledgement confirmation, or with a typed acknowledgement
+failure. A source whose client returns before that declares so rather than reporting a confirmation
+it did not get:
+
+| Acknowledgement confirmation | Entities | When acknowledging returns |
+| --- | --- | --- |
+| `answered` | SQS | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. |
+| `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+| `queued` | Kafka, Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Kafka consumer-group commit is never awaited, a Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+
+The host reports progress for a batch only once acknowledging it returns. Until then the
+ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
+the batch's acknowledgement roots to resolve keeps counting against its domain and ingestor until
+the source loop drops the batch acknowledgement after `acknowledge` or `reject` returns. A drain or
+an ownership handoff that waits for admitted acknowledgement roots therefore also waits for the
+source's confirmation, and a node's graceful stop completes outstanding acknowledgements before
+the source closes, within the drain timeout. A root that waits only on what a drain does not wait
+for, such as a `REQUIRED WAIT` dependency or a window that retains its row, still does not hold
+the drain, and neither do the resolved roots of the batch it belongs to, because the batch cannot
+be acknowledged until it resolves.
+
+A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
+a later acknowledgement is confirmed, and the host rejects the positions for their position class
+to handle. A stop that reaches the source loop once a batch's acknowledgement roots have resolved
+does not abandon the batch: the loop takes the resolved outcome before the stop and confirms the
+batch first. A batch whose roots had not all resolved when its source stopped is left unconfirmed;
+the source instance logs `source instance stopped before its transport confirmed positions it
+read; the transport presents them again` with the count, and its transport's own redelivery
+contract applies.
 
 ## Sink boundary
 

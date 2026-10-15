@@ -16,7 +16,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceResult};
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices, SourceResult,
+};
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
@@ -229,8 +231,8 @@ impl BrokerSourceConnector for RedeliveringSource {
 struct ConfirmedAcknowledgement;
 
 #[async_trait]
-impl SourceAcknowledgementServices for ConfirmedAcknowledgement {
-    async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
+impl SourceBatchAcknowledgementServices for ConfirmedAcknowledgement {
+    async fn wait(&mut self, _timeout: Duration) -> SourceAcknowledgementOutcome {
         SourceAcknowledgementOutcome::Ack
     }
 }
@@ -258,20 +260,22 @@ impl RedeliveryHost {
 
 #[async_trait]
 impl SourceHostServices for RedeliveryHost {
-    async fn intake(
+    async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        _messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()> {
+        panic!("a connection-bound source reads in an acknowledged mode");
+    }
+
+    async fn intake_acknowledged(
+        &mut self,
+        _messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
         if self.lose_during_first_intake {
             self.lose_during_first_intake = false;
             self.broker.lock().lose_connection();
         }
-        let acknowledgements = batch
-            .messages
-            .iter()
-            .map(|_| SourceAcknowledgement::new(ConfirmedAcknowledgement))
-            .collect();
-        Ok(SourceIntakeOutcome { acknowledgements })
+        Ok(SourceBatchAcknowledgement::new(ConfirmedAcknowledgement))
     }
 
     async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -317,6 +321,11 @@ impl SourceHostServices for RedeliveryHost {
             .counted_redeliveries
             .checked_add(positions)
             .verified("a check counts only a few redeliveries");
+    }
+    fn record_unconfirmed_stop(&self, positions: usize) {
+        panic!(
+            "every acknowledgement tree of the check resolves, but {positions} positions did not"
+        );
     }
 }
 
