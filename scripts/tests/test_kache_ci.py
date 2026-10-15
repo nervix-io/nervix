@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import tomllib
 import unittest
@@ -56,6 +57,14 @@ REMOTE_ENVIRONMENT = {
     "KACHE_S3_ACCESS_KEY": "test-access-key",
     "KACHE_S3_SECRET_KEY": "test-secret-key",
 }
+# The publication step's script. A job that failed before its checkout has no script to run.
+PUBLISH_SCRIPT = (
+    "if [[ -f scripts/kache_remote.py ]]; then\n"
+    '  python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"\n'
+    "else\n"
+    '  echo "::notice::Kache publication did not run because checkout did not provide its script"\n'
+    "fi"
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,13 @@ class Step:
     def field(self, key: str) -> str | None:
         match = re.search(rf"^        {key}: (.+)$", self.text, re.MULTILINE)
         return None if match is None else match.group(1)
+
+    def block(self, key: str) -> str | None:
+        """The step's `key: |` literal block without its indentation."""
+        match = re.search(rf"^        {key}: \|\n((?:          .*\n)+)", self.text, re.MULTILINE)
+        if match is None:
+            return None
+        return textwrap.dedent(match.group(1)).rstrip("\n")
 
 
 def workflow_jobs(workflow: str) -> dict[str, str]:
@@ -162,10 +178,7 @@ class KacheWorkflowTests(unittest.TestCase):
                     self.assertEqual(publish.field("if"), "always()")
                     self.assertEqual(publish.field("timeout-minutes"), "4")
                     self.assertEqual(publish.mapping("env"), {"JOB_STATUS": "${{ job.status }}"})
-                    self.assertEqual(
-                        publish.field("run"),
-                        'python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"',
-                    )
+                    self.assertEqual(publish.block("run"), PUBLISH_SCRIPT)
                     if "Publish kache report" in names:
                         # The report and its artifact carry the publication record.
                         self.assertEqual(names[publish_index + 1], "Publish kache report")
@@ -173,6 +186,32 @@ class KacheWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(publish_index, len(steps) - 1)
         self.assertEqual(len(manifest_keys), len(set(manifest_keys)), manifest_keys)
+
+    def test_the_publication_step_records_a_failed_job_and_tolerates_a_missing_checkout(self) -> None:
+        scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios"])
+        script = next(step for step in scenarios if step.name == "Publish kache cache").block("run")
+        self.assertEqual(script, PUBLISH_SCRIPT)
+        with tempfile.TemporaryDirectory() as directory:
+            runner_temp = Path(directory) / "runner-temp"
+            runner_temp.mkdir()
+            empty_workspace = Path(directory) / "workspace"
+            empty_workspace.mkdir()
+
+            # A job that failed before its checkout has no script, so the step only adds a notice.
+            failed = run_step(script, empty_workspace, {"JOB_STATUS": "failure", "RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(failed.returncode, 0, failed.stderr)
+            self.assertEqual(
+                failed.stdout,
+                "::notice::Kache publication did not run because checkout did not provide its script\n",
+            )
+            self.assertFalse((runner_temp / "kache-report").exists())
+
+            # A checked-out job whose work was cancelled records that publication did not run.
+            cancelled = run_step(script, Path.cwd(), {"JOB_STATUS": "cancelled", "RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            recorded = json.loads((runner_temp / "kache-report" / "publication.json").read_text())
+            self.assertEqual(recorded["outcome"], "not-run")
+            self.assertEqual(recorded["job_status"], "cancelled")
 
     def test_the_report_records_health_and_the_costliest_misses(self) -> None:
         report_script = Path("scripts/publish_kache_report.py").read_text()
@@ -232,6 +271,18 @@ def isolated(environment: dict[str, str]) -> dict[str, str]:
         if not name.startswith(("GITHUB_", "KACHE_", "RUNNER_")):
             inherited[name] = value
     return inherited | environment
+
+
+def run_step(script: str, working_directory: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run a workflow step's script as GitHub runs a `run` step without a `shell`: `bash -e`."""
+    return subprocess.run(
+        ["bash", "-e", "-c", script],
+        capture_output=True,
+        cwd=working_directory,
+        env=isolated(environment),
+        text=True,
+        check=False,
+    )
 
 
 def run_cli(arguments: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:

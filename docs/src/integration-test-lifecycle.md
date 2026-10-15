@@ -257,6 +257,14 @@ The CI jobs divide the work at the scenario boundary:
 | `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side, the two stress selections included: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
+The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
+their pinned Go formatters. This makes the installer and the later cache publication and report
+scripts available when a tool setup step fails. The installer retains every attempt in a
+`go-tool-bootstrap-<job>` artifact and retries only a checksum database transport error within its
+eight-minute budget. The publication and report steps check for their scripts before calling them,
+so a failed checkout does not add a second failure that obscures the original one. The jobs'
+existing deadlines and test budgets are unchanged.
+
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
 seconds. Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
@@ -331,7 +339,8 @@ document, and an answer outside its schema is reported rather than read. The out
 
 Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
 ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
-add a workflow warning. The record, `publication.json` and `publication.md`, lands in
+add a workflow warning. A job that failed before its checkout has no script to run, so its step
+adds only a notice. The record, `publication.json` and `publication.md`, lands in
 `$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
 the job summary. An image build runs `publish --job-status success` as the last command of its
 build stage, which reaches it only when every artifact has been built.

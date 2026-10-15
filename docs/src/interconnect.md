@@ -1611,6 +1611,14 @@ end starts its pool slot's bounded reconnect; closing the inbound end releases t
 slot so that reconnect can be accepted. Ordinary request deadlines still apply to individual
 operations during the detection window.
 
+Packet loss on a link that stays up is left to TCP. The host kernel retransmits lost packets under
+its own retransmission timeout, which grows exponentially while losses continue, and the
+interconnect does not tune it. An exchange over a lossy link therefore takes as long as its
+retransmissions, and one whose deadline passes first fails with a timeout that its owner may retry.
+Nervix sets no bound on how long such loss delays the traffic the link carries.
+[A Quorum Over A Lossy Link](./consensus-storage-and-replication.md#a-quorum-over-a-lossy-link)
+describes what it means for commits.
+
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so
 a multi-file update cannot install a mixed generation. An invalid or partially written candidate

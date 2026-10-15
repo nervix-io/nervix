@@ -49,6 +49,11 @@ jobs:
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
         with:
@@ -96,12 +101,10 @@ jobs:
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install ghokin
-        run: |
-          go install github.com/antham/ghokin/v3@v3.9.0
+        run: python3 scripts/install_go_ci_tool.py ghokin "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install apt deps and current GitHub CLI
         run: |
@@ -122,11 +125,6 @@ jobs:
         uses: Nugine/setup-flatc@v1
         with:
           version: "25.12.19"
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -159,11 +157,21 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -172,6 +180,14 @@ jobs:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
   # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
   diagnostic-evidence:
@@ -258,7 +274,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
   # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
   # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
@@ -397,7 +418,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -422,6 +448,11 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
         with:
@@ -449,7 +480,7 @@ jobs:
       - name: Setup Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
 
       - name: Install TinyGo
         run: |
@@ -464,8 +495,7 @@ jobs:
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install playwright
         run: |
@@ -482,11 +512,6 @@ jobs:
         uses: Nugine/setup-flatc@v1
         with:
           version: "25.12.19"
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -532,7 +557,7 @@ jobs:
         run: |
           if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
             kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
-            for attempt in {1..10}; do
+            for _ in {1..10}; do
               [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
               sleep 1
             done
@@ -557,11 +582,21 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -570,6 +605,14 @@ jobs:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
       - name: Upload test logs
         if: always()
@@ -592,6 +635,11 @@ jobs:
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
         with:
@@ -619,7 +667,7 @@ jobs:
       - name: Setup Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
 
       - name: Install TinyGo
         run: |
@@ -634,8 +682,7 @@ jobs:
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install playwright
         run: |
@@ -652,11 +699,6 @@ jobs:
         uses: Nugine/setup-flatc@v1
         with:
           version: "25.12.19"
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -707,7 +749,7 @@ jobs:
         run: |
           if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
             kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
-            for attempt in {1..10}; do
+            for _ in {1..10}; do
               [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
               sleep 1
             done
@@ -740,11 +782,21 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -754,6 +806,14 @@ jobs:
           overwrite: true
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
       - name: Upload scenario logs
         if: always()
@@ -968,7 +1028,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1190,7 +1255,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1324,7 +1394,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1458,7 +1533,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1590,7 +1670,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1736,7 +1821,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()

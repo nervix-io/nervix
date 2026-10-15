@@ -115,7 +115,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
   bolero-fuzz:
     name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
@@ -286,7 +291,12 @@ jobs:
         timeout-minutes: 4
         env:
           JOB_STATUS: ${{ job.status }}
-        run: python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
   bolero-fuzz-combined:
     name: bolero-fuzz-combined

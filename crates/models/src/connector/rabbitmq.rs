@@ -27,8 +27,9 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
     EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    QueueName, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    PositionClass, QueueName, RetryPolicy, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(RabbitMq: unpooled CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -63,6 +64,7 @@ impl SourceEntity for RabbitMqQueueSource {
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::RabbitMq),
+        position_class: PositionClass::BrokerRedelivered,
     };
 }
 
