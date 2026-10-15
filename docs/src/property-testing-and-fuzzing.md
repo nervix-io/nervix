@@ -399,10 +399,11 @@ manual Bolero runs execute randomized checks and record a deliberate sanitizer s
 Before starting ordinary suites, Check's `test-selection` job proves which source it selects for.
 Its checkout must be the commit the event tests: a merge whose first parent is its base and whose
 second parent is the event's exact head. The event and the tested merge need not name the same base.
-A pull request's recorded base is the merge base of its head and its base branch when the head last
-changed, while GitHub builds the tested merge on the base branch's tip. When the base branch
-advances after the head changed, a push that did not merge the newest base, or a label added later,
-therefore tests a merge whose base is newer than the one its event names.
+GitHub records a pull request's base as its base branch's tip when the pull request opens, and moves
+it forward only to the newest base commit that a later head merges, while it builds the tested merge
+on the base branch's tip whenever the head changes. A push made after the base branch advanced,
+whose head does not merge the newest base, therefore tests a merge whose base is newer than the one
+its event names, and label events that follow name the same recorded base.
 
 Selection accepts the tested base when it is the event's base, or when the event's base is one of
 its ancestors. The checkout holds only the tested merge and its parents, so to decide the second

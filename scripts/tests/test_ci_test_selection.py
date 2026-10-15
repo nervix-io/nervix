@@ -68,7 +68,7 @@ class MergeFixture:
         return self.git("rev-parse", "HEAD")
 
     def event(self, head: str, labels: tuple[str, ...] = (), action: str = "synchronize") -> dict:
-        """The event names the base recorded when the head last changed, before the base branch moved."""
+        """The event names the base GitHub recorded before the base branch moved on."""
         return {
             "action": action,
             "pull_request": {
@@ -110,7 +110,7 @@ class MergeFixture:
 
 
 class AdvancedBaseSelectionTests(unittest.TestCase):
-    """GitHub records a pull request's base when its head last changed, but merges into the current tip."""
+    """GitHub records a pull request's base when it opens, but merges each new head into the current tip."""
 
     def test_tested_merge_into_an_advanced_base_selects_from_that_base(self) -> None:
         for shallow in (False, True):

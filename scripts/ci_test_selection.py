@@ -98,9 +98,10 @@ class TestSelection:
         if len(parents) != 2 or parents[1] != head_sha:
             raise ValueError("the tested merge must merge the event's exact head into one base")
         tested_base_sha = parents[0]
-        # The event names the merge base GitHub recorded when the head last changed, but GitHub merges
-        # the head into the base branch's tip when it builds the tested merge. A base branch that
-        # advanced in between leaves a tested base that descends from the event's base.
+        # The event names the base GitHub recorded for the pull request: the base branch's tip when it
+        # opened, or the newest base commit a later head merged. GitHub builds the tested merge on the
+        # base branch's tip whenever the head changes, so a base branch that advanced in between leaves
+        # a tested base that descends from the event's base.
         if tested_base_sha != event_base_sha:
             checkout.fetch_history(tested_base_sha)
             if not checkout.is_ancestor(event_base_sha, tested_base_sha):
