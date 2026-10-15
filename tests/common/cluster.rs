@@ -1677,6 +1677,48 @@ impl Cluster {
         }
     }
 
+    /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
+    /// consumer, which never lets the broker create it.
+    pub(crate) fn kafka_topic_exists(&self, topic: &str) -> io::Result<bool> {
+        let partitions = kafka_topic_partition_count(&self.dependencies, topic)?;
+        Ok(partitions.is_some())
+    }
+
+    /// Waits until the broker lists every group of `groups`, when `listed` is true, or none of
+    /// them, when it is false.
+    pub(crate) async fn wait_for_kafka_consumer_groups_listed(
+        &self,
+        groups: &BTreeSet<String>,
+        listed: bool,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let broker_groups = kafka_listed_consumer_groups(&self.dependencies)?;
+            let present = groups
+                .intersection(&broker_groups)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let settled = if listed {
+                present == *groups
+            } else {
+                present.is_empty()
+            };
+            if settled {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let expected = if listed { "all" } else { "none" };
+                return Err(io::Error::other(format!(
+                    "expected Kafka to list {expected} of consumer groups {groups:?} within \
+                     {within:?}; it lists {present:?} of them"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn assert_kafka_consumer_group_next_offset(
         &self,
         group: &str,
@@ -5142,6 +5184,29 @@ fn kafka_consumer_group_member_count(
         .find(|info| info.name() == group)
         .ok_or_else(|| io::Error::other(format!("kafka consumer group '{group}' not found")))?;
     Ok(info.members().len())
+}
+
+/// The consumer groups the Kafka broker lists. A group with neither members nor committed offsets
+/// does not exist on the broker, so the listing leaves it out.
+fn kafka_listed_consumer_groups(
+    dependencies: &DependencyEndpoints,
+) -> io::Result<BTreeSet<String>> {
+    let mut client_config = kafka_client_config(dependencies)?;
+    let consumer: BaseConsumer = client_config
+        .set(
+            "group.id",
+            format!("nervix-cucumber-admin-{}", Uuid::now_v7().as_simple()),
+        )
+        .create()
+        .map_err(io::Error::other)?;
+    let group_list = consumer
+        .fetch_group_list(None, Duration::from_secs(10))
+        .map_err(io::Error::other)?;
+    let mut listed = BTreeSet::new();
+    for group in group_list.groups() {
+        listed.insert(group.name().to_string());
+    }
+    Ok(listed)
 }
 
 fn kafka_consumer_group_next_offset(

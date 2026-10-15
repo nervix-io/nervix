@@ -42,6 +42,7 @@ use nervix_primitives::{
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
+    error::{KafkaError, RDKafkaErrorCode},
     message::{Headers, Message as KafkaMessage},
     topic_partition_list::{Offset, TopicPartitionList},
 };
@@ -207,6 +208,10 @@ pub enum KafkaSourceError {
     InspectPartitions,
     #[error("Kafka returned no metadata for topic '{topic}'")]
     MissingMetadata { topic: String },
+    /// Nervix provisions nothing in Kafka, so a consumer reports a topic the broker does not have
+    /// rather than letting the broker create it.
+    #[error("Kafka topic '{topic}' does not exist")]
+    MissingTopic { topic: String },
     #[error("failed to build Kafka timestamp query for topic '{topic}' partition {partition}")]
     BuildTimestampQuery { topic: String, partition: i32 },
     #[error("failed to resolve Kafka offsets by timestamp for topic '{topic}'")]
@@ -223,6 +228,13 @@ pub enum KafkaSourceError {
     OffsetOverflow { topic: String, partition: i32 },
     #[error("Kafka batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
+}
+
+impl KafkaSourceError {
+    /// Whether the failure is a topic the broker does not have.
+    pub fn is_missing_topic(&self) -> bool {
+        matches!(self, Self::MissingTopic { .. })
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -362,24 +374,11 @@ impl SourceConnector for KafkaSource {
     type Plan = KafkaSourcePlan;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> SourceResult<Self> {
-        let mut config = ClientConfig::new();
-        for entry in &plan.config {
-            config.set(&entry.key, &entry.value);
-        }
         let group_id = match &plan.offset_mode {
             KafkaSourceOffsetMode::ConsumerGroup { group_id }
             | KafkaSourceOffsetMode::Domain { group_id, .. } => group_id,
         };
-        config.set("group.id", group_id);
-        config.set("enable.partition.eof", "false");
-        config.set(
-            "enable.auto.commit",
-            if plan.enable_auto_commit {
-                "true"
-            } else {
-                "false"
-            },
-        );
+        let config = consumer_config(&plan.config, group_id, plan.enable_auto_commit);
         let consumer = config
             .create()
             .map_err(|source| {
@@ -499,9 +498,7 @@ impl BrokerSourceConnector for KafkaSource {
             KafkaSourceOffsetMode::ConsumerGroup { .. } => self.consumer.recv().await,
         };
         let first = first
-            .map_err(|source| {
-                Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
-            })
+            .map_err(|source| self.receive_failure(source))
             .change_context(SourceError::Read { connector: KAFKA })?
             .detach();
         let first = KafkaSourceMessage::from_message(first)
@@ -589,6 +586,19 @@ impl BrokerSourceConnector for KafkaSource {
 }
 
 impl KafkaSource {
+    /// The failure a receive reports. A topic the broker does not have is reported by name, since
+    /// the consumer never lets the broker create it.
+    fn receive_failure(&self, source: KafkaError) -> Report<KafkaSourceError> {
+        if let KafkaError::MessageConsumption(code) = &source
+            && names_missing_topic(*code)
+        {
+            return Report::new(KafkaSourceError::MissingTopic {
+                topic: self.topic.as_str().to_string(),
+            });
+        }
+        Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
+    }
+
     async fn initialize_domain_offsets(
         &mut self,
         host: &KafkaDomainOffsetHost,
@@ -801,6 +811,36 @@ pub fn earliest_message_offsets(
     Ok(earliest)
 }
 
+/// The configuration of every Kafka consumer Nervix runs: the client's pass-through entries, then
+/// the keys Nervix decides, which override any entry of the same name. A consumer never lets the
+/// broker create a topic it names, because Nervix provisions nothing in an external system.
+fn consumer_config(
+    entries: &[ClientConfigEntry],
+    group_id: &str,
+    enable_auto_commit: bool,
+) -> ClientConfig {
+    let mut config = ClientConfig::new();
+    for entry in entries {
+        config.set(&entry.key, &entry.value);
+    }
+    let auto_commit = if enable_auto_commit { "true" } else { "false" };
+    config.set("group.id", group_id);
+    config.set("enable.partition.eof", "false");
+    config.set("enable.auto.commit", auto_commit);
+    config.set("allow.auto.create.topics", "false");
+    config
+}
+
+/// Whether a broker or driver error code says the topic does not exist. librdkafka reports a
+/// subscribed topic the broker lacks as the broker's own code, and a topic its metadata cache lacks
+/// as the local one.
+fn names_missing_topic(code: RDKafkaErrorCode) -> bool {
+    matches!(
+        code,
+        RDKafkaErrorCode::UnknownTopicOrPartition | RDKafkaErrorCode::UnknownTopic
+    )
+}
+
 fn topic_partitions(
     consumer: &StreamConsumer,
     topic: &str,
@@ -818,6 +858,13 @@ fn topic_partitions(
             topic: topic.to_string(),
         }));
     };
+    if let Some(error) = topic_metadata.error()
+        && names_missing_topic(error.into())
+    {
+        return Err(Report::new(KafkaSourceError::MissingTopic {
+            topic: topic.to_string(),
+        }));
+    }
     Ok(topic_metadata
         .partitions()
         .iter()
@@ -1023,13 +1070,7 @@ impl TopicPartitionInspector {
         config: &[ClientConfigEntry],
         group_id: String,
     ) -> Result<Self, Report<KafkaSourceError>> {
-        let mut client_config = ClientConfig::new();
-        for entry in config {
-            client_config.set(&entry.key, &entry.value);
-        }
-        client_config.set("group.id", group_id);
-        client_config.set("enable.partition.eof", "false");
-        client_config.set("enable.auto.commit", "false");
+        let client_config = consumer_config(config, &group_id, false);
         let consumer = client_config.create().map_err(|source| {
             Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
         })?;
@@ -1066,6 +1107,50 @@ mod tests {
             .add_partition_offset("events", 0, Offset::Offset(offset))
             .assured("the test uses a nonnegative literal Kafka offset");
         assignment
+    }
+
+    #[test]
+    fn a_consumer_never_lets_the_broker_create_a_topic_whatever_the_client_sets() {
+        let entries = [
+            ClientConfigEntry {
+                key: "bootstrap.servers".to_string(),
+                value: "127.0.0.1:9092".to_string(),
+            },
+            ClientConfigEntry {
+                key: "allow.auto.create.topics".to_string(),
+                value: "true".to_string(),
+            },
+            ClientConfigEntry {
+                key: "group.id".to_string(),
+                value: "operator".to_string(),
+            },
+        ];
+
+        let config = consumer_config(&entries, "nervix_domain_orders_events", true);
+
+        assert_eq!(config.get("allow.auto.create.topics"), Some("false"));
+        assert_eq!(config.get("group.id"), Some("nervix_domain_orders_events"));
+        assert_eq!(config.get("enable.auto.commit"), Some("true"));
+        assert_eq!(config.get("enable.partition.eof"), Some("false"));
+        assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+        let manual = consumer_config(&entries, "nervix_domain_orders_events", false);
+        assert_eq!(manual.get("enable.auto.commit"), Some("false"));
+    }
+
+    #[test]
+    fn only_an_unknown_topic_names_a_missing_topic() {
+        assert!(names_missing_topic(
+            RDKafkaErrorCode::UnknownTopicOrPartition
+        ));
+        assert!(names_missing_topic(RDKafkaErrorCode::UnknownTopic));
+        for code in [
+            RDKafkaErrorCode::UnknownPartition,
+            RDKafkaErrorCode::TopicAuthorizationFailed,
+            RDKafkaErrorCode::LeaderNotAvailable,
+            RDKafkaErrorCode::AllBrokersDown,
+        ] {
+            assert!(!names_missing_topic(code), "{code:?}");
+        }
     }
 
     #[test]

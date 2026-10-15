@@ -1080,3 +1080,173 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @kafka_owned_broker_state
+  Scenario Outline: Kafka ingestor reports a missing topic by name, never creates it, and starts once it is provisioned
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'unprovisioned_{{test_id}}' OFFSET BY <offsets> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      transient error: Kafka topic 'unprovisioned_{{test_id}}' does not exist
+      """
+    And Kafka topic "unprovisioned_{{test_id}}" does not exist
+    When the operator provisions Kafka topic "unprovisioned_{{test_id}}" with 1 partitions
+    And Kafka message is published to topic "unprovisioned_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+
+    Examples:
+      | cluster_size | offsets                                           |
+      | 1            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
+      | 1            | DOMAIN                                            |
+      | 3            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
+      | 3            | DOMAIN                                            |
+
+  @kafka_owned_broker_state
+  Scenario Outline: CREATE CLIENT refuses a Kafka CONFIG that lets a consumer create topics
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands fail with "client 'kafka_main' in domain '{{domain}}' cannot set CONFIG key 'allow.auto.create.topics'"
+      """
+      CREATE CLIENT kafka_main
+      TYPE KAFKA
+      CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'allow.auto.create.topics' = 'true'
+      };
+      """
+    And these NSPL commands are executed
+      """
+      CREATE CLIENT kafka_main
+      TYPE KAFKA
+      CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}'
+      };
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @kafka_owned_broker_state
+  Scenario Outline: A Kafka ingestor with domain-owned offsets keeps no consumer group on the broker, running or dropped
+    Given a <cluster_size> node nervix cluster is started
+    And Kafka topic "dropped_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE KAFKA TOPIC INGESTOR kafka_dropped
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE KAFKA TOPIC INGESTOR kafka_grouped
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY CONSUMER GROUP 'operator_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    And Kafka message is published to topic "dropped_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "30s" Kafka lists these consumer groups
+      """
+      operator_{{test_id}}
+      """
+    And Kafka lists none of these consumer groups
+      """
+      nervix_domain_{{domain}}_kafka_dropped
+      nervix_domain_watch_{{domain}}_kafka_dropped
+      nervix_schedule_watch_{{domain}}_kafka_dropped
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DROP INGESTOR kafka_dropped;
+      """
+    Then Kafka lists none of these consumer groups
+      """
+      nervix_domain_{{domain}}_kafka_dropped
+      nervix_domain_watch_{{domain}}_kafka_dropped
+      nervix_schedule_watch_{{domain}}_kafka_dropped
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

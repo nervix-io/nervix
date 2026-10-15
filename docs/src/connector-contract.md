@@ -918,6 +918,12 @@ sequenceDiagram
 ## Integration-specific boundaries
 
 - **Kafka source.** The driver inspects topic partitions and reads or commits Kafka offsets.
+  Every consumer it creates, the source's own and both partition inspectors, sets
+  `allow.auto.create.topics` to `false` after the client's pass-through entries, and the registry
+  refuses that key in a Kafka client's `CONFIG`, so neither subscribing nor inspecting ever creates
+  a topic. A topic the broker does not have is the typed missing-topic failure, from the
+  subscription's error or from the topic's metadata, and the host shows it as the ingestor's
+  transient error until the topic is provisioned.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
   unacknowledged record. A consumer-group rebalance can move a partition to another group member
   while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.
