@@ -35,6 +35,12 @@ run-with-jobs recipe jobs:
 install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
+# Build the pinned cargo-crap, which the complexity count and the CRAP report run, into a root of its
+# own below the target directory. scripts/cargo_crap.py declares the version; a build already there
+# is kept.
+install-cargo-crap:
+    python3 -m scripts.cargo_crap install
+
 # Server library properties embed the same real console assets as the product.
 bolero-deps: build-web-console
 
@@ -1147,8 +1153,8 @@ coverage-merge-runner:
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
 
 # Check the same merged workspace coverage and complexity limit locally as CI does.
-check-coverage report="lcov-workspace.info":
-    cargo crap --lcov {{ quote(report) }} --min 30 --threshold 30
+check-coverage report="lcov-workspace.info": install-cargo-crap
+    python3 -m scripts.cargo_crap run -- --lcov {{ quote(report) }} --min 30 --threshold 30
 
 # Measure added executable lines; --pr <number> updates an advisory GitHub PR comment.
 coverage-patch base="origin/main" report="lcov-workspace.info" *args:
@@ -1909,9 +1915,10 @@ benchmark *args:
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
 
-# Measure the load driver's preparation controls with ordinary native coverage.
-coverage-benchmark-load output="target/benchmark-load.lcov":
-    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- empty_topic_setup
+# Measure the load driver's tests whose names contain `filter` with ordinary native coverage; by
+# default its preparation controls, and every test with an empty filter.
+coverage-benchmark-load output="target/benchmark-load.lcov" filter="empty_topic_setup":
+    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(filter) }}
 
 # Build the pinned Flink image with its matching Kafka SQL connector.
 benchmark-flink-image:
@@ -2219,12 +2226,13 @@ audit:
     cargo audit
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
-ratchet *args: typed-ratchet-build typed-ratchet-source-build
+ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
     python3 -m scripts.ratchet {{ args }}
 
-# Focused regression checks for the debt gate and its shared Rust source scanner.
-test-ratchet-units: typed-ratchet-source-build
-    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
+# Focused regression checks for the debt gate, its shared Rust source scanner and its pinned
+# complexity analyzer.
+test-ratchet-units: typed-ratchet-source-build install-cargo-crap
+    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
 
 # Structural Rust properties use a stable source parser, without the compiler driver.
 typed-ratchet-source-build:
@@ -2338,12 +2346,12 @@ typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 [private, parallel]
 typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
-coverage-typed-ratchet-python: typed-ratchet-source-build test-typed-ratchet-compiler test-typed-ratchet-modeled
+coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
