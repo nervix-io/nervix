@@ -54,6 +54,7 @@ on:
           - backup07
           - backup07scale
           - backup07wasm
+          - backup07scale1000
         default: smoke
 
 permissions:

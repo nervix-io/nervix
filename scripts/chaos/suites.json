@@ -717,7 +717,7 @@
         {
           "id": "scale-1000-n1",
           "shard": 3,
-          "budget_minutes": 75,
+          "budget_minutes": 60,
           "run": [
             "backup-cycles",
             "--nodes",
@@ -777,7 +777,7 @@
         {
           "id": "scale-1000-n3",
           "shard": 6,
-          "budget_minutes": 75,
+          "budget_minutes": 60,
           "run": [
             "backup-cycles",
             "--nodes",
@@ -917,6 +917,51 @@
             "20",
             "--scale-wasm-bytes",
             "25165824"
+          ]
+        }
+      ]
+    },
+    "backup07scale1000": {
+      "description": "Backup 07 freeze scaling: backup cycles over 1000 branches on one and three nodes",
+      "entries": [
+        {
+          "id": "scale-1000-n1",
+          "shard": 1,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "36000",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "3000"
+          ]
+        },
+        {
+          "id": "scale-1000-n3",
+          "shard": 2,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "36000",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "3000"
           ]
         }
       ]
