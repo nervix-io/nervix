@@ -1638,7 +1638,7 @@ runs in the command processes and supplies no ordering, wakeups or branches insi
 The per-mode build directories and fresh attempt directories prevent one mode from replacing
 another's executable or counters. Native source-line execution complements each model's claim;
 it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
-the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
+ordinary coverage and its CRAP report. See [native extra coverage](developing-nervix.md) for
 collection, artifacts, filtering and replay commands.
 
 The integrated ordinary cost probe is `just bench-primitives`. It measures the boundary's atomic
@@ -2023,7 +2023,7 @@ through Cargo's configured runner, and hands `lane.json` to the collector, which
 unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
-coverage stays out of ordinary coverage and the CRAP gate. The [Integration Test
+coverage stays out of ordinary coverage and its CRAP report. The [Integration Test
 Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
 reserves.
 
