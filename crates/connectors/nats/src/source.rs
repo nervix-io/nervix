@@ -432,6 +432,29 @@ mod tests {
         ));
     }
 
+    /// The instance ends its subscription on the first loss, so a loss signalled while another is
+    /// pending, or after the instance stopped listening, is dropped.
+    #[test]
+    fn a_lost_connection_is_signalled_once_and_not_after_the_instance_stopped_listening() {
+        let (lost, mut connection_lost) = mpsc::channel(1);
+        NatsSourcePlan::signal_connection_lost(&lost);
+        NatsSourcePlan::signal_connection_lost(&lost);
+        assert!(
+            connection_lost.try_recv().is_ok(),
+            "the first loss is signalled"
+        );
+        assert!(
+            connection_lost.try_recv().is_err(),
+            "a loss signalled while one is pending is not signalled again"
+        );
+        drop(connection_lost);
+        NatsSourcePlan::signal_connection_lost(&lost);
+        assert!(
+            lost.is_closed(),
+            "the instance no longer listens for its end"
+        );
+    }
+
     #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
         let (lost, _connection_lost) = mpsc::channel(1);

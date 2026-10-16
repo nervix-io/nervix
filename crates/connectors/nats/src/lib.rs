@@ -575,6 +575,43 @@ mod tests {
         let _connection = script.await.expect("the scripted server ran");
     }
 
+    /// A window of one waits for each record's `PubAck` before it takes the next record, so a
+    /// failed `PubAck` ends the publish while the window admits its record.
+    #[nervix_primitives::test]
+    async fn a_window_of_one_ends_the_publish_on_a_failed_pub_ack() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(64).await;
+            let publish = connection.expect_publish().await;
+            connection
+                .reply(
+                    &publish,
+                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
+                )
+                .await;
+            connection
+        });
+        let mut sink = jetstream_sink(&addr, 1).await;
+
+        let outcome = sink
+            .publish(vec![record(0, b"first", &[]), record(1, b"second", &[])])
+            .await
+            .into_parts();
+
+        assert!(outcome.delivered.is_empty());
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("the failed PubAck ends the publish");
+        let description = printable_description(&failure).expect("the failure describes itself");
+        assert!(
+            description.starts_with("nats JetStream publish failed: "),
+            "{description}"
+        );
+        let _connection = script.await.expect("the scripted server ran");
+    }
+
     /// JetStream answers every record but the oldest, then fails the oldest's `PubAck`: the
     /// publish settles every `PubAck` it was given, more of them than one cooperative budget lets
     /// a task read, so the host's retry resends none of the records the stream confirmed.
