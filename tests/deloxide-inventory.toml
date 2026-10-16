@@ -123,6 +123,7 @@ tags = [
   "@shutdown_source_confirmation_handoff",
   "@shutdown_kafka_refused_commit",
   "@metrics_checkpoint_handoff",
+  "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
 ]
 target = "test:scenarios"
@@ -1088,6 +1089,26 @@ invariant = "A voter first heard through a relayed heartbeat keeps every schedul
 invocation = "scenarios"
 scenario = "A voter first heard through a relayed heartbeat keeps its ownership after cluster restart"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Whole-cluster teardown, replica store reopening, forced-recovery checkpoint selection and guest restoration during destination installation. Async application mutexes and installation watches are untracked."
+examples = 1
+feature = "tests/features/cluster/forced_recovery_schedule.feature"
+id = "scenario.forced-recovery-schedule"
+invariant = "A promoted replica preserves both confirmed guest saves when forced recovery observes the destination before its execution schedule is installed."
+invocation = "scenarios"
+scenario = "A promoted replica retains its guest saves when recovery precedes schedule installation"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: replica store reopening, forced-recovery checkpoint selection and guest restoration during destination installation. Async application mutexes and installation watches are untracked."
+examples = 1
+feature = "tests/features/cluster/forced_recovery_schedule.feature"
+id = "stress.forced-recovery-schedule"
+invariant = "A promoted replica preserves both confirmed guest saves when forced recovery observes the destination before its execution schedule is installed."
+invocation = "stress-restore-scenarios"
+scenario = "A promoted replica retains its guest saves when recovery precedes schedule installation"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Distributed native lifecycle and Kafka metadata restoration above the bulk budget, durable generation publication, checkpoint replication and acknowledgement, and exact owner and replica values after restart. Stream waits and assignment atomics are untracked."
