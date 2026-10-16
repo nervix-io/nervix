@@ -142,9 +142,9 @@ backup_cut_window() {
     ((backup_released_ms >= backup_engaged_ms)) || backup_fail 'the cut release precedes engagement'
 }
 
-run_backup_scenario() {
-    phase 'healthy acknowledged Kafka traffic'
-    mkdir -p "${artifact_dir}/backup"
+# Generates the run's baseline fixture, starts the load and the listener observer, and waits until
+# the source and the sink have each passed their first ten records.
+backup_traffic_start() {
     jq -nc --arg run_id "${run_id}" --argjson count "${record_count}" \
         -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
     [[ "$(wc -l <"${artifact_dir}/fixtures/input.ndjson")" -eq "${record_count}" ]] \
@@ -153,6 +153,29 @@ run_backup_scenario() {
     wait_for 'independent load and observer' 30 check_support_containers
     wait_for 'source baseline' 40 topic_progressed chaos_input 9
     wait_for 'acknowledged sink baseline' 60 topic_progressed chaos_output 9
+}
+
+# Stops the load and reconstructs the accepted-input ledger from the source topic.
+backup_final_boundary() {
+    touch "${artifact_dir}/traffic/stop-load"
+    local load_id
+    load_id="$(owned_service_container load)" || return 1
+    wait_for 'load producer flushed and exited' 40 load_exited_cleanly "${load_id}"
+    producer_status="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${load_id}")"
+    input_end="$(topic_end_offset chaos_input)"
+    [[ "${input_end}" =~ ^[0-9]+$ && "${input_end}" -le "${record_count}" ]] \
+        || backup_fail 'source boundary exceeded the bounded fixture'
+    kcat -q -b broker:9092 -C -t chaos_input -p 0 -o beginning -c "${input_end}" \
+        >"${artifact_dir}/traffic/accepted-input.ndjson" \
+        2>"${artifact_dir}/traffic/source-consumer.stderr"
+    [[ "$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")" -eq "${input_end}" ]] \
+        || backup_fail 'accepted-input ledger did not cover the final source boundary'
+}
+
+run_backup_scenario() {
+    phase 'healthy acknowledged Kafka traffic'
+    mkdir -p "${artifact_dir}/backup"
+    backup_traffic_start
     local source_before output_before
     source_before="$(topic_end_offset chaos_input)"
     output_before="$(topic_end_offset chaos_output)"
@@ -203,17 +226,5 @@ run_backup_scenario() {
         >"${artifact_dir}/results/backup-progress.json"
 
     phase 'backup traffic final boundary'
-    touch "${artifact_dir}/traffic/stop-load"
-    local load_id
-    load_id="$(owned_service_container load)" || return 1
-    wait_for 'load producer flushed and exited' 40 load_exited_cleanly "${load_id}"
-    producer_status="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${load_id}")"
-    input_end="$(topic_end_offset chaos_input)"
-    [[ "${input_end}" =~ ^[0-9]+$ && "${input_end}" -le "${record_count}" ]] \
-        || backup_fail 'source boundary exceeded the bounded fixture'
-    kcat -q -b broker:9092 -C -t chaos_input -p 0 -o beginning -c "${input_end}" \
-        >"${artifact_dir}/traffic/accepted-input.ndjson" \
-        2>"${artifact_dir}/traffic/source-consumer.stderr"
-    [[ "$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")" -eq "${input_end}" ]] \
-        || backup_fail 'accepted-input ledger did not cover the final source boundary'
+    backup_final_boundary
 }
