@@ -53,6 +53,7 @@ on:
           - soak
           - backup07
           - backup07scale
+          - backup07wasm
         default: smoke
 
 permissions:

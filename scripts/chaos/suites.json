@@ -683,7 +683,7 @@
             "--nodes",
             "1",
             "--records",
-            "3000",
+            "6000",
             "--scale-branches",
             "3",
             "--scale-interval-ms",
@@ -697,13 +697,13 @@
         {
           "id": "scale-300-n1",
           "shard": 2,
-          "budget_minutes": 45,
+          "budget_minutes": 50,
           "run": [
             "backup-cycles",
             "--nodes",
             "1",
             "--records",
-            "12000",
+            "22000",
             "--scale-branches",
             "300",
             "--scale-interval-ms",
@@ -717,13 +717,13 @@
         {
           "id": "scale-1000-n1",
           "shard": 3,
-          "budget_minutes": 60,
+          "budget_minutes": 75,
           "run": [
             "backup-cycles",
             "--nodes",
             "1",
             "--records",
-            "20000",
+            "36000",
             "--scale-branches",
             "1000",
             "--scale-interval-ms",
@@ -743,7 +743,7 @@
             "--nodes",
             "3",
             "--records",
-            "3000",
+            "6000",
             "--scale-branches",
             "3",
             "--scale-interval-ms",
@@ -757,13 +757,13 @@
         {
           "id": "scale-300-n3",
           "shard": 5,
-          "budget_minutes": 45,
+          "budget_minutes": 50,
           "run": [
             "backup-cycles",
             "--nodes",
             "3",
             "--records",
-            "12000",
+            "22000",
             "--scale-branches",
             "300",
             "--scale-interval-ms",
@@ -777,13 +777,13 @@
         {
           "id": "scale-1000-n3",
           "shard": 6,
-          "budget_minutes": 60,
+          "budget_minutes": 75,
           "run": [
             "backup-cycles",
             "--nodes",
             "3",
             "--records",
-            "20000",
+            "36000",
             "--scale-branches",
             "1000",
             "--scale-interval-ms",
@@ -792,6 +792,131 @@
             "6",
             "--scale-cycle-records",
             "3000"
+          ]
+        }
+      ]
+    },
+    "backup07wasm": {
+      "description": "Backup 07 freeze scaling: backup cycles with WASM guest saves of 1, 8 and 24 MiB per branch on one and three nodes",
+      "entries": [
+        {
+          "id": "wasm-1m-n1",
+          "shard": 1,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "900",
+            "--scale-interval-ms",
+            "1000",
+            "--scale-cycles",
+            "4",
+            "--scale-cycle-records",
+            "20",
+            "--scale-wasm-bytes",
+            "1048576"
+          ]
+        },
+        {
+          "id": "wasm-8m-n1",
+          "shard": 2,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "900",
+            "--scale-interval-ms",
+            "1000",
+            "--scale-cycles",
+            "4",
+            "--scale-cycle-records",
+            "20",
+            "--scale-wasm-bytes",
+            "8388608"
+          ]
+        },
+        {
+          "id": "wasm-24m-n1",
+          "shard": 3,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "900",
+            "--scale-interval-ms",
+            "1000",
+            "--scale-cycles",
+            "4",
+            "--scale-cycle-records",
+            "20",
+            "--scale-wasm-bytes",
+            "25165824"
+          ]
+        },
+        {
+          "id": "wasm-1m-n3",
+          "shard": 4,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "900",
+            "--scale-interval-ms",
+            "1000",
+            "--scale-cycles",
+            "4",
+            "--scale-cycle-records",
+            "20",
+            "--scale-wasm-bytes",
+            "1048576"
+          ]
+        },
+        {
+          "id": "wasm-8m-n3",
+          "shard": 5,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "900",
+            "--scale-interval-ms",
+            "1000",
+            "--scale-cycles",
+            "4",
+            "--scale-cycle-records",
+            "20",
+            "--scale-wasm-bytes",
+            "8388608"
+          ]
+        },
+        {
+          "id": "wasm-24m-n3",
+          "shard": 6,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "900",
+            "--scale-interval-ms",
+            "1000",
+            "--scale-cycles",
+            "4",
+            "--scale-cycle-records",
+            "20",
+            "--scale-wasm-bytes",
+            "25165824"
           ]
         }
       ]

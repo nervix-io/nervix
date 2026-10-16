@@ -123,6 +123,7 @@ scale_branches=3
 scale_interval_ms=""
 scale_cycles=8
 scale_cycle_records=2
+scale_wasm_bytes=""
 records_option_set=false
 timeout_option_set=false
 mixed_option_set=false
@@ -259,13 +260,14 @@ while [[ "$#" -gt 0 ]]; do
             keep_resources=true
             shift
             ;;
-        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records)
+        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records | --scale-wasm-bytes)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
             case "$1" in
                 --scale-branches) scale_branches="$2" ;;
                 --scale-interval-ms) scale_interval_ms="$2" ;;
                 --scale-cycles) scale_cycles="$2" ;;
                 --scale-cycle-records) scale_cycle_records="$2" ;;
+                --scale-wasm-bytes) scale_wasm_bytes="$2" ;;
             esac
             shift 2
             ;;
@@ -691,6 +693,10 @@ if [[ "${scenario}" == stateful ]]; then
     if [[ "${node_count}" == 3 ]]; then
         export CHAOS_REPLICA_COUNT=1
     fi
+fi
+if [[ -n "${scale_wasm_bytes}" && "${node_count}" == 3 ]]; then
+    # Campaign only: one state replica, so every guest save also reaches a replica.
+    export CHAOS_REPLICA_COUNT=1
 fi
 export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
 export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
@@ -2124,6 +2130,9 @@ elif [[ "${scenario}" == domain-time ]]; then
     scenario_topics=(chaos_paced_input chaos_paced_output)
 elif [[ "${backup_state_graph}" == true ]]; then
     scenario_topics=(chaos_unique_output chaos_window_output)
+    if [[ -n "${scale_wasm_bytes}" ]]; then
+        scenario_topics+=(chaos_padded_output)
+    fi
 fi
 for scenario_topic in ${scenario_topics[@]+"${scenario_topics[@]}"}; do
     broker_admin /opt/kafka/bin/kafka-topics.sh \
@@ -2220,6 +2229,72 @@ if [[ "${backup_state_graph}" == true ]]; then
     printf '%s\n' "${backup_state_nspl}" >"${artifact_dir}/fixtures/backup-state.nspl"
     domain_cli_command "${backup_state_nspl}" \
         >"${artifact_dir}/public/configure-backup-state-nspl.txt" 2>&1
+    if [[ -n "${scale_wasm_bytes}" ]]; then
+        # Campaign only: an attached WASM processor whose guest emits nothing and saves
+        # scale_wasm_bytes bytes per branch, so the cut freezes and archives that much guest state.
+        mkdir -p "${artifact_dir}/fixtures/padded-wasm/processors"
+        "${script_dir}/fixtures/wasm/padded-state-wat.sh" "${scale_wasm_bytes}" \
+            >"${artifact_dir}/fixtures/padded-wasm/processors/padded-state.wat"
+        chmod 0755 "${artifact_dir}/fixtures/padded-wasm" "${artifact_dir}/fixtures/padded-wasm/processors"
+        chmod 0644 "${artifact_dir}/fixtures/padded-wasm/processors/padded-state.wat"
+        domain_cli_command 'CREATE RESOURCE chaos_padded_guest;' \
+            >"${artifact_dir}/public/create-padded-wasm-resource.txt" 2>&1
+        compose run --rm --no-deps -v "${artifact_dir}/fixtures/padded-wasm:/chaos-wasm:ro" admin \
+            nervix-cli --server "http://${cli_host}:47391" --domain chaos_baseline \
+            --password "${CHAOS_PASSWORD}" \
+            --command "UPLOAD RESOURCE chaos_padded_guest VERSION '/chaos-wasm';" \
+            >"${artifact_dir}/public/upload-padded-wasm-resource.txt" 2>&1
+        grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-padded-wasm-resource.txt" \
+            || setup_error 'the packaged CLI did not upload the padded WASM fixture as resource version 1'
+        padded_nspl="BEGIN;
+CREATE SCHEMA chaos_padded_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  content STRING,
+  branch_count I64
+);
+CREATE WIRE JSON SCHEMA chaos_padded_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  content STRING,
+  branch_count INTEGER
+);
+CREATE CODEC chaos_padded_json
+  FROM WIRE JSON SCHEMA chaos_padded_wire
+  TO SCHEMA chaos_padded_record;
+CREATE RELAY chaos_padded_out SCHEMA chaos_padded_record BRANCHED BY chaos_branch CAPACITY 1;
+CREATE ATTACHED WASM PROCESSOR chaos_padded
+  FROM chaos_records
+  USING RESOURCE chaos_padded_guest VERSION 1
+  FILE 'processors/padded-state.wat'
+  MAX FUEL 100000000
+  MAX MEMORY 128MiB
+  BRANCHED BY chaos_branch
+  TO chaos_padded_out
+    SET event_id = event_id,
+        branch_name = branch_name,
+        sequence = sequence,
+        content = content,
+        branch_count = branch_count
+    ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
+  ON GLOBAL ERROR LOG;
+CREATE ATTACHED EMITTER chaos_padded_emitter
+  FROM chaos_padded_out
+  TO KAFKA chaos_kafka TOPIC chaos_padded_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_padded_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+COMMIT;"
+        printf '%s\n' "${padded_nspl}" >"${artifact_dir}/fixtures/padded-state.nspl"
+        domain_cli_command "${padded_nspl}" \
+            >"${artifact_dir}/public/configure-padded-state-nspl.txt" 2>&1
+    fi
 fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
 if [[ "${scenario}" == domain-time ]]; then

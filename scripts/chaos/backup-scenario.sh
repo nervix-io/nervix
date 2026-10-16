@@ -233,12 +233,46 @@ backup_archived_state() {
                      branches: (map(.branches // 0) | add)}))}' "$1"
 }
 
+# Campaign only: while the cycles run, one probe container samples every node's resident memory,
+# executor reservations by class and restore staging every two seconds, and a host loop samples
+# Docker's memory view of every container of the project.
+campaign_sampler_start() {
+    local cycles_dir="$1"
+    local nodes="nervix-1"
+    if [[ "${node_count}" == 3 ]]; then
+        nodes="nervix-1 nervix-2 nervix-3"
+    fi
+    local script="while true; do t=\$(date +%s); for n in ${nodes}; do wget -q -T 3 -O - http://\$n:9090/metrics 2>/dev/null | grep -E '^nervix_(execution_memory_reserved_bytes|execution_memory_capacity_bytes|jemalloc_resident_bytes|restore_staging_bytes)' | sed \"s/^/\$t \$n /\"; done; sleep 2; done"
+    campaign_sampler_container="$( (compose run -d --no-deps probe sh -c "${script}" 2>/dev/null || true) | tail -n 1)"
+    (
+        set +e
+        while true; do
+            stamp="$(date +%s)"
+            docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' $(docker compose "${compose_args[@]}" ps -q 2>/dev/null) 2>/dev/null \
+                | sed "s/^/${stamp} /"
+            sleep 2
+        done
+    ) >"${cycles_dir}/docker-stats.txt" 2>/dev/null &
+    campaign_stats_pid=$!
+}
+
+campaign_sampler_stop() {
+    local cycles_dir="$1"
+    kill "${campaign_stats_pid}" 2>/dev/null || true
+    wait "${campaign_stats_pid}" 2>/dev/null || true
+    if [[ -n "${campaign_sampler_container:-}" ]]; then
+        docker logs "${campaign_sampler_container}" >"${cycles_dir}/metric-samples.txt" 2>/dev/null || true
+        docker rm -f "${campaign_sampler_container}" >/dev/null 2>&1 || true
+    fi
+}
+
 run_backup_cycles() {
     phase 'healthy acknowledged Kafka traffic'
     local cycles_dir="${artifact_dir}/backup-cycles"
     mkdir -p "${cycles_dir}"
     backup_traffic_start
     : >"${cycles_dir}/cycles.ndjson"
+    campaign_sampler_start "${cycles_dir}"
     local previous_offset=9
     local cycle
     for cycle in $(seq 1 "${backup_cycle_count}"); do
@@ -284,6 +318,7 @@ run_backup_cycles() {
               restored_domain:("chaos_cycle_\($cycle)")}' >>"${cycles_dir}/cycles.ndjson"
         previous_offset="${archived_offset}"
     done
+    campaign_sampler_stop "${cycles_dir}"
 
     phase 'post-cycle continuity'
     check_support_containers
