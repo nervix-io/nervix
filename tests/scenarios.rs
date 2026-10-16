@@ -975,6 +975,17 @@ fn when_stallable_endpoint_is_resumed(world: &mut ScenarioWorld, name: String) {
         .set_paused(false);
 }
 
+/// Every connection the endpoint forwards is reset, as by a dependency that drops its clients,
+/// while the dependency itself keeps running for the other scenarios that share it.
+#[when(expr = "the stallable endpoint {string} resets its connections")]
+fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, name: String) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .reset_connections();
+}
+
 #[given("ClickHouse is running")]
 async fn given_clickhouse_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
