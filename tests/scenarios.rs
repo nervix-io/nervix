@@ -21419,13 +21419,17 @@ impl DescribedEmitterRetry {
         described
     }
 
-    /// Whether the emitter failed and its next attempt is at most `wait` away.
+    /// Whether the emitter failed and its next attempt, which has not started yet, is at most
+    /// `wait` away.
+    ///
+    /// DESCRIBE keeps reporting a failure until a publish succeeds, so once the next attempt is
+    /// due it reports a wait of zero while that attempt runs.
     fn retries_within(&self, wait: Duration) -> bool {
         if self.transient_error.is_none() {
             return false;
         }
         match self.reconnect_wait {
-            Some(reconnect_wait) => reconnect_wait <= wait,
+            Some(reconnect_wait) => !reconnect_wait.is_zero() && reconnect_wait <= wait,
             None => false,
         }
     }

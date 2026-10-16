@@ -35,8 +35,11 @@ const PARTITION_ONE_KEY: &str = "held-1";
 /// A producer queue of 1 KiB, the smallest librdkafka accepts.
 const ONE_KIB_QUEUE: (&str, &str) = ("queue.buffering.max.kbytes", "1");
 
+/// Messages of 1000 bytes at most, the smallest `message.max.bytes` librdkafka accepts.
+const THOUSAND_BYTE_MESSAGES: (&str, &str) = ("message.max.bytes", "1000");
+
 /// A payload larger than a [`ONE_KIB_QUEUE`] producer queue holds, so the producer can never take
-/// it into that queue.
+/// it into that queue, and larger than a [`THOUSAND_BYTE_MESSAGES`] message.
 const OVERSIZED_PAYLOAD_BYTES: usize = 2048;
 
 /// A host that records nothing, for a sink whose publishes report everything in their outcome.
@@ -244,6 +247,49 @@ async fn a_record_its_broker_refuses_for_good_is_rejected() {
 }
 
 #[nervix_primitives::test]
+async fn a_record_the_producer_refuses_for_its_own_size_is_rejected_and_the_publish_goes_on() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(
+        &cluster,
+        &[THOUSAND_BYTE_MESSAGES],
+        confirmed(2, Duration::from_secs(60)),
+    );
+
+    let outcome = sink
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+            record(1, PARTITION_ZERO_KEYS[1], vec![0; OVERSIZED_PAYLOAD_BYTES]),
+            record(2, PARTITION_ZERO_KEYS[0], small_payload(2)),
+        ])
+        .await;
+
+    let parts = outcome.into_parts();
+    assert_eq!(
+        parts.delivered.into_iter().collect::<BTreeSet<_>>(),
+        ids([0, 2]),
+        "the records around the refused one are delivered"
+    );
+    let refused = KafkaError::MessageProduction(RDKafkaErrorCode::MessageSizeTooLarge);
+    let rejected = parts
+        .rejected
+        .iter()
+        .map(|rejected| (rejected.id, rejected.error.message.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rejected,
+        vec![(
+            SinkRecordId::new(1),
+            format!("kafka rejected record: {refused}")
+        )]
+    );
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a record refused for its own size fails nothing else: {:?}",
+        parts.infrastructure_error
+    );
+}
+
+#[nervix_primitives::test]
 async fn the_producer_gives_up_a_record_the_publish_stopped_waiting_for() {
     let cluster = cluster(1, 1);
     cluster
@@ -275,6 +321,41 @@ async fn the_producer_gives_up_a_record_the_publish_stopped_waiting_for() {
         );
         sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[nervix_primitives::test]
+async fn an_unconfirmed_publish_delivers_each_record_the_producer_takes() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(
+        &cluster,
+        &[THOUSAND_BYTE_MESSAGES],
+        BrokerPublishingMode::NoAck,
+    );
+
+    let outcome = sink
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+            record(1, PARTITION_ZERO_KEYS[1], vec![0; OVERSIZED_PAYLOAD_BYTES]),
+            record(2, PARTITION_ZERO_KEYS[0], small_payload(2)),
+        ])
+        .await;
+
+    let parts = outcome.into_parts();
+    assert_eq!(
+        parts.delivered,
+        vec![SinkRecordId::new(0), SinkRecordId::new(2)]
+    );
+    let rejected = parts
+        .rejected
+        .iter()
+        .map(|rejected| rejected.id)
+        .collect::<Vec<_>>();
+    assert_eq!(rejected, vec![SinkRecordId::new(1)]);
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a producer that takes every other record fails nothing: {:?}",
+        parts.infrastructure_error
+    );
 }
 
 #[nervix_primitives::test]

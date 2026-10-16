@@ -648,5 +648,5 @@ mod tests {
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
-#[path = "confirmed_publish_tests.rs"]
-mod confirmed_publish_tests;
+#[path = "publish_tests.rs"]
+mod publish_tests;
