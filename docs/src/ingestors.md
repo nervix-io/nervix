@@ -140,6 +140,17 @@ Each entity accepts only the modes it can honor, and completion offers only thos
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
+In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and
+error delivery the message unfolded into has completed, and it reports that progress only once
+the transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
+broker's answer to its deletion, a `RABBITMQ QUEUE` for its acknowledgement to be written to the
+connection, and a `KAFKA TOPIC`, `PULSAR TOPIC` or `MQTT TOPIC` only for its client to queue the
+acknowledgement. An acknowledgement the transport fails to confirm is a source error that
+`DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
+messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
+confirmations before it closes them; see
+[Shutdown And Recovery](shutdown.md#connector-contracts).
+
 ## Altering Ingestors
 
 `ALTER` names the connector and entity of the stored ingestor in its head and applies one or more
@@ -897,6 +908,15 @@ consumers on the same queue continue. Queue length, message TTL, overflow, and a
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
 re-provisions it; Nervix never creates it.
 
+A connection that closes while a delivery is still unacknowledged, because the broker restarted,
+closed it, or the network dropped it, also makes RabbitMQ requeue that delivery. The acknowledgement
+or the requeue the ingestor still owes it can only be sent on the connection it arrived on, so the
+instance reconnects on its `RETRY POLICY` cadence, discards what it owed, counts it in
+`nervix_ingestor_transport_redeliveries_total`, which `DESCRIBE INGESTOR` also prints, and consumes
+again. RabbitMQ then delivers the message again: a delivery that failed in the graph is retried,
+and one the graph had already acknowledged is ingested a second time, so delivery across a
+reconnect is at least once.
+
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
@@ -1169,11 +1189,19 @@ asynchronous resolver. It tries the returned addresses in order within one 30-se
 DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
-Resolution and connection failures are transient source failures handled by the host's existing
-retry lifecycle. Cancelling or stopping the source drops a pending connection attempt.
+Resolution, connection and read failures are transient source failures. A peer Close records its
+code and reason in `DESCRIBE INGESTOR`; EOF also triggers recovery. Reconnects wait 250 ms initially,
+doubling to at most 30 seconds while attempts keep failing. A successful upgrade alone does not
+reset the delay or clear the last failure: a delivered batch does. Cancelling or stopping the
+source drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
+
+Suspension and terminal close send a Close frame and wait up to one second for the peer's reply,
+including the time needed to send the frame, before releasing the connection. A peer that does
+not answer cannot hold shutdown indefinitely. Terminal close also clears queued signaling
+payloads; suspension retains them.
 
 A `WEBSOCKETS CONNECTION` ingestor is a single-owner ingestor. It keeps its existing primary and
 replica assignment through schedule recomputation while every assigned cluster node remains live,

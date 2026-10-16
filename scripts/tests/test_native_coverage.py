@@ -218,7 +218,7 @@ class InventoryTests(unittest.TestCase):
                     for artifact in ("completion.json", "lcov.info", "lane.json"):
                         self.assertIn(f"target/native-coverage/test-${{{{ matrix.selection }}}}/**/{artifact}", upload)
                     self.assertNotIn("profraw", upload)
-                    # Diagnostic coverage never joins ordinary coverage or the CRAP gate.
+                    # Diagnostic coverage never joins ordinary coverage or its CRAP report.
                     coverage = job_section(workflow, "coverage")
                     self.assertNotIn("deloxide", coverage)
                     continue

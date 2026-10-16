@@ -237,8 +237,13 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `2`, so its
-16-CPU runner has 32 slots. Cucumber may take up all parsed scenarios without charging a slot.
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
+16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
+attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
+the unchanged 41-minute suite budget. The additional slots use the observed CPU and memory
+headroom; their complete-suite qualification retains runner load and the actual margin rather than
+assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
+without charging a slot.
 Admission grants feature capacity and a run slot in one decision, after both are available. A
 scenario holds both through the end of teardown. The active-scenario diagnostic names the feature
 limit or run slot a waiting scenario needs. No scenario runs alone or prevents unrelated scenarios
@@ -251,17 +256,24 @@ suite, and
 available run slots favor a queued limited successor over queued ordinary work. The web console
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
 the other three waiting behind its whole queue. Their chains can therefore make progress throughout
-the suite rather than after it. Cucumber retries a failed
-scenario twice; `--retry 0` turns retries off for a focused run.
+the suite rather than after it. Cucumber retries a failed scenario twice; `--retry 0` turns retries
+off for a focused run. The before hook reads the attempt kind from its active-scenario registration.
+Each feature queue keeps retries ahead of first attempts, and admission selects an eligible retry
+before any first attempt, including a limited feature's first attempt. A retry still needs its
+feature capacity and a run slot together: one waiting for a full feature group leaves free slots
+available to other work. Ordinary and WASM-reset queues retain FIFO order within an attempt kind;
+the web-console group retains its feature fairness. The finite retry count bounds this priority;
+first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
+capacities before dispatch continues.
 
 The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report. The CRAP step runs the pinned cargo-crap, which the job builds through kache |
-| `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./developing-nervix.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
+| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
+| `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
+| `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./coverage-reports.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -461,6 +473,9 @@ The boundary between them is kept in four places.
   stopping the writer finishes its admitted command before counting completed writes: the response
   can arrive after all voters have already applied that command. The fixture still checks the
   storage-derived catch-up bound, append-stream limit and commands-memory budget.
+  Its initial burst of domain creation also uses one production client, retaining each command's
+  execution identity across a leadership change during finalization. A raw session's recoverable
+  disposition cannot end the fixture before follower catch-up starts.
   A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
   observability, web console, or interconnect. A readiness timeout may still move all listeners
   within the same startup budget. A changed interconnect address remains reserved while a peer
@@ -472,6 +487,11 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
+  The forced-recovery startup fixture holds the promoted replica's initial installation across a
+  whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
+  unavailable. The destination records its missing schedule before releasing the held installation
+  once, so the regression reaches that boundary without spending the recovery budget between
+  scenario steps. Public placement, recovery outcome and both branches' output remain the verdict.
   `just coverage-harness-liveness <filter>` measures the ordinary startup and other harness owner
   regressions with counters of their own, as the [diagnostic lane](#diagnostic-lane) section
   describes. A patch that also changes product code passes the retained `lcov.info` to
@@ -984,6 +1004,9 @@ until that node has ended.
   clusters are also dropped first. Dropping any server child kills it and returns its ports.
 - Broker and syslog observers, HTTP and gRPC receivers, the browser, and the session are closed
   before the cluster stops.
+- The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
+  a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
+  socket ownership stays in that task, so the same cancellation releases its active connection.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
   once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
@@ -1439,34 +1462,21 @@ After collecting unit and scenario profiles, `just coverage-report-workspace` ex
 workspace packages, including executed test files, as `lcov-workspace.info` with the checkout path
 beside it, and `just coverage-merge` maps that report onto the repository.
 
-Both CI collectors export `lcov-workspace.info` from every collected profile, with no package
-selection, and with `--no-default-ignore-filename-regex`, and write the absolute checkout path they
-ran in to `coverage-source-root.txt` beside it. Test lines stay in these reports, so merging native
-extra reports cannot make executed library properties appear uncovered because their files were
-filtered. Executing a crate's tests does not include that crate in a report whose package selection
-names only the root package. Filtering happens in the merge, not in the exports: the coverage job
-runs `just coverage-merge` over the `coverage-tests`, `coverage-scenarios` and
-`coverage-native-extras` artifacts, which maps every record onto the files tracked at the tested
-revision, drops dependency, toolchain and generated records by class, leaves out the native
-collections of other modes, and fails rather than publish a report that misses an input or a
-workspace member. It passes that one report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. Patch coverage and comment
-publication are advisory and never change the build verdict. The complexity verdict is the
-`just ratchet` count of functions above cyclomatic complexity 30, which the `checks` job enforces
-and which reads no coverage.
-The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
-artifact retains the report, its merge record `target/coverage-merge/record.json` and
-`target/patch-coverage.md`. The `coverage-full` job later reads that report unchanged and adds the
-modeled, diagnostic and fuzz collections the run selected; their counters never enter the ordinary
-report, its patch coverage or its CRAP report.
+[Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the producer catalog,
+export flags, checkout-root mapping, tracked-source policy, ordinary merge record and integrity
+failures. That chapter also owns the advisory patch/CRAP reports and the separate deterministic
+complexity verdict. The `coverage-merged` artifact retains the ordinary report, its merge record
+and both advisory reports. The `coverage-full` job later reads that report unchanged and adds the
+modeled, diagnostic and fuzz collections the run selected to form the
+[full workspace union](./coverage-reports.md#the-full-workspace-union); their counters never enter
+the ordinary report, its patch coverage or its CRAP report.
+
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
 deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
 The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
 Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
-The merge reads each producer's checkout path explicitly when it maps LCOV sources from Blacksmith
-onto files on its GitHub-hosted runner.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |

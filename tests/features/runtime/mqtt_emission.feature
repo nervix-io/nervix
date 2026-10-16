@@ -162,3 +162,88 @@ Feature: MQTT emission
       | 3            |                                    | {"user_id":42}   |
       | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
       | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+
+  # One MQTT message carries four records, which the ingest codec splits into one batch, so the
+  # emitter hands all four to its client in one publish. The endpoint drops the first record's
+  # PUBLISH: the broker confirms the other three and never sees or answers the first. When the
+  # first record's answer misses ACK TIMEOUT, the confirmation window settles the answers the
+  # broker gave, so the emitter sends again only the first record.
+  @mqtt_emitter_confirmation_window
+  Scenario Outline: An MQTT <mode> emitter sends again only the record its broker never answered
+    Given MQTT is running
+    And an MQTT endpoint that drops chosen publishes is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MQTT topic "window_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_batch_codec FROM JSON TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-window-ingress-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'window_in_{{test_id}}' MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_batch_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_filtered_addr}}',
+        'client_id' = 'nervix-window-emitter-{{test_id}}'
+      };
+      CREATE EMITTER window_out FROM notifications
+        TO MQTT mqtt_sink TOPIC window_out_{{test_id}}
+          MODE <mode> ACK PARALLEL MAX 8 ACK TIMEOUT 10s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And the MQTT endpoint drops every publish carrying
+      """
+      {"user_id":1}
+      """
+    And MQTT message is published to topic "window_in_{{test_id}}"
+      """
+      [{"user_id":1},{"user_id":2},{"user_id":3},{"user_id":4}]
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"user_id":2}
+      {"user_id":3}
+      {"user_id":4}
+      """
+    And within "60s" DESCRIBE EMITTER "window_out" on the leader node contains
+      """
+      transient error: the broker did not answer within ACK TIMEOUT 10s
+      """
+    When the MQTT endpoint forwards every publish
+    Then within "60s" the observed broker receives exactly these payloads
+      """
+      {"user_id":1}
+      """
+
+    Examples:
+      | cluster_size | mode  |
+      | 1            | QOS 1 |
+      | 3            | QOS 1 |
+      | 1            | QOS 2 |
+      | 3            | QOS 2 |

@@ -88,8 +88,9 @@ pinned analyzer measures it: cargo-crap at the version `scripts/cargo_crap.py` d
 build the advisory CRAP report of `just check-coverage` runs. `just install-cargo-crap` builds that
 version with `cargo install --locked` into `target/tools/cargo-crap-<version>/`, through the
 compiler wrapper the host configures, and keeps a build that is already there. `just ratchet`,
-`just test-ratchet-units` and `just check-coverage` depend on it, and the CI `checks` and
-`coverage` jobs build it through kache. A binary that reports another version is refused with
+`just test-ratchet-units`, `just check-coverage`, `just test-crap-report` and
+`just coverage-crap-report-runner` depend on it, and the CI `checks`, `coverage` and `extra-tests`
+jobs build it through kache. A binary that reports another version is refused with
 the command that installs the pinned one; a different version in `PATH` is never used.
 
 The complexity is classical McCabe: one, plus one for every `if`, `for`, `while`, `loop`, `match`

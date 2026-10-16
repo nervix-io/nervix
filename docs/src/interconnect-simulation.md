@@ -73,6 +73,10 @@ through requests, snapshots, and outcomes.
 
 ## Build Modes
 
+[Execution Primitives](./execution-primitives.md) owns backend and target selection, permission
+contracts and the difference between compile-time probes and actual execution evidence. This
+chapter owns what the Turmoil hosts simulate, the faults and the completed scenario evidence.
+
 The simulation is its own build. Its scheduler replaces the real network, so it can never share a
 compilation with the production or Shuttle builds.
 
@@ -516,7 +520,7 @@ a successful report. Coverage percentages and comment failures remain advisory; 
 replay and collection verdicts remain mandatory. The ordinary coverage/CRAP job uses ordinary
 reports only. For a pull request labeled `turmoil`, the `coverage-full` job requires this job's
 success and its complete collection, and adds the collection's lines, attributed to Turmoil, to the
-[full workspace union](./developing-nervix.md#the-full-workspace-union). `just coverage-turmoil
+[full workspace union](./coverage-reports.md#the-full-workspace-union). `just coverage-turmoil
 <output>` uses this same collector for local inspection.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so

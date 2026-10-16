@@ -140,6 +140,8 @@ error, records it as evidence, and exits with `3`, or with `4` when the recordin
 running a destructor, an exit handler or a remaining phase, as
 [Diagnostic deadlock detection](./data-plane-concurrency.md#diagnostic-deadlock-detection)
 describes. Its durable state recovers as after any forced exit.
+[Execution Primitives](./execution-primitives.md#builds-modes-and-product-binaries) owns how the
+diagnostic binary is selected and why it is a separate artifact from an ordinary release.
 
 ## Terminating Incarnation And Placement Eligibility
 
@@ -587,6 +589,14 @@ schedule, activation fails and leaves every saved checkpoint unchanged. State is
 the accepted decision either stages a recreated inventory or reports a reset for every state
 component the entity owns.
 
+The destination first waits for the execution schedule it validates to finish installing, within
+the existing five-second preparation deadline. Lifecycle state can be published before the graph,
+so recovery also orders its schedule read after local application completes. A missing startup
+execution is a wait for installation, rather than evidence that the replica lacks checkpoints.
+An installed schedule with a different fingerprint still refuses preparation. Expiry identifies
+the domain and scheduled entity as an installation deadline failure; the existing failed-preparation
+recreation policy remains in effect.
+
 A forced recovery of a WASM processor starts a new guest-state generation for every branch in the
 same schedule publication, and activation publishes the staged checkpoints in that generation. The
 former owner's saves, and those of any replica that missed the recovery, belong to the generation it
@@ -646,11 +656,26 @@ reaches its completion point before the process ends.
 
 ### Sources
 
-Acknowledgements and commits complete before the source session stops, for work that reached its
-sinks. A Kafka consumer-group offset is committed during the drain once the records it covers have
-been acknowledged through the graph. Work whose acknowledgement root is still unresolved when the
-drain ends is negatively acknowledged, so the source's own redelivery contract applies. This is why
-a drain that times out leaves Kafka offsets uncommitted rather than advancing them.
+An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
+waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
+is reported and the socket is released; the shutdown deadline still bounds the surrounding
+lifecycle. This protocol handshake does not acknowledge payload delivery or add redelivery.
+
+A source acknowledges or commits the work that reached its sinks before its session stops. A batch
+acknowledged through the graph stays outstanding admitted work until its source has confirmed the
+batch's positions on its transport, so the drain waits for that confirmation as it waits for any
+other acknowledgement root, within the drain timeout. What a source's confirmation means is the
+acknowledgement confirmation its entity declares; see
+[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion
+is answered by the broker and a RabbitMQ acknowledgement is written to the connection before the
+drain moves on, while a Kafka consumer-group commit, a Pulsar acknowledgement and an MQTT `PUBACK`
+are only queued by their clients, so the drain does not wait for their brokers to answer them.
+
+Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
+so the source's own redelivery contract applies. A source instance that stops while it still waits
+on such a batch logs `source instance stopped before its transport confirmed positions it read; the
+transport presents them again` at `info`, with the count of positions. This is why a drain that
+times out leaves Kafka offsets uncommitted rather than advancing them.
 
 What that contract is depends on the source, and three groups differ sharply:
 
@@ -884,8 +909,10 @@ snapshot interval. Restore streams its complete sealed container into the genera
 including containers larger than the bulk memory budget. `RESUME` activates the archived domain
 generation only after every assigned owner and replica has published its complete set. These
 rows reopen from one pinned database snapshot across a node restart; the stored clock mapping
-projects downtime under the recovered authority. A failed installation retains its durable
-activation gate across restart. A normal `START` creates a new generation and clears materialized
+projects downtime under the recovered authority. The materializer's nonpersisted branch activity
+registry starts at that task's activation time in the recovered domain clock, giving restored
+branches a full idle lifetime while preserving their record event watermarks. A failed installation
+retains its durable activation gate across restart. A normal `START` creates a new generation and clears materialized
 rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
@@ -1135,6 +1162,11 @@ node itself when it leads, and carry the leader's account of each moved unit as 
 `timed out clearing shutdown drain cordon` carries the `timeout` the release waited. Each phase
 record carries its outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
 or forced one.
+
+A source instance that stops before its transport confirmed positions it read records
+`source instance stopped before its transport confirmed positions it read; the transport presents
+them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
+`positions`.
 
 Runtime teardown records every domain task it had to abort, at `warn`:
 `shutdown task exceeded grace period; aborting` carries the `domain`, the task's entity as

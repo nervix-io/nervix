@@ -129,7 +129,8 @@ class Run:
         self, records: Mapping[str, Mapping[int, int]] = ORDINARY_LINES, *, verdict: str = "complete",
         revision: str | None = None, merged: Mapping[str, str] | None = None, run: str = RUN,
     ) -> Path:
-        """The coverage job's coverage-merged artifact: the merged report and its merge record."""
+        """The coverage job's coverage-merged artifact: the merged report and its merge record, beside
+        the patch coverage and CRAP reports the artifact also carries and the union does not read."""
         directory = self.inputs / "coverage-merged"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "lcov-workspace.info").write_text(lcov(records))
@@ -153,6 +154,11 @@ class Run:
         record_path = directory / "target/coverage-merge/record.json"
         record_path.parent.mkdir(parents=True, exist_ok=True)
         record_path.write_text(json.dumps(record))
+        (directory / "target/patch-coverage.md").write_text("## Patch line coverage\n")
+        crap = directory / "target/crap-report"
+        crap.mkdir(parents=True, exist_ok=True)
+        (crap / "crap.json").write_text(json.dumps({"verdict": "complete", "report": "lcov-workspace.info"}))
+        (crap / "crap.md").write_text("## CRAP report\n")
         return directory
 
     def collection(
@@ -1094,6 +1100,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("name: coverage-bolero-fuzz\n", bolero)
         self.assertIn("name: bolero-selection\n", bolero)
         self.assertIn("contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')", bolero)
+
+    def test_the_coverage_job_retains_the_ordinary_report_and_merge_record_the_union_reads(self) -> None:
+        upload = step_section(job_section(self.workflow, "coverage"), "Upload merged coverage")
+        self.assertIn("name: coverage-merged\n", upload)
+        for path in (coverage_full.WORKSPACE_REPORT, coverage_full.MERGE_RECORD):
+            self.assertIn(f"            {path}\n", upload)
 
     def test_ci_measures_the_unions_own_tooling(self) -> None:
         runner = recipe_body(self.justfile, "coverage-full-runner")

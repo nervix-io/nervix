@@ -123,6 +123,10 @@ struct FaultInjectionState {
     /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
     /// cordon that node's own graceful shutdown drain set.
     delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
+    /// Waits, keyed by an ingestor, that its source hosts spend between learning that a batch was
+    /// acknowledged through the graph and letting the source confirm the batch's positions on its
+    /// transport, as a transport slow to answer an acknowledgement would.
+    delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot failures after earlier restore checkpoints have reached the receiving node.
@@ -320,6 +324,7 @@ enum RemoteAcknowledgementLoss {
 enum CommandPausePoint {
     Admission(ClusterNodeName),
     RuntimeInstallation(ClusterNodeName),
+    ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
@@ -396,6 +401,7 @@ impl Default for FaultInjection {
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
+                delayed_source_confirmations: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 failed_restore_state_installations: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -1103,6 +1109,16 @@ impl FaultInjection {
             .insert(stopping_node, delay);
     }
 
+    /// Makes every source host of `ingestor` wait `delay` after a batch was acknowledged through
+    /// the graph before its source confirms the batch's positions on its transport, as a transport
+    /// slow to answer an acknowledgement would. A host reads the delay as it starts, so a scenario
+    /// arms it before the ingestor starts.
+    pub fn delay_source_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
+        self.inner
+            .delayed_source_confirmations
+            .insert(ingestor, delay);
+    }
+
     /// Fails the next resource version `node_id` installs, after the node installed and published
     /// the version and before the upload is promoted, so a scenario can produce a failed version
     /// whose archive is present.
@@ -1320,6 +1336,34 @@ impl FaultInjection {
 
     pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
+    /// Resume a held initial installation only after forced recovery observes its missing
+    /// schedule. The observation precedes release, so the fixture never races two scenario steps
+    /// against the recovery budget.
+    pub fn resume_installation_after_missing_recovery_schedule(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ForcedRecoveryMissingSchedule(node_id));
+    }
+
+    pub async fn wait_for_missing_recovery_schedule(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ForcedRecoveryMissingSchedule(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub(crate) fn missing_recovery_schedule_if_armed(&self, node_id: &ClusterNodeName) {
+        let point = CommandPausePoint::ForcedRecoveryMissingSchedule(node_id.clone());
+        let pause = match self.inner.command_pauses.get(&point) {
+            Some(pause) => pause.value().clone(),
+            None => return,
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        self.release_runtime_installation_pause(node_id);
+        // Keep the one-shot observation until the scenario observes it or finishes cleanup.
     }
 
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
@@ -2130,6 +2174,11 @@ impl FaultInjection {
             .delayed_shutdown_cordon_releases
             .remove(stopping_node)?;
         Some(delay)
+    }
+
+    pub(crate) fn source_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
+        let delay = self.inner.delayed_source_confirmations.get(ingestor)?;
+        Some(*delay)
     }
 
     /// Record the executor whose workers a scenario may fill.
