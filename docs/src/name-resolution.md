@@ -72,7 +72,7 @@ blocking pool, so a slow filesystem never stalls a reactor thread, and then buil
 resolver on the node's Tokio runtime. The read is one of the declared owners of the blocking pool
 outside the bounded executor, because a node loads its resolver before it builds its executor and a
 client tool loads the same resolver without one; see
-[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
 or hosts file takes effect when the node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
@@ -433,7 +433,7 @@ Nervix-authored code cannot reach the operating system's resolver at all.
 `just validate-primitive-boundary`, also part of `just validate`, rejects `tokio::net::lookup_host`
 and the `ToSocketAddrs` traits wherever Nervix code names them, and the primitive boundary's sockets
 offer a lookup only in the Turmoil build, where it answers from the simulated DNS table, as
-[Execution-Sensitive Primitives](./data-plane-concurrency.md#execution-sensitive-primitives)
+[Execution Primitives](./execution-primitives.md)
 describes. A dependency that resolves inside itself is outside that check, which is why [Residual
 Resolution](#residual-resolution) lists each one.
 

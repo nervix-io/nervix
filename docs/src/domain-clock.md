@@ -658,7 +658,8 @@ contract, which the runtime and every connector crate share, so a connector stam
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
-Physical monotonic time is measured with the timers and instants of the primitive boundary,
+Physical monotonic time is measured with the timers and instants of the
+[primitive boundary](./execution-primitives.md),
 `nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
 permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
 deadline armed on its timer stays logical, as described above. Its timers follow the clock of the

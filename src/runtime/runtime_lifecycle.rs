@@ -757,42 +757,6 @@ impl Runtime {
         self.inner.replicated_branch_aggregated_states.clear();
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "running tasks borrow retained node services or await their selected \
-                      acknowledgement root"
-        )
-    )]
-    pub(in crate::runtime) async fn await_ack_completion(
-        shutdown_rx: &mut watch::Receiver<bool>,
-        mut completion: AckCompletion,
-        timeout_duration: Duration,
-    ) -> Option<AckOutcome> {
-        loop {
-            nervix_primitives::select! {
-                // A signalled stop and a dropped sender both end this wait, so the outcome
-                // carries nothing the caller could act on differently.
-                _ = shutdown_rx.changed() => {
-                    return None;
-                }
-                progress = nervix_primitives::time::timeout(timeout_duration, completion.wait_for_progress()) => {
-                    match progress {
-                        Ok(AckProgress::Alive) => {}
-                        Ok(AckProgress::Complete(outcome)) => return Some(outcome),
-                        Err(_) => {
-                            return Some(AckOutcome::NoAck(format!(
-                                "ack timeout elapsed after {}",
-                                humantime::format_duration(timeout_duration)
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     pub(in crate::runtime) async fn await_shutdown_task(
         task: JoinHandle<()>,
         domain: &DomainName,
