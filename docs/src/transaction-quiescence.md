@@ -258,8 +258,8 @@ Ownership-handoff engagement confirms the closed admission hold and requested fl
 coordinator observes each exact operation's pending drain before capture; a drained response
 publishes the participant's capture freeze. A drain timeout keeps the pending node and work counts
 and releases attempted holds before independent schedule units continue. Retrying a two-second
-engagement reply timeout waits on the same receiver-owned identity, adds no pause attempt and
-extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
+engagement reply timeout, or a request whose interconnect stream broke, waits on the same
+receiver-owned identity, adds no pause attempt and extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
 participant.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is

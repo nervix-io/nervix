@@ -337,8 +337,11 @@ The coordinator then queries the exact operation's drain status. A participant p
 freeze before returning a drained status, and capture requires that coordination identity's freeze
 in addition to its held gate. Pending status retains the work counts used by timeout diagnostics.
 Each engagement request keeps the two-second reply bound; a typed timeout retries the same identity
-and complete scope within the original preparation deadline. A retry observes the existing
-receiver-owned operation and lease. Other request failures keep their existing classification.
+and complete scope within the original preparation deadline. A transport failure, such as a stream
+that broke, leaves delivery as uncertain as a lost reply, so it retries the same identity and scope
+too, after a 100-millisecond pause that gives the connection time to be replaced. A retry observes
+the existing receiver-owned operation and lease. Other request failures keep their existing
+classification.
 
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand

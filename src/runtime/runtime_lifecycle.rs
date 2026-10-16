@@ -323,6 +323,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_handoff_engagement_transport_failure(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_handoff_engagement_transport_failure(domain)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
         self.inner
             .fault_injection

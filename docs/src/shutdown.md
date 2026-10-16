@@ -525,7 +525,9 @@ Frozen owners retain state until capture and activation finish. Preparation reta
 deadline, distinct from the activation lease. A pending-drain timeout reports its node and counts,
 releases every attempted hold, and leaves independent schedule units available for later moves.
 Repeated engagement requests use the same identity and scope; a bounded reply timeout creates
-no additional flush and restarts no lease.
+no additional flush and restarts no lease. A request whose interconnect stream broke is retried the
+same way within the preparation deadline, so one lost connection to any participant does not fail
+the unit while preparation time remains.
 
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated

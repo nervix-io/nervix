@@ -8353,6 +8353,41 @@ async fn given_next_entity_gate_engagement_is_rejected(world: &mut ScenarioWorld
         .fail_next_entity_gate_engagement(domain);
 }
 
+#[given(
+    expr = "the next ownership handoff gate engagement request in domain {string} breaks in \
+            transport"
+)]
+async fn given_next_handoff_engagement_request_breaks_in_transport(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .break_next_handoff_engagement_transport(domain);
+}
+
+#[then(
+    expr = "the broken ownership handoff gate engagement request in domain {string} was delivered"
+)]
+async fn then_broken_handoff_engagement_request_was_delivered(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .handoff_engagement_transport_failure_delivered(&domain),
+        "no ownership handoff gate engagement request in domain {domain} met the armed transport \
+         failure"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
