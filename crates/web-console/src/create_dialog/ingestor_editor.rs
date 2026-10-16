@@ -12,7 +12,11 @@
 )]
 
 use leptos::prelude::*;
-use nervix_models::{IngestQuiesceOverflow, IngestSourceKind, MqttQos, MqttSession};
+use nervix_models::{
+    HttpSourceEntity, IngestQuiesceOverflow, IngestSourceKind, KafkaSourceEntity, MqttQos,
+    MqttSession, MqttSourceEntity, NatsSourceEntity, PrometheusSourceEntity, PulsarSourceEntity,
+    RabbitMqSourceEntity, RedisSourceEntity, SqsSourceEntity,
+};
 
 use super::{
     ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_textarea_value,
@@ -163,7 +167,10 @@ pub(super) fn IngestorEditor(
         let source = &signals.ingestor.get().source;
         matches!(
             source.kind,
-            Some(IngestSourceKind::RabbitMq | IngestSourceKind::Sqs)
+            Some(
+                IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue)
+                    | IngestSourceKind::Sqs(SqsSourceEntity::Queue)
+            )
         ) || source.delivery.is_some_and(DeliveryChoice::acknowledged)
     };
     view! {
@@ -180,7 +187,7 @@ pub(super) fn IngestorEditor(
         </label>
         <fieldset class="create-field create-ingestor-source">
             <legend>"Source type"</legend>
-            <For each=|| IngestSourceKind::ALL.into_iter()
+            <For each=IngestSourceKind::modeled
                 key=|kind| kind.form_key()
                 children=move |kind| view! {
                     <button type="button" data-source=kind.form_key()
@@ -197,32 +204,32 @@ pub(super) fn IngestorEditor(
                 control=ChoiceControl::IngestSourceRef signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
         </Show>
-        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::Kafka | IngestSourceKind::Pulsar | IngestSourceKind::Mqtt)) fallback=|| ()>
+        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::Kafka(KafkaSourceEntity::Topic) | IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) | IngestSourceKind::Mqtt(MqttSourceEntity::Topic))) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Topic />
         </Show>
-        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::RabbitMq | IngestSourceKind::Sqs)) fallback=|| ()>
+        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) | IngestSourceKind::Sqs(SqsSourceEntity::Queue))) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Queue />
         </Show>
-        <Show when=move || source_kind() == Some(IngestSourceKind::RedisPubSub) fallback=|| ()>
+        <Show when=move || source_kind() == Some(IngestSourceKind::Redis(RedisSourceEntity::PubSub)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Channel />
         </Show>
-        <Show when=move || source_kind() == Some(IngestSourceKind::Nats) fallback=|| ()>
+        <Show when=move || source_kind() == Some(IngestSourceKind::Nats(NatsSourceEntity::Subject)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Subject />
             <SourceFieldEditor signals=signals field=SourceField::QueueGroup />
         </Show>
-        <Show when=move || source_kind() == Some(IngestSourceKind::Pulsar) fallback=|| ()>
+        <Show when=move || source_kind() == Some(IngestSourceKind::Pulsar(PulsarSourceEntity::Topic)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Subscription />
         </Show>
-        <Show when=move || source_kind() == Some(IngestSourceKind::Prometheus) fallback=|| ()>
+        <Show when=move || source_kind() == Some(IngestSourceKind::Prometheus(PrometheusSourceEntity::Query)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Query />
         </Show>
-        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::Http | IngestSourceKind::Prometheus)) fallback=|| ()>
+        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::Http(HttpSourceEntity::Request) | IngestSourceKind::Prometheus(PrometheusSourceEntity::Query))) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Every />
         </Show>
-        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::Kafka | IngestSourceKind::Pulsar | IngestSourceKind::Mqtt | IngestSourceKind::Nats | IngestSourceKind::RabbitMq | IngestSourceKind::Sqs)) fallback=|| ()>
+        <Show when=move || matches!(source_kind(), Some(IngestSourceKind::Kafka(KafkaSourceEntity::Topic) | IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) | IngestSourceKind::Mqtt(MqttSourceEntity::Topic) | IngestSourceKind::Nats(NatsSourceEntity::Subject) | IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) | IngestSourceKind::Sqs(SqsSourceEntity::Queue))) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Instances />
         </Show>
-        <Show when=move || source_kind() == Some(IngestSourceKind::Kafka) fallback=|| ()>
+        <Show when=move || source_kind() == Some(IngestSourceKind::Kafka(KafkaSourceEntity::Topic)) fallback=|| ()>
             <fieldset class="create-field create-ingestor-offset">
                 <legend>"Offset ownership"</legend>
                 <button type="button" data-offset="domain"
@@ -257,7 +264,7 @@ pub(super) fn IngestorEditor(
                                     || (source.available_modes().len() == 1
                                         && source.available_modes().first() == Some(&mode))
                             }
-                            disabled=move || pending() || !matches!(source_kind(), Some(IngestSourceKind::Kafka | IngestSourceKind::Pulsar | IngestSourceKind::Mqtt))
+                            disabled=move || pending() || !matches!(source_kind(), Some(IngestSourceKind::Kafka(KafkaSourceEntity::Topic) | IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) | IngestSourceKind::Mqtt(MqttSourceEntity::Topic)))
                             on:click=move |_| {
                                 signals.ingestor.update(|draft| draft.source.delivery = Some(mode));
                                 signals.edit();
@@ -265,7 +272,7 @@ pub(super) fn IngestorEditor(
                     } />
             </fieldset>
         </Show>
-        <Show when=move || source_kind() == Some(IngestSourceKind::Mqtt) fallback=|| ()>
+        <Show when=move || source_kind() == Some(IngestSourceKind::Mqtt(MqttSourceEntity::Topic)) fallback=|| ()>
             <fieldset class="create-field create-ingestor-mqtt-session">
                 <legend>"MQTT session"</legend>
                 <button type="button" data-session="clean" class:active=move || signals.ingestor.get().source.mqtt_session == Some(MqttSession::Clean)
@@ -299,7 +306,7 @@ pub(super) fn IngestorEditor(
                         <button type="button" data-quiesce=choice.key()
                             class:active=move || signals.ingestor.get().source.quiesce == Some(choice)
                             disabled=move || pending() || (choice == QuiesceChoice::Suspend
-                                && source_kind() == Some(IngestSourceKind::Mqtt)
+                                && source_kind() == Some(IngestSourceKind::Mqtt(MqttSourceEntity::Topic))
                                 && (signals.ingestor.get().source.mqtt_session != Some(MqttSession::Persistent)
                                     || signals.ingestor.get().source.mqtt_qos != Some(MqttQos::AtLeastOnce)))
                             on:click=move |_| {
@@ -311,7 +318,7 @@ pub(super) fn IngestorEditor(
         </Show>
         <Show when=move || signals.ingestor.get().source.quiesce == Some(QuiesceChoice::Buffer) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::BufferSize />
-            <Show when=move || source_kind() != Some(IngestSourceKind::Endpoint) fallback=|| ()>
+            <Show when=move || !signals.ingestor.get().source.reads_endpoint() fallback=|| ()>
                 <fieldset class="create-field create-ingestor-overflow">
                     <legend>"On overflow"</legend>
                     <button type="button" data-overflow="oldest" class:active=move || signals.ingestor.get().source.overflow == Some(IngestQuiesceOverflow::DropOldest)

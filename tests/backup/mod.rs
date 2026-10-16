@@ -20,6 +20,7 @@ use super::*;
 use crate::common::{
     cluster::test_basic_authorization,
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
+    runner_offload::off_the_runner,
 };
 
 mod branch_keys;
@@ -59,6 +60,18 @@ fn archive_path(world: &mut ScenarioWorld, name: &str) -> PathBuf {
             .expect("the scenario's backup directory is created")
     });
     directory.path().join(name)
+}
+
+/// Reads, verifies and describes the archive at `path`. A scenario's archive can hold hundreds of
+/// MiB, so the work runs on a blocking task rather than the runner task every scenario shares.
+async fn described_archive(path: PathBuf) -> nervix_backup::ArchiveDescription {
+    off_the_runner(move || {
+        let file = std::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("archive {} opens: {error}", path.display()));
+        nervix_backup::describe_archive(file)
+            .unwrap_or_else(|report| panic!("archive {} verifies: {report:?}", path.display()))
+    })
+    .await
 }
 
 fn scenario_domain(world: &ScenarioWorld, raw: &str) -> DomainName {
@@ -256,7 +269,7 @@ fn then_backup_reports_dropped_records(world: &mut ScenarioWorld, minimum: u64) 
 }
 
 #[then(expr = "the CLI backup succeeded with a JSON report naming domain {string}")]
-fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
+async fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     let output = last_cli_output(world);
     assert!(
@@ -278,24 +291,29 @@ fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
             .as_str()
             .expect("the report names its output"),
     );
-    let bytes = std::fs::read(&path).expect("the reported archive exists");
-    let length = u64::try_from(bytes.len()).expect("an archive length fits 64 bits");
-    assert_eq!(
-        Some(length),
-        report["total_bytes"].as_u64(),
-        "the archive has its reported size"
-    );
-    assert_eq!(
-        Some(blake3::hash(&bytes).to_hex().as_str()),
-        report["blake3"].as_str(),
-        "the archive has its reported digest"
-    );
-    use std::os::unix::fs::PermissionsExt as _;
-    let mode = std::fs::metadata(&path)
-        .expect("the archive's metadata is readable")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600, "only the owner may read an archive");
+    let reported_length = report["total_bytes"].as_u64();
+    let reported_digest = report["blake3"].as_str().map(ToOwned::to_owned);
+    off_the_runner(move || {
+        let bytes = std::fs::read(&path).expect("the reported archive exists");
+        let length = u64::try_from(bytes.len()).expect("an archive length fits 64 bits");
+        assert_eq!(
+            Some(length),
+            reported_length,
+            "the archive has its reported size"
+        );
+        assert_eq!(
+            Some(blake3::hash(&bytes).to_hex().as_str()),
+            reported_digest.as_deref(),
+            "the archive has its reported digest"
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path)
+            .expect("the archive's metadata is readable")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "only the owner may read an archive");
+    })
+    .await;
 }
 
 #[then("the CLI backup succeeded with a JSON report naming no domain")]
@@ -388,17 +406,20 @@ impl SectionVisitor for ModelsCollector {
     }
 }
 
-/// The NSPL an archive holds for `domain`.
-fn archived_models(path: &Path, domain: &DomainName) -> String {
-    let file = std::fs::File::open(path).expect("the archive exists");
-    let mut collector = ModelsCollector::default();
-    read_archive(std::io::BufReader::new(file), &mut collector)
-        .unwrap_or_else(|report| panic!("the archive verifies: {report:?}"));
-    let models_path = nervix_backup::SectionPath::domain_models(domain).to_string();
-    collector
-        .documents
-        .remove(&models_path)
-        .unwrap_or_else(|| panic!("the archive holds '{models_path}'"))
+/// The NSPL an archive holds for `domain`, read after the whole archive verifies on a blocking task.
+async fn archived_models(path: PathBuf, domain: DomainName) -> String {
+    off_the_runner(move || {
+        let file = std::fs::File::open(&path).expect("the archive exists");
+        let mut collector = ModelsCollector::default();
+        read_archive(std::io::BufReader::new(file), &mut collector)
+            .unwrap_or_else(|report| panic!("the archive verifies: {report:?}"));
+        let models_path = nervix_backup::SectionPath::domain_models(&domain).to_string();
+        collector
+            .documents
+            .remove(&models_path)
+            .unwrap_or_else(|| panic!("the archive holds '{models_path}'"))
+    })
+    .await
 }
 
 /// The canonical NSPL of every model `source` creates, in name order.
@@ -424,7 +445,7 @@ fn created_models(source: &str) -> Vec<String> {
     expr = "backup archive {string} holds for domain {string} exactly the models these NSPL \
             commands create"
 )]
-fn then_archive_holds_exactly_the_models(
+async fn then_archive_holds_exactly_the_models(
     world: &mut ScenarioWorld,
     file: String,
     domain: String,
@@ -432,7 +453,7 @@ fn then_archive_holds_exactly_the_models(
 ) {
     let path = archive_path(world, &file);
     let domain = scenario_domain(world, &domain);
-    let archived = archived_models(&path, &domain);
+    let archived = archived_models(path, domain).await;
     let expected = created_models(&expand_placeholders(world, docstring(step)));
     assert_eq!(
         created_models(&archived),
@@ -445,7 +466,7 @@ fn then_archive_holds_exactly_the_models(
     expr = "backup archive {string} holds for domain {string} schema {string} and relays {string} \
             numbered contiguously from 1"
 )]
-fn then_archive_holds_a_contiguous_run(
+async fn then_archive_holds_a_contiguous_run(
     world: &mut ScenarioWorld,
     file: String,
     domain: String,
@@ -454,7 +475,7 @@ fn then_archive_holds_a_contiguous_run(
 ) {
     let path = archive_path(world, &file);
     let domain = scenario_domain(world, &domain);
-    let archived = archived_models(&path, &domain);
+    let archived = archived_models(path, domain).await;
     let statements = parse_client_statements(&archived)
         .unwrap_or_else(|error| panic!("models.nspl parses: {error:?}\n{archived}"));
     let mut schema_found = false;
@@ -659,17 +680,22 @@ async fn given_resource_directory_holding_a_large_file(
         .node_base_dir(&node_id)
         .expect("the node has a base directory");
     let resource_dir = base_dir.join("fixtures").join(&placeholder);
-    std::fs::create_dir_all(&resource_dir).expect("the fixture directory is created");
-    // Varied bytes, so nothing between the client and the archive can shrink them.
-    let mut bytes = Vec::with_capacity(mebibytes * 1024 * 1024);
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    while bytes.len() < mebibytes * 1024 * 1024 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        bytes.extend_from_slice(&state.to_le_bytes());
-    }
-    std::fs::write(resource_dir.join("payload.bin"), bytes).expect("the fixture file is written");
+    let fixture_dir = resource_dir.clone();
+    off_the_runner(move || {
+        std::fs::create_dir_all(&fixture_dir).expect("the fixture directory is created");
+        // Varied bytes, so nothing between the client and the archive can shrink them.
+        let mut bytes = Vec::with_capacity(mebibytes * 1024 * 1024);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        while bytes.len() < mebibytes * 1024 * 1024 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.extend_from_slice(&state.to_le_bytes());
+        }
+        std::fs::write(fixture_dir.join("payload.bin"), bytes)
+            .expect("the fixture file is written");
+    })
+    .await;
     world
         .placeholders
         .insert(placeholder, resource_dir.display().to_string());
@@ -827,16 +853,20 @@ async fn when_cli_backs_up_to_standard_output(
 #[then(
     "the archive the CLI wrote to standard output verifies and its report went to standard error"
 )]
-fn then_standard_output_holds_the_archive(world: &mut ScenarioWorld) {
+async fn then_standard_output_holds_the_archive(world: &mut ScenarioWorld) {
     let output = last_cli_output(world);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
         "the backup failed: status {}; stderr: {stderr}",
         output.status
     );
-    nervix_backup::describe_archive(output.stdout.as_slice())
-        .unwrap_or_else(|report| panic!("standard output holds a valid archive: {report:?}"));
+    let archive = output.stdout.clone();
+    off_the_runner(move || {
+        nervix_backup::describe_archive(archive.as_slice())
+            .unwrap_or_else(|report| panic!("standard output holds a valid archive: {report:?}"))
+    })
+    .await;
     assert!(
         stderr.contains("backed up domain"),
         "the report went to standard error: {stderr}"
@@ -967,7 +997,7 @@ async fn when_backup_retry_validity_has_ended(world: &mut ScenarioWorld) {
     expr = "backup archive {string} is copied to {string} with its manifest's record {word} set \
             to {int}"
 )]
-fn when_archive_is_copied_with_a_foreign_header(
+async fn when_archive_is_copied_with_a_foreign_header(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -976,11 +1006,6 @@ fn when_archive_is_copied_with_a_foreign_header(
 ) {
     let source = archive_path(world, &source);
     let target = archive_path(world, &target);
-    let mut bytes = Vec::new();
-    std::fs::File::open(&source)
-        .expect("the source archive exists")
-        .read_to_end(&mut bytes)
-        .expect("the source archive is readable");
     // The manifest is the first entry: its 512-byte tar header, then its record, whose header is
     // an eight-byte magic, a little-endian kind tag, and a little-endian format version.
     let offset = match field.as_str() {
@@ -988,6 +1013,14 @@ fn when_archive_is_copied_with_a_foreign_header(
         "version" => 512 + 8 + 2,
         other => panic!("a record header has no field '{other}'"),
     };
-    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-    std::fs::write(&target, bytes).expect("the altered archive is written");
+    off_the_runner(move || {
+        let mut bytes = Vec::new();
+        std::fs::File::open(&source)
+            .expect("the source archive exists")
+            .read_to_end(&mut bytes)
+            .expect("the source archive is readable");
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        std::fs::write(&target, bytes).expect("the altered archive is written");
+    })
+    .await;
 }

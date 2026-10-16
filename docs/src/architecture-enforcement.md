@@ -7,13 +7,13 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The three structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The four structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
 ## Rule Contracts
 
-The fourteen rule families below have one implementation each. The family name remains useful
+The fifteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
@@ -33,6 +33,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
+| `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
 `map_or_else`, `ok_or`, `ok_or_else`, `or_else`, `unwrap_or`, `unwrap_or_default` and
@@ -59,10 +60,10 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The three
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The four
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
-file size but are excluded from cast/field debt. Test-only items are excluded from those two
+file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
 syntax counts. Other inactive configuration branches remain visible. These exclusions belong
 to these counts; they do not exempt a file from the primitive, manifest, clock or language
 provenance validators, which own their broader authored-source contracts.
@@ -79,6 +80,50 @@ The parser requires no rustc internals or analysis driver. `just typed-ratchet-s
 builds it on the stable toolchain. Native compiler coverage builds it on that producer's pinned
 toolchain so LLVM profiles and exporters match. The tooling workspace stays outside product
 dependencies, including browser and ordinary release graphs.
+
+## Function Complexity
+
+`functions_over_complexity_30` counts the functions whose cyclomatic complexity exceeds 30, as one
+pinned analyzer measures it: cargo-crap at the version `scripts/cargo_crap.py` declares, the same
+build the advisory CRAP report of `just check-coverage` runs. `just install-cargo-crap` builds that
+version with `cargo install --locked` into `target/tools/cargo-crap-<version>/`, through the
+compiler wrapper the host configures, and keeps a build that is already there. `just ratchet`,
+`just test-ratchet-units`, `just check-coverage`, `just test-crap-report` and
+`just coverage-crap-report-runner` depend on it, and the CI `checks`, `coverage` and `extra-tests`
+jobs build it through kache. A binary that reports another version is refused with
+the command that installs the pinned one; a different version in `PATH` is never used.
+
+The complexity is classical McCabe: one, plus one for every `if`, `for`, `while`, `loop`, `match`
+arm, `&&`, `||` and `?`. A function at exactly 30 is not counted and one at 31 is. Growing a
+function that already exceeds 30 leaves the count unchanged; a new function above 30, or one that
+crosses it, raises the count.
+
+The analyzer walks the repository root with the eligibility above. It reads syntax and expands
+nothing, so these are outside the count:
+
+- a `#[test]` function and everything inside a `#[cfg(test)]` module;
+- a function inside a macro, whether an authored `macro_rules!` body or an invoked item macro such
+  as `cfg_if!`;
+- the body of a trait's provided method;
+- a function nested in another function's body, and the decisions of a closure, which belong to
+  no reported function.
+
+Fixtures pin each limit, so a new analyzer version that changes one fails a test. Inactive
+configuration branches stay visible.
+
+Missing analysis never reads as zero debt. The count fails, naming the cause, when the pinned
+binary is missing or reports another version; when the analyzer exits with an error or writes a
+warning, which it does only for a source it could not read or parse; when it measures no function;
+when its report has another version or a `?` weight other than one; when a `.cargo-crap.toml`
+in the repository root or above it could change the analysis; when it measures a file source
+discovery does not govern, such as one in a nested repository; and when a discovered file is
+hidden, a symbolic link or tracked but ignored by Git, which the analyzer's walk would skip.
+
+`just ratchet --show functions_over_complexity_30` lists each function's file, line, name and
+complexity. The baseline holds counts rather than sites, so when a count rises the gate lists every
+site of that count and the function a change added is named among them. Decomposing a function is
+the repair. Extracting a forwarding wrapper only to move the number is the workaround
+`just lint-audit` attributes to a lowering of this count.
 
 ## Exceptions And Ownership Review
 
@@ -124,3 +169,73 @@ The sanitizer compiler adapter preserves the source parser's span contract as de
 [Property Testing And Fuzzing](property-testing-and-fuzzing.md).
 The [concurrency](data-plane-concurrency.md), [error](errors-and-diagnostics.md) and
 [state](typed-states.md) chapters retain those operational owners.
+
+## Auditing Lint Workarounds
+
+A rule that misjudges code invites code shaped around the rule. The textual counters this gate
+replaced matched method spellings inside named files, so lowering a count sometimes meant
+respelling an operation or moving it rather than changing what the rule was about. `just
+lint-audit` finds code shaped like such a workaround and attributes it to the history that
+produced it.
+
+The compiler pass records review candidates beside its acquisition findings in every complete
+analysis, so the audit reads the evidence `just ratchet` uses and runs no second analysis.
+`just lint-audit --inventory` audits with warning levels while the gate still has open
+diagnostics, and `--configuration` selects declared configurations as an inventory. Each
+candidate carries its owning body, that body's execution contract (declared, or recurring by
+reachability from a recurring caller), its spans and macro origins, and the configurations that
+compiled it.
+
+| Kind | Resolved pattern | Controls that are not candidates |
+| --- | --- | --- |
+| `repeated_lookup` | Keyed operations (`get`, `get_mut`, `contains_key`, `insert`, `remove`, `entry`, indexing and their IndexMap forms) of a standard, hashbrown, IndexMap, DashMap or JSON map collection, on one receiver place with one key value, where a later operation can run after an earlier one. `guarded` marks a later operation in a branch the earlier result selected. | Exclusive branches, a receiver or key assigned between the operations, different keys or collections, and another type with map-like method names. |
+| `key_allocation` | A borrowed lookup handed an owned copy of its key, or an `entry` handed a copy that a hit discards. | Borrowed keys, owned insertion keys, `Copy` values, shared-handle clones and formatted keys. |
+| `borrowed_copy` | An owned copy whose only use is a borrow, such as `&value.clone()` or `text.to_string().len()`. | Copies that are moved, `Copy` values, shared-handle clones and text formatted from another value. |
+| `duplicated_branch` | A call or assignment that every branch of one exhaustive `if` chain or `match` repeats, with the same resolved callees, generic arguments and type. | An `if` without `else`, exits, constructed values, and arms that dispatch one spelling over differently typed bindings. |
+| `forwarding_wrapper` | A synchronous function whose whole body passes its parameters unchanged and in order to one local function, with its caller count and whether it carries a source contract, implements a trait method or calls into another file. | Transformed, reordered or partial arguments, library callees and constructors. |
+| `discarded_error` | `Result::ok`, `unwrap_or`, `unwrap_or_default`, `is_ok`, `is_err`, an `unwrap_or_else`, `map_err` or `or_else` closure that ignores its failure, an `Err(_)` arm, `if let Ok` without `else` and `let Ok(..) = .. else`, when the failure carries information. | Unit, uninhabited and zero-sized failures, and failures handed on. |
+| `disguised_clamp` | Checked primitive-integer or `Duration` arithmetic, or a checked integer conversion, whose absence falls back through `unwrap_or`, `unwrap_or_default` or `unwrap_or_else`. | Overflow decided by its own statement. |
+| `relocated_acquisition` | A synchronization acquisition outside the files the textual lock counter read, written by a commit that lowered that count. | Acquisitions in the counter's files, and ones no lowering commit wrote. |
+
+Attribution blames each candidate's lines in the working tree, reads the diff hunk of the commit
+that completed them, and replays the history of `debt-baseline.json`. For every count the
+candidate's kind could have worked around, it records whether that commit introduced or lowered the
+count, whether its hunk, the rest of the candidate's file or the commit's other files removed the
+counter's governed spelling (such as `.entry(` for the lock counter, counted only in the files that
+counter read at the time), and whether the code predates the count. The report keeps the hunk's
+removed and added lines around the candidate's line. When the completing commit only carried the
+pattern forward, the earlier commits of the same lines are read for that evidence and the one found
+is recorded as the origin. `--pull-requests` also reads, through `gh`, the commits a squash merge
+folded away, finding its pull request by the number the subject names or, for a subject without one,
+by the merged commit, and records a commit that removed the spelling while writing one of the
+candidate's own lines. A read that ends with a server error or a dropped connection is attempted up
+to four times with a doubling backoff; a failure that persists, or any other failure, ends the audit
+without a report.
+
+The suggestion is `suspected` when a count event coincides with a spelling removed from the
+candidate's own hunk or file, or a folded commit rewrote the candidate's lines away from it. A
+removal in another file explains the candidate only for the lock counter, which read named files, so
+moving an operation out of them lowered it. The suggestion is `possible` when only an event or a
+removal is present, or when the code was written into a file the lock counter read before the
+compiler resolved that count, since such code could avoid the spelling without changing the count;
+`unattributed` when the code was written while a count existed without any of these; `pre-existing`
+when it predates every plausible count; and `uncommitted` for lines not yet committed. A suggestion
+is evidence for review, never a classification: chronology alone proves nothing.
+
+Candidate identities hash the kind, file, owner, primary source and pattern facts without byte
+offsets, so an unrelated edit keeps them, and a repeat within one owner takes an ordinal.
+`audit.json` and `audit.md` land in `target/lint-audit/<source identity>/`. They are generated
+evidence: review dispositions, inventories and measurements belong on the owning task, and nothing
+reads them back as policy.
+
+Review classifies each candidate as confirmed lint-caused, suspected, unrelated, pre-existing or
+intentional, recording the source revision, owning rule, before and after code, reason and
+disposition. A repair keeps lazy and fallible initialization, side-effect counts, borrowed-key hit
+behavior, exact equality, lifetimes, reentrancy, error and acknowledgement semantics and ordering.
+An `entry` is not a repair where a hit would discard an allocated key, where a callback runs between
+the lookup and the insertion, or where the miss path needs the whole collection. Fewer searches do
+not make an `entry` faster either: on a small ordered map whose hits dominate, a lookup can cost
+less than building the entry, so the measurement covers hit-heavy and miss-heavy key
+distributions. A performance claim needs measured lookup, comparison and allocation counts and
+same-host Criterion or `just benchmark-ab` evidence; a shorter function or a lower count is not a
+speedup.

@@ -74,8 +74,8 @@ CREATE IF NOT EXISTS SCHEMA symbol_branch (
   symbol STRING
 );
 
-CREATE INGESTOR ingest_binance_ws
-  FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL ON QUIESCE DROP
+CREATE WEBSOCKETS CONNECTION INGESTOR ingest_binance_ws
+  FROM binance_ws MODE NO ACK ON QUIESCE DROP
   DECODE USING binance_ws_event_codec
   TO binance_ws_events
     INHERIT ALL

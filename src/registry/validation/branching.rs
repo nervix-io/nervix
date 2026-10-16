@@ -1120,8 +1120,9 @@ mod tests {
         AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, ClusterNodeName,
         CreateGenerator, CreateIngestor, CreateReingestor, CreateWireSchema, Expression,
         FieldReference, FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, JsonType,
-        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, ParseAsType,
-        PlacementPolicy, ProcessorInputs, SchemaField, WireSchemaField, WireSchemaName,
+        KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MaterializedRelayState,
+        MessageErrorPolicy, ParseAsType, PlacementPolicy, ProcessorInputs, SchemaField,
+        WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -1513,7 +1514,7 @@ mod tests {
                         ),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Kafka {
+                                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                                     client: named("broker_in_2"),
                                     topic: named("notifications"),
                                     offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
@@ -1526,7 +1527,7 @@ mod tests {
                                         },
                                     },
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                                },
+                                })),
                                 codec: named("event_codec"),
                             },
                         ),

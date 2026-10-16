@@ -23,8 +23,8 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
-        CREATE INGESTOR ingestor_metrics_source
-        FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
+        FROM ingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -167,8 +167,8 @@ Feature: Ingestor metrics
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge payload-size-{{test_id}}.example.com;
       CREATE ENDPOINT payload_size_ingress ON edge PATH '/payload-size' TYPE HTTP;
-      CREATE INGESTOR payload_size_source
-        FROM ENDPOINT payload_size_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR payload_size_source
+        FROM payload_size_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -230,7 +230,7 @@ Feature: Ingestor metrics
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE INGESTOR ingestor_metrics_source
+        CREATE <source_head> INGESTOR ingestor_metrics_source
         FROM <source_clause>
         ON QUIESCE DROP
         DECODE USING notification_codec
@@ -284,11 +284,11 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | source_kind | source_clause                                                                    | input                     |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
+      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | source_kind | source_head  | source_clause                                              | input                     |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |
 
   Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
     Given MQTT is running
@@ -318,8 +318,8 @@ Feature: Ingestor metrics
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
         };
-        CREATE INGESTOR immediate_source
-        FROM MQTT mqtt_main TOPIC immediate_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR immediate_source
+        FROM mqtt_main TOPIC 'immediate_notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -367,8 +367,8 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
         CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
-        CREATE INGESTOR ingestor_metrics_source
-        FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
+        FROM ingestor_metrics_restart_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -441,8 +441,8 @@ Feature: Ingestor metrics
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE INGESTOR remote_owner_metrics_source
-        FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR remote_owner_metrics_source
+        FROM redis_main CHANNEL 'remote_owner_notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -482,8 +482,8 @@ Feature: Ingestor metrics
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics' TYPE HTTP;
-      CREATE INGESTOR unfolded_metrics_source
-        FROM ENDPOINT unfolded_metrics_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR unfolded_metrics_source
+        FROM unfolded_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_batch_codec
         TO notifications
         INHERIT ALL

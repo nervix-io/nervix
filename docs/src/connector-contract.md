@@ -15,7 +15,7 @@ outbound request, from Arrow preparation to response and recovery.
 
 | Layer | Responsibility |
 | --- | --- |
-| Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The registry names no connector crate. |
+| Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The vocabulary nests every source and sink Model by connector and entity, and each pair declares its capabilities once there. The registry names no connector crate. |
 | Decision and composition | Convert a validated Model into a typed source or sink start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define source and sink operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the source contract, the sink contract, or both. |
@@ -44,12 +44,68 @@ runtime policy or connector lifecycle change.
 The contract and every integration crate take their execution-sensitive primitives from
 `nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
 backoff are measured with, and every socket a connector opens itself. A modeled build therefore
-selects them for the whole graph, as [Data-Plane Concurrency](./data-plane-concurrency.md)
+selects them for the whole graph, as [Execution Primitives](./execution-primitives.md)
 describes. The sockets and timers a driver library creates inside itself stay the driver's and are
 outside that selection. A connector's own code never resolves a name through the operating system:
 it resolves through the node's resolver, as the sections below describe, and a driver that resolves
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
+
+### Connector hygiene standard
+
+The following standard applies to each connector crate, its declarations, and the server paths
+that compose and report it. It also applies when another feature adds or changes one of those
+paths.
+
+- **One source for names.** The vocabulary's `ConnectorKind` display supplies connector names;
+  source and sink entity names come from their vocabulary declarations. Configuration errors,
+  transport and HTTP-client labels, metrics, logs, dataflow identifiers and `DESCRIBE` output
+  derive their names from those sources. A required namespace or prefix is derived once and
+  reused, rather than introducing another spelling or case table. Protocol field names and
+  external configuration passed through to a driver retain their external contract.
+- **Typed causes until reporting.** A connector owns semantic error enums using `thiserror` and
+  propagates context with `error-stack`. Preserve a driver's typed error beneath the connector's
+  operation context instead of replacing it with its `Display` text. A cause that Nervix can
+  classify is a typed variant, not a free-text `reason` or `Result<_, String>`. Text received as
+  part of an external protocol remains external data; it does not replace an available typed
+  cause. Render a report only at the boundary that presents it, retaining the cause for callers
+  that must decide whether to retry, reject a record or fail a start. Sensitive payloads and
+  credentials stay out of rendered diagnostics.
+- **Annotations describe the actual outcome.** A `nervix::error_boundary(outcome|library, ...)`
+  contract belongs on the exact error type or return contract it classifies, with a reason
+  describing that path. An annotation may call a result a record rejection only when the
+  implementation actually returns that record's rejection. A failed connection, refused start
+  or failed request is not made record-specific by its annotation. [Errors And
+  Diagnostics](./errors-and-diagnostics.md) owns these classifications and reporting boundaries.
+- **Unit tests exercise the owning paths.** Cover each implemented publish path, window or batch
+  algorithm, header and metadata mapping, and acknowledgement operation through its production
+  owner. Include successful delivery and the supported rejection, transient and unanswered
+  outcomes, partial confirmations, ordering and bounds where the path has those states. Exercise
+  source polling, reads and close when the connector owns them. A path the connector does not
+  implement needs no fictional test. Unit tests complement the public Cucumber scenarios and
+  concurrency checks required by the behavior; they do not replace them.
+- **Properties cover encodings and measures.** Each connector-owned encoding or encoded-size
+  measure has a bounded Bolero property over valid current values, registered in
+  `tests/bolero-targets.toml` for ordinary and fuzz execution with its source-adjacent corpus.
+  Lossless conversions compare the complete original value; size properties compare the measure
+  with the exact production encoding, including headers and framing that count toward the limit,
+  and exercise the limit boundaries. Lossy or one-way mappings assert their declared contract.
+  A crate using a shared encoding or measure exercises that shared owner rather than copying
+  its implementation. [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) owns
+  registration, budgets, execution and retained failure evidence.
+
+A connector change keeps this chapter and the relevant ingestor or emitter manual current, runs
+`just validate` and the focused checks for its changed paths, and leaves the architecture ratchet
+at or below its baseline. Documentation changes also run `just book`. Execution-mode evidence
+follows the changed protocol or lifecycle, as [Data-Plane
+Concurrency](./data-plane-concurrency.md) describes; changing labels or documentation alone does
+not introduce a synchronization claim.
+
+Before closing a connector epic, review changes landed from parallel work for additional name
+sources, free-text causes, inaccurate boundary annotations, and publish, mapping, batch or
+acknowledgement paths missing their unit or property coverage. Record the review, evidence and
+any compliance tasks on the owning ClickUp epic and tasks. Implementation reports and temporary
+audit findings are not repository documentation.
 
 ### DNS for HTTP and Iceberg
 
@@ -176,7 +232,7 @@ A failed lookup reaches the driver as the resolver's `DnsLookupError`, which the
 cause of its connection error. The connector finds it there and reports `MqttConnectionError::Resolve`
 with the host and the lookup failure; every other failure keeps the driver's own description. A
 source reports the failure as a resume failure and retries on its declared `RETRY POLICY`, or on
-the host's reconnect cadence in a `NO_ACK` mode. A sink's event loop reports it as the emitter's
+the host's reconnect cadence in `MODE NO ACK`. A sink's event loop reports it as the emitter's
 transient error and reconnects on the emitter's retry policy. Neither acknowledges undelivered
 data: a source that cannot connect receives nothing, and a QoS 1 or 2 sink confirms a record only
 once the broker acknowledges it, so the input stays unacknowledged while the broker name does not
@@ -220,20 +276,25 @@ use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
 cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
-lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
-error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
+lookup failure. A lookup failure reaches the connector as a cause of the driver's connection error,
+where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
 existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
-source read or acknowledgement failure. The report's message names the host and the lookup
-failure. An SQS source looks its queue up when its ingestor starts; a failure there, a lookup
-failure included, fails that start, and the runtime keeps the failure's text as the start failure's
-reason. Any other failure to reach the service, including a certificate that does not name the
-configured host, is described by every cause of the driver's connection error, which describes the
-connection and never a record; a service's own response keeps its existing description. None of
-these failures rejects a record or acknowledges input. The host retries each on its declared
-backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS source keeps the SDK's
-standard retry mode, which makes up to three attempts at a request whose connection failed, lookup
-failures included, before the source reports the failure. Pooled connections stay open when their
-host's answer changes or expires; the next connection resolves again.
+source resume, read or acknowledgement failure. The report's message names the host and the lookup
+failure. An SQS source plan builds its client from configuration and TLS material alone; each
+instance looks its queue up when it first resumes and keeps the queue's URL. A failure there, a
+lookup failure included, is a resume failure, which the host shows as the source's transient error
+and retries on the source's retry policy. A queue the service does not have is the typed
+`SqsSourceError::MissingQueue`, which names it, whether the service answers with AWS's
+query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ does, only with the
+JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
+certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and never a record; a service's own response keeps
+its existing description. None of these failures rejects a record or acknowledges input. The host
+retries each on its declared backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS
+source keeps the SDK's standard retry mode, which makes up to three attempts at a request whose
+connection failed, lookup failures included, before the source reports the failure. Pooled
+connections stay open when their host's answer changes or expires; the next connection resolves
+again.
 
 ### DNS for OTEL gRPC
 
@@ -291,7 +352,7 @@ A driver call that parks its thread while it waits on the network computes nothi
 it would hold a worker idle for the whole wait. librdkafka's producer flush and metadata fetch are
 such calls, so the Kafka connector runs them on the runtime's blocking pool as declared owners
 outside the executor, bounded by the host's flush deadline and a per-request metadata timeout.
-[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor)
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
 
@@ -319,24 +380,32 @@ that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, which typed metadata scope exists,
-whether quiesce is supported, the nonzero instance count, and the supported acknowledgement mode.
+whether quiesce is supported, the nonzero instance count, the supported acknowledgement mode, and
+the position class the source's entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
-the host never interprets one as a graph identity.
+the host never interprets one as a graph identity. Each source entity also declares its
+acknowledgement confirmation, how far its transport has confirmed positions once acknowledging them
+returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client source's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
 attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
 The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
-partition, offset, and headers; Syslog carries the peer address. Transport headers are visited
+partition, offset, and headers; Syslog carries the peer address. The scopes, and the fields of
+each with their exact types, are declared once in the vocabulary, and each source entity names the
+scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
+programs may name, the host builds its metadata columns from the same fields, and a connector's
+metadata row names the scope it carries, so the three cannot disagree. Transport headers are visited
 from the borrowed message in arrival order. The host copies them only when the quiesce control
 decides on a payload, which may retain it, or a WebSocket session must retain them after the source
 message ends. Header support and each
 system's mapping are explicit: HTTP endpoint and polling headers, WebSocket upgrade headers,
 Kafka record headers, NATS headers, Pulsar properties, RabbitMQ AMQP headers, and SQS attributes
-retain their connector-specific semantics. Other source families do not offer header reads.
+retain their connector-specific semantics. Other connector and entity pairs do not offer header
+reads.
 `read_header` and `read_headers` are validated against those capabilities; header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior.
@@ -364,7 +433,7 @@ returns the share negatively; admitted records remain pending through keepalives
 waits until their terminal outcome or the silence bound. A relay owner whose relay memory has no
 room for the acknowledgement watches of a delivery holds the delivery back unadmitted instead of
 refusing it, and the host's dispatch waits for that admission within its five-minute bound. A
-source in a `NO_ACK` mode therefore stops reading while its delivery is held, as under any relay
+source in `MODE NO ACK` therefore stops reading while its delivery is held, as under any relay
 backpressure, and its output is delivered once the relay owner has room rather than lost. In an
 acknowledged mode the held rows' shares stay pending without keepalives, so a hold longer than the
 source's `ACK TIMEOUT` rejects their positions and the source delivers them again, possibly after the
@@ -408,11 +477,13 @@ At the start of a graceful stop, the host closes intake on the stopping node bef
 plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
 admission regardless of the ingestor's declared `ON QUIESCE` mode; already admitted payloads and
 ACK roots continue through the graph. The connector does not choose the move or finish its own
-acknowledgements early. A source started on the destination node after handoff uses that node's
-open intake.
+acknowledgements early. A batch's work stays outstanding until its source has confirmed the
+batch's positions on the transport, so both the move and the in-place drain wait for that
+confirmation; see [Confirmed acknowledgements](#confirmed-acknowledgements). A source started on
+the destination node after handoff uses that node's open intake.
 
 A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
-`NO_ACK` mode, cannot be presented again either. An acknowledged batch the extension workers refuse
+`MODE NO ACK`, cannot be presented again either. An acknowledged batch the extension workers refuse
 is rejected for its source to deliver again, and an endpoint refuses a body its sender sends again;
 a live unacknowledged payload follows its source's unacknowledged admission instead, which each
 source's composition declares. Waiting holds the source's loop, so a source waits for a place only
@@ -427,8 +498,8 @@ when its transport stays connected with bounded memory while nothing reads it:
 | MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
 | Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
 | WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
-| Kafka `NO_ACK PARALLEL` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
-| Pulsar `NO_ACK PARALLEL` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
+| `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
+| `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
 
 A waiting payload races the ingestor's stop and every new quiesce decision. The stop drops it. A
 new decision, for a source whose input passes through the quiesce control, hands the payload to the
@@ -439,14 +510,25 @@ stays unacknowledged until its consumer reconnects.
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
-timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
-transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. If rejection itself fails, the host retains those positions, suspends
-the source, and reestablishes its assignment. It retries the same rejection before polling any
-later batch or committing a later position, so a retried rejection must not depend on a poll. The
-[Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a
-consumer-group rebalance has moved away, because only a poll can assign that partition again. A
-transport without an acknowledged delivery mode has no redelivery guarantee from Nervix. The
+timeout. The host takes in an acknowledged batch as one batch acknowledgement and waits for every
+accepted message's ACK outcome before acknowledging the batch's transport positions; a message a
+quiesce buffer or drop policy took over adds nothing to wait for. A failed or timed-out ACK rejects
+the positions and retries according to the source's delivery policy. What the host does when
+rejection itself fails depends on the position class each source entity declares, which states what
+its positions still mean once the connection that delivered them is gone. The host handles each
+class once:
+
+| Position class | Entities | After a failed rejection |
+| --- | --- | --- |
+| `replayable` | Kafka, Pulsar | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+| `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+
+A transport acknowledgement that fails because the connection died is handled the same way: the
+host rejects the positions, that rejection fails on the same lost connection, and the class decides.
+A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
+whose acknowledgement the broker never received is ingested again. A transport without an
+acknowledged delivery mode has no redelivery guarantee from Nervix. The
 sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
 modes are in [Ingestors](./ingestors.md) and
 [Shutdown And Recovery](./shutdown.md#connector-contracts).
@@ -461,11 +543,53 @@ sequenceDiagram
     Graph-->>Host: One ACK outcome per accepted message
     alt All ACK roots succeed
         Host->>Source: Acknowledge transport positions
+        alt The transport confirms them
+            Source-->>Host: Confirmed
+            Host->>Host: Report progress, release the batch's work
+        else The confirmation fails
+            Source-->>Host: Typed acknowledgement failure
+            Host->>Host: Show the transient status
+            Host->>Source: Reject transport positions
+        end
     else Intake or an ACK root fails
         Host->>Source: Reject transport positions
         Host->>Host: Apply declared retry policy
     end
 ```
+
+### Confirmed acknowledgements
+
+`acknowledge` returns only once the source's transport has confirmed the positions, as far as the
+source's entity declares in its acknowledgement confirmation, or with a typed acknowledgement
+failure. A source whose client returns before that declares so rather than reporting a confirmation
+it did not get:
+
+| Acknowledgement confirmation | Entities | When acknowledging returns |
+| --- | --- | --- |
+| `answered` | SQS | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. |
+| `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+| `queued` | Kafka, Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Kafka consumer-group commit is never awaited, a Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+
+The host reports progress for a batch only once acknowledging it returns. Until then the
+ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
+the batch's acknowledgement roots to resolve keeps counting against its domain and ingestor until
+the source loop drops the batch acknowledgement after `acknowledge` or `reject` returns. A drain or
+an ownership handoff that waits for admitted acknowledgement roots therefore also waits for the
+source's confirmation, and a node's graceful stop completes outstanding acknowledgements before
+the source closes, within the drain timeout. A root that waits only on what a drain does not wait
+for, such as a `REQUIRED WAIT` dependency or a window that retains its row, still does not hold
+the drain, and neither do the resolved roots of the batch it belongs to, because the batch cannot
+be acknowledged until it resolves.
+
+A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
+a later acknowledgement is confirmed, and the host rejects the positions for their position class
+to handle. A stop that reaches the source loop once a batch's acknowledgement roots have resolved
+does not abandon the batch: the loop takes the resolved outcome before the stop and confirms the
+batch first. A batch whose roots had not all resolved when its source stopped is left unconfirmed;
+the source instance logs `source instance stopped before its transport confirmed positions it
+read; the transport presents them again` with the count, and its transport's own redelivery
+contract applies.
 
 ## Sink boundary
 
@@ -554,6 +678,43 @@ queue within the remaining stop deadline; Kafka uses it. A sink may keep its cli
 publish failure when reopening it would discard staged work or a persistent session, or, as the
 HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
 transient failure its pending work is still waiting out.
+
+A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
+`ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
+identity, its execution time and the future through which the broker answers for it: a
+confirmation, a refusal for good with the message its message error reports, or a failure that
+leaves the record's outcome unknown. The connector maps its driver's answer to one of those three;
+the window decides nothing else about the driver. A record's deadline is `ACK TIMEOUT` after its own
+hand-over. While the window holds `MAX` records it waits for the oldest answer until the oldest's
+deadline and no longer before the sink hands over another record, so at most `MAX` records await
+answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was handed over, the
+window waits for each remaining answer, oldest first and each until its own deadline. An answer
+given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
+could not take a record for a reason that is not the record's own, the oldest answer failed or
+missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
+failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
+which the emitter shows as its transient error; a failure the connector hands it carries the
+connector's own description. The window holds the publish's outcome, and both ways of ending a
+publish go through it, so before it reports a failure it settles every answer the broker already
+gave, the oldest's included: a confirmed record is delivered and a refused one rejected, and the
+host's retry never resends a record the broker confirmed. A record without an answer, or whose
+answer failed, stays unresolved and is sent again, which is the at-least-once delivery `MODE ACK`
+promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+reference model of this rule over scripted answers given within, at, past or never by each deadline,
+failed answers and driver failures, and the Shuttle checks of the
+[confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
+while answers arrive concurrently with the publish.
+
+The MQTT sink awaits its QoS 1 and QoS 2 answers through the window. A completed handshake confirms
+a record, a reason code about the record itself (not authorized, an invalid topic name or an
+invalid payload format) refuses it, and every other ending leaves it unresolved: the client, its
+connection or its session failed, or the reason code is not about the record. The client's request
+queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
+so the client can refuse a record only while the queue still holds an earlier failed attempt's
+requests, before the broker answered any record of the publish. The Kafka, Pulsar and NATS
+JetStream sinks still await their answers through windows of their own, which drop their in-flight
+records when the driver refuses to take one, so a retry can resend records their broker already
+confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
@@ -868,7 +1029,10 @@ sequenceDiagram
   turns the admitted bytes into the request body without validating them again; invalid UTF-8
   outranks an excluded character, and either is a record rejection. Attribute values pass through
   the same character classifier. The OTEL sink decodes trace and span identifiers with
-  `faster-hex` after checking their exact length.
+  `faster-hex` after checking their exact length and refuses all-zero identifiers. The registered
+  `otel-hex-ids` property compares all bytes and acceptance with an independent per-digit scalar
+  decoder for trace, span and parent-span keys, including lowercase, uppercase, mixed case,
+  arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
   prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
   host measures from staging, ends or its staged files reach the maximum commit size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
@@ -920,15 +1084,54 @@ sequenceDiagram
   path and query. The source host cancels a pending resume when shutdown or quiesce changes its
   lifecycle state. DNS and connection failures remain infrastructure outcomes for the host to retry;
   a resolved address alone never completes a Syslog record or an input acknowledgement.
+- **WebSocket client source.** The WebSocket connector crate supplies the outbound
+  `WEBSOCKETS CONNECTION` source through `SourceConnector` and `BrokerSourceConnector`. It has
+  no emitter or listening endpoint. Its plan carries resolved client configuration, the node
+  resolver and an optional compiled signaling protocol. `open` prepares local transport and TLS
+  state without resolving a name or connecting; `resume` resolves and connects, completes any
+  signaling handshake, and only then reports readiness. Accepted data from a successful
+  handshake is queued for polling before new socket frames. Text and binary frames become raw
+  payload bytes for the host to decode; protocol control frames remain transport concerns.
+  Suspension drops the connection while retaining queued payloads, and close also clears that
+  queue. Transport failure requires another resume of the retained source.
+  The host composer currently resolves the named signaling protocol and chooses buffered intake,
+  a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
+  the executor. Holding its polling loop would also stop answering the peer's pings. These
+  transport requirements belong in a connector-owned contract declaration; the composer
+  currently hard-codes them instead. The source ownership header names this boundary violation.
+  The source's position carries no external acknowledgement, and its acknowledge and reject operations are
+  no-ops; reconnection supplies no durable replay guarantee. The host owns graph intake, routing,
+  quiesce, admission and retry cadence. Server endpoint listeners use the server's request-scoped
+  source and share only the signaling engine with this outbound connector.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
-  client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
-  frames become payload; the host still owns intake and routing. Domain activation resolves the
-  endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
-  when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
-  The compiler never chooses a graph route or an endpoint listener. A number keeps its value
-  between a frame and the programs that read and write it: a protobuf `double` to its bits.
-- **Server endpoint intake.** The endpoint source binds one prepared intake lifetime to all of its
-  configured routes before reporting readiness. Domain definitions and bound lifetimes share one
+  client sources and server endpoint sessions. Its ordered send and wait clauses, acceptance
+  policy, per-connection state and handshake timeout govern when frames become payload; the
+  caller supplies the accepted-data sink, and the host still owns intake and routing. Domain
+  activation resolves the endpoint's VHOST and signaling reference first. The runtime binds the
+  pinned protobuf resource, when present, and hands its send and wait message descriptors to the
+  compiler. The compiled artifact retains the wire format, compiled jaq programs and timeout;
+  each connection owns its handshake state. The compiler never chooses a graph route or an
+  endpoint listener. A number keeps its value between a frame and the programs that read and
+  write it: a protobuf `double` to its bits.
+  The compiler currently also receives the configuration Model's `SignalingWireFormat` and
+  `SignalingProtocolOnConnect`, and parses the latter's timeout text. This contradicts the
+  connector engine's typed-plan input boundary: the decision layer must convert those Model
+  fields and the duration into a typed signaling plan before compilation. The crate and
+  signaling module's ownership headers name this violation; sharing the engine with endpoint
+  sessions does not transfer Model conversion, resource resolution or routing into the connector.
+  The accepted-data callback is currently the crate's own `SignalingDataSink` interface. Its
+  host service belongs in the shared connector contract; the signaling module's header names
+  this separate host-interface ownership violation.
+  Registered conversion properties exercise complete messages with explicit scalar presence:
+  double and float bits, full-width integers, booleans, strings, ordered repeated fields and
+  absent defaults. The generated JSON omits empty repeated fields, which protobuf does not
+  distinguish from absent ones. A separate malformed-frame property refuses invalid field tags,
+  truncated fixed-width and length-delimited fields, oversized varints and incomplete packed
+  float elements through the production decoder.
+- **Server endpoint intake.** `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors share one
+  server-owned intake; each head names the protocol its endpoint serves, and the registry refuses an
+  endpoint of another `TYPE` before activation. The endpoint source binds one prepared intake
+  lifetime to all of its configured routes before reporting readiness. Domain definitions and bound lifetimes share one
   immutable publication. HTTP resolves it once per request; a WebSocket retains its route and
   signaling protocol for the connection, including data accepted during signaling. Close or drop
   ends that exact lifetime before withdrawing it, so a retained route cannot attach to a replacement
@@ -1031,15 +1234,19 @@ drain boundary. This chapter does not redefine those output formats.
 
 ## Adding an integration
 
-1. Define its vocabulary Model and capabilities, then add NSPL grammar and completion for the
-   public statement form. Keep external driver configuration raw only where pass-through is its
+1. Declare each entity it serves in the vocabulary: one Model per entity with its capabilities,
+   its delivery modes, and a typed name, checked by the entity's own rule, for each external name
+   its statement writes. The connector and entity together name the statement's head, such as
+   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
+   and its completion. Keep external driver configuration raw only where pass-through is its
    intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
-   source or sink contract implementation. Add its composition mapping in the server; do not
-   teach the contract or registry about the driver.
+   source or sink contract implementation. A brokered sink that awaits its broker's answers in
+   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. Add
+   its composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
    three-node execution and failure paths. Confirm the crate boundary and run the repository's
    validation and connector tests.

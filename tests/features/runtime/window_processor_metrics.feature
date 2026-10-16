@@ -31,8 +31,8 @@ Feature: Window processor metrics
         CREATE RELAY metrics_summary SCHEMA metric_summary BRANCHED BY by_window_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
-        CREATE INGESTOR window_metrics_source
-        FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR window_metrics_source
+        FROM window_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics_input
         INHERIT ALL

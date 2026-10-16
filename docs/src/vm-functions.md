@@ -38,6 +38,10 @@ Five rules hold throughout:
 
 ## Ownership By Layer
 
+The predicate capability and its execution entry point keep paired supported and rejection
+Rustdoc examples beside their APIs. `just test-capability-docs` runs them in normal tests and CI,
+separately from [execution and concurrency evidence](./execution-primitives.md#verification-contracts).
+
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
@@ -459,6 +463,7 @@ All paths are relative to the repository root.
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
+| `benches/window_sketches.rs` | The cost of admitting retained rows into pane sketches, from a new pane for every row to a thousand rows per pane |
 | `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
@@ -1130,10 +1135,12 @@ For each batch, the task works through these steps:
 4. For each run, every structure reads one typed value slice and validity bitmap from the shared
    argument columns. Counts use bitmap popcounts; integer sums use exact high and low lane halves;
    float sums use per-lane TwoSum; moments use a compensated mean pass and a centered second pass,
-   falling back to a weighted mean when summing finite inputs overflows before division, then one
+   normalizing by the largest contributing magnitude when summing finite inputs overflows before division, then one
    Chan merge into the branch's aggregate. Histogram indexes are computed for the run and
    scattered into bucket counts. Each retained
    row holds its sequence, its timestamp, and a row view of the Arc'd input and argument batches.
+   The normalized mean is clamped to its operand range before rescaling; a constant finite run
+   keeps its exact mean and zero M2 and cross moment even when its sum overflows.
 5. It emits while the width is met, and then steps the window. Stepped rows are acknowledged.
 
 Tumbling and sliding windows use this same path, with different `WIDTH` and `STEP`.
@@ -1178,6 +1185,12 @@ At emission the window merges every live pane into a fresh sketch:
 - Misra-Gries adds weighted counts.
 
 Each top-k value is sliced from the earliest retained row with that key.
+
+The first row admitted into a pane creates its sketch, found or inserted by one search of the
+window's ordered pane map; every later row of the pane updates that sketch in place. A row whose
+argument is absent admits nothing, so a pane holding only such rows keeps no sketch.
+`just bench-window-sketches` measures admission at one, 16 and 1,024 rows per pane for each
+sketch.
 
 A sketch cannot subtract a row. When a window steps, every pane is cleared, and every surviving row
 is admitted again. This rebuilds the whole window rather than one pane, so a row that left the

@@ -114,10 +114,13 @@ tags = [
   "@udf_column_builder",
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
+  "@inferencer_inspection_admission",
   "@shutdown_cordon_release",
   "@shutdown_kafka_handoff",
   "@shutdown_leader_change",
   "@shutdown_flush_before_freeze",
+  "@shutdown_source_confirmation",
+  "@shutdown_source_confirmation_handoff",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
 ]
@@ -515,6 +518,14 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
 [[workload]]
+coverage = "Remote acknowledgement silence sweeps whose ticks are already due when runtime teardown cancels them, and the registry's final resolution, under tracked position guards."
+id = "owner.remote-ack-silence-sweeps"
+invariant = "One fresh diagnostic process ends overrunning silence sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
+
+[[workload]]
 coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
 examples = 2
 feature = "tests/features/cluster/deadlock_diagnostics.feature"
@@ -552,6 +563,26 @@ id = "scenario.shutdown-kafka-handoff"
 invariant = "A stopping Kafka owner admits no new source work during its emitter handoff and completes the drain with every admitted record delivered."
 invocation = "scenarios"
 scenario = "A stopping Kafka ingestor closes intake while its attached emitter hands over"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A one-node in-place drain that waits for a Kafka source's delayed transport confirmation, while tracked source controls, ACK completion and the confirmed root's hand-over run during the stop. The confirmation delay, the Kafka client and the drain's poll are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-source-confirmation"
+invariant = "A node that stops in place completes its drain only after the transport confirmed the source offsets of the work it admitted, so the offsets are committed when the stop ends."
+invocation = "scenarios"
+scenario = "A node that stops in place keeps draining until its transport confirms the source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, while tracked entity-gate state, source controls and ACK completion run during the stop. The confirmation delay, the Kafka client and transport waits are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-source-confirmation-handoff"
+invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
+invocation = "scenarios"
+scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -691,6 +722,16 @@ scenario = "A keyspace and a window above the bulk budget resume exactly beside 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Lazy stored checkpoint selection, admitted native views, bounded archive groups and stopped restore through the existing capture and installation locks on one node. Three-node byte equality runs in the ordinary suite."
+examples = 1
+feature = "tests/features/cluster/backup_stored_branch_capture.feature"
+id = "scenario.stored-branch-capture"
+invariant = "Stored keyspaces and windows above 32 MiB beside 24 small branches are admitted and re-export every byte exactly after stop and stopped restore."
+invocation = "scenarios"
+scenario = "Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "A three-node WASM processor commits two branch saves above the replication-message limit, then drains its owner through checkpoint capture, bulk fetch, verification, and successor installation while state-store locks are tracked. Async stream waits and interconnect transport scheduling remain outside Deloxide."
 examples = 1
 feature = "tests/features/runtime/large_wasm_state_replication.feature"
@@ -724,6 +765,26 @@ order_tags = [
   "@order_resume_tenants_cluster",
 ]
 scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-retention-activation"
+invariant = "Restored materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "scenarios"
+scenario = "Restored materialized branches measure idle lifetime from activation time"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Materialized branch retention after an independent cluster restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-restart-retention"
+invariant = "Reopened materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "scenarios"
+scenario = "Restarted materialized branches measure idle lifetime from activation time"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -875,6 +936,16 @@ id = "scenario.inferencer-branch-batches"
 invariant = "A batched inferencer scores interleaved records of two branches in one batch for each branch and keeps each branch's rows apart, on one and three nodes."
 invocation = "scenarios"
 scenario = "Batched inferencer isolates interleaved concrete branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Control-plane ONNX inspection admission, typed full-queue refusal and successful creation after releasing the bulk workers on diagnostic nodes. Dependency-owned ONNX threads and async queue waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/inferencer.feature"
+id = "scenario.inferencer-inspection-admission"
+invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
+invocation = "scenarios"
+scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1218,6 +1289,16 @@ scenario = "Batched inferencer isolates interleaved concrete branches"
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: control-plane ONNX inspection admission, typed full-queue refusal and successful creation after releasing the bulk workers. Dependency-owned ONNX threads and async queue waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/inferencer.feature"
+id = "stress.inferencer-inspection-admission"
+invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
@@ -1358,6 +1439,16 @@ scenario = "A keyspace and a window above the bulk budget resume exactly beside 
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: lazy stored checkpoint selection, admitted native views, bounded archive groups and stopped restore through the existing capture and installation locks on one node."
+examples = 1
+feature = "tests/features/cluster/backup_stored_branch_capture.feature"
+id = "stress.stored-branch-capture"
+invariant = "Stored keyspaces and windows above 32 MiB beside 24 small branches are admitted and re-export every byte exactly after stop and stopped restore."
+invocation = "stress-restore-scenarios"
+scenario = "Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: a three-node WASM processor commits two branch saves above the replication-message limit, then drains its owner through checkpoint capture, bulk fetch, verification, and successor installation while state-store locks are tracked. Async stream waits and interconnect transport scheduling remain outside Deloxide."
 examples = 1
 feature = "tests/features/runtime/large_wasm_state_replication.feature"
@@ -1386,6 +1477,26 @@ invariant = "Materialized generations larger than the bulk budget resume on ever
 invocation = "stress-restore-scenarios"
 scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
 selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-retention-activation"
+invariant = "Restored materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "stress-restore-scenarios"
+scenario = "Restored materialized branches measure idle lifetime from activation time"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: materialized branch retention after an independent cluster restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-restart-retention"
+invariant = "Reopened materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "stress-scenarios"
+scenario = "Restarted materialized branches measure idle lifetime from activation time"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Under scheduling stress: a delayed restore coordinator racing a resumed materialized generation."
@@ -1505,6 +1616,26 @@ id = "stress.shutdown-kafka-handoff"
 invariant = "A stopping Kafka owner admits no new source work during its emitter handoff and completes the drain with every admitted record delivered."
 invocation = "stress-scenarios"
 scenario = "A stopping Kafka ingestor closes intake while its attached emitter hands over"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a one-node in-place drain that waits for a Kafka source's delayed transport confirmation, with tracked source controls and ACK completion during the stop. The confirmation delay, the Kafka client and the drain's poll remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-source-confirmation"
+invariant = "A node that stops in place completes its drain only after the transport confirmed the source offsets of the work it admitted, so the offsets are committed when the stop ends."
+invocation = "stress-scenarios"
+scenario = "A node that stops in place keeps draining until its transport confirms the source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, with tracked entity-gate state, source controls and ACK completion during the stop. The confirmation delay, the Kafka client and transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-source-confirmation-handoff"
+invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
+invocation = "stress-scenarios"
+scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -1635,6 +1766,7 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed workloads reach the clock state lock through attaches, frames, events, reads of followed clocks, and the restoration decisions and attempts of a reopened session. They do not detach a clock while a restoration of it is being decided, move an attachment by redirect while its old session holds it, or leave a restoration unanswered past the request timeout, so detach releases, a restoration waiting for one, and the wake of an abandoned restoration are exercised only by the client-core unit tests and the Shuttle check shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock, outside the lane."
 path = "crates/client-core/src/domain_clock.rs"
 workloads = [
   "scenario.paced-resume",
@@ -1931,9 +2063,11 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The holders mutex in occupy_execution and release_execution is reached by ordinary bounded-execution and branch-state-room scenarios, which the lane's registered scenario selections do not include."
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The inferencer inspection admission workloads also reach the execution occupancy holders mutex while saturating and releasing the bulk workers. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
+  "scenario.inferencer-inspection-admission",
+  "stress.inferencer-inspection-admission",
   "scenario.shutdown-flush-before-freeze",
   "scenario.shutdown-kafka-handoff",
   "scenario.shutdown-leader-change",
@@ -2046,6 +2180,10 @@ path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
+  "scenario.shutdown-source-confirmation",
+  "scenario.shutdown-source-confirmation-handoff",
+  "stress.shutdown-source-confirmation",
+  "stress.shutdown-source-confirmation-handoff",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
@@ -2062,8 +2200,12 @@ workloads = [
   "owner.materialized-publications",
   "scenario.materialized-cut",
   "scenario.materialized-bulk-generations",
+  "scenario.materialized-retention-activation",
+  "scenario.materialized-restart-retention",
   "stress.materialized-cut",
   "stress.materialized-bulk-generations",
+  "stress.materialized-retention-activation",
+  "stress.materialized-restart-retention",
 ]
 
 [[owner]]
@@ -2081,7 +2223,14 @@ workloads = [
 
 [[owner]]
 path = "src/runtime/relay_boundary.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.materialized-retention-activation",
+  "scenario.materialized-restart-retention",
+  "stress.diagnostic-nodes",
+  "stress.materialized-retention-activation",
+  "stress.materialized-restart-retention",
+]
 
 [[owner]]
 path = "src/runtime/relay_channel.rs"
@@ -2090,6 +2239,7 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
 workloads = [
+  "owner.remote-ack-silence-sweeps",
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",
@@ -2120,7 +2270,11 @@ workloads = [
 path = "src/runtime_ack.rs"
 workloads = [
   "scenario.client-alter-drain",
+  "scenario.shutdown-source-confirmation",
+  "scenario.shutdown-source-confirmation-handoff",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
+  "stress.shutdown-source-confirmation",
+  "stress.shutdown-source-confirmation-handoff",
   "stress.wasm-kafka-restore",
 ]

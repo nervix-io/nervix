@@ -16,9 +16,9 @@ Feature: Runtime report chains
         'endpoint' = 'http://127.0.0.1:1/events',
         'method' = 'GET'
       };
-      CREATE INGESTOR cadence_reader
-        FROM HTTP cadence_http EVERY 1d
-        ON QUIESCE SUSPEND DECODE USING cadence_codec
+      CREATE HTTP REQUEST INGESTOR cadence_reader
+        FROM cadence_http EVERY 1d
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_codec
         TIMESTAMP NOW
         TO cadence_records
           INHERIT ALL

@@ -13,6 +13,11 @@ binding inherits every rule below from it except those in [Using The Shared
 Binding](#using-the-shared-binding). An implementation that speaks the protocol itself, as the Go
 and TypeScript conformance clients do, follows all of it.
 
+The Rust reference implementation's execution modes and native/browser capability boundaries are
+specified in [Execution Primitives](./execution-primitives.md). Those repository build and
+verification contracts apply to the Rust implementation; independent clients continue to implement
+the protocol rules in this manual using their own runtime.
+
 ## Conformance Language
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as RFC 2119 defines them.
@@ -205,8 +210,9 @@ archive; see [Restore Streams](#restore-streams).
   `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
   targets when a form requires an exact format. An ingestor source-reference target MUST carry a
-  domain and MUST match the selected source family; the endpoint source target returns endpoints
-  and the others return clients of the matching transport. The ingestor codec target carries a
+  domain and MUST match the selected connector and entity; the `HTTP ENDPOINT` and
+  `WEBSOCKETS ENDPOINT` targets return endpoints of that `TYPE`, and the others return clients of
+  the pair's connector. The ingestor codec target carries a
   domain and returns only decoding codecs. Its unbranched relay target carries a domain, while its
   branched relay target carries a domain followed by a branch `Model` reference. Ingestor error
   relays use the unbranched target. A branch-field lookup carries a domain followed by a branch
@@ -467,7 +473,11 @@ payload, infinity, and nullable and sensitive branch key fields.
   session does not follow that clock, and the client MUST stop following it as it does after
   `DomainClockDetached`. An attach answered `RequestCancelled` attaches nothing, so the client MUST
   NOT follow the clock on its account; a detach answered `RequestCancelled` with `AfterAdmission`
-  has detached.
+  has detached. A client that attaches clocks again on its own, as K-5 requires, MUST NOT decide to
+  send such an attach while a detach of the same domain is unanswered, and MUST send an attach it
+  decided on before that detach ahead of it, so that the detach reaches the attach's session behind
+  it or finds that session ended. Once the detach is answered, no session then holds the clock on
+  the client's behalf.
 - **K-2.** A client MUST apply the clock in the attach reply before any state or tick frame for
   that domain. The attach reply's state, or a later `DomainClockObserved` for a changed generation,
   MUST be applied before a `DomainClockTicked` of that generation. It MUST ignore frames about a
@@ -497,7 +507,12 @@ payload, infinity, and nullable and sensitive branch key fields.
   other reason, the client MUST keep the attachment interrupted rather than drop the domain, and
   SHOULD send the attach again on that session after a growing wait. An attach the session leaves
   unanswered past the client's request timeout ends that session, as any request that outlives the
-  timeout does, and the client attaches the clock again on its next session.
+  timeout does, and the client attaches the clock again on its next session; a client waiting for
+  clock events MUST then open that session rather than wait for the ended session's transport to
+  fail. When a new session answers the attach while the previous session still holds the
+  attachment, as after a leader redirect, the client MUST move the attachment without a gap: it
+  keeps the newest tick of a clock that stays paced in the same generation, and ignores a tick of
+  the new session that does not advance it.
 
 ## Producers
 
@@ -597,6 +612,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   non-empty and within one frame, adding up to exactly `total_bytes`, and then the client
   half-closes the stream. The Rust client sends 64 KiB chunks.
   [Resources](./resources.md#upload-format) defines the archive format.
+  A client that prepares a local archive MUST finish and flush it before using it as an upload
+  body. A preparation failure or cancellation MUST abandon the partial archive while preserving
+  the original failure or cancellation outcome. Local preparation has not admitted an upload.
 - **U-2.** A client MUST create one upload identity per logical upload, 1 to 128 bytes of ASCII
   letters, digits, `-`, `_`, and `.`, and SHOULD make it a UUIDv7. It MUST keep the identity and the
   exact archive bytes until the upload's outcome is known, and every attempt MUST send both
@@ -890,7 +908,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `A native client does not restore a subscription the server ended and opens its name again on request` in `client_wire_failures.feature`; `Web console ends a relay tab the server ended and resubscribes it on request` in `nspl_repl.feature`; `a_subscription_type_must_be_selected_and_supported`, `a_subscription_the_server_ended_is_not_opened_again_on_a_new_session`, `an_end_its_session_lost_before_it_was_read_is_still_reported`, and, in the console, `a_generation_the_server_ended_ends_its_tab_which_keeps_its_rows_and_is_not_restored` |
 | S-7, S-8 | In `client_wire_failures.feature`: `A reconnected native client restores acknowledged subscriptions`, `A native client deletes a subscription its lost session held and opens the name again`, `A native client reports a refused subscription restoration and deletes the subscription without the server`, and `A native client keeps a subscription active while it receives a row that fills most of a frame`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `a_refused_restoration_is_repeated_after_a_growing_delay`, `deleting_a_subscription_whose_restoration_was_refused_needs_no_server`, `a_subscription_requested_on_a_closed_session_opens_on_a_new_session`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
-| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
+| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `an_attachment_moved_before_its_old_session_ends_keeps_the_tick_it_reported`, `a_detach_sent_while_a_refused_restoration_waits_releases_the_clock_for_good`, `a_detach_the_old_session_answers_during_a_reconnect_stays_released_on_the_new_session`, `a_restoration_left_unanswered_past_the_request_timeout_wakes_the_waiting_reader`, `a_detach_refused_during_a_reconnect_leaves_the_clock_restored_on_the_new_session`, `a_clock_attached_while_a_reconnect_opens_its_exchange_is_attached_again_on_it`, `an_attachment_moved_while_its_exchange_holds_it_keeps_the_tick_of_an_unchanged_clock`, `a_detach_waits_for_the_attaches_decided_before_it_and_holds_off_later_ones`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, the Shuttle check `shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | P-1 to P-8 | Every scenario of `client_ingestors.feature` and of `client_ingestor_process_faults.feature`, including the socket loss, full restart, relocation, and forwarding node death cases retaining one producer; `a_lost_exchange_leaves_sent_batches_unknown_and_restores_the_producer`, `a_batch_waiting_for_admission_when_the_session_ends_is_definitely_unsent`, `a_new_domain_generation_requires_a_new_producer_open`, and `closing_a_producer_during_restoration_releases_its_late_open` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
 | E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, `a_read_whose_caller_stopped_waiting_is_taken_over_by_the_next_read`, `a_close_whose_caller_stopped_waiting_still_releases_the_attachment`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |

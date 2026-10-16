@@ -544,6 +544,16 @@ pub(in crate::application) fn create_registry_error_response(
             };
             failed_at(format!("{err}"), span)
         }
+        // The reference of the wrong connector or endpoint type is what the statement got wrong,
+        // so the diagnostic underlines it.
+        RegistryError::IngestorClientConnectorMismatch { client, .. } => failed_at(
+            format!("{err}"),
+            find_identifier_span(query, &ModelName::from(client)),
+        ),
+        RegistryError::IngestorEndpointTypeMismatch { endpoint, .. } => failed_at(
+            format!("{err}"),
+            find_identifier_span(query, &ModelName::from(endpoint)),
+        ),
         _ => failed_at(format!("{err}"), None),
     }
 }
@@ -708,6 +718,12 @@ impl CompletionSnapshot<'_> {
                 })
                 .map(|model| model.name().to_string())
                 .collect(),
+            SemanticReference::SourceReference(source) => self
+                .models
+                .iter()
+                .filter(|model| source.admits(model) && model.name().as_str().starts_with(&prefix))
+                .map(|model| model.name().to_string())
+                .collect(),
             SemanticReference::SchemaField(schema_name) => self
                 .models
                 .iter()
@@ -770,7 +786,7 @@ impl CompletionSnapshot<'_> {
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
                     }
                     BuiltinFunctionScope::EmitterInvocation(kind)
-                        if kind.capabilities().writes_headers() =>
+                        if kind.capabilities().writes_headers =>
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }
@@ -843,26 +859,27 @@ impl ChoicePageBasis {
             ChoiceTarget::SignalingProtocol => 12,
             ChoiceTarget::Codec => 13,
             ChoiceTarget::CodecField => 14,
-            ChoiceTarget::IngestHttpSource => 15,
-            ChoiceTarget::IngestKafkaSource => 16,
-            ChoiceTarget::IngestPulsarSource => 17,
-            ChoiceTarget::IngestMqttSource => 18,
-            ChoiceTarget::IngestNatsSource => 19,
-            ChoiceTarget::IngestRabbitMqSource => 20,
-            ChoiceTarget::IngestRedisPubSubSource => 21,
-            ChoiceTarget::IngestPrometheusSource => 22,
-            ChoiceTarget::IngestZeroMqSource => 23,
-            ChoiceTarget::IngestSqsSource => 24,
-            ChoiceTarget::IngestEndpointSource => 25,
-            ChoiceTarget::IngestWebsocketsSource => 26,
-            ChoiceTarget::IngestSyslogSource => 27,
-            ChoiceTarget::IngestCodec => 28,
-            ChoiceTarget::IngestUnbranchedRelay => 29,
-            ChoiceTarget::IngestBranchedRelay => 30,
-            ChoiceTarget::BranchField => 31,
-            ChoiceTarget::ProcessorCompatibleInputRelay => 32,
-            ChoiceTarget::ProcessorInputBranchRelay => 33,
-            ChoiceTarget::ProcessorMaterializedRelay => 34,
+            ChoiceTarget::IngestHttpRequestSource => 15,
+            ChoiceTarget::IngestHttpEndpointSource => 16,
+            ChoiceTarget::IngestKafkaSource => 17,
+            ChoiceTarget::IngestPulsarSource => 18,
+            ChoiceTarget::IngestMqttSource => 19,
+            ChoiceTarget::IngestNatsSource => 20,
+            ChoiceTarget::IngestRabbitMqSource => 21,
+            ChoiceTarget::IngestRedisPubSubSource => 22,
+            ChoiceTarget::IngestPrometheusSource => 23,
+            ChoiceTarget::IngestZeroMqSource => 24,
+            ChoiceTarget::IngestSqsSource => 25,
+            ChoiceTarget::IngestWebsocketsConnectionSource => 26,
+            ChoiceTarget::IngestWebsocketsEndpointSource => 27,
+            ChoiceTarget::IngestSyslogSource => 28,
+            ChoiceTarget::IngestCodec => 29,
+            ChoiceTarget::IngestUnbranchedRelay => 30,
+            ChoiceTarget::IngestBranchedRelay => 31,
+            ChoiceTarget::BranchField => 32,
+            ChoiceTarget::ProcessorCompatibleInputRelay => 33,
+            ChoiceTarget::ProcessorInputBranchRelay => 34,
+            ChoiceTarget::ProcessorMaterializedRelay => 35,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1094,7 +1111,8 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::SignalingProtocol
         | ChoiceTarget::Codec
         | ChoiceTarget::CodecField
-        | ChoiceTarget::IngestHttpSource
+        | ChoiceTarget::IngestHttpRequestSource
+        | ChoiceTarget::IngestHttpEndpointSource
         | ChoiceTarget::IngestKafkaSource
         | ChoiceTarget::IngestPulsarSource
         | ChoiceTarget::IngestMqttSource
@@ -1104,8 +1122,8 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestPrometheusSource
         | ChoiceTarget::IngestZeroMqSource
         | ChoiceTarget::IngestSqsSource
-        | ChoiceTarget::IngestEndpointSource
-        | ChoiceTarget::IngestWebsocketsSource
+        | ChoiceTarget::IngestWebsocketsConnectionSource
+        | ChoiceTarget::IngestWebsocketsEndpointSource
         | ChoiceTarget::IngestSyslogSource
         | ChoiceTarget::IngestCodec
         | ChoiceTarget::IngestUnbranchedRelay
@@ -1339,7 +1357,8 @@ impl SessionServiceImpl {
             | ChoiceTarget::SignalingProtocol
             | ChoiceTarget::Codec
             | ChoiceTarget::CodecField
-            | ChoiceTarget::IngestHttpSource
+            | ChoiceTarget::IngestHttpRequestSource
+            | ChoiceTarget::IngestHttpEndpointSource
             | ChoiceTarget::IngestKafkaSource
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
@@ -1349,8 +1368,8 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestPrometheusSource
             | ChoiceTarget::IngestZeroMqSource
             | ChoiceTarget::IngestSqsSource
-            | ChoiceTarget::IngestEndpointSource
-            | ChoiceTarget::IngestWebsocketsSource
+            | ChoiceTarget::IngestWebsocketsConnectionSource
+            | ChoiceTarget::IngestWebsocketsEndpointSource
             | ChoiceTarget::IngestSyslogSource
             | ChoiceTarget::IngestCodec
             | ChoiceTarget::IngestUnbranchedRelay
@@ -1903,7 +1922,10 @@ pub(in crate::application) fn conflicting_reference(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use nervix_models::{ModelKind, NodeRef};
+    use nervix_models::{
+        ClientName, ConnectorKind, EndpointName, EndpointType, HttpSourceEntity, IngestSourceKind,
+        ModelKind, NodeRef, SyslogSourceEntity,
+    };
 
     use super::{
         super::{
@@ -2215,6 +2237,54 @@ mod tests {
     }
 
     #[test]
+    fn a_source_reference_of_the_wrong_kind_is_underlined() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let ingestor: ModelName = named("logs");
+
+        let query = "CREATE SYSLOG LISTENER INGESTOR logs FROM cache MODE NO ACK ON QUIESCE \
+                     SUSPEND DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
+                     ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        let err = error_stack::Report::new(RegistryError::IngestorClientConnectorMismatch {
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            kind: IngestSourceKind::Syslog(SyslogSourceEntity::Listener),
+            client: ClientName::parse("cache").expect("valid client name"),
+            required: ConnectorKind::Syslog,
+            found: ConnectorKind::Redis,
+        });
+        let response = create_registry_error_response(query, &domain, &ingestor, &err);
+        assert!(!response.succeeded());
+        assert_eq!(
+            response.message,
+            "SYSLOG LISTENER ingestor 'logs' in domain 'default' requires a SYSLOG client, but \
+             client 'cache' is a REDIS client"
+        );
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(42..47));
+
+        let query = "CREATE HTTP ENDPOINT INGESTOR logs FROM socket MODE NO ACK ON QUIESCE \
+                     SUSPEND DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
+                     ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        let err = error_stack::Report::new(RegistryError::IngestorEndpointTypeMismatch {
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            kind: IngestSourceKind::Http(HttpSourceEntity::Endpoint),
+            endpoint: EndpointName::parse("socket").expect("valid endpoint name"),
+            required: EndpointType::Http,
+            found: EndpointType::Websockets,
+        });
+        let response = create_registry_error_response(query, &domain, &ingestor, &err);
+        assert!(!response.succeeded());
+        assert_eq!(
+            response.message,
+            "HTTP ENDPOINT ingestor 'logs' in domain 'default' requires a TYPE HTTP endpoint, but \
+             endpoint 'socket' is TYPE WEBSOCKETS"
+        );
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(40..46));
+    }
+
+    #[test]
     fn a_rejected_source_names_its_stage_and_keeps_every_span() {
         let query = "USE demo;\nCREATE SCHEMA broken (id BOGUS);";
         let parse = nervix_nspl::client_statement::parse_client_statement_sources(query)
@@ -2444,16 +2514,16 @@ mod tests {
         let endpoint = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON QUIESCE \
-             SUSPEND DECODE USING codec TO outgoing SET value = read_",
+            "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE SUSPEND \
+             DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert_eq!(endpoint, vec!["read_header", "read_headers"]);
         let mqtt = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE INGESTOR source FROM MQTT broker TOPIC events MODE NO_ACK SEQUENTIAL ON \
-             QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
+            "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE \
+             SUSPEND DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert!(mqtt.is_empty(), "{mqtt:?}");

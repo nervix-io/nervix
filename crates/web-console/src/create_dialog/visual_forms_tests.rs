@@ -15,8 +15,10 @@ use leptos::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{ChoiceTarget, ChoiceValue};
 use nervix_models::{
-    DomainName, FieldName, ModelKind, ModelName, NodeRef, ParseAsType, RequestedResourceVersion,
-    ResourceName,
+    DomainName, FieldName, HttpSourceEntity, KafkaSourceEntity, ModelKind, ModelName,
+    MqttSourceEntity, NatsSourceEntity, NodeRef, ParseAsType, PrometheusSourceEntity,
+    PulsarSourceEntity, RabbitMqSourceEntity, RedisSourceEntity, RequestedResourceVersion,
+    ResourceName, SqsSourceEntity, SyslogSourceEntity, WebsocketsSourceEntity, ZeroMqSourceEntity,
 };
 
 use super::{
@@ -576,7 +578,7 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
         );
         any_spawner::Executor::poll_local();
         let html = dialog.to_html();
-        for kind in IngestSourceKind::ALL {
+        for kind in IngestSourceKind::modeled() {
             assert!(html.contains(&format!("data-source=\"{}\"", kind.form_key())));
         }
         for control in [
@@ -590,9 +592,11 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
         ] {
             assert!(html.contains(control), "{control} must render");
         }
-        signals
-            .ingestor
-            .update(|draft| draft.source.choose_kind(IngestSourceKind::Endpoint));
+        signals.ingestor.update(|draft| {
+            draft
+                .source
+                .choose_kind(IngestSourceKind::Http(HttpSourceEntity::Endpoint))
+        });
         let source = ChoiceValue::Model(node(ModelKind::Endpoint, "incoming"));
         select_choice(signals, ChoiceControl::IngestSourceRef, source.clone());
         assert!(selected_choice(
@@ -605,7 +609,7 @@ fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() 
                 .choice_query(ChoiceControl::IngestSourceRef)
                 .assured("endpoint lookup has a captured domain")
                 .target,
-            ChoiceTarget::IngestEndpointSource,
+            ChoiceTarget::IngestHttpEndpointSource,
         );
         signals.ingestor.update(|draft| {
             draft.routes[0].branch.choose_branched();
@@ -650,18 +654,14 @@ fn ingestor_choices_follow_the_selected_source_codec_branch_and_relays() {
             signals.choice_query(ChoiceControl::IngestSourceRef).err(),
             Some("Choose a source type before its client or endpoint")
         );
-        for kind in IngestSourceKind::ALL {
+        for kind in IngestSourceKind::modeled() {
             signals.ingestor.update(|draft| draft.source.choose_kind(kind));
             let query = signals
                 .choice_query(ChoiceControl::IngestSourceRef)
                 .assured("every selected source asks a typed question");
             assert_eq!(query.target, ChoiceTarget::for_ingest_source(kind));
             assert_eq!(query.dependencies[0].value, ChoiceValue::Domain(domain.clone()));
-            let reference_kind = if kind == IngestSourceKind::Endpoint {
-                ModelKind::Endpoint
-            } else {
-                ModelKind::Client
-            };
+            let reference_kind = kind.capabilities().reference.model_kind();
             let source = ChoiceValue::Model(node(reference_kind, "source"));
             select_choice(signals, ChoiceControl::IngestSourceRef, source.clone());
             assert!(selected_choice(signals, ChoiceControl::IngestSourceRef, &source));
@@ -788,19 +788,58 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
         };
         signals.open(CreateKind::Ingestor, Some(scope), "global-create-button");
         for (kind, field) in [
-            (IngestSourceKind::Http, "create-ingestor-every"),
-            (IngestSourceKind::Kafka, "create-ingestor-offset"),
-            (IngestSourceKind::Pulsar, "create-ingestor-subscription"),
-            (IngestSourceKind::Mqtt, "create-ingestor-mqtt-session"),
-            (IngestSourceKind::Nats, "create-ingestor-queue-group"),
-            (IngestSourceKind::RabbitMq, "create-ingestor-queue"),
-            (IngestSourceKind::RedisPubSub, "create-ingestor-channel"),
-            (IngestSourceKind::Prometheus, "create-ingestor-query"),
-            (IngestSourceKind::ZeroMq, "create-ingestor-quiesce"),
-            (IngestSourceKind::Sqs, "create-ingestor-queue"),
-            (IngestSourceKind::Endpoint, "create-ingestor-timestamp"),
-            (IngestSourceKind::Websockets, "create-ingestor-quiesce"),
-            (IngestSourceKind::Syslog, "create-ingestor-quiesce"),
+            (
+                IngestSourceKind::Http(HttpSourceEntity::Request),
+                "create-ingestor-every",
+            ),
+            (
+                IngestSourceKind::Kafka(KafkaSourceEntity::Topic),
+                "create-ingestor-offset",
+            ),
+            (
+                IngestSourceKind::Pulsar(PulsarSourceEntity::Topic),
+                "create-ingestor-subscription",
+            ),
+            (
+                IngestSourceKind::Mqtt(MqttSourceEntity::Topic),
+                "create-ingestor-mqtt-session",
+            ),
+            (
+                IngestSourceKind::Nats(NatsSourceEntity::Subject),
+                "create-ingestor-queue-group",
+            ),
+            (
+                IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue),
+                "create-ingestor-queue",
+            ),
+            (
+                IngestSourceKind::Redis(RedisSourceEntity::PubSub),
+                "create-ingestor-channel",
+            ),
+            (
+                IngestSourceKind::Prometheus(PrometheusSourceEntity::Query),
+                "create-ingestor-query",
+            ),
+            (
+                IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull),
+                "create-ingestor-quiesce",
+            ),
+            (
+                IngestSourceKind::Sqs(SqsSourceEntity::Queue),
+                "create-ingestor-queue",
+            ),
+            (
+                IngestSourceKind::Http(HttpSourceEntity::Endpoint),
+                "create-ingestor-timestamp",
+            ),
+            (
+                IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection),
+                "create-ingestor-quiesce",
+            ),
+            (
+                IngestSourceKind::Syslog(SyslogSourceEntity::Listener),
+                "create-ingestor-quiesce",
+            ),
         ] {
             signals
                 .ingestor
@@ -812,7 +851,9 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
             );
         }
         signals.ingestor.update(|draft| {
-            draft.source.choose_kind(IngestSourceKind::Mqtt);
+            draft
+                .source
+                .choose_kind(IngestSourceKind::Mqtt(MqttSourceEntity::Topic));
             draft.source.delivery = Some(super::ingestor_source_draft::DeliveryChoice::AckParallel);
             draft.source.quiesce = Some(super::ingestor_source_draft::QuiesceChoice::Buffer);
             let route = draft.active_route_mut().assured("first route exists");

@@ -2,14 +2,16 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
+//! - **Owns.** Registration of the focused node-liveness, node-startup, node-stop, phase-deadline,
 //!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver, materialized-state diagnostic and gRPC-receiver regressions with Rust's test
-//!   runner, and the stand-in nodes and clients those regressions talk to.
-//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver, gRPC-receiver
-//!   and materialized-state diagnostic harness modules, and the client wire session
-//!   protocol the stand-in nodes answer status requests with.
+//!   HTTP-receiver, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag and
+//!   runner-offload regressions with Rust's test runner, and the stand-in nodes and clients those
+//!   regressions talk to.
+//! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
+//!   port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
+//!   gRPC-receiver, NATS-observer, runner-lag, runner-offload and materialized-state diagnostic
+//!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
+//!   client wire session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -18,20 +20,38 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/injected_hold.rs"]
+mod injected_hold;
+#[path = "common/injected_hold_tests.rs"]
+mod injected_hold_tests;
 #[path = "common/materialized_state_diagnostics.rs"]
 mod materialized_state_diagnostics;
 #[path = "common/materialized_state_diagnostics_tests.rs"]
 mod materialized_state_diagnostics_tests;
+#[path = "common/nats_observer.rs"]
+mod nats_observer;
+#[path = "common/nats_observer_tests.rs"]
+mod nats_observer_tests;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]
 mod node_startup;
+#[path = "common/node_stop.rs"]
+mod node_stop;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
 #[path = "common/port_pool.rs"]
 mod port_pool;
 #[path = "common/redis_client.rs"]
 mod redis_client;
+#[path = "common/runner_lag.rs"]
+mod runner_lag;
+#[path = "common/runner_lag_tests.rs"]
+mod runner_lag_tests;
+#[path = "common/runner_offload.rs"]
+mod runner_offload;
+#[path = "common/runner_offload_tests.rs"]
+mod runner_offload_tests;
 #[path = "common/scenario_phase.rs"]
 #[allow(
     dead_code,
@@ -81,7 +101,9 @@ mod tests {
         time::{Instant, timeout},
     };
     use nervix_recovery::NoReceiver as _;
-    use nervix_server::application::AppError;
+    use nervix_server::application::{
+        AppError, ShutdownCoordinator, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
+    };
     use nervix_test_environment::{ContainerTeardownError, TeardownFailures};
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tempfile::TempDir;
@@ -105,6 +127,10 @@ mod tests {
             NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted, StartableNode, StartupEnd,
             StartupPorts, StartupRetry, cluster_startup_budget,
         },
+        node_stop::{
+            NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord,
+            ProductShutdownDeadline,
+        },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
         port_pool::{
             PORT_DRAW_LIMIT, PortPoolError, next_port, next_ports, release_test_ports, reserve,
@@ -124,14 +150,164 @@ mod tests {
     };
 
     #[nervix_primitives::test]
+    async fn a_retry_runs_before_the_remaining_first_attempts() {
+        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+
+        let slots = ScenarioRunSlots::new(1);
+        let current = slots
+            .admit_with(
+                FeatureLimit::Unlimited,
+                "current",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let mut first = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            "queued first attempt",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        let mut retry = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            "retry",
+            ScenarioAttempt::Retry,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(retry.as_mut()).is_pending());
+
+        drop(current);
+        let std::task::Poll::Ready(retried) = futures_util::poll!(retry.as_mut()) else {
+            panic!("the next released run slot must go to the retry");
+        };
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        drop(retried);
+        assert!(futures_util::poll!(first.as_mut()).is_ready());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_ready_retry_runs_before_first_attempts_of_limited_features() {
+        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+
+        for limit in [FeatureLimit::WebConsole, FeatureLimit::WasmStateReset] {
+            nervix_primitives::task::consume_budget().await;
+            let slots = ScenarioRunSlots::new(1);
+            let current = slots
+                .admit_with(
+                    FeatureLimit::Unlimited,
+                    "current",
+                    ScenarioAttempt::First,
+                    |_| {},
+                )
+                .await;
+            let mut first = Box::pin(slots.admit_with(
+                limit,
+                "limited first attempt",
+                ScenarioAttempt::First,
+                |_| {},
+            ));
+            assert!(futures_util::poll!(first.as_mut()).is_pending());
+            let mut retry = Box::pin(slots.admit_with(
+                FeatureLimit::Unlimited,
+                "retry",
+                ScenarioAttempt::Retry,
+                |_| {},
+            ));
+            assert!(futures_util::poll!(retry.as_mut()).is_pending());
+            drop(current);
+            let std::task::Poll::Ready(retried) = futures_util::poll!(retry.as_mut()) else {
+                panic!("an eligible retry must precede a limited first attempt");
+            };
+            assert!(futures_util::poll!(first.as_mut()).is_pending());
+            drop(retried);
+            assert!(futures_util::poll!(first.as_mut()).is_ready());
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_retry_waiting_for_its_feature_does_not_hold_a_free_run_slot() {
+        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+
+        let slots = ScenarioRunSlots::new(3);
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "console",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "console",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let mut retry = Box::pin(slots.admit_with(
+            FeatureLimit::WebConsole,
+            "console retry",
+            ScenarioAttempt::Retry,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(retry.as_mut()).is_pending());
+        let mut ordinary = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            "ordinary first attempt",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        let std::task::Poll::Ready(ordinary) = futures_util::poll!(ordinary.as_mut()) else {
+            panic!("a retry blocked by its feature must leave the free run slot usable");
+        };
+        drop(first);
+        assert!(futures_util::poll!(retry.as_mut()).is_ready());
+        drop(second);
+        drop(ordinary);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cancelled_retry_returns_its_feature_and_run_capacity() {
+        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+
+        for limit in [
+            FeatureLimit::WebConsole,
+            FeatureLimit::WasmStateReset,
+            FeatureLimit::Unlimited,
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let slots = ScenarioRunSlots::new(1);
+            let current = slots
+                .admit_with(limit, "current", ScenarioAttempt::First, |_| {})
+                .await;
+            let mut retry = Box::pin(slots.admit_with(
+                limit,
+                "cancelled retry",
+                ScenarioAttempt::Retry,
+                |_| {},
+            ));
+            assert!(futures_util::poll!(retry.as_mut()).is_pending());
+            drop(retry);
+            let mut successor =
+                Box::pin(slots.admit_with(limit, "successor", ScenarioAttempt::First, |_| {}));
+            assert!(futures_util::poll!(successor.as_mut()).is_pending());
+            drop(current);
+            assert!(futures_util::poll!(successor.as_mut()).is_ready());
+        }
+    }
+
+    #[nervix_primitives::test]
     async fn a_queued_web_console_scenario_does_not_hold_a_run_slot() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioRunSlots};
+        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
 
         let slots = StdArc::new(ScenarioRunSlots::new(3));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
                 "Web console execution graph",
+                ScenarioAttempt::First,
                 |_| {},
             )
             .await;
@@ -139,6 +315,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 "Web console execution graph",
+                ScenarioAttempt::First,
                 |_| {},
             )
             .await;
@@ -148,6 +325,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     "Web console execution graph",
+                    ScenarioAttempt::First,
                     |_| {},
                 )
                 .await
@@ -155,7 +333,12 @@ mod tests {
         nervix_primitives::task::yield_now().await;
         let unrelated = timeout(
             Duration::from_millis(100),
-            slots.admit_with(FeatureLimit::Unlimited, "ordinary", |_| {}),
+            slots.admit_with(
+                FeatureLimit::Unlimited,
+                "ordinary",
+                ScenarioAttempt::First,
+                |_| {},
+            ),
         )
         .await;
         assert!(
@@ -171,26 +354,38 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_next_limited_scenario_gets_a_slot_beside_bulk_work() {
-        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+        };
 
         let slots = StdArc::new(ScenarioRunSlots::new(1));
         let current = slots
-            .admit_with(FeatureLimit::Unlimited, "ordinary", |_| {})
+            .admit_with(
+                FeatureLimit::Unlimited,
+                "ordinary",
+                ScenarioAttempt::First,
+                |_| {},
+            )
             .await;
         let (ordinary_waiting, ordinary_started) = oneshot::channel();
         let ordinary_slots = slots.clone();
         let ordinary = nervix_primitives::task::spawn(async move {
             let mut waiting = Some(ordinary_waiting);
             ordinary_slots
-                .admit_with(FeatureLimit::Unlimited, "ordinary", |reason| {
-                    if reason == AdmissionWait::RunSlot {
-                        waiting
-                            .take()
-                            .expect("ordinary waiter reports once")
-                            .send(())
-                            .expect("the test still observes admission");
-                    }
-                })
+                .admit_with(
+                    FeatureLimit::Unlimited,
+                    "ordinary",
+                    ScenarioAttempt::First,
+                    |reason| {
+                        if reason == AdmissionWait::RunSlot {
+                            waiting
+                                .take()
+                                .expect("ordinary waiter reports once")
+                                .send(())
+                                .expect("the test still observes admission");
+                        }
+                    },
+                )
                 .await
         });
         ordinary_started.await.expect("ordinary waiter starts");
@@ -204,6 +399,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     "Web console execution graph",
+                    ScenarioAttempt::First,
                     |reason| {
                         if reason == AdmissionWait::RunSlot {
                             waiting
@@ -235,13 +431,16 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain() {
-        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+        };
 
         let slots = StdArc::new(ScenarioRunSlots::new(2));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
                 "Web console execution graph",
+                ScenarioAttempt::First,
                 |_| {},
             )
             .await;
@@ -249,6 +448,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 "Web console execution graph",
+                ScenarioAttempt::First,
                 |_| {},
             )
             .await;
@@ -261,6 +461,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     "Web console execution graph",
+                    ScenarioAttempt::First,
                     |reason| {
                         if reason == AdmissionWait::WebConsole {
                             waiting
@@ -280,15 +481,20 @@ mod tests {
         let ordinary = nervix_primitives::task::spawn(async move {
             let mut waiting = Some(ordinary_waiting);
             ordinary_slots
-                .admit_with(FeatureLimit::Unlimited, "ordinary", |reason| {
-                    if reason == AdmissionWait::RunSlot {
-                        waiting
-                            .take()
-                            .expect("ordinary waiter reports once")
-                            .send(())
-                            .expect("the test still observes admission");
-                    }
-                })
+                .admit_with(
+                    FeatureLimit::Unlimited,
+                    "ordinary",
+                    ScenarioAttempt::First,
+                    |reason| {
+                        if reason == AdmissionWait::RunSlot {
+                            waiting
+                                .take()
+                                .expect("ordinary waiter reports once")
+                                .send(())
+                                .expect("the test still observes admission");
+                        }
+                    },
+                )
                 .await
         });
         ordinary_started.await.expect("ordinary waiter starts");
@@ -310,13 +516,16 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn each_web_console_feature_starts_before_one_feature_consumes_the_group() {
-        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+        };
 
         let slots = StdArc::new(ScenarioRunSlots::new(2));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
                 "Web console execution graph",
+                ScenarioAttempt::First,
                 |_| {},
             )
             .await;
@@ -324,6 +533,7 @@ mod tests {
             .admit_with(
                 FeatureLimit::WebConsole,
                 "Web console execution graph",
+                ScenarioAttempt::First,
                 |_| {},
             )
             .await;
@@ -336,6 +546,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     "Web console execution graph",
+                    ScenarioAttempt::First,
                     |reason| {
                         if reason == AdmissionWait::WebConsole {
                             waiting
@@ -358,6 +569,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     "Web console NSPL REPL",
+                    ScenarioAttempt::First,
                     |reason| {
                         if reason == AdmissionWait::WebConsole {
                             waiting
@@ -380,6 +592,7 @@ mod tests {
                 .admit_with(
                     FeatureLimit::WebConsole,
                     "Web console transaction inspector",
+                    ScenarioAttempt::First,
                     |reason| {
                         if reason == AdmissionWait::WebConsole {
                             waiting
@@ -1759,6 +1972,8 @@ mod tests {
         task: OwnedNodeTask,
         log: Arc<CleanupLog>,
         scenario: Option<Arc<ActiveScenarioRegistration>>,
+        /// What the node's shutdown reads as while it stops, when the regression gives it one.
+        progress: Option<NodeStopProgress>,
     }
 
     impl StandInTeardownNode {
@@ -1800,7 +2015,14 @@ mod tests {
                 task,
                 log: log.clone(),
                 scenario: None,
+                progress: None,
             }
+        }
+
+        /// Gives the node a shutdown that reads as `progress` for as long as it stops.
+        fn stopping_in(mut self, progress: NodeStopProgress) -> Self {
+            self.progress = Some(progress);
+            self
         }
 
         /// Reads the phase `scenario` publishes while this node releases, so a regression can tell
@@ -1825,6 +2047,10 @@ mod tests {
 
         fn owned_task(&mut self) -> &mut OwnedNodeTask {
             &mut self.task
+        }
+
+        fn stop_progress(&self) -> Option<NodeStopProgress> {
+            self.progress
         }
 
         fn release(&mut self) {
@@ -2166,6 +2392,232 @@ mod tests {
             assert!(!teardown.left_nodes_stopping(), "{teardown}");
             assert_eq!(log.released().len(), cluster.len());
         }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes =
+            [
+                StandInTeardownNode::new("node-1", StandInEnding::StopsWhenAsked, &log)
+                    .stopping_in(NodeStopProgress {
+                        phase: ShutdownPhase::DrainSupport,
+                        deadline: ProductShutdownDeadline::Ahead(Duration::from_secs(200)),
+                    }),
+                StandInTeardownNode::new("node-2", StandInEnding::OutlastsCleanup, &log)
+                    .stopping_in(NodeStopProgress {
+                        phase: ShutdownPhase::TerminalTeardown,
+                        deadline: ProductShutdownDeadline::Passed,
+                    }),
+                StandInTeardownNode::new("node-3", StandInEnding::OutlastsCleanup, &log),
+            ];
+
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        let [ended, read, unread] = teardown.nodes.as_slice() else {
+            panic!("a cluster of three reports three nodes: {teardown}");
+        };
+        // A node that ended inside the budget has no shutdown left to describe.
+        assert_eq!(ended.progress, None, "{ended}");
+        assert_eq!(
+            read.to_string(),
+            "node \"node-2\" was still stopping at the cleanup deadline, in shutdown phase \
+             TerminalTeardown, past its own shutdown deadline, and keeps its storage and ports \
+             until it ends"
+        );
+        // A node whose shutdown cannot be read is still named as stopping.
+        assert_eq!(
+            unread.to_string(),
+            "node \"node-3\" was still stopping at the cleanup deadline and keeps its storage and \
+             ports until it ends"
+        );
+        assert_eq!(
+            log.left_stopping(),
+            vec!["node-2".to_string(), "node-3".to_string()]
+        );
+    }
+
+    /// The test nodes' shutdown timeout, which a stopping node's deadline is read against.
+    const STAND_IN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(240);
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline() {
+        let shutdown = ShutdownCoordinator::new(STAND_IN_SHUTDOWN_TIMEOUT);
+
+        let serving = NodeStopProgress::observe(&shutdown);
+        assert_eq!(
+            serving,
+            NodeStopProgress {
+                phase: ShutdownPhase::Serving,
+                deadline: ProductShutdownDeadline::NotRequested,
+            }
+        );
+        assert_eq!(
+            serving.to_string(),
+            "in shutdown phase Serving, with no stop request accepted"
+        );
+
+        shutdown.request_stop();
+        nervix_primitives::time::advance(Duration::from_secs(90)).await;
+        let stopping = NodeStopProgress::observe(&shutdown);
+        assert_eq!(
+            stopping,
+            NodeStopProgress {
+                phase: ShutdownPhase::StopRequested,
+                deadline: ProductShutdownDeadline::Ahead(Duration::from_secs(150)),
+            }
+        );
+        assert_eq!(
+            stopping.to_string(),
+            "in shutdown phase StopRequested, 150s before its own shutdown deadline"
+        );
+
+        // An in-process node has no deadline supervision, so it is read past its deadline for as
+        // long as it goes on stopping.
+        nervix_primitives::time::advance(Duration::from_secs(150)).await;
+        let overdue = NodeStopProgress::observe(&shutdown);
+        assert_eq!(overdue.phase, ShutdownPhase::StopRequested);
+        assert_eq!(overdue.deadline, ProductShutdownDeadline::Passed);
+        nervix_primitives::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(NodeStopProgress::observe(&shutdown), overdue);
+        assert_eq!(
+            overdue.to_string(),
+            "in shutdown phase StopRequested, past its own shutdown deadline"
+        );
+    }
+
+    #[test]
+    fn a_stop_record_reads_as_the_transition_the_harness_prints() {
+        let ended = NodeStopRecord {
+            node: "node-2".to_string(),
+            stopping_for: Some(Duration::from_millis(480)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::Ended {
+                task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
+                shutdown: Some(ShutdownOutcome {
+                    stop_admission: ShutdownPhaseOutcome::Completed,
+                    drain_support: ShutdownPhaseOutcome::Abandoned,
+                    terminal_teardown: ShutdownPhaseOutcome::Completed,
+                }),
+            },
+        };
+        assert_eq!(
+            ended.to_string(),
+            "node 'node-2' stop: ended 480ms after its stop request, inside its 300s watchdog: \
+             clean application exit; shutdown phases: stop admission Completed, drain support \
+             Abandoned, terminal teardown Completed"
+        );
+
+        let unreported = NodeStopRecord {
+            node: "node-3".to_string(),
+            stopping_for: Some(Duration::from_secs(2)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::Ended {
+                task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
+                shutdown: None,
+            },
+        };
+        assert_eq!(
+            unreported.to_string(),
+            "node 'node-3' stop: ended 2s after its stop request, inside its 300s watchdog: clean \
+             application exit; no shutdown outcome was reported"
+        );
+
+        let still_stopping = NodeStopRecord {
+            node: "restored-1".to_string(),
+            stopping_for: Some(Duration::from_secs(300)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::StillStopping(NodeStopProgress {
+                phase: ShutdownPhase::TerminalTeardown,
+                deadline: ProductShutdownDeadline::Passed,
+            }),
+        };
+        assert_eq!(
+            still_stopping.to_string(),
+            "node 'restored-1' stop: still stopping 300s after its stop request, at the end of \
+             its 300s watchdog, in shutdown phase TerminalTeardown, past its own shutdown deadline"
+        );
+
+        let kept = NodeStopRecord {
+            node: "restored-2".to_string(),
+            stopping_for: Some(Duration::from_secs(75)),
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::LeftToKeeper,
+        };
+        assert_eq!(
+            kept.to_string(),
+            "node 'restored-2' stop: still stopping 75s after its stop request; it had already \
+             been left to a keeper, which waits for it to end"
+        );
+
+        let unasked = NodeStopRecord {
+            node: "node-1".to_string(),
+            stopping_for: None,
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::Ended {
+                task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
+                shutdown: None,
+            },
+        };
+        assert_eq!(
+            unasked.to_string(),
+            "node 'node-1' stop: ended without a stop request from the harness, inside its 300s \
+             watchdog: clean application exit; no shutdown outcome was reported"
+        );
+
+        // A node that was to end by itself and did not is read the same way as one the harness
+        // stopped.
+        let unasked_and_running = NodeStopRecord {
+            node: "node-1".to_string(),
+            stopping_for: None,
+            watchdog: Duration::from_secs(300),
+            ending: NodeStopEnding::StillStopping(NodeStopProgress {
+                phase: ShutdownPhase::Serving,
+                deadline: ProductShutdownDeadline::NotRequested,
+            }),
+        };
+        assert_eq!(
+            unasked_and_running.to_string(),
+            "node 'node-1' stop: still running without a stop request from the harness, at the \
+             end of its 300s watchdog, in shutdown phase Serving, with no stop request accepted"
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task() {
+        let (mut clock, ended) = NodeStopClock::start();
+        assert_eq!(
+            clock.stopping_for(),
+            None,
+            "a node the harness never asked to stop has no stop to time"
+        );
+
+        nervix_primitives::time::advance(Duration::from_secs(7)).await;
+        clock.stop_requested();
+        nervix_primitives::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(clock.stopping_for(), Some(Duration::from_secs(3)));
+
+        // A later request changes nothing, as it changes nothing in the node.
+        clock.stop_requested();
+        nervix_primitives::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(clock.stopping_for(), Some(Duration::from_secs(5)));
+
+        // The task records its own ending, so a harness that gets round to the node later still
+        // reads how long the node itself took.
+        drop(ended);
+        nervix_primitives::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(clock.stopping_for(), Some(Duration::from_secs(5)));
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop() {
+        let (mut clock, ended) = NodeStopClock::start();
+        drop(ended);
+        nervix_primitives::time::advance(Duration::from_secs(4)).await;
+
+        clock.stop_requested();
+
+        assert_eq!(clock.stopping_for(), Some(Duration::ZERO));
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -3242,12 +3694,16 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_retried_scenario_publishes_which_attempt_is_running() {
+        use crate::scenario_schedule::ScenarioAttempt;
+
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let first = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
         assert_eq!(published(&first).attempt, 1);
+        assert_eq!(first.attempt(), ScenarioAttempt::First);
         drop(first);
 
         let retry = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        assert_eq!(retry.attempt(), ScenarioAttempt::Retry);
         assert_eq!(
             published(&retry).attempt,
             2,
@@ -3259,6 +3715,7 @@ mod tests {
         let example =
             ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 51);
         assert_eq!(published(&example).attempt, 1);
+        assert_eq!(example.attempt(), ScenarioAttempt::First);
         assert_ne!(published(&retry).identity, published(&example).identity);
     }
 

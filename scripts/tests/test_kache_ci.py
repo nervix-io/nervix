@@ -1,99 +1,309 @@
 from __future__ import annotations
 
+import contextlib
+from dataclasses import dataclass
+import io
+import json
 import os
+from pathlib import Path
+import re
+import signal
+import stat
 import subprocess
+import sys
 import tempfile
+import textwrap
+import time
 import tomllib
 import unittest
-from pathlib import Path
+from unittest import mock
+
+from scripts import kache_remote
+from scripts.kache_remote import (
+    ConfigurationError,
+    DaemonState,
+    Outcome,
+    Publication,
+    StartError,
+)
+
+WORKFLOWS = (
+    Path(".github/workflows/check.yaml"),
+    Path(".github/workflows/docker-build.yaml"),
+    Path(".github/workflows/bolero.yaml"),
+)
+# Every job that builds Rust through kache, by workflow.
+KACHE_JOBS = {
+    "check.yaml": {
+        "checks",
+        "diagnostic-evidence",
+        "deloxide",
+        "tests",
+        "scenarios",
+        "coverage",
+        "client-conformance",
+        "extra-tests",
+        "shuttle",
+        "loom",
+        "loom-qualification",
+        "turmoil",
+    },
+    "docker-build.yaml": {"benchmark", "build-book"},
+    "bolero.yaml": {"bolero-random", "bolero-fuzz"},
+}
+REMOTE_ENVIRONMENT = {
+    "KACHE_S3_BUCKET": "kache-ci",
+    "KACHE_S3_REGION": "auto",
+    "KACHE_S3_ENDPOINT": "https://account-id.r2.cloudflarestorage.com",
+    "KACHE_S3_ACCESS_KEY": "test-access-key",
+    "KACHE_S3_SECRET_KEY": "test-secret-key",
+}
+# The publication step's script. A job that failed before its checkout has no script to run.
+PUBLISH_SCRIPT = (
+    "if [[ -f scripts/kache_remote.py ]]; then\n"
+    '  python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"\n'
+    "else\n"
+    '  echo "::notice::Kache publication did not run because checkout did not provide its script"\n'
+    "fi"
+)
 
 
-class KacheCiTests(unittest.TestCase):
-    def test_native_rust_jobs_use_s3_backed_kache_without_actions_cache(self) -> None:
-        check_workflow = Path(".github/workflows/check.yaml").read_text()
-        docker_workflow = Path(".github/workflows/docker-build.yaml").read_text()
+@dataclass(frozen=True)
+class Step:
+    name: str
+    text: str
 
-        self.assertNotIn("actions/cache@", check_workflow)
-        self.assertNotIn("actions/cache@", docker_workflow)
-        self.assertNotIn("enable-cache: true", docker_workflow)
-        for workflow in (check_workflow, docker_workflow):
-            self.assertIn('KACHE_VERSION: "0.28.1"', workflow)
-            self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow)
+    def mapping(self, key: str) -> dict[str, str]:
+        """The step's `key:` block as a flat mapping of its entries."""
+        match = re.search(rf"^        {key}:\n((?:          .+\n)+)", self.text, re.MULTILINE)
+        if match is None:
+            return {}
+        entries = {}
+        for line in match.group(1).splitlines():
+            name, _, value = line.strip().partition(": ")
+            entries[name] = value
+        return entries
 
-        import re
+    def field(self, key: str) -> str | None:
+        match = re.search(rf"^        {key}: (.+)$", self.text, re.MULTILINE)
+        return None if match is None else match.group(1)
 
-        def job_sections(workflow: str) -> dict[str, str]:
-            starts = list(re.finditer(r"^  ([a-z][a-z-]*):\n", workflow, re.MULTILINE))
-            return {
-                match.group(1): workflow[match.start() : starts[index + 1].start() if index + 1 < len(starts) else len(workflow)]
-                for index, match in enumerate(starts)
-            }
+    def block(self, key: str) -> str | None:
+        """The step's `key: |` literal block without its indentation."""
+        match = re.search(rf"^        {key}: \|\n((?:          .*\n)+)", self.text, re.MULTILINE)
+        if match is None:
+            return None
+        return textwrap.dedent(match.group(1)).rstrip("\n")
 
-        jobs = job_sections(check_workflow) | job_sections(docker_workflow)
-        kache_jobs = (
-            "checks",
-            "tests",
-            "scenarios",
-            "client-conformance",
-            "extra-tests",
-            "shuttle",
-            "loom",
-            "turmoil",
-            "deloxide",
-            "benchmark",
-            "build-book",
-        )
-        for name in kache_jobs:
-            with self.subTest(job=name):
-                job = jobs[name]
-                configure_index = job.index("bash scripts/configure_kache_remote.sh")
-                setup_index = job.index("uses: kunobi-ninja/kache-action@v1")
-                self.assertLess(configure_index, setup_index)
-                self.assertIn('echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"', job)
-                self.assertIn('github-cache: "false"', job)
-                self.assertIn('sync: "false"', job)
-                self.assertIn('cache-executables: "true"', job)
-                self.assertIn('s3-prefix: "artifacts"', job)
-                self.assertIn("s3-bucket: ${{ vars.KACHE_BUCKET }}", job)
-                self.assertIn("s3-region: ${{ vars.KACHE_BUCKET_REGION }}", job)
-                self.assertIn("KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}", job)
-                self.assertIn("s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}", job)
-                self.assertIn("KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}", job)
-                self.assertIn("KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}", job)
-                self.assertIn("s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}", job)
-                self.assertIn("s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}", job)
-                self.assertIn("python3 scripts/publish_kache_report.py", job)
-                self.assertIn("Upload kache report", job)
-                self.assertIn('max-size: "1TiB"', job)
 
-        self.assertNotIn("KACHE_GC_EVICT_SHARED", docker_workflow)
+def workflow_jobs(workflow: str) -> dict[str, str]:
+    body = workflow.split("\njobs:\n", maxsplit=1)[1]
+    starts = list(re.finditer(r"^  ([a-z][a-z0-9-]*):\n", body, re.MULTILINE))
+    jobs = {}
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(body)
+        jobs[start.group(1)] = body[start.start() : end]
+    return jobs
 
+
+def job_steps(job: str) -> list[Step]:
+    starts = list(re.finditer(r"^      - ", job, re.MULTILINE))
+    steps = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(job)
+        text = job[start.start() : end]
+        name = re.search(r"^      (?:- |  )name: (.+)$", text, re.MULTILINE)
+        steps.append(Step(name.group(1) if name else "", text))
+    return steps
+
+
+def workflow_env(workflow: str) -> str:
+    return workflow.split("\njobs:\n", maxsplit=1)[0]
+
+
+class KacheWorkflowTests(unittest.TestCase):
+    def test_every_kache_job_starts_its_remote_and_publishes_within_the_contract(self) -> None:
+        manifest_keys = []
+        for path in WORKFLOWS:
+            workflow = path.read_text()
+            self.assertIn('KACHE_VERSION: "1.2.1"', workflow_env(workflow))
+            self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow_env(workflow))
+            self.assertNotIn("sync --push", workflow)
+            self.assertNotIn("configure_kache_remote", workflow)
+            self.assertNotIn("actions/cache@", workflow)
+            jobs = workflow_jobs(workflow)
+            kache_jobs = {name for name, job in jobs.items() if "kunobi-ninja/kache-action" in job}
+            self.assertEqual(kache_jobs, KACHE_JOBS[path.name], path)
+            for name in sorted(kache_jobs):
+                with self.subTest(workflow=path.name, job=name):
+                    steps = job_steps(jobs[name])
+                    names = [step.name for step in steps]
+                    setup = names.index("Setup kache")
+                    self.assertIn("uses: kunobi-ninja/kache-action@v1", steps[setup].text)
+                    # Without S3 inputs the action neither saves a manifest nor pushes, and it
+                    # still stops the job's daemon at the end of the job.
+                    self.assertEqual(
+                        steps[setup].mapping("with"),
+                        {
+                            "version": "${{ env.KACHE_VERSION }}",
+                            "github-cache": '"false"',
+                            "cache-executables": '"true"',
+                            "max-size": '"1TiB"',
+                            "pr-comment": '"false"',
+                        },
+                    )
+
+                    start = steps[setup + 1]
+                    self.assertEqual(start.name, "Start kache remote")
+                    self.assertEqual(start.field("run"), "python3 scripts/kache_remote.py start")
+                    environment = start.mapping("env")
+                    manifest_key = environment.pop("KACHE_MANIFEST_KEY")
+                    self.assertTrue(manifest_key.endswith("-${{ runner.os }}-${{ runner.arch }}"), manifest_key)
+                    manifest_keys.append(manifest_key.replace("${{ github.job }}", name))
+                    self.assertEqual(
+                        environment,
+                        {
+                            "KACHE_S3_BUCKET": "${{ vars.KACHE_BUCKET }}",
+                            "KACHE_S3_REGION": "${{ vars.KACHE_BUCKET_REGION }}",
+                            "KACHE_S3_ENDPOINT": "${{ vars.KACHE_BUCKET_ENDPOINT }}",
+                            "KACHE_S3_ACCESS_KEY": "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}",
+                            "KACHE_S3_SECRET_KEY": "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}",
+                        },
+                    )
+                    for earlier in steps[:setup]:
+                        self.assertNotIn("KACHE_", earlier.text, earlier.name)
+
+                    self.assertEqual(names.count("Publish kache cache"), 1)
+                    publish_index = names.index("Publish kache cache")
+                    publish = steps[publish_index]
+                    self.assertEqual(publish.field("if"), "always()")
+                    self.assertEqual(publish.field("timeout-minutes"), "4")
+                    self.assertEqual(publish.mapping("env"), {"JOB_STATUS": "${{ job.status }}"})
+                    self.assertEqual(publish.block("run"), PUBLISH_SCRIPT)
+                    if "Publish kache report" in names:
+                        # The report and its artifact carry the publication record.
+                        self.assertEqual(names[publish_index + 1], "Publish kache report")
+                        self.assertEqual(names[publish_index + 2], "Upload kache report")
+                    else:
+                        self.assertEqual(publish_index, len(steps) - 1)
+        self.assertEqual(len(manifest_keys), len(set(manifest_keys)), manifest_keys)
+
+    def test_the_publication_step_records_a_failed_job_and_tolerates_a_missing_checkout(self) -> None:
+        scenarios = job_steps(workflow_jobs(Path(".github/workflows/check.yaml").read_text())["scenarios"])
+        script = next(step for step in scenarios if step.name == "Publish kache cache").block("run")
+        self.assertEqual(script, PUBLISH_SCRIPT)
+        with tempfile.TemporaryDirectory() as directory:
+            runner_temp = Path(directory) / "runner-temp"
+            runner_temp.mkdir()
+            empty_workspace = Path(directory) / "workspace"
+            empty_workspace.mkdir()
+
+            # A job that failed before its checkout has no script, so the step only adds a notice.
+            failed = run_step(script, empty_workspace, {"JOB_STATUS": "failure", "RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(failed.returncode, 0, failed.stderr)
+            self.assertEqual(
+                failed.stdout,
+                "::notice::Kache publication did not run because checkout did not provide its script\n",
+            )
+            self.assertFalse((runner_temp / "kache-report").exists())
+
+            # A checked-out job whose work was cancelled records that publication did not run.
+            cancelled = run_step(script, Path.cwd(), {"JOB_STATUS": "cancelled", "RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            recorded = json.loads((runner_temp / "kache-report" / "publication.json").read_text())
+            self.assertEqual(recorded["outcome"], "not-run")
+            self.assertEqual(recorded["job_status"], "cancelled")
+
+    def test_the_report_records_health_and_the_costliest_misses(self) -> None:
         report_script = Path("scripts/publish_kache_report.py").read_text()
         self.assertIn('run("kache", "doctor")', report_script)
         self.assertIn('run("kache", "why-miss", crate)', report_script)
         self.assertIn('run("kache", "report", "--format", "json"', report_script)
 
-    def test_remote_config_is_file_backed_for_the_daemon(self) -> None:
-        script = Path("scripts/configure_kache_remote.sh")
-        self.assertTrue(script.is_file())
+    def test_image_builds_configure_and_publish_through_the_same_contract(self) -> None:
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        dockerfile = Path("Dockerfile.debian").read_text()
+        justfile = Path("justfile").read_text()
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            config = Path(temporary_directory) / "kache.toml"
-            required_environment = {
-                "KACHE_S3_BUCKET": "kache-ci",
-                "KACHE_S3_REGION": "auto",
-                "KACHE_S3_ENDPOINT": "https://account-id.r2.cloudflarestorage.com",
-                "KACHE_S3_ACCESS_KEY": "test-access-key",
-                "KACHE_S3_SECRET_KEY": "test-secret-key",
-            }
-            environment = os.environ | required_environment
-            subprocess.run(
-                ["bash", str(script), str(config)],
-                check=True,
-                env=environment,
-            )
+        self.assertNotIn("useblacksmith/setup-docker-builder", workflow)
+        self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
+        for name, value in (
+            ("KACHE_S3_BUCKET", "${{ vars.KACHE_BUCKET }}"),
+            ("KACHE_S3_REGION", "${{ vars.KACHE_BUCKET_REGION }}"),
+            ("KACHE_S3_ENDPOINT", "${{ vars.KACHE_BUCKET_ENDPOINT }}"),
+            ("KACHE_S3_ACCESS_KEY", "${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}"),
+            ("KACHE_S3_SECRET_KEY", "${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}"),
+        ):
+            self.assertIn(f"{name}: {value}", workflow)
+            self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
+            self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
+            self.assertIn(f"ARG {name}\n", dockerfile)
+        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}"', justfile)
 
+        self.assertIn("ARG KACHE_VERSION=1.2.1", dockerfile)
+        self.assertIn('cargo binstall --no-confirm "kache@${KACHE_VERSION}"', dockerfile)
+        self.assertIn("COPY scripts/kache_remote.py ./scripts/kache_remote.py", dockerfile)
+        self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
+        self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
+        self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
+        self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
+        self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
+        configure = dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"')
+        daemon = dockerfile.index("kache daemon start")
+        self.assertLess(configure, daemon)
+        # The build stage ends with the publication, after every artifact it built.
+        build_stage = dockerfile.split("\nFROM ", maxsplit=2)[1]
+        self.assertTrue(
+            build_stage.rstrip().endswith(
+                "&& python3 scripts/kache_remote.py publish --job-status success /tmp/kache-report"
+            ),
+            build_stage[-300:],
+        )
+        self.assertNotIn("sync --push", dockerfile)
+        self.assertNotIn("kache save-manifest", dockerfile)
+        self.assertNotIn("configure_kache_remote", dockerfile)
+
+
+def isolated(environment: dict[str, str]) -> dict[str, str]:
+    """This process's environment without a CI job's GitHub and kache settings, then
+    `environment`, so a command under test never writes to the job running the tests."""
+    inherited = {}
+    for name, value in os.environ.items():
+        if not name.startswith(("GITHUB_", "KACHE_", "RUNNER_")):
+            inherited[name] = value
+    return inherited | environment
+
+
+def run_step(script: str, working_directory: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run a workflow step's script as GitHub runs a `run` step without a `shell`: `bash -e`."""
+    return subprocess.run(
+        ["bash", "-e", "-c", script],
+        capture_output=True,
+        cwd=working_directory,
+        env=isolated(environment),
+        text=True,
+        check=False,
+    )
+
+
+def run_cli(arguments: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "scripts/kache_remote.py", *arguments],
+        capture_output=True,
+        env=isolated(environment),
+        text=True,
+        check=False,
+    )
+
+
+class RemoteConfigurationTests(unittest.TestCase):
+    def test_configure_writes_the_remote_for_the_daemon_without_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "nested" / "kache.toml"
+            result = run_cli(["configure", str(config)], REMOTE_ENVIRONMENT)
+            self.assertEqual(result.returncode, 0, result.stderr)
             parsed = tomllib.loads(config.read_text())
+            mode = stat.S_IMODE(config.stat().st_mode)
 
         self.assertEqual(
             parsed,
@@ -104,98 +314,573 @@ class KacheCiTests(unittest.TestCase):
                         "bucket": "kache-ci",
                         "region": "auto",
                         "endpoint": "https://account-id.r2.cloudflarestorage.com",
+                        "prefix": "artifacts",
                         "pull_request_prefix": "artifacts-pr",
                     }
                 }
             },
         )
+        self.assertEqual(mode, 0o600)
 
-        for missing_variable in required_environment:
-            with self.subTest(missing_variable=missing_variable):
-                incomplete_environment = environment.copy()
-                incomplete_environment.pop(missing_variable)
-                result = subprocess.run(
-                    ["bash", str(script), str(config)],
-                    capture_output=True,
-                    check=False,
-                    env=incomplete_environment,
-                    text=True,
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(f"{missing_variable} is required", result.stderr)
+    def test_every_remote_setting_is_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "kache.toml"
+            for missing in REMOTE_ENVIRONMENT:
+                with self.subTest(missing=missing):
+                    environment = dict(REMOTE_ENVIRONMENT)
+                    environment.pop(missing)
+                    result = run_cli(["configure", str(config)], environment)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(f"{missing} is required", result.stderr)
+            self.assertFalse(config.exists())
 
-    def test_docker_build_requires_the_s3_remote(self) -> None:
-        workflow = Path(".github/workflows/docker-build.yaml").read_text()
-        dockerfile = Path("Dockerfile.debian").read_text()
-        justfile = Path("justfile").read_text()
+    def test_endpoint_is_a_service_url(self) -> None:
+        for endpoint in (
+            "https://account-id.r2.cloudflarestorage.com/kache-ci",
+            "account-id.r2.cloudflarestorage.com",
+            "ftp://account-id.r2.cloudflarestorage.com",
+            "https://user:password@example.com",
+            "https://example.com/?region=auto",
+            "https://example.com/#fragment",
+            "https://example.com:not-a-port",
+            'https://example.com/\n[other]\nvalue = "injected"',
+            "https://example.com /",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ConfigurationError) as raised:
+                kache_remote.Remote.from_environment(REMOTE_ENVIRONMENT | {"KACHE_S3_ENDPOINT": endpoint})
+            self.assertIn("KACHE_S3_ENDPOINT", str(raised.exception))
 
-        self.assertNotIn("useblacksmith/setup-docker-builder", workflow)
-        self.assertIn("uses: docker/setup-buildx-action@v3", workflow)
-        self.assertIn("KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}", workflow)
-        self.assertIn("KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}", workflow)
-        self.assertIn("KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}", workflow)
-        self.assertIn(
-            "KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}", workflow
+    def test_a_valid_endpoint_keeps_its_port_without_a_trailing_slash(self) -> None:
+        remote = kache_remote.Remote.from_environment(REMOTE_ENVIRONMENT | {"KACHE_S3_ENDPOINT": "http://127.0.0.1:9000/"})
+        self.assertEqual(remote.endpoint, "http://127.0.0.1:9000")
+
+    def test_a_quote_in_a_value_cannot_leave_its_string(self) -> None:
+        remote = kache_remote.Remote.from_environment(REMOTE_ENVIRONMENT | {"KACHE_S3_ENDPOINT": 'https://example.com"'})
+        parsed = tomllib.loads(remote.configuration())
+        self.assertEqual(parsed["cache"]["remote"]["endpoint"], 'https://example.com"')
+        self.assertEqual(set(parsed["cache"]["remote"]), {"type", "bucket", "region", "endpoint", "prefix", "pull_request_prefix"})
+
+    def test_bucket_and_region_are_validated(self) -> None:
+        for name, value, message in (
+            ("KACHE_S3_BUCKET", "Kache_CI", "not a valid S3 bucket name"),
+            ("KACHE_S3_BUCKET", "k", "not a valid S3 bucket name"),
+            ("KACHE_S3_REGION", "us east", "not a valid S3 region"),
+        ):
+            with self.subTest(name=name, value=value), self.assertRaises(ConfigurationError) as raised:
+                kache_remote.Remote.from_environment(REMOTE_ENVIRONMENT | {name: value})
+            self.assertIn(message, str(raised.exception))
+
+
+FAKE_KACHE = r'''
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+behavior_path = Path(os.environ["FAKE_KACHE_BEHAVIOR"])
+behavior = json.loads(behavior_path.read_text())
+arguments = sys.argv[1:]
+observed = ("KACHE_CONFIG", "KACHE_S3_BUCKET", "KACHE_S3_PREFIX", "KACHE_S3_ACCESS_KEY", "KACHE_MANIFEST_KEY", "KACHE_NAMESPACE")
+with open(os.environ["FAKE_KACHE_LOG"], "a") as log:
+    log.write(json.dumps({"argv": arguments, "env": {name: os.environ.get(name) for name in observed}}) + "\n")
+
+
+def take(name, default):
+    """The next value of a sequence the behavior gives; its last value repeats."""
+    values = behavior.get(name)
+    if values is None:
+        return default
+    value = values[0]
+    if len(values) > 1:
+        behavior[name] = values[1:]
+        behavior_path.write_text(json.dumps(behavior))
+    return value
+
+
+def document(command, body):
+    print(json.dumps({"schema_version": behavior.get("schema_version", 1), "command": command, "success": True, **body}))
+
+
+if arguments == ["daemon", "start"]:
+    print("daemon started")
+    sys.exit(behavior.get("daemon_start_status", 0))
+if arguments == ["--json", "daemon", "status"]:
+    time.sleep(behavior.get("status_seconds", 0))
+    text = take("status_text", None)
+    if text is not None:
+        print(text)
+        sys.exit(3)
+    failure = behavior.get("status_failure")
+    if failure is not None:
+        print(json.dumps({"schema_version": 1, "command": "daemon-status", "success": False,
+                          "error": {"code": "command_failed", "message": failure, "causes": []}}))
+        sys.exit(1)
+    config_path = behavior.get("config_path", os.environ.get("KACHE_CONFIG"))
+    document("daemon-status", {"daemon_running": take("running", True), "daemon_config_path": config_path})
+    sys.exit(0)
+if arguments == ["--json", "stats"]:
+    document("stats", {
+        "daemon_connected": True,
+        "remote": behavior.get("remote", "s3://kache-ci/artifacts"),
+        "daemon_remote_readonly": behavior.get("readonly", False),
+    })
+    sys.exit(0)
+if arguments[:2] == ["telemetry", "write"]:
+    time.sleep(behavior.get("telemetry_seconds", 0))
+    status = take("telemetry_status", 0)
+    if status:
+        print("telemetry failed", file=sys.stderr)
+        sys.exit(status)
+    directory = Path(arguments[2])
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "schema_version").write_text(behavior.get("telemetry_schema", "1") + "\n")
+
+    def point(value, key=None, attribute=None):
+        attributes = [] if key is None else [{"key": key, "value": {"stringValue": attribute}}]
+        return {"asInt": str(value), "timeUnixNano": "1", "attributes": attributes}
+
+    results = [point(behavior.get(result, 0), "kache.cache.result", result) for result in ("completed", "failed", "skipped", "suppressed")]
+    metrics = [
+        {"name": "kache.cache.uploads.pending", "unit": "{upload}", "gauge": {"dataPoints": [point(take("pending", 0))]}},
+        {"name": "kache.cache.remote.degraded", "unit": "1", "gauge": {"dataPoints": [point(behavior.get("degraded", 0))]}},
+        {"name": "kache.cache.uploads", "unit": "{upload}", "sum": {"dataPoints": results}},
+        {"name": "kache.cache.bytes", "unit": "By", "sum": {"dataPoints": [
+            point(behavior.get("bytes", 0), "kache.cache.direction", "upload"),
+            point(0, "kache.cache.direction", "download"),
+        ]}},
+    ]
+    metrics = [metric for metric in metrics if metric["name"] != behavior.get("telemetry_without")]
+    document_body = {"resourceMetrics": [{"resource": {"attributes": []}, "scopeMetrics": [{"scope": {"name": "kache.cache"}, "metrics": metrics}]}]}
+    rendered = "{not json" if behavior.get("telemetry_corrupt") else json.dumps(document_body)
+    (directory / "metrics.otlp.json").write_text(rendered)
+    sys.exit(0)
+if arguments[0] == "save-manifest":
+    time.sleep(behavior.get("manifest_seconds", 0))
+    print(behavior.get("manifest_output", "Saved manifest: 12 entries for 'job-Linux-X64'"))
+    sys.exit(behavior.get("manifest_status", 0))
+sys.exit(f"unexpected kache arguments: {arguments}")
+'''
+
+
+class FakeKache:
+    """A `kache` executable whose answers a test sets, recording every invocation."""
+
+    def __init__(self, directory: Path, behavior: dict) -> None:
+        self.bin = directory / "bin"
+        self.bin.mkdir()
+        executable = self.bin / "kache"
+        executable.write_text(f"#!{sys.executable}\n{FAKE_KACHE}")
+        executable.chmod(0o755)
+        self.behavior = directory / "behavior.json"
+        self.behavior.write_text(json.dumps(behavior))
+        self.log = directory / "kache.log"
+        self.log.touch()
+
+    def environment(self, **extra: str) -> dict[str, str]:
+        return {
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_KACHE_BEHAVIOR": str(self.behavior),
+            "FAKE_KACHE_LOG": str(self.log),
+        } | extra
+
+    def calls(self) -> list[dict]:
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def commands(self) -> list[list[str]]:
+        return [call["argv"][:3] if call["argv"][:2] == ["--json", "daemon"] else call["argv"][:2] for call in self.calls()]
+
+
+class SteppingClock(kache_remote.Clock):
+    """A clock that moves only when publication sleeps."""
+
+    def __init__(self) -> None:
+        self.time = 1000.0
+        self.sleeps: list[float] = []
+
+    def now(self) -> float:
+        return self.time
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.time += seconds
+
+
+class PublicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.directory)], check=True))
+        self.report = self.directory / "kache-report"
+        self.summary = self.directory / "summary.md"
+
+    def publish(self, behavior: dict, job_status: str = "success", budget: float = 10.0, **extra: str) -> tuple[Publication, FakeKache, str]:
+        kache = FakeKache(self.directory, behavior)
+        environment = kache.environment(
+            GITHUB_JOB="scenarios",
+            GITHUB_STEP_SUMMARY=str(self.summary),
+            KACHE_MANIFEST_KEY="scenarios-Linux-X64",
+            KACHE_NAMESPACE="scenarios-Linux-X64",
+            # A second copy of the remote's description never reaches a kache command.
+            KACHE_S3_BUCKET="ambient-bucket",
+            KACHE_S3_PREFIX="ambient-prefix",
+        ) | extra
+        self.clock = SteppingClock()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            publication = kache_remote.publish(self.report, job_status, environment, self.clock, budget, 2.0)
+        return publication, kache, output.getvalue()
+
+    def recorded(self) -> dict:
+        return json.loads((self.report / "publication.json").read_text())
+
+    def test_a_successful_job_saves_its_manifest_and_waits_for_every_upload(self) -> None:
+        publication, kache, output = self.publish({"pending": [5, 3, 0], "completed": 41, "skipped": 7, "bytes": 1024})
+
+        self.assertEqual(publication.outcome, Outcome.PUBLISHED)
+        self.assertEqual(publication.reasons, [])
+        self.assertEqual(publication.manifest.status, 0)
+        self.assertEqual(publication.uploads_at_start.pending, 5)
+        self.assertEqual(publication.uploads_at_end.pending, 0)
+        self.assertEqual(publication.uploads_at_end.completed, 41)
+        self.assertEqual(self.clock.sleeps, [2.0])
+        self.assertEqual(
+            kache.commands(),
+            [
+                ["--json", "daemon", "status"],
+                ["--json", "stats"],
+                ["telemetry", "write"],
+                ["save-manifest", "--manifest-key"],
+                ["telemetry", "write"],
+                ["telemetry", "write"],
+                ["--json", "daemon", "status"],
+                ["--json", "stats"],
+            ],
         )
-        self.assertIn(
-            "KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}", workflow
+        manifest = kache.calls()[3]["argv"]
+        self.assertEqual(manifest, ["save-manifest", "--manifest-key", "scenarios-Linux-X64", "--namespace", "scenarios-Linux-X64"])
+        for call in kache.calls():
+            self.assertIsNone(call["env"]["KACHE_S3_BUCKET"])
+            self.assertIsNone(call["env"]["KACHE_S3_PREFIX"])
+        self.assertEqual(self.recorded()["outcome"], "published")
+        self.assertIn("### Kache publication: published", self.summary.read_text())
+        self.assertIn("Saved manifest: 12 entries", (self.report / "publication.md").read_text())
+        self.assertNotIn("::warning", output)
+
+    def test_the_wait_ends_with_the_budget_and_names_the_uploads_left_to_the_drain(self) -> None:
+        publication, kache, output = self.publish({"pending": [3]}, budget=10.0)
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertEqual(self.clock.sleeps, [2.0, 2.0, 2.0, 2.0, 2.0])
+        self.assertEqual(publication.upload_wait_seconds, 10.0)
+        self.assertEqual(publication.uploads_at_end.pending, 3)
+        self.assertEqual(
+            publication.reasons,
+            ["3 uploads were still queued or in flight when the budget ended; the daemon's shutdown drain takes them over."],
+        )
+        self.assertEqual(kache.commands().count(["telemetry", "write"]), 6)
+        self.assertIn("::warning title=kache publication incomplete::3 uploads", output)
+        self.assertEqual(self.recorded()["outcome"], "incomplete")
+
+    def test_a_manifest_that_outlasts_the_budget_is_reported_unsaved(self) -> None:
+        publication, _kache, _output = self.publish({"manifest_seconds": 5}, budget=1.0)
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertIsNone(publication.manifest.status)
+        self.assertIn("The manifest was not saved within the budget.", publication.reasons)
+
+    def test_a_failed_manifest_and_failed_uploads_leave_publication_incomplete(self) -> None:
+        publication, _kache, _output = self.publish({"manifest_status": 1, "manifest_output": "remote refused", "failed": 2})
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertEqual(
+            publication.reasons,
+            ["Saving the manifest exited with status 1.", "2 uploads failed for good during the job."],
+        )
+        self.assertEqual(publication.manifest.output_tail, ["remote refused"])
+
+    def test_a_job_whose_work_failed_or_was_cancelled_waits_for_nothing(self) -> None:
+        for status in ("failure", "cancelled"):
+            with self.subTest(status=status):
+                publication, kache, output = self.publish({}, job_status=status)
+                self.assertEqual(publication.outcome, Outcome.NOT_RUN)
+                self.assertEqual(kache.calls(), [])
+                self.assertEqual(self.clock.sleeps, [])
+                self.assertNotIn("::warning", output)
+                self.assertEqual(self.recorded()["job_status"], status)
+                kache.log.unlink()
+                subprocess.run(["rm", "-rf", str(kache.bin)], check=True)
+
+    def test_a_read_only_remote_has_nothing_to_publish(self) -> None:
+        publication, kache, output = self.publish({"readonly": True})
+
+        self.assertEqual(publication.outcome, Outcome.READ_ONLY)
+        self.assertEqual(kache.commands(), [["--json", "daemon", "status"], ["--json", "stats"]])
+        self.assertNotIn("::warning", output)
+
+    def test_a_stopped_daemon_is_not_started_again_to_answer(self) -> None:
+        publication, kache, output = self.publish({"running": [False]})
+
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertEqual(publication.reasons, ["The job's kache daemon is not running."])
+        # `kache stats` would start a daemon, so a stopped one is never asked through it.
+        self.assertEqual(kache.commands(), [["--json", "daemon", "status"]])
+        self.assertIn("::warning title=kache publication unavailable::", output)
+
+    def test_a_daemon_that_stops_during_the_wait_leaves_its_counters_unconfirmed(self) -> None:
+        publication, _kache, _output = self.publish({"running": [True, False], "pending": [1, 0]})
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertEqual(
+            publication.reasons,
+            ["The daemon stopped answering during the wait, so its upload counters are unconfirmed."],
         )
 
-        self.assertIn('--build-arg "KACHE_S3_ACCESS_KEY=', justfile)
-        self.assertIn('--build-arg "KACHE_S3_SECRET_KEY=', justfile)
-        self.assertIn('--build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}"', justfile)
-        self.assertIn(
-            ': "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"', justfile
-        )
-        self.assertIn(
-            ': "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"', justfile
-        )
-        self.assertNotIn('if [[ -n "${KACHE_S3_ACCESS_KEY:-}"', justfile)
-        self.assertNotIn("${KACHE_S3_REGION:-us-east-1}", justfile)
-        self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
-        self.assertIn("ARG KACHE_VERSION=0.28.1", dockerfile)
-        self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
-        self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
-        self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
-        self.assertIn("ARG KACHE_S3_ENDPOINT", dockerfile)
-        self.assertIn(
-            ': "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"', dockerfile
-        )
-        configure_index = dockerfile.index("bash scripts/configure_kache_remote.sh")
-        daemon_index = dockerfile.index("kache daemon start")
-        self.assertLess(configure_index, daemon_index)
-        self.assertIn("export KACHE_CONFIG=", dockerfile)
-        self.assertNotIn("ARG KACHE_S3_REGION=", dockerfile)
-        self.assertNotIn('if [ -n "${KACHE_S3_ACCESS_KEY', dockerfile)
-        self.assertIn("kache daemon start", dockerfile)
-        self.assertIn("kache stats", dockerfile)
-        self.assertIn("kache save-manifest", dockerfile)
-        self.assertIn("kache sync --push", dockerfile)
+    def test_unreadable_uploads_are_unavailable_before_and_incomplete_during_the_wait(self) -> None:
+        publication, _kache, _output = self.publish({"telemetry_status": [1]})
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertIn("`kache telemetry write` exited with status 1", publication.reasons[0])
 
-    def test_remote_endpoint_requires_an_account_url(self) -> None:
-        environment = os.environ | {
-            "KACHE_S3_BUCKET": "kache-ci",
-            "KACHE_S3_REGION": "auto",
-            "KACHE_S3_ACCESS_KEY": "test-access-key",
-            "KACHE_S3_SECRET_KEY": "test-secret-key",
-        }
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            config = Path(temporary_directory) / "kache.toml"
-            for endpoint in (
-                "https://account-id.r2.cloudflarestorage.com/kache-ci",
-                "account-id.r2.cloudflarestorage.com",
-                "https://user:password@example.com",
-                'https://example.com/\n[other]\nvalue = "injected"',
-            ):
-                with self.subTest(endpoint=endpoint):
-                    result = subprocess.run(
-                        ["bash", "scripts/configure_kache_remote.sh", str(config)],
-                        capture_output=True,
-                        env=environment | {"KACHE_S3_ENDPOINT": endpoint},
-                        text=True,
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("KACHE_S3_ENDPOINT", result.stderr)
+        subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+        publication, _kache, _output = self.publish({"telemetry_status": [0, 1], "pending": [2]})
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertIn("The daemon's uploads could not be read", publication.reasons[0])
+
+    def test_telemetry_of_another_schema_is_refused(self) -> None:
+        publication, _kache, _output = self.publish({"telemetry_schema": "2"})
+
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertIn("kache telemetry schema '2', expected '1'", publication.reasons[0])
+
+    def test_a_document_of_another_schema_is_refused(self) -> None:
+        publication, _kache, _output = self.publish({"schema_version": 2})
+
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertIn("answered outside JSON schema 1", publication.reasons[0])
+
+    def test_a_job_without_kache_or_its_remote_is_unavailable(self) -> None:
+        publication, _kache, _output = self.publish({}, PATH="/nonexistent")
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertEqual(publication.reasons, ["This job has no kache command."])
+
+        subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+        publication, kache, _output = self.publish({}, KACHE_MANIFEST_KEY="")
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertIn("KACHE_MANIFEST_KEY is not set", publication.reasons[0])
+        self.assertEqual(kache.calls(), [])
+
+    def test_kache_answers_outside_their_contract_are_refusals(self) -> None:
+        for behavior, budget, outcome, reason in (
+            ({"status_text": ["Daemon: running"]}, 10.0, Outcome.UNAVAILABLE, "exited with status 3 without a JSON document"),
+            ({"status_failure": "socket refused"}, 10.0, Outcome.UNAVAILABLE, "`kache --json daemon status` failed: socket refused"),
+            ({"status_seconds": 3}, 0.5, Outcome.UNAVAILABLE, "`kache --json daemon status` did not answer within 1 s"),
+            ({"telemetry_seconds": 3}, 0.5, Outcome.UNAVAILABLE, "`kache telemetry write` did not answer within 1 s"),
+            ({"telemetry_without": "kache.cache.uploads.pending"}, 10.0, Outcome.UNAVAILABLE, "kache telemetry has no kache.cache.uploads.pending metric"),
+            ({"telemetry_corrupt": True}, 10.0, Outcome.UNAVAILABLE, "unreadable kache telemetry"),
+            ({"status_text": [None, "garbage"]}, 10.0, Outcome.INCOMPLETE, "The daemon stopped answering during the wait"),
+            ({}, 0.0, Outcome.INCOMPLETE, "The manifest was not saved within the budget."),
+        ):
+            with self.subTest(behavior=behavior, budget=budget):
+                subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+                publication, _kache, _output = self.publish(behavior, budget=budget)
+                self.assertEqual(publication.outcome, outcome)
+                self.assertTrue(any(reason in recorded for recorded in publication.reasons), publication.reasons)
+
+    def test_output_a_timed_out_command_left_is_text(self) -> None:
+        self.assertEqual(kache_remote.captured_text(None), "")
+        self.assertEqual(kache_remote.captured_text("partial"), "partial")
+        self.assertEqual(kache_remote.captured_text(b"bytes \xff"), "bytes \ufffd")
+
+    def test_an_image_build_is_named_by_its_manifest_key(self) -> None:
+        kache = FakeKache(self.directory, {})
+        environment = kache.environment(KACHE_MANIFEST_KEY="docker-amd64", KACHE_NAMESPACE="docker-amd64")
+        with contextlib.redirect_stdout(io.StringIO()):
+            publication = kache_remote.publish(self.report, "success", environment, SteppingClock(), 10.0, 2.0)
+        self.assertEqual(publication.job, "docker-amd64")
+        self.assertEqual(publication.outcome, Outcome.PUBLISHED)
+
+    def test_a_termination_during_the_wait_is_recorded_before_the_step_ends(self) -> None:
+        kache = FakeKache(self.directory, {"pending": [4]})
+        environment = isolated(kache.environment(
+            GITHUB_JOB="scenarios",
+            KACHE_MANIFEST_KEY="scenarios-Linux-X64",
+            KACHE_NAMESPACE="scenarios-Linux-X64",
+        ))
+        process = subprocess.Popen(
+            [sys.executable, "scripts/kache_remote.py", "publish", "--job-status", "success", str(self.report)],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # The publication is waiting once it has asked for the uploads after saving the manifest.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            commands = kache.commands()
+            if ["save-manifest", "--manifest-key"] in commands and commands[-1] == ["telemetry", "write"]:
+                break
+            time.sleep(0.05)
+        else:
+            process.kill()
+            self.fail(f"publication never started waiting: {kache.commands()}")
+        process.send_signal(signal.SIGTERM)
+        _stdout, stderr = process.communicate(timeout=60)
+
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, stderr)
+        recorded = self.recorded()
+        self.assertEqual(recorded["outcome"], "cancelled")
+        self.assertEqual(recorded["reasons"], ["The step received SIGTERM while waiting for uploads."])
+
+    def test_a_termination_is_recorded_and_raised_again(self) -> None:
+        class TerminatedWhileWaiting(SteppingClock):
+            def sleep(self, seconds: float) -> None:
+                kache_remote.raise_cancelled(signal.SIGINT, None)
+
+        kache = FakeKache(self.directory, {"pending": [2]})
+        environment = kache.environment(KACHE_MANIFEST_KEY="tests-Linux-X64", GITHUB_JOB="tests")
+        with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(kache_remote.Cancelled) as raised:
+            kache_remote.publish(self.report, "success", environment, TerminatedWhileWaiting(), 10.0, 2.0)
+
+        self.assertEqual(raised.exception.signal_number, signal.SIGINT)
+        self.assertEqual(self.recorded()["reasons"], ["The step received SIGINT while waiting for uploads."])
+        self.assertIn("::warning title=kache publication cancelled::", output.getvalue())
+
+    def test_main_publishes_with_the_step_handlers_installed(self) -> None:
+        handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        self.addCleanup(lambda: [signal.signal(number, handler) for number, handler in handlers.items()])
+        kache = FakeKache(self.directory, {})
+        environment = kache.environment(GITHUB_STEP_SUMMARY=str(self.summary))
+        with mock.patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            status = kache_remote.main(["publish", "--job-status", "failure", str(self.report)])
+
+        self.assertEqual(status, 0)
+        self.assertIs(signal.getsignal(signal.SIGTERM), kache_remote.raise_cancelled)
+        self.assertEqual(self.recorded()["outcome"], "not-run")
+        self.assertEqual(kache.calls(), [])
+
+
+class StartTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.directory)], check=True))
+        self.runner_temp = self.directory / "runner-temp"
+        self.runner_temp.mkdir()
+        self.github_env = self.directory / "github-env"
+        self.github_env.touch()
+
+    def environment(self, kache: FakeKache, **extra: str) -> dict[str, str]:
+        return kache.environment(
+            RUNNER_TEMP=str(self.runner_temp),
+            GITHUB_ENV=str(self.github_env),
+            KACHE_MANIFEST_KEY="deloxide-deloxide-order-Linux-X64",
+            KACHE_S3_PREFIX="ambient-prefix",
+        ) | REMOTE_ENVIRONMENT | extra
+
+    def start(self, behavior: dict, **extra: str) -> tuple[DaemonState, FakeKache, SteppingClock]:
+        kache = FakeKache(self.directory, behavior)
+        clock = SteppingClock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            daemon = kache_remote.start(self.environment(kache, **extra), clock)
+        return daemon, kache, clock
+
+    def test_the_daemon_starts_with_the_configured_remote_and_later_steps_inherit_it(self) -> None:
+        daemon, kache, clock = self.start({})
+
+        configuration = self.runner_temp / "kache-remote.toml"
+        self.assertEqual(daemon, DaemonState(True, str(configuration), "s3://kache-ci/artifacts", False))
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(
+            self.github_env.read_text().splitlines(),
+            [
+                f"KACHE_CONFIG={configuration}",
+                "KACHE_S3_ACCESS_KEY=test-access-key",
+                "KACHE_S3_SECRET_KEY=test-secret-key",
+                "KACHE_MANIFEST_KEY=deloxide-deloxide-order-Linux-X64",
+                "KACHE_NAMESPACE=deloxide-deloxide-order-Linux-X64",
+            ],
+        )
+        self.assertEqual(tomllib.loads(configuration.read_text())["cache"]["remote"]["bucket"], "kache-ci")
+        started = kache.calls()[0]
+        self.assertEqual(started["argv"], ["daemon", "start"])
+        self.assertEqual(
+            started["env"],
+            {
+                "KACHE_CONFIG": str(configuration),
+                "KACHE_S3_BUCKET": None,
+                "KACHE_S3_PREFIX": None,
+                "KACHE_S3_ACCESS_KEY": "test-access-key",
+                "KACHE_MANIFEST_KEY": "deloxide-deloxide-order-Linux-X64",
+                "KACHE_NAMESPACE": "deloxide-deloxide-order-Linux-X64",
+            },
+        )
+
+    def test_a_daemon_without_the_remote_fails_the_job_after_three_polls(self) -> None:
+        for behavior, refusal in (
+            ({"config_path": "/elsewhere/kache.toml"}, "the daemon reads configuration /elsewhere/kache.toml"),
+            ({"remote": "s3://other/artifacts"}, "the configuration names remote s3://other/artifacts"),
+            ({"running": [False]}, "the daemon is not running"),
+            ({"schema_version": 2}, "answered outside JSON schema 1"),
+        ):
+            with self.subTest(refusal=refusal):
+                subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+                self.github_env.write_text("")
+                with self.assertRaises(StartError) as raised:
+                    self.start(behavior)
+                self.assertIn(refusal, str(raised.exception))
+                self.assertIn("s3://kache-ci/artifacts", str(raised.exception))
+
+    def test_a_daemon_that_answers_on_the_second_poll_is_accepted(self) -> None:
+        _daemon, kache, clock = self.start({"running": [False, True]})
+
+        self.assertEqual(clock.sleeps, [kache_remote.VERIFY_RETRY_SECONDS])
+        self.assertEqual(kache.commands().count(["--json", "daemon", "status"]), 2)
+
+    def test_a_daemon_that_does_not_start_fails_the_job(self) -> None:
+        with self.assertRaises(StartError) as raised:
+            self.start({"daemon_start_status": 3})
+        self.assertIn("`kache daemon start` exited with status 3", str(raised.exception))
+
+    def test_a_job_without_a_runner_directory_is_refused(self) -> None:
+        with self.assertRaises(ConfigurationError) as raised:
+            self.start({}, RUNNER_TEMP="")
+        self.assertIn("RUNNER_TEMP is required", str(raised.exception))
+
+    def test_a_value_later_steps_cannot_inherit_is_refused(self) -> None:
+        with self.assertRaises(ConfigurationError) as raised:
+            self.start({}, KACHE_S3_SECRET_KEY="first-line\nKACHE_CONFIG=/injected")
+        self.assertIn("KACHE_S3_SECRET_KEY must be a single line", str(raised.exception))
+
+    def test_main_maps_each_command_to_its_exit_status(self) -> None:
+        kache = FakeKache(self.directory, {"daemon_start_status": 1})
+        configuration = self.directory / "image-build.toml"
+        missing_bucket = dict(REMOTE_ENVIRONMENT)
+        missing_bucket.pop("KACHE_S3_BUCKET")
+        for environment, arguments, status, message in (
+            (REMOTE_ENVIRONMENT, ["configure", str(configuration)], 0, ""),
+            (missing_bucket, ["configure", str(configuration)], 2, "configure: KACHE_S3_BUCKET is required"),
+            (self.environment(kache), ["start"], 1, "`kache daemon start` exited with status 1"),
+        ):
+            with self.subTest(arguments=arguments, status=status):
+                errors = io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, environment, clear=True),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    self.assertEqual(kache_remote.main(arguments), status)
+                self.assertIn(message, errors.getvalue())
+        self.assertEqual(tomllib.loads(configuration.read_text())["cache"]["remote"]["prefix"], "artifacts")
+
+    def test_the_command_line_reports_configuration_and_start_failures(self) -> None:
+        kache = FakeKache(self.directory, {"daemon_start_status": 1})
+        environment = self.environment(kache)
+        environment.pop("KACHE_S3_BUCKET")
+        result = run_cli(["start"], environment)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("start: KACHE_S3_BUCKET is required", result.stderr)
+
+        result = run_cli(["start"], self.environment(kache))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("`kache daemon start` exited with status 1", result.stderr)
 
 
 if __name__ == "__main__":

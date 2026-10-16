@@ -34,8 +34,8 @@ Feature: Syslog support
           'protocol' = 'udp',
           'addr' = '{{syslog_emit_addr}}'
         };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events
@@ -137,8 +137,8 @@ Feature: Syslog support
           'protocol' = 'udp',
           'addr' = '{{syslog_emit_addr}}'
         };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events
@@ -196,8 +196,8 @@ Feature: Syslog support
           'addr' = '{{syslog_ingest_addr}}',
           'framing' = 'octet-counting'
         };
-      CREATE INGESTOR invalid_syslog_intake
-        FROM SYSLOG invalid_syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR invalid_syslog_intake
+        FROM invalid_syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events
@@ -250,8 +250,8 @@ Feature: Syslog support
           'tls_key_file' = '{{ syslog_tls }}/tls.key',
           'tls_ca_file' = '{{ syslog_tls }}/ca.crt'
         };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events
@@ -306,8 +306,8 @@ Feature: Syslog support
           'addr' = '{{syslog_ingest_addr}}',
           'max_message_size' = '4096'
         };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events
@@ -367,8 +367,8 @@ Feature: Syslog support
           'protocol' = 'tcp',
           'addr' = '{{syslog_ingest_addr}}'
         };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events
@@ -440,8 +440,8 @@ Feature: Syslog support
           'tls_key_file' = '{{ syslog_tls }}/tls.key',
           'tls_ca_file' = '{{ syslog_tls }}/ca.crt'
         };
-      CREATE INGESTOR syslog_intake
-        FROM SYSLOG syslog_listener MODE NO_ACK SEQUENTIAL
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
         ON QUIESCE SUSPEND
         DECODE USING syslog_codec
         TO syslog_events

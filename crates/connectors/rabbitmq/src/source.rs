@@ -37,7 +37,7 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, QueueName};
+use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
 use thiserror::Error;
 
 use crate::connection::RabbitMqBroker;
@@ -78,7 +78,7 @@ type RabbitMqSourceResult<T> = Result<T, Report<RabbitMqSourceError>>;
 pub struct RabbitMqSourcePlan {
     config: Vec<ClientConfigEntry>,
     dns: DnsResolver,
-    queue: QueueName,
+    queue: RabbitMqQueueName,
     consumer_tag: String,
 }
 
@@ -94,7 +94,7 @@ impl RabbitMqSourcePlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
         dns: DnsResolver,
-        queue: QueueName,
+        queue: RabbitMqQueueName,
         consumer_tag: String,
     ) -> Self {
         Self {
@@ -447,7 +447,7 @@ mod tests {
                     value: addr.clone(),
                 }],
                 dns.clone(),
-                QueueName::parse("orders").expect("a fixed queue name is valid"),
+                RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
                 "orders".to_string(),
             );
             let mut source = RabbitMqSource::open(&plan, 0)

@@ -39,9 +39,9 @@ Feature: WASM guest-state checkpoint durability
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_checkpoint_local_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_checkpoint_local_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_checkpoint_local_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_local_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -111,6 +111,101 @@ Feature: WASM guest-state checkpoint durability
       | 3            | 0             |
       | 3            | 1             |
 
+  # The checkpoint is held for longer than the source's ACK TIMEOUT, so the source sends the held
+  # input again unless the branch reports it alive, and well inside the checkpoint's own ninety
+  # seconds. The source is sequential: it commits no later offset before the held batch resolves,
+  # so once the later input is committed every resend has already reached the relay and the exact
+  # relay total settles the outcome.
+  Scenario Outline: A checkpoint that outlasts its source's ACK TIMEOUT keeps the input alive on <cluster_size> nodes
+    Given Kafka is running
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "wasm_checkpoint_alive_in_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_checkpointed_filter;
+      UPLOAD RESOURCE wasm_checkpointed_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_checkpoint_alive_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_alive_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING metric_codec
+        TO raw_metrics
+          INHERIT ALL
+          BRANCHED BY by_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_checkpointed_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    Then Kafka consumer group "wasm_checkpoint_alive_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "wasm_checkpoint_alive_in_{{test_id}}"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "wasm_checkpoint_alive_in_{{test_id}}"
+      """
+      {"value":11,"tenant":"beta"}
+      """
+    Then within "60s" Kafka consumer group "wasm_checkpoint_alive_group_{{test_id}}" next offset for topic "wasm_checkpoint_alive_in_{{test_id}}" partition 0 is "at least 2"
+    When the next guest-state checkpoint of WASM processor "filter_even_rows" pauses <window>
+    And Kafka message is published to topic "wasm_checkpoint_alive_in_{{test_id}}"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    Then a guest-state checkpoint of WASM processor "filter_even_rows" is held <window>
+    When physical time passes for "40s"
+    And every held WASM guest-state checkpoint is released
+    And Kafka message is published to topic "wasm_checkpoint_alive_in_{{test_id}}"
+      """
+      {"value":12,"tenant":"beta"}
+      """
+    Then within "90s" Kafka consumer group "wasm_checkpoint_alive_group_{{test_id}}" next offset for topic "wasm_checkpoint_alive_in_{{test_id}}" partition 0 is "at least 4"
+    And within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
+      key={"tenant":"beta"} | "tenant":"beta" | "value":12
+      """
+    And within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 4
+
+    Examples:
+      | cluster_size | replica_count | window                 |
+      | 1            | 0             | after_local_durability |
+      | 3            | 1             | after_local_durability |
+
   Scenario: A WASM processor withholds source acknowledgement until its replica durably holds the checkpoint
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
@@ -139,9 +234,9 @@ Feature: WASM guest-state checkpoint durability
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_checkpoint_replica_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_checkpoint_replica_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_checkpoint_replica_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_replica_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -243,9 +338,9 @@ Feature: WASM guest-state checkpoint durability
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_checkpoint_failover_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_checkpoint_failover_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_checkpoint_failover_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_checkpoint_failover_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec

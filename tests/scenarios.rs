@@ -113,11 +113,12 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
-        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
-        POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
-        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
+        ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
+        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+        TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -125,6 +126,7 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    mqtt_publish_filter::MqttPublishFilter,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
@@ -132,6 +134,7 @@ use crate::common::{
         TestUpload, TestUploadPart, WireOutcome as _, flatten_command_messages,
         fresh_execution_reference, outcome_not_leader, outcome_succeeded, outcome_unknown,
     },
+    runner_lag::RunnerLagObserver,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
@@ -451,6 +454,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
+    mqtt_publish_filter: Option<MqttPublishFilter>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
@@ -572,6 +577,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
@@ -887,6 +893,65 @@ async fn given_stallable_mqtt_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "mqtt", MQTT_ADDR, "mqtt_stallable_addr").await;
 }
 
+/// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
+/// its address `{{mqtt_filtered_addr}}`.
+#[given("an MQTT endpoint that drops chosen publishes is configured")]
+async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(MQTT_ADDR)
+        .unwrap_or_else(|error| panic!("MQTT endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse MQTT endpoint '{endpoint}': {error}"));
+    // `mqtt` is not a special URL scheme, so the URL keeps its host as opaque text.
+    let broker_ip = match endpoint_url.host() {
+        Some(url::Host::Ipv4(address)) => std::net::IpAddr::V4(address),
+        Some(url::Host::Ipv6(address)) => std::net::IpAddr::V6(address),
+        Some(url::Host::Domain(host)) => host.parse().unwrap_or_else(|error| {
+            panic!("MQTT endpoint '{endpoint}' does not name the broker by its IP address: {error}")
+        }),
+        None => panic!("MQTT endpoint '{endpoint}' has no host"),
+    };
+    let broker_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("MQTT endpoint '{endpoint}' has no explicit port"));
+    let filter = MqttPublishFilter::start(std::net::SocketAddr::new(broker_ip, broker_port))
+        .await
+        .unwrap_or_else(|error| panic!("failed to start the MQTT publish filter: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in MQTT endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(filter.local_port()))
+        .unwrap_or_else(|()| panic!("failed to replace port in MQTT endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert("mqtt_filtered_addr".to_string(), endpoint_url.to_string());
+    world.mqtt_publish_filter = Some(filter);
+}
+
+/// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
+/// broker never sees, delivers or answers it.
+#[when("the MQTT endpoint drops every publish carrying")]
+fn when_mqtt_endpoint_drops_publishes_carrying(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let payload = expand_placeholders(world, docstring(step).trim());
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .drop_publishes_carrying(payload.into_bytes());
+}
+
+#[when("the MQTT endpoint forwards every publish")]
+fn when_mqtt_endpoint_forwards_every_publish(world: &mut ScenarioWorld) {
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .forward_every_publish();
+}
+
 #[given("a stallable Pulsar endpoint is configured")]
 async fn given_stallable_pulsar_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "pulsar", PULSAR_ADDR, "pulsar_stallable_addr").await;
@@ -908,6 +973,17 @@ fn when_stallable_endpoint_is_resumed(world: &mut ScenarioWorld, name: String) {
         .get(&name)
         .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
         .set_paused(false);
+}
+
+/// Every connection the endpoint forwards is reset, as by a dependency that drops its clients,
+/// while the dependency itself keeps running for the other scenarios that share it.
+#[when(expr = "the stallable endpoint {string} resets its connections")]
+fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, name: String) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .reset_connections();
 }
 
 #[given("ClickHouse is running")]
@@ -4916,30 +4992,40 @@ impl IngestorLogicTransportFixture {
         }
     }
 
+    /// The connector and entity the ingestor's head names.
+    fn head_fragment(self) -> &'static str {
+        match self {
+            Self::HttpEndpoint => "HTTP ENDPOINT",
+            Self::WebsocketEndpoint => "WEBSOCKETS ENDPOINT",
+            Self::Kafka => "KAFKA TOPIC",
+            Self::Mqtt => "MQTT TOPIC",
+            Self::Nats => "NATS SUBJECT",
+            Self::ZeroMq => "ZEROMQ PULL",
+        }
+    }
+
     fn source_fragment(self) -> &'static str {
         match self {
-            Self::HttpEndpoint | Self::WebsocketEndpoint => {
-                "FROM ENDPOINT logic_endpoint MODE NO_ACK SEQUENTIAL"
-            }
+            Self::HttpEndpoint | Self::WebsocketEndpoint => "FROM logic_endpoint MODE NO ACK",
             Self::Kafka => {
-                r#"FROM KAFKA logic_kafka
-        TOPIC logic_notifications_{{test_id}}
+                r#"FROM logic_kafka
+        TOPIC 'logic_notifications_{{test_id}}'
         OFFSET BY DOMAIN
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms"#
             }
             Self::Mqtt => {
-                r#"FROM MQTT logic_mqtt
-        TOPIC logic_notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL"#
+                r#"FROM logic_mqtt
+        TOPIC 'logic_notifications_{{test_id}}'
+        MODE NO ACK"#
             }
             Self::Nats => {
-                r#"FROM NATS logic_nats
-        SUBJECT logic_notifications_{{test_id}}
-        QUEUE GROUP logic_notifications_group_{{test_id}}
+                r#"FROM logic_nats
+        SUBJECT 'logic_notifications_{{test_id}}'
+        QUEUE GROUP 'logic_notifications_group_{{test_id}}'
         INSTANCES 1
-        MODE NO_ACK SEQUENTIAL"#
+        MODE NO ACK"#
             }
-            Self::ZeroMq => "FROM ZEROMQ logic_zeromq MODE NO_ACK SEQUENTIAL",
+            Self::ZeroMq => "FROM logic_zeromq MODE NO ACK",
         }
     }
 
@@ -5647,7 +5733,7 @@ fn build_ingestor_logic_commands(
         TTL 5m;
       CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
       {}
-      CREATE INGESTOR logic_ingestor
+      CREATE {} INGESTOR logic_ingestor
         {}
         ON QUIESCE {}
         DECODE USING {}
@@ -5663,6 +5749,7 @@ fn build_ingestor_logic_commands(
 "#,
         output_schema.schema_name(),
         transport.setup_fragment(),
+        transport.head_fragment(),
         transport.source_fragment(),
         transport.quiesce_fragment(),
         output_schema.input_codec_name(),
@@ -5996,18 +6083,30 @@ async fn when_domains_are_created_in_a_burst(
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
     let mut retention_peak = observer.raft_log_retention();
-    let mut session = world
+    let leader_uri = world
         .cluster()
-        .open_session(&leader, &world.domain)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve burst leader '{leader}': {error}"));
+    let connect_options = client_connect_options(&leader_uri)
+        .unwrap_or_else(|error| panic!("failed to configure burst client: {error}"));
+    let client =
+        Client::connect_with_options(&leader_uri, client_domain(&world.domain), connect_options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to open burst client session: {error:#}"));
     for index in 0..count {
         nervix_primitives::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
-        session
-            .run_command(&format!("CREATE DOMAIN {name};"))
+        let outcome = client
+            .execute(format!("CREATE DOMAIN {name};"))
             .await
-            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
+            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error:#}"));
+        assert!(
+            outcome.succeeded(),
+            "creating domain '{name}' failed with {:?}: {}; diagnostics: {:?}",
+            outcome.disposition,
+            outcome.message,
+            outcome.diagnostics,
+        );
         let retention = observer.raft_log_retention();
         if retention.retained_bytes > retention_peak.retained_bytes {
             retention_peak = retention;
@@ -7402,8 +7501,8 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         CREATE RELAY {output_relay} SCHEMA counted_output_event{relay_branching};
         CREATE VHOST edge wasm-reset-{{{{test_id}}}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-        CREATE INGESTOR counted_source
-          FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR counted_source
+          FROM ingress MODE NO ACK
           ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec
           TO counted_input_events
           INHERIT ALL
@@ -10665,6 +10764,19 @@ async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
         .delay_shutdown_cordon_release_of(crate::common::cluster::node_name(&node_id), delay);
 }
 
+#[given(expr = "the transport of ingestor {string} takes {string} to confirm its acknowledgements")]
+async fn given_source_confirmation_delay(
+    world: &mut ScenarioWorld,
+    ingestor: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    world
+        .fault_injection
+        .delay_source_confirmation(ingestor, delay);
+}
+
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
 async fn then_last_shutdown_reports_drain_support_phase(
     world: &mut ScenarioWorld,
@@ -12110,6 +12222,27 @@ async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
     }
 }
 
+#[then("every node reports that its last shutdown finished before its deadline")]
+async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+    world: &mut ScenarioWorld,
+) {
+    for node_id in world.cluster().node_ids() {
+        let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
+            panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
+        };
+        if let Some(failure) = world.cluster().node_run_failure(&node_id) {
+            panic!(
+                "node '{node_id}' did not finish its shutdown cleanly, with phases {shutdown:?}: \
+                 {failure}"
+            );
+        }
+        assert!(
+            !shutdown.deadline_expired(),
+            "node '{node_id}' finished its last shutdown past its deadline: {shutdown:?}"
+        );
+    }
+}
+
 #[then(expr = "the last authentication attempts take at least {string}")]
 async fn then_last_authentication_attempts_take_at_least(
     world: &mut ScenarioWorld,
@@ -12777,8 +12910,7 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let Some(nervix_models::IngestSource::Mqtt { .. }) = ingestor.input.transport_source()
-        else {
+        let Some(nervix_models::IngestSource::Mqtt(_)) = ingestor.input.transport_source() else {
             continue;
         };
         world
@@ -16034,6 +16166,39 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill every bulk worker on every node, and give them all back once `duration` has passed. The
+/// scenario goes on while they are held, so work a stopping node hands its bulk workers waits out
+/// the rest of that time, and the release does not depend on the step that stops the node.
+#[when(expr = "bulk execution on every node is occupied for {string}")]
+async fn when_bulk_execution_is_occupied_on_every_node_for(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let fault_injection = world.fault_injection.clone();
+    let mut node_names = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let node_name = crate::common::cluster::node_name(&node_id);
+        nervix_primitives::time::timeout(
+            Duration::from_secs(30),
+            fault_injection.occupy_execution(&node_name, nervix_execution::CpuClass::Bulk),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("bulk execution on '{node_id}' never filled its workers: {error}")
+        });
+        node_names.push(node_name);
+    }
+    // The release outlives this step and the scenario's own failure, so a node that waits for its
+    // bulk workers always gets them back.
+    nervix_primitives::task::spawn(async move {
+        nervix_primitives::time::sleep(duration).await;
+        for node_name in &node_names {
+            fault_injection.release_execution(node_name);
+        }
+    });
+}
+
 /// Fill every bulk worker and every place in the bulk wait queue on a node, so the next bulk job
 /// the node is handed is refused for room rather than queued.
 #[when(expr = "bulk execution on node {string} is saturated")]
@@ -16274,45 +16439,58 @@ impl UnacknowledgedSourceFixture {
         }
     }
 
+    /// The connector and entity the ingestor's head names.
+    fn head_fragment(self) -> &'static str {
+        match self {
+            Self::Kafka => "KAFKA TOPIC",
+            Self::Mqtt => "MQTT TOPIC",
+            Self::Nats => "NATS SUBJECT",
+            Self::Pulsar => "PULSAR TOPIC",
+            Self::RedisPubSub => "REDIS PUBSUB",
+            Self::Syslog => "SYSLOG LISTENER",
+            Self::WebsocketClient => "WEBSOCKETS CONNECTION",
+            Self::ZeroMq => "ZEROMQ PULL",
+        }
+    }
+
     /// What the ingestor reads, in the transport's unacknowledged mode, and its quiesce mode.
     fn source_fragment(self) -> &'static str {
         match self {
             Self::Kafka => {
-                "FROM KAFKA unacknowledged_client TOPIC unacknowledged_{{test_id}}
-          OFFSET BY CONSUMER GROUP unacknowledged_group_{{test_id}}
-          MODE NO_ACK PARALLEL
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unacknowledged_group_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::Mqtt => {
-                "FROM MQTT unacknowledged_client TOPIC unacknowledged_{{test_id}} MODE NO_ACK \
-                 SEQUENTIAL
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Nats => {
-                "FROM NATS unacknowledged_client SUBJECT unacknowledged_{{test_id}}
-          QUEUE GROUP unacknowledged_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client SUBJECT 'unacknowledged_{{test_id}}'
+          QUEUE GROUP 'unacknowledged_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Pulsar => {
-                "FROM PULSAR unacknowledged_client TOPIC unacknowledged_{{test_id}}
-          SUBSCRIPTION unacknowledged_{{test_id}} INSTANCES 1 MODE NO_ACK PARALLEL
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
-                "FROM REDIS PUBSUB unacknowledged_client CHANNEL unacknowledged_{{test_id}}
-          MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client CHANNEL 'unacknowledged_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Syslog => {
-                "FROM SYSLOG unacknowledged_client MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::WebsocketClient => {
-                "FROM WEBSOCKETS unacknowledged_client MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::ZeroMq => {
-                "FROM ZEROMQ unacknowledged_client MODE NO_ACK SEQUENTIAL
+                "FROM unacknowledged_client MODE NO ACK
         ON QUIESCE SUSPEND"
             }
         }
@@ -16327,7 +16505,7 @@ impl UnacknowledgedSourceFixture {
       CREATE CODEC unacknowledged_codec FROM JSON TO SCHEMA unacknowledged_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unacknowledged_events SCHEMA unacknowledged_event UNBRANCHED;{client}
-      CREATE INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}
+      CREATE {head} INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}
         {source}
         DECODE USING unacknowledged_codec
         TO unacknowledged_events INHERIT ALL UNBRANCHED
@@ -16335,6 +16513,7 @@ impl UnacknowledgedSourceFixture {
       CREATE SUBSCRIPTION unacknowledged_subscription TO unacknowledged_events;
 "#,
             client = self.client_fragment(),
+            head = self.head_fragment(),
             source = self.source_fragment(),
         )
     }
@@ -26523,30 +26702,31 @@ async fn then_quickwit_index_eventually_contains(
     }
 }
 
+/// How long a scenario waits for text in the OpenTelemetry Collector's followed output.
+const OTEL_COLLECTOR_CONTENT_BOUND: Duration = Duration::from_secs(10);
+
 #[then(expr = "OpenTelemetry Collector eventually contains {string}")]
 async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expected: String) {
     let expected = expand_placeholders(world, &expected);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        if world
-            .dependencies
-            .otel_collector_contains(&expected)
-            .await
-            .expect("OpenTelemetry Collector logs must be readable")
-        {
-            return;
-        }
-        if Instant::now() >= deadline {
-            let logs = world.dependencies.otel_collector_logs().await;
-            panic!(
-                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; last \
-                 command output: {:?}; collector output:\n{logs:?}",
-                world.last_command_output
-            );
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let wait = output
+        .wait_for(&expected, OTEL_COLLECTOR_CONTENT_BOUND)
+        .await;
+    let ended = match wait {
+        CollectorWait::Found => return,
+        CollectorWait::Elapsed => format!("its {OTEL_COLLECTOR_CONTENT_BOUND:?} bound passed"),
+        CollectorWait::FollowerStopped => "the follower stopped reading it".to_string(),
+    };
+    let missed = output.missed(&expected, &world.test_id);
+    panic!(
+        "timed out waiting for OpenTelemetry Collector to contain {expected:?}: {ended}; \
+         {missed}; last command output: {:?}",
+        world.last_command_output
+    );
 }
 
 #[then(
@@ -26558,66 +26738,67 @@ async fn then_otel_collector_receives_split_exports(
     signal: String,
     #[step] step: &Step,
 ) {
-    let (heading, count_key) = match signal.as_str() {
-        "logs" => ("Logs", "log records"),
-        "traces" => ("Traces", "spans"),
-        "metrics" => ("Metrics", "data points"),
-        _ => panic!("unsupported OTEL signal {signal}"),
-    };
+    let signal = signal
+        .parse::<CollectorSignal>()
+        .expect("the step names the logs, traces or metrics signal");
     let expected = expand_placeholders(world, docstring(step));
     let members = expected
         .lines()
         .map(str::trim)
         .filter(|member| !member.is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(members.len(), 3, "the step names exactly three members");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let export_boundary = format!("\tinfo\t{heading}\t");
+    let &[first, second, third] = members.as_slice() else {
+        panic!("the step names exactly three members, not {members:?}");
+    };
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let deadline = Instant::now() + OTEL_COLLECTOR_CONTENT_BOUND;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let logs = world
-            .dependencies
-            .otel_collector_logs()
-            .await
-            .expect("OpenTelemetry Collector logs must be readable");
-        let mut two_record_export = None;
-        let mut one_record_export = None;
+        let printed = output.text();
+        let exports = signal.exports(&printed);
+        let mut two_member_export = None;
+        let mut one_member_export = None;
         let mut observed = Vec::new();
-        for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
-            let count = block
-                .lines()
-                .next()
-                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .and_then(|header| header[count_key].as_u64());
-            let carried = members
-                .iter()
-                .filter(|member| block.contains(**member))
+        for (index, export) in exports.iter().enumerate() {
+            let first_at = export.position(first);
+            let second_at = export.position(second);
+            let third_at = export.position(third);
+            let named = [first_at, second_at, third_at]
+                .into_iter()
+                .flatten()
                 .count();
-            if carried > 0 {
-                observed.push(format!(
-                    "export {index}: {count:?} {count_key}, {carried} named"
-                ));
+            if named == 0 {
+                continue;
             }
-            if count == Some(2)
-                && block.find(members[0]).is_some_and(|first| {
-                    block.find(members[1]).is_some_and(|second| first < second)
-                })
+            let records = export.records();
+            observed.push(format!(
+                "export {index}: {records} {}, {named} named",
+                signal.record_noun()
+            ));
+            if records == 2
+                && let (Some(first_at), Some(second_at)) = (first_at, second_at)
+                && first_at < second_at
             {
-                two_record_export = Some(index);
+                two_member_export = Some(index);
             }
-            if count == Some(1) && block.contains(members[2]) {
-                one_record_export = Some(index);
+            if records == 1 && third_at.is_some() {
+                one_member_export = Some(index);
             }
         }
-        if let (Some(first), Some(second)) = (two_record_export, one_record_export)
-            && first < second
+        if let (Some(two_members), Some(one_member)) = (two_member_export, one_member_export)
+            && two_members < one_member
         {
             return;
         }
         assert!(
             Instant::now() < deadline,
             "timed out waiting for ordered two-member and one-member {signal} exports; observed \
-             {observed:?}"
+             {observed:?}; followed {}",
+            output.progress()
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
@@ -28573,23 +28754,28 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     );
 
     let deadline = Instant::now() + duration;
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion");
     for expected_sequence in 1..=count {
         nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out after receiving {} of {count} sequential broker messages",
-            expected_sequence - 1
+            "timed out after receiving {} of {count} sequential broker messages; {}",
+            expected_sequence - 1,
+            observer.describe_client_receipts()
         );
-        let message = world
-            .broker_observer
-            .as_mut()
-            .expect("a broker observer must exist before assertion")
+        let message = observer
             .try_next_message(deadline.saturating_duration_since(now))
             .await
             .expect("failed while waiting for sequential broker message")
             .unwrap_or_else(|| {
-                panic!("timed out waiting for broker message {expected_sequence} of {count}")
+                panic!(
+                    "timed out waiting for broker message {expected_sequence} of {count}; {}",
+                    observer.describe_client_receipts()
+                )
             });
         let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
             .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
@@ -28621,10 +28807,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
         world.last_broker_headers = message.headers;
     }
 
-    let duplicate = world
-        .broker_observer
-        .as_mut()
-        .expect("a broker observer must exist before assertion")
+    let duplicate = observer
         .try_next_message(Duration::from_millis(500))
         .await
         .expect("failed while checking for a duplicate broker message");
@@ -28994,6 +29177,20 @@ fn publish_suite_summary() {
     }
 }
 
+/// How the scenario run observes stalls of its runner task. A healthy runner polls within
+/// milliseconds; one second clears scheduling noise on a loaded runner and still shows every step
+/// whose synchronous work delays the scenarios beside it. A tick every 250 milliseconds measures a
+/// stall to within a quarter of that bound.
+const SCENARIO_RUNNER_LAG: RunnerLagObserver = RunnerLagObserver {
+    period: Duration::from_millis(250),
+    reported: Duration::from_secs(1),
+};
+
+const _: () = assert!(
+    SCENARIO_RUNNER_LAG.period.as_millis() * 4 <= SCENARIO_RUNNER_LAG.reported.as_millis(),
+    "a reported runner stall spans at least four tick periods"
+);
+
 async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
@@ -29045,14 +29242,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                world.active_scenario = Some(ActiveScenarioRegistration::start(
-                    &feature_name,
-                    &scenario_name,
-                    scenario_line,
-                ));
+                let registration =
+                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let attempt = registration.attempt();
+                world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, |reason| {
+                    .admit_with(limit, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
@@ -29157,6 +29353,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.mqtt_publish_filter = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
@@ -29185,6 +29382,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
     // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
     // they are — so the retry coverage below keeps running until the budget itself expires.
+    // A step that blocks the runner task holds every scenario and the watchdog alike, and nothing
+    // polled on that task can end it, so each such stall is logged with the scenarios live during
+    // it.
+    let run = SCENARIO_RUNNER_LAG.observe(run, |stall| {
+        append_cucumber_log_line(&stall.to_string());
+        for active in ActiveScenario::active() {
+            append_cucumber_log_line(&format!("scenario live during runner stall: {active}"));
+        }
+    });
     let writer = match watchdog
         .bound_with_timeout_report(run, publish_suite_summary)
         .await

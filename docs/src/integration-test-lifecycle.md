@@ -46,6 +46,13 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
+path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
+validation and title checks remain enabled. This exclusion records a source decision rather than
+scenario execution, and cancellation of a required run never supplies successful evidence. Explicit
+mode labels retain their own selections. [Documentation-only Selection](./property-testing-and-fuzzing.md#documentation-only-selection)
+owns the allowed paths, immutable event snapshot and retained CI selection record.
+
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
 `tests/features`. Its lifecycle owners live in `tests/common`.
 
@@ -60,7 +67,11 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
+| Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
+| Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
@@ -173,10 +184,26 @@ up to three more times with a new port selection. It also removes the failed con
 attempts are exhausted, so a scenario retry does not collide with its name. Other startup failures
 reach the scenario directly.
 
-The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
-batching scenario reads the Collector's debug exporter output to check the number and order of
-records in each received export request, using unique test markers to distinguish simultaneous
-scenarios sharing that container.
+The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions through
+one follower that the suite-owned environment starts with the container. The follower streams both
+outputs from the container's start into an in-memory transcript of at most 1 GiB per output, and
+every scenario observes that transcript without the environment's lock or another read of the
+container's logs. A Docker logs read answers with the output as it stood when the read began, and
+the Collector's output grows for the whole run, so no assertion re-reads it. The environment stops
+the follower before it tears the container down. A batching scenario reads the Collector's debug
+exporter output to check the number and order of records in each received export request, using
+unique test markers to distinguish simultaneous scenarios sharing that container.
+
+The debug exporter prints each export as two log entries: a summary that counts the export's
+records, and then the export's body. The Collector prints each entry whole, but an entry of a
+concurrent export can print between a summary and its body, so a summary does not identify the body
+it counts. The batching scenario therefore reads each export from its body alone. The body's first
+line names its signal, and each log record, span or data point in it starts a line of its own,
+which is what the scenario counts. The logger prints the entry's fields after the body's last line,
+so a body is read only once its fields have arrived. The suite's Collector configuration turns off
+the sampling of the Collector's own logger. By default that logger prints only the first ten entries
+that share a message in each ten-second interval, and every hundredth after that, so it drops the
+summaries of exports that arrive close together.
 
 The raw session fixture records domain-clock replies and frames in the order it reads them. A wait
 for a detach reply can queue ticks that arrived before the reply; the post-detach assertion checks
@@ -210,8 +237,13 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `2`, so its
-16-CPU runner has 32 slots. Cucumber may take up all parsed scenarios without charging a slot.
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
+16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
+attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
+the unchanged 41-minute suite budget. The additional slots use the observed CPU and memory
+headroom; their complete-suite qualification retains runner load and the actual margin rather than
+assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
+without charging a slot.
 Admission grants feature capacity and a run slot in one decision, after both are available. A
 scenario holds both through the end of teardown. The active-scenario diagnostic names the feature
 limit or run slot a waiting scenario needs. No scenario runs alone or prevents unrelated scenarios
@@ -224,24 +256,39 @@ suite, and
 available run slots favor a queued limited successor over queued ordinary work. The web console
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
 the other three waiting behind its whole queue. Their chains can therefore make progress throughout
-the suite rather than after it. Cucumber retries a failed
-scenario twice; `--retry 0` turns retries off for a focused run.
+the suite rather than after it. Cucumber retries a failed scenario twice; `--retry 0` turns retries
+off for a focused run. The before hook reads the attempt kind from its active-scenario registration.
+Each feature queue keeps retries ahead of first attempts, and admission selects an eligible retry
+before any first attempt, including a limited feature's first attempt. A retry still needs its
+feature capacity and a run slot together: one waiting for a full feature group leaves free slots
+available to other work. Ordinary and WASM-reset queues retain FIFO order within an attempt kind;
+the web-console group retains its feature fairness. The finite retry count bounds this priority;
+first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
+capacities before dispatch continues.
 
 The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP, retained artifacts and an advisory patch line coverage comment |
+| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
+| `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
 | `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side, the two stress selections included: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
+The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
+their pinned Go formatters. This makes the installer and the later cache publication and report
+scripts available when a tool setup step fails. The installer retains every attempt in a
+`go-tool-bootstrap-<job>` artifact and retries only a checksum database transport error within its
+eight-minute budget. The publication and report steps check for their scripts before calling them,
+so a failed checkout does not add a second failure that obscures the original one. The jobs'
+existing deadlines and test budgets are unchanged.
+
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
+seconds. Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
@@ -251,22 +298,79 @@ limit.
 The shared remote is Cloudflare R2 through its S3 API. Kache reads the base `artifacts` prefix
 first. Pull-request jobs also read and publish entries, manifests, and shards under the shared
 `artifacts-pr` prefix, configured in the daemon's TOML file. This lets successive PR runs reuse
-their builds. Protected-branch pushes use only `artifacts`; scheduled and manually dispatched
-native jobs retain kache's read-only policy. Fork PRs still need credentials to access R2.
-Kache 0.28.1's `doctor` displays the generic read-only CI policy even when the PR prefix is
-enabled; actual uploads confirm that PR publication is active.
+their builds. Kache lets only a protected-branch push publish to `artifacts`, and no workflow runs
+on one; scheduled and manually dispatched native jobs retain kache's read-only policy. Docker image
+builds run kache inside BuildKit, which does not see the GitHub Actions environment, so their
+builder publishes to `artifacts`. Fork PRs still need credentials to access R2. Kache's `doctor`
+displays the generic read-only CI policy even when the PR prefix is enabled; the job's daemon
+reports its actual write mode, which the start step prints and publication records.
 
 CI configures the cache bucket through the required repository variables `KACHE_BUCKET` (bucket
 name), `KACHE_BUCKET_REGION` (S3 region), and `KACHE_BUCKET_ENDPOINT` (S3 service URL), and reads its
 credentials from the repository secrets `KACHE_BUCKET_ACCESS_KEY_ID` and
-`KACHE_BUCKET_SECRET_ACCESS_KEY`. The workflows pass these settings through kache's `KACHE_S3_*`
-environment variables and the setup action's S3 inputs. Docker image builds pass the same settings
-to their builder. The service URL is written into the daemon's TOML configuration before startup.
+`KACHE_BUCKET_SECRET_ACCESS_KEY`. Each kache-backed job passes them, as kache's `KACHE_S3_*`
+environment variables, to `python3 scripts/kache_remote.py start` right after the setup action.
+Docker image builds pass the same settings to their builder, whose build command runs
+`scripts/kache_remote.py configure` before it starts the daemon. Either way the service URL is
+written into the daemon's TOML configuration before startup.
 
 For Cloudflare R2, set `KACHE_BUCKET_REGION` to `auto` and `KACHE_BUCKET_ENDPOINT` to
 `https://<account-id>.r2.cloudflarestorage.com`, without the bucket name in the URL. The bucket name
-belongs in `KACHE_BUCKET`. The configuration script rejects URLs with a bucket path; supplying the
-full bucket URL can make the remote cache appear empty.
+belongs in `KACHE_BUCKET`. `scripts/kache_remote.py` rejects URLs with a bucket path; supplying
+the full bucket URL can make the remote cache appear empty.
+
+### Cache Publication
+
+`scripts/kache_remote.py` owns the remote of every kache-backed job: the `check.yaml`, Bolero,
+`benchmark` and `build-book` jobs, and the builder stage of every Docker image build.
+
+`kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped
+runtime directory, and stops the job's daemon in its post step. It receives no S3 inputs, so its
+post step neither saves a manifest nor pushes. The `Start kache remote` step that follows it:
+
+1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the bucket, region,
+   service URL, base prefix and pull-request prefix. The credentials stay in the environment.
+2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
+   `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
+   every build variant keeps its own manifest and shards.
+3. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
+   that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
+   daemon that has not answered yet gets three polls, two seconds apart. The step prints whether
+   the daemon publishes uploads or, under kache's read-only policy, skips them.
+
+During the build the daemon publishes each entry the build stores: kache records a durable upload
+intent, uploads the entry in the background, and retries an upload that failed for a retryable
+reason every five seconds.
+
+`Publish kache cache` runs `scripts/kache_remote.py publish` whatever the job's result: just before
+the kache report where the job publishes one, and as the job's last step otherwise. For a job whose
+work succeeded, it saves the build manifest with `kache save-manifest`, then reads the daemon's
+upload counters from `kache telemetry write` every two seconds until no upload is queued or in
+flight. It waits at most 120 seconds, its kache commands included. The step's 4-minute
+`timeout-minutes` only backstops that bound. Every kache answer it reads is a versioned kache
+document, and an answer outside its schema is reported rather than read. The outcome is one of:
+
+| Outcome | When | What remains |
+| --- | --- | --- |
+| `published` | The manifest is saved and the daemon reports every upload of the job finished | Nothing |
+| `incomplete` | The budget ended with uploads queued or in flight, the manifest failed or did not finish, an upload failed for good, or the daemon stopped answering during the wait | Queued uploads go to the daemon's shutdown drain, which kache bounds at 30 seconds |
+| `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
+| `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
+| `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
+| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the phase the step reached |
+
+Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
+ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
+add a workflow warning. A job that failed before its checkout has no script to run, so its step
+adds only a notice. The record, `publication.json` and `publication.md`, lands in
+`$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
+the job summary. An image build runs `publish --job-status success` as the last command of its
+build stage, which reaches it only when every artifact has been built.
+
+No job runs `kache sync --push`. Kache's push-only sync lists every key under both prefixes before
+it decides what to push. On 2026-10-14 and 2026-10-15 that listing grew from 650,859 to 690,780
+keys, took six to eight and a half minutes in every kache-backed job, and found nothing the daemon
+had not already published.
 
 ## Product Deadlines And Harness Deadlines
 
@@ -292,6 +396,18 @@ responding-node pair while other probes remain healthy. It can also hold one nod
 that node reports a runtime revision prepared, wait until the hold is reached, and release it after
 asserting command completion. These are per-scenario injected conditions; their waits have harness
 bounds and do not shorten the product's completion deadline.
+
+An injected hold is the opposite case: a product deadline races it. The scenario holds a controlled
+operation at a gate for a workload duration, counted from the moment it observes the gate, and the
+node keeps its own deadline running while the operation waits. The backup wait scenarios hold one
+domain's quiesced cut for 12 seconds and the next one's for 14 seconds, each inside its own
+20-second cut budget. The scenario's margin is the part of the budget the hold leaves, and a runner
+task that another scenario's synchronous step stalls for longer than that margin would lengthen a
+hold timed on the runner task until the product deadline expires. `tests/common/injected_hold.rs`
+therefore waits for each gate, holds it for its duration and releases it on a task of its own, and
+the step that injects the holds only awaits that task. A stalled runner delays when the step learns
+of a release, never the release itself. The step still watches the controlled operation, and a
+command that ends before its gates were held fails the step with the command's own outcome.
 
 The boundary between them is kept in four places.
 
@@ -356,6 +472,9 @@ The boundary between them is kept in four places.
   stopping the writer finishes its admitted command before counting completed writes: the response
   can arrive after all voters have already applied that command. The fixture still checks the
   storage-derived catch-up bound, append-stream limit and commands-memory budget.
+  Its initial burst of domain creation also uses one production client, retaining each command's
+  execution identity across a leadership change during finalization. A raw session's recoverable
+  disposition cannot end the fixture before follower catch-up starts.
   A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
   observability, web console, or interconnect. A readiness timeout may still move all listeners
   within the same startup budget. A changed interconnect address remains reserved while a peer
@@ -367,15 +486,15 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
-  `just coverage-harness-liveness <filter>` measures the ordinary startup and other harness owner
-  regressions with counters of their own, as the [diagnostic lane](#diagnostic-lane) section
-  describes. A patch that also changes product code passes the retained `lcov.info` to
-  `just coverage-patch` as another `--report`, beside the workspace report.
   The forced-recovery startup fixture holds the promoted replica's initial installation across a
   whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
   unavailable. The destination records its missing schedule before releasing the held installation
   once, so the regression reaches that boundary without spending the recovery budget between
   scenario steps. Public placement, recovery outcome and both branches' output remain the verdict.
+  `just coverage-harness-liveness <filter>` measures the ordinary startup and other harness owner
+  regressions with counters of their own, as the [diagnostic lane](#diagnostic-lane) section
+  describes. A patch that also changes product code passes the retained `lcov.info` to
+  `just coverage-patch` as another `--report`, beside the workspace report.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -396,7 +515,7 @@ second module runs the operation, it is named after the owner.
 | Cleanup after a failed startup attempt | `node_startup.rs` | 5 seconds, inside what the startup budget has left | The node keeps its task, and the startup ends rather than launching over a node that is still stopping |
 | One node's startup, every attempt included | `node_startup.rs` | 84 seconds | The startup fails with the typed record of every attempt |
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
-| A node a scenario stops itself | `cluster.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The step fails, and the node keeps its task and everything it holds |
+| A node a scenario stops itself | `cluster.rs`, recorded by `node_stop.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The step fails naming how long the node had been stopping and the shutdown phase it was in, and the node keeps its task and everything it holds |
 | Scenario cleanup of a whole cluster | `cluster_teardown.rs` | 60 seconds for every node together | Nodes still stopping are left to end themselves, keep their storage and ports until they have, and are recorded as still stopping |
 | Stopping a scenario's HTTP and gRPC receivers | `http_receiver.rs` and `grpc_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
@@ -550,10 +669,17 @@ node stopped. The OTEL metric scenario observes one successful export from each 
 owner before checking Collector output. HTTP intake acceptance does not establish sink export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
-The OTEL Collector content wait keeps its ten-second observation bound. If that bound expires,
-its failure includes the last command output and a collector log snapshot, or the snapshot's
-read error. A collector timeout alone does not establish that the emitter lost a record or failed
-to export it; retained diagnostics and a new attempt remain separate evidence.
+The OTEL Collector content wait keeps its ten-second bound, from the step's start to the text's
+appearance in the followed transcript, counting output printed before the step began. Each look
+searches only what arrived since the previous look, plus the bytes an occurrence could span across
+it, and every append wakes the wait, so the text is seen as soon as the follower reads it. No look
+re-reads the whole output, so a record delivered within the bound cannot be missed by a long read
+that began before the delivery and ended after the bound. If the bound expires, or the follower
+stops first, the failure reports whether the text arrived after the wait ended, how far the follower
+has read each output and how it stopped, the latest 200 Collector lines that name the scenario's
+test identifier, and the last command output. A collector timeout alone does not establish that the
+emitter lost a record or failed to export it; retained diagnostics and a new attempt remain separate
+evidence.
 
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
@@ -836,10 +962,14 @@ afterwards removes the temporary storage its nodes wrote as soon as no node left
 shares it. Two more records appear only when they apply:
 
 ```text
-scenario cleanup unfinished: node "<node>" was still stopping at the cleanup deadline and keeps its storage and ports until it ends
+scenario cleanup unfinished: node "<node>" was still stopping at the cleanup deadline, in shutdown phase <phase>, <the node's own deadline>, and keeps its storage and ports until it ends
 scenario live during unfinished cleanup: <identity> attempt=<n> phase=<phase> phase_age=<age> age=<age>
 scenario teardown failed: <node record ending in a panic>
 ```
+
+A node left stopping is read through its shutdown coordinator before it goes to its keeper, as
+[Scenario-Driven Stops](#scenario-driven-stops) describes, so the record says which of the node's
+own shutdown phases the cleanup deadline found it in.
 
 An unfinished cleanup is usually cleanup that ran beside work heavy enough to starve it, so the
 harness names every scenario live at that moment, and the keeper's own line later says when the
@@ -900,6 +1030,28 @@ registration, and the scenario's cleanup waits for it again or leaves it stoppin
 Stopping every node requests every stop first and then waits for each node in turn. A scenario can
 also begin stopping a node without waiting, to observe how the cluster reacts while the node is on
 its way down; its cleanup waits for it later.
+
+The harness prints every such stop to standard error when its wait ends, as it prints a startup:
+
+```text
+node '<node>' stop: ended <elapsed> after its stop request, inside its <watchdog> watchdog: <terminal outcome>; shutdown phases: stop admission <outcome>, drain support <outcome>, terminal teardown <outcome>
+node '<node>' stop: still stopping <elapsed> after its stop request, at the end of its <watchdog> watchdog, in shutdown phase <phase>, <the node's own deadline>
+```
+
+The elapsed time runs from the first stop request the harness made of that launch of the node to
+the moment its task ended. The task records its own ending, so the stops of a whole cluster, which
+are requested together and awaited in turn, each report how long that node took rather than how
+long the harness took to reach it. A stop is printed by the wait that observed the ending, and only
+by that one.
+
+The second line is also the failure of the step. A node that outlived its watchdog is read through
+its shutdown coordinator, which changes nothing in the node: the phase is the product's
+`StopRequested`, `DrainSupport` or `TerminalTeardown`, and the node's own deadline reads
+`<remaining> before its own shutdown deadline` or `past its own shutdown deadline`. An in-process
+node has no deadline supervision to end it, so a node read in `TerminalTeardown` past its own
+deadline is running the final stops the product lets run to completion, while one read in
+`DrainSupport` is still inside a drain its scenario configured. A node that had already been left
+stopping under a keeper has handed its coordinator over, and its record says so instead.
 
 ## Ports
 
@@ -1122,6 +1274,35 @@ scenario cleanup forced: gRPC receiver <name>: <the same record>
 A call that panics takes its connection with it, so the stop counts it among the panicked
 connections.
 
+## Broker Observers
+
+A scenario about a node that publishes to a broker observes the destination through a client of its
+own: a Kafka consumer, a subscriber of MQTT, RabbitMQ, Redis, Pulsar or SQS, a ZeroMQ socket, or a
+core NATS subscription. Its steps then assert on what the broker delivered to that client, in the
+order the broker delivered it.
+
+Those steps run on the runner task, so how an observer hands a message to its step decides how many
+polls of that task a burst of messages costs. Most observers run one task on the binary's runtime
+that reads the broker's client and hands each message to the step over a bounded channel, and the
+scenario aborts that task when it drops the observer. A core NATS observer has no task of its own:
+the NATS client already reads what the server delivers into the subscription's own buffer on a task
+of its own, and the step takes each message straight from that buffer. A step that is behind takes
+as many buffered messages in one poll of the runner task as the poll's cooperative budget allows.
+
+Under the suite's concurrency the runner task comes back to a step only after it has polled every
+other woken scenario. While the NATS observer handed each message on through a one-message channel,
+every message waited for a poll of its own, and on a loaded runner the NATS emission scenarios
+drained their 32,768 messages too slowly for their 90-second bound although the observing client
+had already received every one of them.
+
+The NATS client buffers at most 65,536 messages for one subscription and, as a slow consumer, drops
+what arrives beyond them, so a scenario keeps the messages its step has not yet taken below that
+bound.
+
+A step that waits for a sequence of messages and times out names how many messages the observing
+client had received from its broker, for a client that counts them, so a message that never reached
+the observer reads differently from one the step had not yet taken.
+
 ## DNS Authorities
 
 A scenario about how nodes find one another by name selects its cluster's peer addressing before the
@@ -1274,28 +1455,21 @@ current profiles and reuses unchanged instrumented artifacts for another scenari
 When collecting a different source revision, first run `just coverage-clean-workspace` so
 instrumented binaries and line mappings from earlier sources cannot enter the new report.
 After collecting unit and scenario profiles, `just coverage-report-workspace` exports all
-workspace packages, including executed test files.
+workspace packages, including executed test files, as `lcov-workspace.info` with the checkout path
+beside it, and `just coverage-merge` maps that report onto the repository.
 
-Both CI collectors export `lcov-workspace.info` with an explicit `--workspace` report scope and
-`--no-default-ignore-filename-regex`. Test lines stay in these reports, so merging native extra
-reports cannot make executed library properties appear uncovered because their files were filtered.
-Executing a crate's tests does not include that crate in a report whose package selection names
-only the root package. The coverage job merges these workspace reports with completed native
-extra reports and passes that combined workspace report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. The separate `lcov.info` artifact
-retains the focused server, CLI and web-console view. Patch coverage and comment publication are
-advisory and never change the build verdict; the complexity check is independent. The PR comment
-and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
-reports and `target/patch-coverage.md`.
-Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
+[Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the producer catalog,
+export flags, checkout-root mapping, tracked-source policy, ordinary merge record and integrity
+failures. That chapter also owns the advisory patch/CRAP reports and the separate deterministic
+complexity verdict. The `coverage-merged` artifact retains the ordinary report, its merge record
+and both advisory reports.
+
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
 deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
 The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
 Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
-The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
-to files on its GitHub-hosted runner.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
@@ -1306,6 +1480,12 @@ to files on its GitHub-hosted runner.
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
 the job's result uploads the whole `tests/logs` directory as the `scenario-logs` artifact.
+
+A suite that passes ends before its budget, so the reserve then holds the coverage export, the
+uploads and [cache publication](#cache-publication), which waits at most 120 seconds. Saving the
+manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and the daemon had
+already published every entry those jobs built. A suite that fails or runs out of its budget leaves
+publication `not-run`, so the reserve stays with the cleanup.
 
 The first split-job PR run completed its suite in 21m49s with 88.3% run-slot utilization and four
 retries. One Raft snapshot scenario failed all three attempts because its setup accepted a purge
@@ -1322,6 +1502,26 @@ A same-commit rerun of the scenarios job replaces that job's four report artifac
 runner load, kache report, and scenario coverage. This lets a rerun publish its own diagnostics
 under GitHub Actions' immutable artifact names. When the coverage job is rerun, its advisory
 reporter updates its marked PR comment for the same PR head instead of adding a comment.
+
+### Runner Stalls
+
+The watchdog is polled on the runner task, so it cannot see, let alone end, a step that blocks that
+task. The run is therefore polled beside a tick on the same task, due every 250 milliseconds. A step
+that blocks inside its poll delays the tick until it returns, so how late the tick is polled is how
+long the task was held. A stall of one second or more goes to the scenario log with every scenario
+live during it:
+
+```text
+runner task stalled for <duration>
+scenario live during runner stall: <identity> attempt=<n> phase=<phase> phase_age=<age> age=<age>
+```
+
+The log line is a diagnostic, not a failure: a stall delays every wait and bound the other scenarios
+measure, and the line says when and for how long. Backup steps hand their archive reads, rewrites,
+digests and fixture generation, and the inspection of stopped nodes' databases, to blocking tasks;
+the native metadata restore scenario, whose archive holds lifecycle and offset records above 32 MiB
+each, held the runner task for about 30 seconds while it inspected three restored nodes before they
+did.
 
 ## Diagnostic Lane
 
@@ -1392,7 +1592,7 @@ verdict.
 | Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
 | Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
+| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
 
 The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
 every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
@@ -1410,9 +1610,11 @@ inventory; the inventory and job bounds remain enforced.
 The two stress selections compile one build, the active-only build with the bounded disturbance
 of `StressConfiguration::LANE`, and between them run every scenario of the active-only selection but
 the report tool's triage, one at a time: a stress build enters Deloxide's process-wide detector
-twice on every mutex and write acquisition, and with four scenarios in one process their nodes
-contended on it and missed startup and request deadlines that a plain diagnostic build of the same
-scenarios met. `deloxide-stress` runs the active-only selection's probes, conformance checks and
+twice on every mutex and write acquisition, and when the selections were introduced, with four
+scenarios in one process, their nodes contended on it and missed startup and request deadlines
+that a plain diagnostic build of the same scenarios met.
+[Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
+them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
 owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 35
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 30 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
@@ -1431,7 +1633,7 @@ of diagnostic builds, about 63 of its 80 budgeted minutes, before the variation 
 before the large-state WASM handoff added since, and before any scenario added later. Chunking that lane into a fresh process per
 feature keeps the sum and adds a process start-up per chunk. Running more stressed scenarios at once
 in one process, or fewer nodes in each of several concurrent scenarios, is the configuration whose
-nodes missed product deadlines, and Deloxide 04A investigates the failures seen at two per process.
+nodes missed product deadlines then.
 The restore scenarios are the longest family, so they became their own selection: a budget and a
 runner of their own, and the same build, disturbance and probes. In the CI run of 2026-10-10 that
 introduced the split, `deloxide-stress` took 28m41s in the lane's step and 27 minutes inside its
@@ -1451,6 +1653,84 @@ scenarios two to three times slower than CI, so `deloxide-stress-restore` expire
 17 of its 43 runs, every one of which passed. Run the stress lanes where the CPUs are not already
 saturated, or again once their builds are warm; an expired budget ends the lane with status `124`,
 never as a clean result.
+
+### Two Stressed Scenarios In One Process
+
+At two stressed scenarios in one process, the restore scenarios failed in two ways the
+one-at-a-time selections never did: `the cluster is restarted` found a restored node still stopping
+at the end of its 300-second watchdog, and node startups spent their whole 84-second budget.
+Neither was a deadlock among tracked locks. Every evidence file of those runs qualified with no
+finding, and both failures are a node that could not get through terminal teardown, or through
+startup, beside the other nodes of its process.
+
+The retained run of `tests/features/cluster/backup_materialized.feature` at `6c0d23de` holds the
+signature. Its 28 stops by `the cluster is restarted` took 130.5 seconds at the median and 297.7 at
+the slowest, 2.3 seconds inside the watchdog, where the plain diagnostic build of the same revision
+took 0.9 and 39.6. Of its 129 node stops, 69 never reported the end of terminal teardown. Three
+things made a stop that slow, and CPU contention is what turned them into a failure: the run shared
+a 40-CPU host whose one-minute load was 47 at the median and between 28 and 75.
+
+- **Every node swept its whole acknowledgement registry every second, and a sweep that overran
+  the second could not be cancelled.** The remote acknowledgement silence sweep took a guard for
+  each of a node's 16,384 correlation positions whether or not the node had forwarded anything, and
+  a stress build enters Deloxide's one detector twice for each of them. On that host one sweep took
+  longer than the second between sweeps. Its task then found the next tick already due and went
+  from one sweep into the next without waiting, and the cancellation that runtime teardown joins the
+  task with is observed only when the task waits. The run's first cleanups show it: four nodes that
+  had served for under ten seconds logged nothing through 59 seconds of terminal teardown while the
+  process kept three CPUs busy. The sweep now visits only the positions a node's deliveries and
+  admissions have claimed, which keeps it far inside its second, and its task returns to its
+  executor after every sweep, so teardown's cancellation ends it after the sweep in progress even
+  when that sweep overruns; see [Terminal Teardown](./shutdown.md#terminal-teardown).
+- **Nodes the harness gave up on kept running.** A cleanup that reached its deadline aborted the
+  node's root task, which ended that one future and left every task the node had spawned, its
+  sweep among them, running for the rest of the process. A node aborted this way never reported
+  the end of its teardown. The harness never aborts a node now, as
+  [Node Tasks And Readiness](#node-tasks-and-readiness) describes.
+- **A stopping domain waited for its generators one at a time.** When every node of a cluster stops
+  at once, a generator that is reading its source relay from another node, or publishing to one,
+  waits on a peer that no longer answers, and runtime teardown gave each such generator its own
+  two-second grace in turn. This one is independent of the detector: it is in the plain build's
+  39.6 seconds too. The generators of a domain now share one grace; see
+  [Terminal Teardown](./shutdown.md#terminal-teardown).
+
+The measurements below repeat that run's configuration on a 32-CPU workstation shared with other
+builds: the whole feature in the `deloxide-stress` build, two scenarios in one process, sixteen
+runtime workers on sixteen CPUs, no retries, and the row, startup, stop and cleanup deadlines
+unchanged.
+
+| Build | Outcome | `the cluster is restarted` stops, median and slowest | Slowest node startup |
+| --- | --- | --- | --- |
+| `6c0d23de`, retained from the 40-CPU host | Ended by its 3000-second budget with 17 of 18 complete and one failed | 130.5 s and 297.7 s | 29.5 s |
+| `c39c5388`, after the sweep and the harness changed | 18 of 18 passed in 422 s | 0.49 s and 36.9 s, the slowest all generator graces | 2.1 s |
+| With the generators' shared grace | 18 of 18 passed in 376 s | 0.36 s and 10.9 s | 2.6 s |
+
+Without competing load, `6c0d23de` itself is as fast here as the current revision: in the
+feature's first four examples its restarted clusters stopped in 0.06 seconds at the median and
+0.48 at the slowest. The sweep's cost shows only once the process has to compete for its CPUs. A
+build of `c39c5388` with nothing changed but the full sweep restored was run beside an unchanged
+one, the process confined to four CPUs that twelve busy loops competed for. The unchanged build
+passed 18 of 18 in 443 seconds. The build with the full sweep took 1,301 seconds and 1.7 times
+the CPU time, failed both three-node examples with forty relays when deliveries to a peer timed out
+during their input rounds, and stopped its restarted clusters in 5.3 seconds at the median against
+0.36. `6c0d23de` itself, run the same way, matched that build and not the unchanged one: 1,345
+seconds, the same two examples failed, one of them with the missing rows of the retained run, and
+its restarted clusters stopped in 4.5 seconds at the median.
+
+What a three-node stop still costs after this is bounded by the deadlines of the calls its nodes had
+in flight when the stop began, and each wait is named in the node's log. A relay owner that is
+delivering to a peer which has already stopped waits out the five seconds that delivery's admission
+is given and the five its cancellation is given. A checkpoint announcement to a replica that has
+stopped is waited for until its five-second dispatch deadline has passed. A replica's placement task
+that is fetching or acknowledging a checkpoint when its owner stops does not observe the stop, and
+such tasks are aborted one after another, two seconds each. The node's generators share their two
+seconds. In `Every node stopping at once ends its generators together`, the slowest node of the
+three-node cluster took between 2.0 and 12.0 seconds to stop in ten runs of the ordinary build.
+Before the generators shared their grace it took between 22.0 and 30.1 seconds in five of six runs,
+and 8.1 in the sixth, where two of the nodes had no generator waiting on a peer.
+
+The stress selections keep running one scenario at a time: their budgets were measured that way,
+and two per process remains the comparison below rather than a lane.
 
 For a focused comparison, `just test-diagnostic-scenarios <selection> <feature> --name
 <scenario> --concurrency 2 --retry 0` builds and runs the public scenario in `deloxide`,
@@ -1520,7 +1800,7 @@ artifact carries `tests/logs`.
 | Output | Where | What it holds |
 | --- | --- | --- |
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
-| Harness transitions | Standard error | Node startup transitions and outcomes, and a suite timeout's diagnostic and cleanup |
+| Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
 | Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the NSPL commands scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
 | Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, and the ten longest attempts; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
@@ -1535,7 +1815,8 @@ tail it needs.
 | A status wait that expired | The step fails with the elapsed time, the last status text, and the last typed failure |
 | A node that never became ready | The step fails with every attempt's record, and a failed construction logs `cluster start failed:` |
 | A teardown diagnostic that failed or timed out | The node's `status_error=` or `status_timeout=` line, and cleanup continues |
-| A cleanup that left nodes stopping, or a node that panicked while stopping | `scenario cleanup unfinished:` or `scenario teardown failed:` lines beside an unchanged scenario result, and the keeper's `ended ... after it was left stopping` line on standard error |
+| A node a scenario stopped that outlived its watchdog | The step fails with the node's stop record: how long it had been stopping, the shutdown phase it was in, and whether its own deadline had passed |
+| A cleanup that left nodes stopping, or a node that panicked while stopping | `scenario cleanup unfinished:` lines naming each node's shutdown phase, or `scenario teardown failed:` lines, beside an unchanged scenario result, and the keeper's `ended ... after it was left stopping` line on standard error |
 | A scenario that never ends | The suite timeout diagnostic names it with its attempt, phase, phase age, and nodes |
 | An exhausted port pool | The step that needed a port fails with the pool's report |
 
@@ -1589,7 +1870,11 @@ contract.
    Failures carry no credentials and no payload values.
 5. **Never block the runner task.** Every scenario and the suite watchdog share it. A synchronous
    loop needs a bound of its own, as the port draw has, and blocking work belongs on a blocking or
-   spawned task.
+   spawned task: a step hands its file, encoding, digest or database work to `off_the_runner` in
+   `tests/common/runner_offload.rs` and awaits it, and the
+   [runner-lag observer](#runner-stalls) logs a step that still holds the task. A duration a scenario injects for a product deadline to race is timed on a task
+   of its own, as [injected holds](#product-deadlines-and-harness-deadlines) are, because another
+   scenario can still stall the runner task.
 6. **Make cancellation release it.** Whatever a scenario starts belongs to the scenario's world or
    its cluster, so dropping the run releases it: spawned work behind handles that abort on drop,
    child processes killed on drop, and node tasks through the single task owner, which asks a node
@@ -1621,6 +1906,8 @@ The harness guarantees:
 - A cluster's cleanup costs one budget whatever its size, and releases what a node held only after
   that node's task has ended.
 - `finished` is published only after cleanup has completed.
+- A gate a step holds is released its injected duration after the hold observed it, however long
+  the runner task is stalled.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -1656,8 +1943,8 @@ Its limits:
 ## Qualification Evidence
 
 `just test-harness-liveness` runs the focused regressions that hold this contract. They drive
-stand-in session services on real loopback sockets and stand-in node tasks, most of them on a paused
-clock. The `tests` job runs them beside the separate scenario job.
+stand-in session services and a stand-in NATS server on real loopback sockets, and stand-in node
+tasks, most of them on a paused clock. The `tests` job runs them beside the separate scenario job.
 
 | Contract | Regressions |
 | --- | --- |
@@ -1667,10 +1954,13 @@ clock. The `tests` job runs them beside the separate scenario job.
 | One startup budget with classified retries | `repeated_readiness_failure_spends_one_budget_across_every_attempt`, `a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over`, `exhaustion_reports_every_attempt_with_its_typed_cause`, `ports_that_cannot_be_reallocated_end_the_startup`, `a_bound_address_is_retried_until_a_launch_becomes_ready`, `a_last_attempt_still_becomes_ready_with_what_the_budget_left`, `an_application_error_ends_the_startup_without_another_launch`, `a_panicking_node_ends_the_startup_without_another_launch`, `a_launch_failure_ends_the_startup_before_anything_is_cleaned_up`, `sequential_cluster_construction_stays_inside_its_derived_budget` |
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
+| A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
+| Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
+| A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as

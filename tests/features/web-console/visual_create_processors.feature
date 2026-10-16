@@ -180,7 +180,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_route_output SCHEMA visual_route_event UNBRANCHED;
       CREATE VHOST visual_route_host route-{{test_id}}.example.com;
       CREATE ENDPOINT visual_route_endpoint ON visual_route_host PATH '/route' TYPE HTTP;
-      CREATE INGESTOR visual_route_source FROM ENDPOINT visual_route_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR visual_route_source FROM visual_route_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_route_codec
         TO visual_route_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -242,7 +242,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_partition_output SCHEMA visual_partition_event BRANCHED BY visual_by_tenant;
       CREATE VHOST visual_partition_host partition-{{test_id}}.example.com;
       CREATE ENDPOINT visual_partition_endpoint ON visual_partition_host PATH '/partition' TYPE HTTP;
-      CREATE INGESTOR visual_partition_source FROM ENDPOINT visual_partition_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR visual_partition_source FROM visual_partition_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_partition_codec
         TO visual_partition_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -316,7 +316,7 @@ Feature: Web console visual junction and reingestor creation
       CREATE RELAY visual_sensitive_out SCHEMA visual_sensitive_output UNBRANCHED;
       CREATE VHOST visual_sensitive_host sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT visual_sensitive_endpoint ON visual_sensitive_host PATH '/sensitive' TYPE HTTP;
-      CREATE INGESTOR visual_sensitive_source FROM ENDPOINT visual_sensitive_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR visual_sensitive_source FROM visual_sensitive_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_sensitive_codec
         TO visual_sensitive_in INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

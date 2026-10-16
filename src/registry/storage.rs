@@ -50,7 +50,7 @@ use crate::registry::{
         PlannedMutations, RegistryMutation, RegistryPersistMutation, TransactionMutationPreflight,
         classify_quiesce,
     },
-    placement::{PlacementPlan, ensure_placement_member_shape_change_allowed},
+    placement::PlacementPlan,
 };
 
 /// Why applying one alteration of a batch discards its outcome.
@@ -555,14 +555,9 @@ impl Registry {
                             identifier: alter.relay.as_str().to_string(),
                         }));
                     };
-                    let before = Model::Relay(relay.clone());
                     relay.apply_alter(alter).map_err(|rejection| {
                         RegistryError::invalid_model(domain, alter.relay.as_str(), rejection)
                     })?;
-                    let after = Model::Relay(relay.clone());
-                    ensure_placement_member_shape_change_allowed(
-                        domain, &before, &after, &candidate,
-                    )?;
                 }
                 RegistryMutation::AlterJunction(alter) => {
                     info!(
@@ -660,14 +655,9 @@ impl Registry {
                             identifier: alter.ingestor.as_str().to_string(),
                         }));
                     };
-                    let before = Model::Ingestor(ingestor.clone());
                     ingestor.apply_alter(alter).map_err(|rejection| {
                         RegistryError::invalid_model(domain, alter.ingestor.as_str(), rejection)
                     })?;
-                    let after = Model::Ingestor(ingestor.clone());
-                    ensure_placement_member_shape_change_allowed(
-                        domain, &before, &after, &candidate,
-                    )?;
                 }
                 RegistryMutation::AlterReingestor(alter) => {
                     info!(
@@ -1525,7 +1515,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL U64";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL PHR";
 
 #[cfg(test)]
 #[cfg_attr(

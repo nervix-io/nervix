@@ -1,0 +1,251 @@
+use nonzero_ext::nonzero;
+
+use crate::{
+    AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
+    CreateSchema, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointSource, HttpSource, IngestQuiesceMode, IngestSource, KafkaPartitionSchedule, Model,
+    ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, ResolvedBranching,
+    ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode, SyslogListenerSource,
+    SyslogSource,
+};
+
+fn named<N>(raw: &str) -> N
+where
+    N: for<'a> TryFrom<&'a str>,
+    for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
+{
+    N::try_from(raw).expect("valid name")
+}
+
+fn domain(raw: &str) -> DomainName {
+    DomainName::try_from(raw).expect("valid domain")
+}
+
+#[test]
+fn cluster_schedule_returns_matching_domain() {
+    let alpha = DomainSchedule::new(domain("alpha"), Vec::new(), Vec::new());
+    let beta = DomainSchedule::new(domain("beta"), Vec::new(), Vec::new());
+    let schedule = ClusterSchedule::from_iter([alpha.clone(), beta]);
+
+    assert_eq!(schedule.domain(&domain("alpha")), Some(&alpha));
+    assert_eq!(schedule.domain(&domain("gamma")), None);
+}
+
+#[test]
+fn scheduled_node_assignment_checks_exact_node_id() {
+    let node = ScheduledNode::new(
+        Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
+    .placed_on(
+        Some(named::<ClusterNodeName>("node-a")),
+        vec![named::<ClusterNodeName>("node-a")],
+    );
+
+    assert!(node.is_assigned_to(&named::<ClusterNodeName>("node-a")));
+    assert!(!node.is_assigned_to(&named::<ClusterNodeName>("node-b")));
+    assert!(
+        !node
+            .clone()
+            .placed_on(Some(named::<ClusterNodeName>("node-a")), Vec::new())
+            .is_assigned_to(&named::<ClusterNodeName>("node-a"))
+    );
+}
+
+#[test]
+fn scheduled_node_single_assignment_only_when_exactly_one_node_is_present() {
+    let node = ScheduledNode::new(
+        Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
+        Some(named::<ClusterNodeName>("node-a")),
+        vec![named::<ClusterNodeName>("node-a")],
+    );
+
+    assert_eq!(node.assigned_single_node(), Some(&named("node-a")));
+    assert_eq!(
+        node.clone()
+            .placed_on(
+                Some(named::<ClusterNodeName>("node-a")),
+                vec![
+                    named::<ClusterNodeName>("node-a"),
+                    named::<ClusterNodeName>("node-b")
+                ]
+            )
+            .assigned_single_node(),
+        None
+    );
+    assert_eq!(
+        node.placed_on(Some(named::<ClusterNodeName>("node-a")), Vec::new())
+            .assigned_single_node(),
+        None
+    );
+}
+
+#[test]
+fn scheduled_node_exposes_primary_and_replicas() {
+    let node = ScheduledNode::new(
+        Model::Schema(CreateSchema {
+            name: named("orders"),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
+        Some(named::<ClusterNodeName>("node-a")),
+        vec![
+            named::<ClusterNodeName>("node-a"),
+            named::<ClusterNodeName>("node-b"),
+            named::<ClusterNodeName>("node-c"),
+        ],
+    );
+
+    assert_eq!(node.primary_node(), Some(&named("node-a")));
+    assert_eq!(
+        node.replica_nodes(),
+        vec![&named("node-b"), &named("node-c")]
+    );
+    assert!(node.is_primary_on(&named::<ClusterNodeName>("node-a")));
+    assert!(!node.is_primary_on(&named::<ClusterNodeName>("node-b")));
+}
+
+#[test]
+fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() {
+    let replicated_junction = ScheduledNode::new(
+        Model::Junction(CreateJunction {
+            name: named("orders_merge"),
+            from: ProcessorInputs::new(
+                vec![named("orders_in_a"), named("orders_in_b")],
+                Vec::new(),
+            ),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            )]),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
+        Some(named::<ClusterNodeName>("node-a")),
+        vec![
+            named::<ClusterNodeName>("node-a"),
+            named::<ClusterNodeName>("node-b"),
+        ],
+    );
+    let endpoint_ingestor = ScheduledNode::new(
+        Model::Ingestor(CreateIngestor {
+            name: named("orders_http"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            )]),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                    endpoint: named("public_http"),
+                    mode: EndpointIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
+                })),
+                codec: named("codec"),
+            }),
+            timestamp_source: None,
+            general_error_policy: GeneralErrorPolicy::Log,
+
+            filter_where: None,
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
+        Some(named::<ClusterNodeName>("node-a")),
+        vec![
+            named::<ClusterNodeName>("node-a"),
+            named::<ClusterNodeName>("node-b"),
+        ],
+    );
+    let syslog_ingestor = ScheduledNode::new(
+        Model::Ingestor(CreateIngestor {
+            name: named("orders_syslog"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                named("orders_out"),
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                },
+            )]),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+                    client: named("syslog_listener"),
+                    mode: SyslogIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::Suspend,
+                })),
+                codec: named("codec"),
+            }),
+            timestamp_source: None,
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(
+        Some(named::<ClusterNodeName>("node-a")),
+        vec![
+            named::<ClusterNodeName>("node-a"),
+            named::<ClusterNodeName>("node-b"),
+        ],
+    );
+
+    assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
+    assert!(replicated_junction.executes_on(&named::<ClusterNodeName>("node-a")));
+    assert!(!replicated_junction.executes_on(&named::<ClusterNodeName>("node-b")));
+
+    assert_eq!(endpoint_ingestor.execution_node(), None);
+    assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
+    assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
+
+    assert_eq!(syslog_ingestor.execution_node(), None);
+    assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
+    assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
+}
+
+#[test]
+fn kafka_partition_schedule_assigns_partitions_round_robin_by_instance() {
+    let schedule = KafkaPartitionSchedule::new(nonzero!(2u64), vec![3, 1, 2, 0], 7);
+
+    assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
+    assert_eq!(schedule.rebalance_epoch, 7);
+    assert_eq!(schedule.instance_assignments, vec![vec![0, 2], vec![1, 3]]);
+}

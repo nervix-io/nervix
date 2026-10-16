@@ -26,6 +26,25 @@ const BULK_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 /// Every large key's transaction identifier and every large window row's note are padded to this.
 const LARGE_VALUE_BYTES: usize = 1024 * 1024;
 
+#[then("the measured backup admits a stored branch checkpoint above 32 MiB")]
+fn then_stored_branch_capture_is_admitted(world: &mut ScenarioWorld) {
+    let sampled = world
+        .backup_memory
+        .take()
+        .assured("the preceding step measured a stored-state backup");
+    sampled.assert_bulk_within_budget();
+    sampled.assert_no_bulk_refusal("stored checkpoint capture uses bounded bulk groups");
+    let threshold = f64::from(32 * 1024 * 1024);
+    assert!(
+        sampled
+            .metadata_peaks
+            .values()
+            .any(|peak| *peak > threshold),
+        "the selected stored checkpoint holds an admitted metadata view: {:?}",
+        sampled.metadata_peaks,
+    );
+}
+
 #[when(expr = "a large branch state restore workload is created")]
 async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) {
     let domain = world.domain.clone();
@@ -53,13 +72,13 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE VHOST edge {host};
          CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
          CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
-         CREATE INGESTOR payment_source FROM ENDPOINT payment_ingress MODE NO_ACK SEQUENTIAL ON \
-         QUIESCE BUFFER MAX SIZE 2MiB DECODE USING payment_codec TO payments INHERIT ALL BRANCHED \
-         BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+         CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE NO ACK ON QUIESCE \
+         BUFFER MAX SIZE 2MiB DECODE USING payment_codec TO payments INHERIT ALL BRANCHED BY \
+         by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;
-         CREATE INGESTOR metric_source FROM ENDPOINT metric_ingress MODE NO_ACK SEQUENTIAL ON \
-         QUIESCE BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED \
-         BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+         CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK ON QUIESCE \
+         BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED BY \
+         by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;
          CREATE DEDUPLICATOR unique_key_filter FROM payments DEDUPLICATE ON input.transaction_id, \
          input.amount MAX TIME 30m BRANCHED BY by_tenant TO unique_keys SET tenant = \
@@ -376,16 +395,13 @@ fn branch_tenant(branch: Option<&Vec<nervix_backup::StateField>>) -> String {
     expr = "backup {string} holds a deduplicator keyspace and a window of tenant {string} above \
             32 MiB beside {int} small branches of each"
 )]
-fn then_large_branch_state_archive_is_complete(
+async fn then_large_branch_state_archive_is_complete(
     world: &mut ScenarioWorld,
     file: String,
     tenant: String,
     small_tenants: usize,
 ) {
-    let archive = nervix_backup::describe_archive(
-        std::fs::File::open(archive_path(world, &file)).assured("the archive opens"),
-    )
-    .assured("the archive verifies");
+    let archive = described_archive(archive_path(world, &file)).await;
     let domain = scenario_domain(world, &world.domain);
     let entry = archive
         .domains

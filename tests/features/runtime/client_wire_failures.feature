@@ -619,8 +619,8 @@ Feature: Client wire failure regressions
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR relocation_offset_source
-        FROM KAFKA relocation_kafka TOPIC relocation_offsets_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR relocation_offset_source
+        FROM relocation_kafka TOPIC 'relocation_offsets_{{test_id}}'
           OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING relocation_codec
@@ -692,8 +692,8 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE INGESTOR wire_source
-        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
@@ -759,8 +759,8 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE INGESTOR wire_source
-        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -870,8 +870,8 @@ Feature: Client wire failure regressions
       CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
       CREATE VHOST edge client-wire-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE INGESTOR wire_source
-        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records
         SET tenant = message.tenant, sequence = message.sequence
@@ -956,8 +956,8 @@ Feature: Client wire failure regressions
       CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE INGESTOR wide_source
-        FROM ENDPOINT wide_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wide_source
+        FROM wide_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
         TO wide_records
         SET sequence = message.sequence, note = message.note

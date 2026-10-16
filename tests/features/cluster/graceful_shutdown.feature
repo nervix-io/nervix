@@ -83,9 +83,9 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR handoff_source
-        FROM KAFKA handoff_kafka TOPIC shutdown_handoff_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP shutdown_handoff_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR handoff_source
+        FROM handoff_kafka TOPIC 'shutdown_handoff_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_handoff_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING handoff_codec
@@ -167,9 +167,9 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR flush_source
-        FROM KAFKA flush_kafka TOPIC shutdown_flush_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP shutdown_flush_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR flush_source
+        FROM flush_kafka TOPIC 'shutdown_flush_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_flush_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING flush_codec
@@ -268,8 +268,8 @@ Feature: Graceful shutdown
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge follower-drain-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/follower-drain' TYPE HTTP;
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
@@ -408,8 +408,8 @@ Feature: Graceful shutdown
       CREATE RELAY shutdown_ack_output SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE VHOST edge shutdown-ack-{{test_id}}.example.com;
       CREATE ENDPOINT shutdown_ack_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR shutdown_ack_source
-        FROM ENDPOINT shutdown_ack_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR shutdown_ack_source
+        FROM shutdown_ack_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
         TO shutdown_ack_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -479,8 +479,8 @@ Feature: Graceful shutdown
       CREATE RELAY held_routed SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR held_source
-        FROM ENDPOINT held_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_ingested
@@ -545,9 +545,9 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR shutdown_order_source
-        FROM KAFKA shutdown_kafka TOPIC shutdown_orders_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_orders_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR shutdown_order_source
+        FROM shutdown_kafka TOPIC 'shutdown_orders_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_orders_{{test_id}}'
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING shutdown_order_codec
@@ -613,6 +613,111 @@ Feature: Graceful shutdown
     And the observed broker does not receive a payload within "2s"
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_orders_{{test_id}}" next offset for topic "shutdown_orders_{{test_id}}" partition 0 is "at least 5"
 
+  @shutdown_source_confirmation @deloxide_stress
+  Scenario: A node that stops in place keeps draining until its transport confirms the source offsets
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "40s"
+    And a 1 node nervix cluster is started
+    And Kafka topic "shutdown_confirm_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_confirm_out_{{test_id}}" is observed
+    And the transport of ingestor "confirm_source" takes "10s" to confirm its acknowledgements
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA confirm_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA confirm_wire MODE STRICT ( event_id integer );
+      CREATE CODEC confirm_codec
+        FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
+      CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
+      CREATE CLIENT confirm_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR confirm_source
+        FROM confirm_kafka TOPIC 'shutdown_confirm_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING confirm_codec
+        TO confirm_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE EMITTER confirm_output FROM confirm_records
+        TO KAFKA confirm_kafka TOPIC shutdown_confirm_out_{{test_id}}
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING confirm_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And Kafka message is published to topic "shutdown_confirm_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    When node "node-1" is gracefully stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "10s" Kafka consumer group "shutdown_confirm_group_{{test_id}}" next offset for topic "shutdown_confirm_in_{{test_id}}" partition 0 is "at least 1"
+
+  @shutdown_source_confirmation_handoff @deloxide_stress
+  Scenario: A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "40s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_confirm_handoff_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_confirm_handoff_out_{{test_id}}" is observed
+    And the transport of ingestor "handoff_confirm_source" takes "10s" to confirm its acknowledgements
+    When these NSPL commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA handoff_confirm_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA handoff_confirm_wire MODE STRICT ( event_id integer );
+      CREATE CODEC handoff_confirm_codec
+        FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
+      CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
+      CREATE CLIENT handoff_confirm_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR handoff_confirm_source
+        FROM handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_handoff_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING handoff_confirm_codec
+        TO handoff_confirm_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE EMITTER handoff_confirm_output FROM handoff_confirm_records
+        TO KAFKA handoff_confirm_kafka TOPIC shutdown_confirm_handoff_out_{{test_id}}
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_confirm_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And leadership is transferred to node "node-2"
+    And Kafka message is published to topic "shutdown_confirm_handoff_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    When node "node-1" is gracefully stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "10s" Kafka consumer group "shutdown_confirm_handoff_group_{{test_id}}" next offset for topic "shutdown_confirm_handoff_in_{{test_id}}" partition 0 is "at least 1"
+    And the observed broker does not receive a payload within "10s"
+
   Scenario: A node whose only uncordoned peer is terminating completes its admitted work in place
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
@@ -635,8 +740,8 @@ Feature: Graceful shutdown
       CREATE RELAY handoff_output SCHEMA eligible_event UNBRANCHED;
       CREATE VHOST edge eligible-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT eligible_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR eligible_source
-        FROM ENDPOINT eligible_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR eligible_source
+        FROM eligible_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
         TO eligible_ingested
           INHERIT ALL
@@ -710,9 +815,9 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR everyone_source
-        FROM KAFKA everyone_kafka TOPIC shutdown_everyone_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_everyone_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR everyone_source
+        FROM everyone_kafka TOPIC 'shutdown_everyone_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_everyone_{{test_id}}'
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING everyone_event_codec
@@ -764,6 +869,23 @@ Feature: Graceful shutdown
       """
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_everyone_{{test_id}}" next offset for topic "shutdown_everyone_{{test_id}}" partition 0 is "at least 2"
 
+  Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And shutdown timeout is configured as "20s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When a materialized restore workload with 40 relays is created
+    And round 1 of 512 KiB materialized rows is submitted for 2 tenants
+    Then within "180s" the materialized generators report round 1, 512 KiB, 40 relays and 2 tenants
+    When the materialized summary subscription "summary_subscription" is closed
+    And all nodes are stopped
+    Then every node reports that its last shutdown finished before its deadline
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   Scenario: A generator releases its buffered output and stops producing when its node drains
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
@@ -792,8 +914,8 @@ Feature: Graceful shutdown
       CREATE RELAY generated_totals SCHEMA tenant_total BRANCHED BY by_generated_tenant;
       CREATE VHOST edge generated-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT tenant_amount_ingress ON edge PATH '/amounts' TYPE HTTP;
-      CREATE INGESTOR tenant_amount_source
-        FROM ENDPOINT tenant_amount_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR tenant_amount_source
+        FROM tenant_amount_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tenant_amount_codec
         TO tenant_amounts
           INHERIT ALL
@@ -867,9 +989,9 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR wait_event_source
-        FROM KAFKA wait_kafka TOPIC shutdown_waiting_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_waiting_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR wait_event_source
+        FROM wait_kafka TOPIC 'shutdown_waiting_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_waiting_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -881,8 +1003,8 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE VHOST edge wait-state-{{test_id}}.example.com;
       CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR wait_state_source
-        FROM ENDPOINT wait_state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+        FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
         TO wait_state
           INHERIT ALL
@@ -956,9 +1078,9 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR stalled_source
-        FROM KAFKA stalled_kafka TOPIC shutdown_stalled_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_stalled_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR stalled_source
+        FROM stalled_kafka TOPIC 'shutdown_stalled_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_stalled_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING stalled_event_codec
@@ -1042,8 +1164,8 @@ Feature: Graceful shutdown
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL

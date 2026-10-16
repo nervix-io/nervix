@@ -42,8 +42,10 @@ The transport also runs, unchanged, inside a seeded Turmoil network simulation. 
 test harness outside product ownership, and
 [Deterministic Interconnect Simulation](./interconnect-simulation.md) owns it: its build mode, the
 fault model, supervision, replay and failure records, the scenario matrix, the commands and CI
-budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
-plugs into. Each seam has one production behavior, which is what every node uses:
+budget, and the limits of what it establishes. [Execution Primitives](./execution-primitives.md)
+owns the backend and target selection that make those seams build consistently across the
+dependency graph. The interconnect owns only the seams the simulation plugs into. Each seam has
+one production behavior, which is what every node uses:
 
 - **Sockets and name resolution.** The TCP listener and outbound streams are the sockets of the
   primitive boundary, `nervix_primitives::net`, which are Tokio's operating-system sockets, and
@@ -1120,6 +1122,21 @@ Their 300-second simulated completion deadline follows two intentional request d
 allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
 latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
 still fail a transfer that does not complete.
+
+The registered `backup-capture-wire` property checks complete drain, capture, inventory and fetch
+messages through the production payload codec under each request's declared class limit. It covers
+every drain action, all ten counters at zero, their full-width maximum and independent generated
+values, all twelve inventory section kinds, ordered and empty inventories, arbitrary digests,
+bounded Unicode paths, and capture/drain/inventory success and refusal responses. The fetch response
+remains an opaque byte stream. `backup-capture-wire-malformed` separately
+checks typed refusal or complete stable re-encoding of damaged and arbitrary message bytes, and
+release of management and bulk reservations. `restore-installation-wire` covers every installation
+action and response, with all eight runtime state kinds branched and unbranched. The server's
+`backup-section-mapping` property checks the total, injective content mapping and distinct validated
+archive paths. These properties supply wire and mapping evidence; the transport simulations and
+public scenarios retain the authentication, fencing and recovery evidence described above. See
+[Property Testing And Fuzzing](./property-testing-and-fuzzing.md) for their domains and commands.
+
 Capture fetch and state installation share the peer connection's one reserved snapshot stream
 slot. The archive staging phase finishes and releases its fetch stream before installation starts;
 an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
@@ -1336,6 +1353,29 @@ its local replication or snapshot-exchange error. Only an execution failure incl
 node's opaque diagnostic text. A materialized snapshot is streamed only after a successful typed
 description identifies its exact length, digest, revision, fence, and branch generation; the
 placement that the request names supplies its schema fingerprint.
+
+Runtime-state message properties use the production bounded encoder and decoder on each
+request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
+complete request and response values, including every state kind, schema and WASM generation,
+model kind, checkpoint read kind, ordered listing, full-width counters, checkpoint length and
+digest, and each remote-operation refusal and subject. Branch floats are compared by their bits,
+including signed zero and nested collection values. `runtime-checkpoint-listing-owner` additionally
+checks the complete runtime owner listing across its semantic conversion and the replication
+response codec. Its current branch-key domain is nonempty, has distinct canonical field names,
+valid datetime text and finite floats; datetime spelling is canonicalized by the runtime owner.
+The separate `runtime-state-replication-malformed` and `runtime-checkpoint-listing-malformed`
+targets exercise bounded damaged frames, encoding limits and typed invalid-branch refusals in
+removed and revised entries. Each property checks that no codec reservation survives its case.
+These are message and conversion checks; transport framing, scheduling and recovery retain their
+separate simulation and public-scenario evidence. Run each named target with `just test-bolero
+<target>` for randomized/corpus checks and `just fuzz <target> <seconds>` for an actual sanitizer
+campaign through the same assertion.
+
+`RkyvMessage`, the public supertrait and response bound of the typed request contracts, is
+nameable at the interconnect crate boundary. Its existing encode/decode methods use the owning
+executor, pool class and byte limit; semantic conversion callers use that same codec rather than
+recreating serialization or validation outside the engine. This introduces no separate codec,
+message shape or execution mode.
 
 Domain routing retains each materialized relay's installed-state publication from the shared
 state-replication routing owner. Branch reads and generator scans use that relay's immutable index,
@@ -1579,6 +1619,14 @@ end starts its pool slot's bounded reconnect; closing the inbound end releases t
 slot so that reconnect can be accepted. Ordinary request deadlines still apply to individual
 operations during the detection window.
 
+Packet loss on a link that stays up is left to TCP. The host kernel retransmits lost packets under
+its own retransmission timeout, which grows exponentially while losses continue, and the
+interconnect does not tune it. An exchange over a lossy link therefore takes as long as its
+retransmissions, and one whose deadline passes first fails with a timeout that its owner may retry.
+Nervix sets no bound on how long such loss delays the traffic the link carries.
+[A Quorum Over A Lossy Link](./consensus-storage-and-replication.md#a-quorum-over-a-lossy-link)
+describes what it means for commits.
+
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so
 a multi-file update cannot install a mixed generation. An invalid or partially written candidate
@@ -1617,7 +1665,7 @@ admitted in place, so these consumers remain available until the node's own grap
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
-record acknowledgement resolve; this includes roots created for `NO_ACK` sources. Ownership
+record acknowledgement resolve; this includes roots created for sources in `MODE NO ACK`. Ownership
 handoff does not complete until its replication acknowledgement and committed activation have been
 observed. These owners keep admitted work visible while the supporting interconnect consumers are
 still running.

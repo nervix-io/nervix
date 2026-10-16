@@ -706,6 +706,9 @@ async fn wait_for_capture_revision(
 }
 
 #[cfg(all(test, not(feature = "loom")))]
+mod section_properties;
+
+#[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use std::task::Poll;
 

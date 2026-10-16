@@ -72,7 +72,7 @@ blocking pool, so a slow filesystem never stalls a reactor thread, and then buil
 resolver on the node's Tokio runtime. The read is one of the declared owners of the blocking pool
 outside the bounded executor, because a node loads its resolver before it builds its executor and a
 client tool loads the same resolver without one; see
-[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
 or hosts file takes effect when the node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
@@ -383,7 +383,7 @@ connection delivers it.
 | --- | --- | --- |
 | Interconnect pool slot | Fails that connection attempt and counts it with reason `resolution` | The slot's reconnect backoff, described in [Connection And Credential Lifecycle](./interconnect.md#connection-and-credential-lifecycle) |
 | Node startup | Fails startup when its own endpoint does not resolve, or when the bootstrap endpoint does not resolve and there are no recovered Raft peer endpoints; otherwise logs and skips an unresolved bootstrap or recovered peer endpoint | The operator or process supervisor for a failed start; reachable recovered peers for a restart with an unresolved bootstrap endpoint |
-| A source | Fails its connection or its resume | The ingestor host, on the source's retry policy or, for a `NO_ACK` source, its reconnect cadence |
+| A source | Fails its connection or its resume | The ingestor host, on the source's retry policy or, for a source in `MODE NO ACK`, its reconnect cadence |
 | A sink | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
 | A Redis command pool | Fails the physical connection the pool was opening | The emitter that borrows from the pool, on its retry policy |
 | A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its command wait ends; `BACKUP` uses `backup_wait_timeout` |
@@ -433,7 +433,7 @@ Nervix-authored code cannot reach the operating system's resolver at all.
 `just validate-primitive-boundary`, also part of `just validate`, rejects `tokio::net::lookup_host`
 and the `ToSocketAddrs` traits wherever Nervix code names them, and the primitive boundary's sockets
 offer a lookup only in the Turmoil build, where it answers from the simulated DNS table, as
-[Execution-Sensitive Primitives](./data-plane-concurrency.md#execution-sensitive-primitives)
+[Execution Primitives](./execution-primitives.md)
 describes. A dependency that resolves inside itself is outside that check, which is why [Residual
 Resolution](#residual-resolution) lists each one.
 
@@ -616,7 +616,7 @@ lookup and exports no metric of its own.
 
 | Where | What shows the failure |
 | --- | --- |
-| RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, and the HTTP request emitter | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` shows the lookup failure on its `transient error:` line, with the host and the reason, such as `resolving 'rabbitmq.example.internal' failed: the name does not exist`. An SQS source looks its queue up when the ingestor starts, and a lookup failure there is the text of that start's failure |
+| RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, and the HTTP request emitter | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` shows the lookup failure on its `transient error:` line, with the host and the reason, such as `resolving 'rabbitmq.example.internal' failed: the name does not exist`. An SQS source looks its queue up when an instance resumes, and shows a lookup failure there on the same line |
 | HTTP polling, Prometheus, Sentry, OTEL and Iceberg | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` reports the failed request, export or catalog call, such as `OTEL gRPC export ended without an answer from the receiver`, without the lookup failure beneath it |
 | The interconnect | `nervix_interconnect_connection_failures_total{reason="resolution"}` counts failed pool connection attempts by pool class, and each attempt is logged at `debug` as `interconnect pool connection failed` with the peer's node, endpoint, pool class and slot and an error reading `resolving <endpoint> failed: <reason>` |
 | Node startup | A recovered Raft member that does not resolve is logged at `warn` as `could not resolve a recovered Raft peer for gossip`; with recovered peer endpoints, an unresolved configured bootstrap host is logged at `warn` as `could not resolve the configured bootstrap host for gossip` and skipped. An own endpoint, or a bootstrap endpoint needed for first contact, fails startup as `failed to start cluster membership` |

@@ -9,22 +9,26 @@ use nervix_models::{
     AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
-    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-    AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope, CordonNode,
-    CreateDomain, CreateResource, CreateStatement, CreateUser, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
-    DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName, InspectionFormat, LookupQuery,
-    ModelKind, ModelName, NodeRef, PlacementPolicy, RebindResource, RebindResourceMembers,
-    RebindResourceSelection, RelayBranching, RelayName, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreLifecycle,
-    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowIngestors,
-    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, StartDomain, Statement,
-    StopDomain, SubscriptionBinding, SubscriptionLiteral, TransactionInspectionRequest,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
+    AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
+    ClientSourceEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
+    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
+    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
+    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
+    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate,
+    DrainNode, DropModel, DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName,
+    HttpSourceEntity, IngestSourceKind, IngestorAlteration, InspectionFormat, KafkaSourceEntity,
+    LookupQuery, ModelKind, ModelName, MqttSourceEntity, NatsSourceEntity, NodeRef,
+    PlacementPolicy, PrometheusSourceEntity, PulsarSourceEntity, RabbitMqSourceEntity,
+    RebindResource, RebindResourceMembers, RebindResourceSelection, RedisSourceEntity,
+    RelayBranching, RelayName, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, ResetWasmBranchField, ResetWasmState,
+    ResetWasmStateScope, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SqsSourceEntity, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionLiteral, SyslogSourceEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
+    WebsocketsSourceEntity, ZeroMqSourceEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -467,10 +471,10 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::AlterIngestor => {
-                let operations = self.operations(Self::alter_ingestor_operation);
+                let alteration = self.ingestor_alteration();
                 Statement::AlterIngestor(AlterIngestor {
                     ingestor: self.name(),
-                    operations,
+                    alteration,
                 })
             }
             StatementVariant::AlterReingestor => {
@@ -1034,8 +1038,9 @@ impl Arbitrary<'_> {
                 // emitter's own payload selection.
                 let emitter = self.create_emitter();
                 let body = match emitter.sink.as_ref() {
-                    nervix_models::EmitSink::Http { .. }
-                    | nervix_models::EmitSink::Client { .. } => Some(emitter.body),
+                    nervix_models::EmitSink::Http(_) | nervix_models::EmitSink::Client(_) => {
+                        Some(emitter.body)
+                    }
                     _ => None,
                 };
                 AlterEmitterOperation::SetSink {
@@ -1080,52 +1085,117 @@ impl Arbitrary<'_> {
         }
     }
 
-    fn alter_ingestor_operation(&mut self) -> AlterIngestorOperation {
-        match self.entropy.byte() % 12 {
+    /// The operations of an `ALTER … INGESTOR` statement under the head of any connector and
+    /// entity, each `SET FROM` stating a source of that pair.
+    ///
+    /// The match is exhaustive, so a new pair does not compile until the generator is taught to
+    /// alter it.
+    pub fn ingestor_alteration(&mut self) -> IngestorAlteration {
+        match self.ingest_source_kind() {
+            IngestSourceKind::Client(ClientSourceEntity::Producer) => self
+                .operations(|arbitrary| {
+                    arbitrary.alter_ingestor_operation(Self::client_producer_source)
+                })
+                .into(),
+            IngestSourceKind::Http(HttpSourceEntity::Request) => {
+                self.transport_operations(Self::http_request_source)
+            }
+            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => {
+                self.transport_operations(Self::http_endpoint_source)
+            }
+            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => {
+                self.transport_operations(Self::kafka_topic_source)
+            }
+            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => {
+                self.transport_operations(Self::pulsar_topic_source)
+            }
+            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => {
+                self.transport_operations(Self::mqtt_topic_source)
+            }
+            IngestSourceKind::Nats(NatsSourceEntity::Subject) => {
+                self.transport_operations(Self::nats_subject_source)
+            }
+            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => {
+                self.transport_operations(Self::rabbitmq_queue_source)
+            }
+            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => {
+                self.transport_operations(Self::redis_pubsub_source)
+            }
+            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
+                self.transport_operations(Self::prometheus_query_source)
+            }
+            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => {
+                self.transport_operations(Self::zeromq_pull_source)
+            }
+            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => {
+                self.transport_operations(Self::sqs_queue_source)
+            }
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
+                self.transport_operations(Self::websockets_connection_source)
+            }
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+                self.transport_operations(Self::websockets_endpoint_source)
+            }
+            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
+                self.transport_operations(Self::syslog_listener_source)
+            }
+        }
+    }
+
+    /// The operations of an alteration of a transport's ingestor, whose `SET FROM` states a source
+    /// `source` builds.
+    fn transport_operations<Source>(
+        &mut self,
+        source: impl Fn(&mut Self) -> Source,
+    ) -> IngestorAlteration
+    where
+        Vec<AlterTransportIngestorOperation<Source>>: Into<IngestorAlteration>,
+    {
+        self.operations(|arbitrary| {
+            if arbitrary.entropy.byte() % 12 == 11 {
+                AlterTransportIngestorOperation::SetDecodeUsing {
+                    codec: arbitrary.name(),
+                }
+            } else {
+                AlterTransportIngestorOperation::from(arbitrary.alter_ingestor_operation(&source))
+            }
+        })
+        .into()
+    }
+
+    /// One operation every ingestor accepts, whose `SET FROM` states a source `source` builds.
+    fn alter_ingestor_operation<Source>(
+        &mut self,
+        source: impl Fn(&mut Self) -> Source,
+    ) -> AlterIngestorOperation<Source> {
+        match self.entropy.byte() % 10 {
             0 => AlterIngestorOperation::SetSource {
-                source: self.ingest_source(),
+                source: source(self),
             },
-            1 => {
-                let ingestor = self.create_ingestor();
-                match ingestor.input {
-                    nervix_models::IngestorInput::Client(source) => {
-                        AlterIngestorOperation::SetClientSource { source }
-                    }
-                    nervix_models::IngestorInput::Transport(input) => {
-                        AlterIngestorOperation::SetSource {
-                            source: input.source,
-                        }
-                    }
-                }
-            }
-            2 => {
-                let source = self.ingest_source();
-                AlterIngestorOperation::SetQuiesce {
-                    quiesce: source.quiesce().clone(),
-                }
-            }
-            3 => AlterIngestorOperation::SetDecodeUsing { codec: self.name() },
-            4 => AlterIngestorOperation::SetTimestamp {
+            1 => AlterIngestorOperation::SetQuiesce {
+                quiesce: self.quiesce_mode(),
+            },
+            2 => AlterIngestorOperation::SetTimestamp {
                 source: if self.entropy.flag() {
                     nervix_models::IngestTimestampSource::Now
                 } else {
                     nervix_models::IngestTimestampSource::At(self.name())
                 },
             },
-            5 => AlterIngestorOperation::DropTimestamp,
-            6 => AlterIngestorOperation::SetFilterWhere {
+            3 => AlterIngestorOperation::DropTimestamp,
+            4 => AlterIngestorOperation::SetFilterWhere {
                 where_clause: self.expression(),
             },
-            7 => AlterIngestorOperation::DropFilterWhere,
-            8 => AlterIngestorOperation::AddRoute {
+            5 => AlterIngestorOperation::DropFilterWhere,
+            6 => AlterIngestorOperation::AddRoute {
                 route: self.single_route(
                     RouteShape::Transforming,
                     RouteFlush::Required,
                     RouteBranch::PerRoute,
                 ),
             },
-            9 => AlterIngestorOperation::DropRoute { relay: self.name() },
-            10 => AlterIngestorOperation::ReplaceRoute {
+            7 => AlterIngestorOperation::DropRoute { relay: self.name() },
+            8 => AlterIngestorOperation::ReplaceRoute {
                 route: self.single_route(
                     RouteShape::Transforming,
                     RouteFlush::Required,

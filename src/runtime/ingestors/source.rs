@@ -24,14 +24,13 @@ use async_trait::async_trait;
 use error_stack::{FrameKind, Report, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, ClientResourceMounts, IngestMetadataRow, PacedSourceConnector,
-    ParsedRetryPolicy, RetainedIngestHeaders, SourceAckPolicy, SourceAcknowledgement,
-    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceAcknowledgementSupport,
-    SourceBatch, SourceBatchRequest, SourceCapabilities, SourceConnector, SourceError, SourceHost,
-    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
-    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePlan,
+    ParsedRetryPolicy, RetainedIngestHeaders, SourceAckPolicy, SourceAcknowledgementOutcome,
+    SourceAcknowledgementSupport, SourceBatch, SourceBatchAcknowledgement, SourceBatchRequest,
+    SourceCapabilities, SourceConnector, SourceError, SourceHost, SourceHostServices,
+    SourceIntakeError, SourceIntakeMessage, SourceIntakeResult, SourceMessage, SourcePlan,
     SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
-use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
+use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
 
 use super::{
@@ -42,6 +41,10 @@ use super::{
     IngestorStartError, SourceStartError,
 };
 use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd};
+
+#[path = "source_acknowledgement.rs"]
+mod acknowledgement;
+use acknowledgement::RuntimeBatchAcknowledgement;
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
@@ -74,10 +77,10 @@ impl IngestorSpec {
         Report::new(cause).change_context(self.initialize_failure())
     }
 
-    /// The metadata namespace this ingestor's messages expose to its programs, which its source's
-    /// transport class decides.
-    pub(in crate::runtime) fn metadata_kind(&self) -> IngestMetadataKind {
-        IngestMetadataKind::from(self.declared_input.source_kind())
+    /// The metadata namespace this ingestor's messages expose to its programs, which the entity
+    /// its source reads declares.
+    pub(in crate::runtime) fn metadata_scope(&self) -> SourceMetadataScope {
+        self.declared_input.source_kind().capabilities().metadata
     }
 
     /// The capabilities this ingestor's source runs with, derived from the source vocabulary.
@@ -88,11 +91,15 @@ impl IngestorSpec {
     ) -> SourceCapabilities {
         SourceCapabilities::new(
             self.reads_headers(),
-            self.metadata_kind().source_scope(),
+            self.metadata_scope(),
             self.declared_input
                 .supports_quiesce(self.declared_input.quiesce_mode()),
             instances,
             acknowledgement,
+            self.declared_input
+                .source_kind()
+                .capabilities()
+                .position_class,
         )
     }
 }
@@ -203,8 +210,11 @@ impl<P> BrokerSourceStart<'_, P> {
                 .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
-                acknowledgement: plan.acknowledgement,
-                retry,
+                policy: BrokerSourcePolicy {
+                    acknowledgement: plan.acknowledgement,
+                    retry,
+                    position_class: plan.capabilities.position_class(),
+                },
             }));
         }
         Ok(SourceStart {
@@ -222,8 +232,19 @@ impl<P> BrokerSourceStart<'_, P> {
 /// One broker source instance, which the host runs under the broker loop.
 pub(super) struct BrokerSourceInstance<C> {
     pub(super) source: C,
+    pub(super) policy: BrokerSourcePolicy,
+}
+
+/// How the host drives one broker source instance.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BrokerSourcePolicy {
+    /// How its messages are grouped and how long their acknowledgement trees are waited on.
     pub(super) acknowledgement: SourceAckPolicy,
+    /// How the host backs off after a failed resume, batch or rejection.
     pub(super) retry: ParsedRetryPolicy,
+    /// What its positions mean once the connection that delivered them is gone, which decides
+    /// what the host does with a rejection the source could not complete.
+    pub(super) position_class: PositionClass,
 }
 
 impl<C> SourceInstance for BrokerSourceInstance<C>
@@ -235,16 +256,11 @@ where
         host: RuntimeSourceHost,
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
-        let Self {
-            source,
-            acknowledgement,
-            retry,
-        } = *self;
+        let Self { source, policy } = *self;
         Box::pin(run_source_instance_with_retry(
             source,
             SourceHost::new(host),
-            acknowledgement,
-            retry,
+            policy,
             shutdown,
         ))
     }
@@ -392,7 +408,7 @@ impl Runtime {
                 shutdown: shutdown_tx.subscribe(),
                 instance_index,
                 readiness,
-                metadata_kind: ingestor.metadata_kind(),
+                metadata_scope: ingestor.metadata_scope(),
                 buffered_intake,
                 flush_each_intake,
                 unacknowledged_admission,
@@ -465,7 +481,7 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) shutdown: watch::Receiver<bool>,
     pub(super) instance_index: u64,
     pub(super) readiness: ingestor_quiesce::SourceInstanceReadiness,
-    pub(super) metadata_kind: IngestMetadataKind,
+    pub(super) metadata_scope: SourceMetadataScope,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
     pub(super) unacknowledged_admission: QueueAdmission,
@@ -500,6 +516,12 @@ pub(super) struct RuntimeSourceHost {
     /// Counts the unacknowledged payloads this host did not deliver because the node's extension
     /// workers had no room to unfold them.
     unfolding_refused: prometheus::IntCounter,
+    /// Counts the positions this host discarded after a reconnect because the broker redelivers
+    /// them.
+    transport_redeliveries: prometheus::IntCounter,
+    /// How long a scenario makes this host wait between learning that a batch was acknowledged
+    /// through the graph and letting its source confirm the batch, as a slow transport would.
+    confirmation_delay: Option<Duration>,
 }
 
 impl RuntimeSourceHost {
@@ -514,7 +536,7 @@ impl RuntimeSourceHost {
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
         let collector = IngestRouteCollector::new(
-            spec.metadata_kind,
+            spec.metadata_scope,
             INGEST_GROUP_MAX_ROWS,
             spec.metrics.clone(),
         );
@@ -525,7 +547,17 @@ impl RuntimeSourceHost {
             &spec.ingestor,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
+        let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
+            &spec.domain,
+            &spec.ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
         let delivery_stop = spec.shutdown.clone();
+        let confirmation_delay = spec
+            .runtime
+            .inner
+            .fault_injection
+            .source_confirmation_delay(&status_key);
         Self {
             handles: spec.handles,
             status,
@@ -550,6 +582,8 @@ impl RuntimeSourceHost {
             flush_each_intake: spec.flush_each_intake,
             unacknowledged_admission: spec.unacknowledged_admission,
             unfolding_refused,
+            transport_redeliveries,
+            confirmation_delay,
         }
     }
 
@@ -603,43 +637,6 @@ impl RuntimeSourceHost {
     }
 }
 
-struct RuntimeSourceAcknowledgement {
-    completion: AckCompletion,
-    shutdown: watch::Receiver<bool>,
-}
-
-#[async_trait]
-impl SourceAcknowledgementServices for RuntimeSourceAcknowledgement {
-    async fn wait(mut self: Box<Self>, timeout: Duration) -> SourceAcknowledgementOutcome {
-        match Runtime::await_ack_completion(&mut self.shutdown, self.completion, timeout).await {
-            Some(AckOutcome::Ack) => SourceAcknowledgementOutcome::Ack,
-            Some(AckOutcome::NoAck(reason)) => SourceAcknowledgementOutcome::NoAck(reason),
-            None => SourceAcknowledgementOutcome::Shutdown,
-        }
-    }
-}
-
-/// What the quiesce control decided about one acknowledged message read while quiesced.
-enum QuiescedIntake {
-    /// The message dispatches with its own acknowledgement root, as it would unquiesced.
-    Admitted,
-    /// A buffer or the drop policy took the message over, so nothing downstream acknowledges it.
-    TakenOver,
-}
-
-/// The acknowledgement of a message a quiesce buffer or drop policy took over from the source.
-///
-/// The source is told the message is done with at once: what a buffer retains is replayed without
-/// it, and what the policy dropped was dropped deliberately.
-struct QuiescedSourceAcknowledgement;
-
-#[async_trait]
-impl SourceAcknowledgementServices for QuiescedSourceAcknowledgement {
-    async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
-        SourceAcknowledgementOutcome::Ack
-    }
-}
-
 impl RuntimeSourceHost {
     /// The metadata a quiesce buffer keeps for a message after the source message is gone.
     fn retained_metadata(
@@ -672,7 +669,7 @@ impl RuntimeSourceHost {
     async fn retain_unacknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+    ) -> SourceIntakeResult<()> {
         let mut entries = Vec::with_capacity(messages.len());
         for message in messages {
             nervix_primitives::task::consume_budget().await;
@@ -681,17 +678,15 @@ impl RuntimeSourceHost {
         }
         let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
         self.intake_unacknowledged_payload(payload).await?;
-        Ok(SourceIntakeOutcome {
-            acknowledgements: Vec::new(),
-        })
+        Ok(())
     }
 
     /// Acknowledged input read while the ingestor is quiesced.
     ///
     /// The quiesce control decides each message on its own. A message it admits is dispatched
-    /// with its acknowledgement root as it would be unquiesced; one it buffers or drops is
-    /// acknowledged at once, because the buffer or the drop policy has taken it over from the
-    /// source. The acknowledgements keep the batch's order.
+    /// with its acknowledgement root as it would be unquiesced. One it buffers or drops adds
+    /// nothing for the batch to wait on, because the buffer or the drop policy has taken it over
+    /// from the source, so its position is settled with the rest of the batch.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -702,50 +697,28 @@ impl RuntimeSourceHost {
     async fn retain_acknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+    ) -> SourceIntakeResult<RuntimeBatchAcknowledgement> {
         let mut admitted = Vec::with_capacity(messages.len());
-        let mut decisions = Vec::with_capacity(messages.len());
         for message in messages {
             nervix_primitives::task::consume_budget().await;
             let metadata = Self::retained_metadata(&message.metadata)?;
             let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
             match self.quiesce.intake(self.instance_index, retained, false) {
-                IngestorQuiesceIntake::Dispatch(_) => {
-                    admitted.push(message);
-                    decisions.push(QuiescedIntake::Admitted);
-                }
+                IngestorQuiesceIntake::Dispatch(_) => admitted.push(message),
                 IngestorQuiesceIntake::Buffered
                 | IngestorQuiesceIntake::Dropped
-                | IngestorQuiesceIntake::Rejected { .. } => {
-                    decisions.push(QuiescedIntake::TakenOver);
-                }
+                | IngestorQuiesceIntake::Rejected { .. } => {}
             }
         }
-        let mut dispatched = Vec::new();
-        if !admitted.is_empty() {
-            let outcome = self.dispatch_acknowledged(admitted).await?;
-            dispatched = outcome.acknowledgements;
+        if admitted.is_empty() {
+            return Ok(self.batch_acknowledgement(Vec::new()));
         }
-        let mut dispatched = dispatched.into_iter();
-        let mut acknowledgements = Vec::with_capacity(decisions.len());
-        for decision in decisions {
-            nervix_primitives::task::consume_budget().await;
-            let acknowledgement = match decision {
-                QuiescedIntake::Admitted => dispatched.next().verified(
-                    "an acknowledged dispatch returns one acknowledgement per admitted message",
-                ),
-                QuiescedIntake::TakenOver => {
-                    SourceAcknowledgement::new(QuiescedSourceAcknowledgement)
-                }
-            };
-            acknowledgements.push(acknowledgement);
-        }
-        Ok(SourceIntakeOutcome { acknowledgements })
+        self.dispatch_acknowledged(admitted).await
     }
 
     /// Decodes an acknowledged batch into an ingest group of its own and dispatches it, returning
-    /// one acknowledgement per message. A payload the node's extension workers cannot unfold now
-    /// fails the batch, which its source rejects and presents again.
+    /// the acknowledgement the batch's source waits on. A payload the node's extension workers
+    /// cannot unfold now fails the batch, which its source rejects and presents again.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -756,9 +729,9 @@ impl RuntimeSourceHost {
     async fn dispatch_acknowledged(
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+    ) -> SourceIntakeResult<RuntimeBatchAcknowledgement> {
         let mut collector = IngestRouteCollector::new(
-            self.collector.kind,
+            self.collector.scope,
             messages.len().max(1),
             self.metrics.clone(),
         );
@@ -784,7 +757,7 @@ impl RuntimeSourceHost {
         let mut acks = Vec::with_capacity(metadata.len());
         for _ in &metadata {
             nervix_primitives::task::consume_budget().await;
-            let (root, completion) = self.ack_root_trackers.tracked_root();
+            let (root, completion) = self.ack_root_trackers.confirmed_root();
             if self.branched_senders.is_empty() {
                 acks.push(root.clone());
             } else {
@@ -822,16 +795,21 @@ impl RuntimeSourceHost {
         for root in roots {
             root.ack_success();
         }
-        let acknowledgements = completions
-            .into_iter()
-            .map(|completion| {
-                SourceAcknowledgement::new(RuntimeSourceAcknowledgement {
-                    completion,
-                    shutdown: self.shutdown.clone(),
-                })
-            })
-            .collect();
-        Ok(SourceIntakeOutcome { acknowledgements })
+        Ok(self.batch_acknowledgement(completions))
+    }
+
+    /// The acknowledgement of a batch whose dispatched messages resolve the roots `completions`
+    /// observe. The roots are confirmed roots, which the batch keeps outstanding until its source
+    /// has settled the batch on its transport.
+    fn batch_acknowledgement(
+        &self,
+        completions: Vec<AckCompletion>,
+    ) -> RuntimeBatchAcknowledgement {
+        RuntimeBatchAcknowledgement::new(
+            completions,
+            self.shutdown.clone(),
+            self.confirmation_delay,
+        )
     }
 
     /// Decodes an unacknowledged batch read while the ingestor was not quiesced into the instance's
@@ -854,10 +832,7 @@ impl RuntimeSourceHost {
         &mut self,
         messages: Vec<SourceIntakeMessage<'_>>,
         mut decided: IngestorQuiesceObservation,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
-        let unacknowledged = SourceIntakeOutcome {
-            acknowledgements: Vec::new(),
-        };
+    ) -> SourceIntakeResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let decode = self.runtime.decode_raw_ingest_payload(
@@ -878,7 +853,7 @@ impl RuntimeSourceHost {
                         LiveDeliveryEnd::Stopped => {
                             self.collector.discard_undispatched_payloads();
                             self.report_stopped_delivery();
-                            return Ok(unacknowledged);
+                            return Ok(());
                         }
                         LiveDeliveryEnd::Redecide => {
                             self.collector.discard_undispatched_payloads();
@@ -922,7 +897,7 @@ impl RuntimeSourceHost {
         if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
             self.flush().await?;
         }
-        Ok(unacknowledged)
+        Ok(())
     }
 
     /// Hands an unacknowledged payload this instance read to the quiesce control, and delivers it
@@ -1070,27 +1045,30 @@ impl PayloadDecodeFailure {
 
 #[async_trait]
 impl SourceHostServices for RuntimeSourceHost {
-    async fn intake(
+    async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()> {
         // The decision the batch is taken in under. A batch that waits for the node's extension
         // workers is decided again once a newer one arrives.
         let decided = self.quiesce.observation();
         if self.buffered_intake && decided.is_quiesced() {
-            return match batch.mode {
-                SourceIntakeMode::Unacknowledged => {
-                    self.retain_unacknowledged(batch.messages).await
-                }
-                SourceIntakeMode::Acknowledged => self.retain_acknowledged(batch.messages).await,
-            };
+            return self.retain_unacknowledged(messages).await;
         }
-        match batch.mode {
-            SourceIntakeMode::Unacknowledged => {
-                self.dispatch_unacknowledged(batch.messages, decided).await
-            }
-            SourceIntakeMode::Acknowledged => self.dispatch_acknowledged(batch.messages).await,
-        }
+        self.dispatch_unacknowledged(messages, decided).await
+    }
+
+    async fn intake_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
+        let quiesced = self.quiesce.observation().is_quiesced();
+        let acknowledgement = if self.buffered_intake && quiesced {
+            self.retain_acknowledged(messages).await?
+        } else {
+            self.dispatch_acknowledged(messages).await?
+        };
+        Ok(SourceBatchAcknowledgement::new(acknowledgement))
     }
 
     async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -1184,6 +1162,27 @@ impl SourceHostServices for RuntimeSourceHost {
             self.ingestor.as_str(),
             self.domain.as_str(),
         ));
+    }
+
+    fn record_transport_redeliveries(&self, positions: usize) {
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            positions,
+            "discarded positions of a lost connection that the broker redelivers"
+        );
+        self.transport_redeliveries.inc_by(positions.arch_into());
+    }
+
+    fn record_unconfirmed_stop(&self, positions: usize) {
+        info!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            instance = self.instance_index,
+            positions,
+            "source instance stopped before its transport confirmed positions it read; the \
+             transport presents them again"
+        );
     }
 }
 
@@ -1572,6 +1571,15 @@ enum BatchDisposition<P> {
     Shutdown,
 }
 
+/// How the loop settles the positions of one batch on the transport.
+#[derive(Debug, Clone, Copy)]
+struct BatchSettlement {
+    position_class: PositionClass,
+    /// How long the loop waits before it retries the batch, which the transient status of a
+    /// confirmation that failed states.
+    retry_after: Duration,
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -1582,12 +1590,16 @@ enum BatchDisposition<P> {
 pub(super) async fn run_source_instance_with_retry<C>(
     mut source: C,
     mut host: SourceHost,
-    acknowledgement: SourceAckPolicy,
-    retry_policy: ParsedRetryPolicy,
+    policy: BrokerSourcePolicy,
     mut shutdown: watch::Receiver<bool>,
 ) where
     C: BrokerSourceConnector,
 {
+    let BrokerSourcePolicy {
+        acknowledgement,
+        retry: retry_policy,
+        position_class,
+    } = policy;
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
     let mut pending_rejection: Option<Vec<C::Position>> = None;
@@ -1638,6 +1650,14 @@ pub(super) async fn run_source_instance_with_retry<C>(
             match resumed {
                 Ok(SourceResume::Ready) => {
                     ready = true;
+                    if position_class == PositionClass::BrokerRedelivered
+                        && let Some(positions) = pending_rejection.take()
+                    {
+                        // The connection that delivered these positions is gone, and the broker
+                        // redelivers everything it did not acknowledge. Rejecting them on the new
+                        // connection could only fail again, so they are counted and dropped.
+                        host.record_transport_redeliveries(positions.len());
+                    }
                     if pending_rejection.is_none() {
                         retry_delay = retry_policy.backoff;
                         host.mark_ready();
@@ -1671,9 +1691,11 @@ pub(super) async fn run_source_instance_with_retry<C>(
             }
         }
 
-        // A failed rewind leaves the connector's cursor beyond an unacknowledged message.
-        // Reestablish its assignment and retry that same rewind before reading another batch:
-        // acknowledging a later Kafka offset would otherwise commit past the missing record.
+        // A failed rewind of a replayable source leaves the connector's cursor beyond an
+        // unacknowledged message. Reestablish its assignment and retry that same rewind before
+        // reading another batch: acknowledging a later Kafka offset would otherwise commit past the
+        // missing record. Only a replayable source still holds a pending rejection here, because a
+        // resume discards a broker-redelivered one and a source without positions never keeps one.
         if let Some(positions) = pending_rejection.take() {
             if let Err(error) = source.reject(&positions).await {
                 host.report_error(format!("{error:#}"));
@@ -1735,9 +1757,9 @@ pub(super) async fn run_source_instance_with_retry<C>(
             host.report_error("source returned an empty message batch".to_string());
             continue;
         }
-        host.clear_transient_error();
 
-        match handle_batch(&mut source, &mut host, acknowledgement, messages).await {
+        let retry_after = source_retry_delay(retry_delay);
+        match handle_batch(&mut source, &mut host, policy, retry_after, messages).await {
             BatchDisposition::Accepted => {
                 retry_delay = retry_policy.backoff;
             }
@@ -1805,12 +1827,17 @@ fn batch_request(acknowledgement: SourceAckPolicy) -> SourceBatchRequest {
 async fn handle_batch<C>(
     source: &mut C,
     host: &mut SourceHost,
-    acknowledgement: SourceAckPolicy,
+    policy: BrokerSourcePolicy,
+    retry_after: Duration,
     messages: Vec<C::Message>,
 ) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
+    let settlement = BatchSettlement {
+        position_class: policy.position_class,
+        retry_after,
+    };
     let positions = messages
         .iter()
         .map(|message| message.position().clone())
@@ -1822,80 +1849,116 @@ where
             metadata: message.metadata(),
         })
         .collect();
-    let mode = match acknowledgement {
-        SourceAckPolicy::None => SourceIntakeMode::Unacknowledged,
-        SourceAckPolicy::Sequential { .. } | SourceAckPolicy::Parallel { .. } => {
-            SourceIntakeMode::Acknowledged
-        }
-    };
-    let intake = host
-        .intake(SourceIntakeBatch {
-            messages: intake_messages,
-            mode,
-        })
-        .await;
-    let outcome = match intake {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            host.report_error(format!("{error:#}"));
-            if mode == SourceIntakeMode::Acknowledged {
-                return reject_batch(source, host, positions).await;
+    match policy.acknowledgement {
+        SourceAckPolicy::None => {
+            let intake = host.intake_unacknowledged(intake_messages).await;
+            if let Err(error) = intake {
+                host.report_error(format!("{error:#}"));
+                return BatchDisposition::Accepted;
             }
-            return BatchDisposition::Accepted;
+            confirm_batch(source, host, settlement, positions).await
         }
-    };
-
-    let timeout = match acknowledgement {
-        SourceAckPolicy::None => None,
         SourceAckPolicy::Sequential { timeout, .. } | SourceAckPolicy::Parallel { timeout, .. } => {
-            Some(timeout)
-        }
-    };
-    if let Some(timeout) = timeout {
-        if outcome.acknowledgements.len() != positions.len() {
-            host.report_error(format!(
-                "source intake returned {} ACKs for {} messages",
-                outcome.acknowledgements.len(),
-                positions.len(),
-            ));
-            return reject_batch(source, host, positions).await;
-        }
-        for acknowledgement in outcome.acknowledgements {
-            nervix_primitives::task::consume_budget().await;
-            match acknowledgement.wait(timeout).await {
-                SourceAcknowledgementOutcome::Ack => {}
-                SourceAcknowledgementOutcome::NoAck(reason) => {
-                    host.handle_ack_failure(reason);
-                    return reject_batch(source, host, positions).await;
+            let intake = host.intake_acknowledged(intake_messages).await;
+            let acknowledgement = match intake {
+                Ok(acknowledgement) => acknowledgement,
+                Err(error) => {
+                    host.report_error(format!("{error:#}"));
+                    return reject_batch(source, host, settlement.position_class, positions).await;
                 }
-                SourceAcknowledgementOutcome::Shutdown => return BatchDisposition::Shutdown,
-            }
+            };
+            settle_acknowledged_batch(
+                source,
+                host,
+                settlement,
+                acknowledgement,
+                timeout,
+                positions,
+            )
+            .await
         }
-    } else if !outcome.acknowledgements.is_empty() {
-        host.report_error("unacknowledged source intake returned ACK handles".to_string());
     }
-
-    if let Err(error) = source.acknowledge(&positions).await {
-        host.report_error(format!("{error:#}"));
-        return reject_batch(source, host, positions).await;
-    }
-    BatchDisposition::Accepted
 }
 
-async fn reject_batch<C>(
+/// Waits for an acknowledged batch's acknowledgement trees, then confirms or rejects its
+/// positions on the transport.
+///
+/// The batch's work stays outstanding for drains and ownership handoffs until `acknowledgement`
+/// drops, so it drops only once the source has settled the positions. A stop that arrives before
+/// every tree resolved leaves the positions unconfirmed, which the host reports.
+async fn settle_acknowledged_batch<C>(
     source: &mut C,
     host: &mut SourceHost,
+    settlement: BatchSettlement,
+    mut acknowledgement: SourceBatchAcknowledgement,
+    timeout: Duration,
     positions: Vec<C::Position>,
 ) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
-    match source.reject(&positions).await {
-        Ok(()) => BatchDisposition::Retry,
-        Err(error) => {
-            host.report_error(format!("{error:#}"));
+    let outcome = acknowledgement.wait(timeout).await;
+    let disposition = match outcome {
+        SourceAcknowledgementOutcome::Ack => {
+            confirm_batch(source, host, settlement, positions).await
+        }
+        SourceAcknowledgementOutcome::NoAck(reason) => {
+            host.handle_ack_failure(reason);
+            reject_batch(source, host, settlement.position_class, positions).await
+        }
+        SourceAcknowledgementOutcome::Shutdown => {
+            host.record_unconfirmed_stop(positions.len());
+            BatchDisposition::Shutdown
+        }
+    };
+    drop(acknowledgement);
+    disposition
+}
+
+/// Confirms `positions` on the transport, which is the progress the host reports.
+///
+/// A confirmation that fails is the ingestor's transient status until a later one succeeds, and
+/// the positions are rejected for their position class to handle.
+async fn confirm_batch<C>(
+    source: &mut C,
+    host: &mut SourceHost,
+    settlement: BatchSettlement,
+    positions: Vec<C::Position>,
+) -> BatchDisposition<C::Position>
+where
+    C: BrokerSourceConnector,
+{
+    let confirmed = source.acknowledge(&positions).await;
+    let Err(error) = confirmed else {
+        host.clear_transient_error();
+        return BatchDisposition::Accepted;
+    };
+    host.record_transient_error(source_failure_reason(&error), settlement.retry_after);
+    host.report_error(format!("{error:#}"));
+    reject_batch(source, host, settlement.position_class, positions).await
+}
+
+/// Rejects `positions` so the source presents them again, and decides by the source's position
+/// class what a rejection that failed leaves pending.
+async fn reject_batch<C>(
+    source: &mut C,
+    host: &mut SourceHost,
+    position_class: PositionClass,
+    positions: Vec<C::Position>,
+) -> BatchDisposition<C::Position>
+where
+    C: BrokerSourceConnector,
+{
+    let Err(error) = source.reject(&positions).await else {
+        return BatchDisposition::Retry;
+    };
+    host.report_error(format!("{error:#}"));
+    match position_class {
+        PositionClass::Replayable | PositionClass::BrokerRedelivered => {
             BatchDisposition::RetryRejection(positions)
         }
+        // A source without positions has nothing a later rejection could name.
+        PositionClass::None => BatchDisposition::Retry,
     }
 }
 
@@ -1937,12 +2000,20 @@ mod tests {
     use std::{collections::VecDeque, future};
 
     use nervix_connector::{
-        IngestMessageHeaders, IngestMetadataRow, SourceConnector, SourceError, SourceResult,
+        IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices,
+        SourceConnector, SourceError, SourceResult,
     };
     use nervix_primitives::sync::{Notify, blocking::Mutex};
 
     use super::*;
     use crate::runtime::domain_clock::DomainClockWaitError;
+
+    /// Which intake the loop asked the host for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RecordedIntake {
+        Unacknowledged,
+        Acknowledged,
+    }
 
     #[derive(Default)]
     struct SourceLoopObservations {
@@ -1951,7 +2022,7 @@ mod tests {
         /// Replays the host still has to deliver, as a quiesce buffer would.
         pending_replays: usize,
         requests: Vec<SourceBatchRequest>,
-        intake: Vec<(SourceIntakeMode, usize)>,
+        intake: Vec<(RecordedIntake, usize)>,
         acknowledged: Vec<Vec<u64>>,
         rejected: Vec<Vec<u64>>,
         poll_errors: Vec<String>,
@@ -2118,8 +2189,8 @@ mod tests {
     }
 
     #[async_trait]
-    impl SourceAcknowledgementServices for ImmediateAcknowledgement {
-        async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
+    impl SourceBatchAcknowledgementServices for ImmediateAcknowledgement {
+        async fn wait(&mut self, _timeout: Duration) -> SourceAcknowledgementOutcome {
             let mut observations = self.observations.lock();
             observations.ack_waits += 1;
             observations
@@ -2153,23 +2224,28 @@ mod tests {
 
     #[async_trait]
     impl SourceHostServices for FakeHost {
-        async fn intake(
+        async fn intake_unacknowledged(
             &mut self,
-            batch: SourceIntakeBatch<'_>,
-        ) -> SourceIntakeResult<SourceIntakeOutcome> {
-            let count = batch.messages.len();
-            self.observations.lock().intake.push((batch.mode, count));
-            let acknowledgements = match batch.mode {
-                SourceIntakeMode::Unacknowledged => Vec::new(),
-                SourceIntakeMode::Acknowledged => (0..count)
-                    .map(|_| {
-                        SourceAcknowledgement::new(ImmediateAcknowledgement {
-                            observations: self.observations.clone(),
-                        })
-                    })
-                    .collect(),
-            };
-            Ok(SourceIntakeOutcome { acknowledgements })
+            messages: Vec<SourceIntakeMessage<'_>>,
+        ) -> SourceIntakeResult<()> {
+            self.observations
+                .lock()
+                .intake
+                .push((RecordedIntake::Unacknowledged, messages.len()));
+            Ok(())
+        }
+
+        async fn intake_acknowledged(
+            &mut self,
+            messages: Vec<SourceIntakeMessage<'_>>,
+        ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
+            self.observations
+                .lock()
+                .intake
+                .push((RecordedIntake::Acknowledged, messages.len()));
+            Ok(SourceBatchAcknowledgement::new(ImmediateAcknowledgement {
+                observations: self.observations.clone(),
+            }))
         }
 
         async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -2238,6 +2314,12 @@ mod tests {
         fn handle_ack_failure(&self, reason: String) {
             self.observations.lock().reported_errors.push(reason);
         }
+        fn record_transport_redeliveries(&self, positions: usize) {
+            panic!("a replayable test source discarded {positions} positions after a reconnect");
+        }
+        fn record_unconfirmed_stop(&self, positions: usize) {
+            panic!("a test source stopped with {positions} positions waiting on their trees");
+        }
     }
 
     #[async_trait]
@@ -2253,6 +2335,14 @@ mod tests {
         fn record_poll_error(&self, reason: String) {
             self.observations.lock().poll_errors.push(reason.clone());
             self.report_error(reason);
+        }
+    }
+
+    fn replayable(acknowledgement: SourceAckPolicy) -> BrokerSourcePolicy {
+        BrokerSourcePolicy {
+            acknowledgement,
+            retry: acknowledgement.retry(),
+            position_class: PositionClass::Replayable,
         }
     }
 
@@ -2285,7 +2375,7 @@ mod tests {
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
+        run_source_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
         drop(shutdown_tx);
         observations
     }
@@ -2507,8 +2597,7 @@ mod tests {
         run_source_instance_with_retry(
             source,
             host,
-            SourceAckPolicy::None,
-            SourceAckPolicy::None.retry(),
+            replayable(SourceAckPolicy::None),
             shutdown_rx,
         )
         .await;
@@ -2542,8 +2631,7 @@ mod tests {
         let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
             source,
             host,
-            SourceAckPolicy::None,
-            SourceAckPolicy::None.retry(),
+            replayable(SourceAckPolicy::None),
             shutdown_rx,
         ));
         started.notified().await;
@@ -2570,8 +2658,7 @@ mod tests {
         let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
             source,
             host,
-            SourceAckPolicy::None,
-            SourceAckPolicy::None.retry(),
+            replayable(SourceAckPolicy::None),
             shutdown_rx,
         ));
         started.notified().await;
@@ -2713,7 +2800,7 @@ mod tests {
         let observations = observations.lock();
         assert_eq!(
             observations.intake,
-            vec![(SourceIntakeMode::Unacknowledged, 1); 3]
+            vec![(RecordedIntake::Unacknowledged, 1); 3]
         );
         assert_eq!(observations.acknowledged, vec![vec![0], vec![1], vec![2]]);
         assert_eq!(observations.ack_waits, 0);
@@ -2730,7 +2817,7 @@ mod tests {
         let observations = observations.lock();
         assert_eq!(
             observations.intake,
-            vec![(SourceIntakeMode::Acknowledged, 1); 3]
+            vec![(RecordedIntake::Acknowledged, 1); 3]
         );
         assert_eq!(observations.acknowledged, vec![vec![0], vec![1], vec![2]]);
         assert_eq!(observations.ack_waits, 3);
@@ -2762,7 +2849,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             retry: retry_policy(),
         };
-        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
+        run_source_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
         drop(shutdown_tx);
 
         let observations = observations.lock();
@@ -2782,12 +2869,9 @@ mod tests {
         })
         .await;
         let observations = observations.lock();
-        assert_eq!(
-            observations.intake,
-            vec![(SourceIntakeMode::Acknowledged, 3)]
-        );
+        assert_eq!(observations.intake, vec![(RecordedIntake::Acknowledged, 3)]);
         assert_eq!(observations.acknowledged, vec![vec![0, 1, 2]]);
-        assert_eq!(observations.ack_waits, 3);
+        assert_eq!(observations.ack_waits, 1);
         assert_eq!(observations.requests[0].max_messages.get(), 3);
         assert_eq!(
             observations.requests[0].batch_timeout,
@@ -2815,6 +2899,14 @@ mod shuttle_tests;
 #[cfg(test)]
 #[path = "source_extension_tests.rs"]
 mod extension_tests;
+
+#[cfg(test)]
+#[path = "source_reconnect_tests.rs"]
+mod reconnect_tests;
+
+#[cfg(test)]
+#[path = "source_confirmation_tests.rs"]
+mod confirmation_tests;
 
 impl Drop for RuntimeSourceHost {
     fn drop(&mut self) {

@@ -3,9 +3,13 @@ use std::ops::Range;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    Backup, BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription,
-    DescribeBackup, DomainName, EmitSinkKind, IngestSourceKind, ModelKind, RelayName, Restore,
-    SchemaName, SemanticReference, Statement, UploadResource, WireSchemaName,
+    Backup, BuiltinFunctionScope, CanonicalNsplError, ClickHouseSinkEntity, CreateSubscription,
+    DeleteSubscription, DescribeBackup, DomainName, EmitSinkKind, HttpSinkEntity,
+    IcebergSinkEntity, IngestSourceKind, KafkaSinkEntity, ModelKind, MongoDbSinkEntity,
+    MqttSinkEntity, MySqlSinkEntity, NatsSinkEntity, OtelSinkEntity, PostgresSinkEntity,
+    PulsarSinkEntity, RabbitMqSinkEntity, RedisSinkEntity, RelayName, Restore, SchemaName,
+    SemanticReference, SentrySinkEntity, SourceReferenceKind, SqsSinkEntity, Statement,
+    SyslogSinkEntity, UploadResource, WireSchemaName, ZeroMqSinkEntity,
 };
 
 use crate::{
@@ -240,8 +244,20 @@ pub enum CompletionExpectation {
 }
 
 impl CompletionExpectation {
-    fn from_label(label: String, schema: Option<&SchemaFieldContext>) -> Option<Self> {
+    /// The expectation a grammar label states. `source` is what the body of the ingestor statement
+    /// being written reads through, which narrows its client or endpoint to the pair its head
+    /// names.
+    fn from_label(
+        label: String,
+        schema: Option<&SchemaFieldContext>,
+        source: Option<SourceReferenceKind>,
+    ) -> Option<Self> {
         if let Some(kind) = ModelKind::from_completion_label(&label) {
+            if let Some(source) = source
+                && source.model_kind() == kind
+            {
+                return Some(Self::Semantic(SemanticReference::SourceReference(source)));
+            }
             return Some(Self::Semantic(SemanticReference::Model(kind)));
         }
         let expectation = match label.as_str() {
@@ -287,9 +303,11 @@ pub fn suggest_client_expectations(input: &str, cursor: usize) -> Vec<Completion
             .map(CompletionExpectation::Semantic)
             .collect();
     }
+    let source = ingestor_source_kind(&tokens).map(|kind| kind.capabilities().reference);
     let mut expectations = Vec::new();
     for label in labels {
-        if let Some(expectation) = CompletionExpectation::from_label(label, schema.as_ref()) {
+        if let Some(expectation) = CompletionExpectation::from_label(label, schema.as_ref(), source)
+        {
             expectations.push(expectation);
         }
     }
@@ -445,63 +463,68 @@ fn known_keyword(token: &Token) -> Option<Keyword> {
     }
 }
 
+/// The connector and entity the head of the ingestor statement being written names, which every
+/// later clause of the statement reads.
 fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestSourceKind> {
-    let from = tokens
+    let create = kw(Keyword::Create)
+        .ignore_then(if_not_exists_clause())
+        .ignore_then(crate::ingestor::head_kind());
+    let alter = kw(Keyword::Alter).ignore_then(crate::ingestor::head_kind());
+    choice((create, alter))
+        .then_ignore(any().repeated())
+        .then_ignore(end())
+        .parse(tokens)
+        .into_output()
+}
+
+fn emitter_sink_kind(tokens: &[Token]) -> Option<EmitSinkKind> {
+    let emitter = tokens
         .iter()
-        .position(|token| known_keyword(token) == Some(Keyword::From))?;
-    let ingestor = tokens[..from]
-        .iter()
-        .any(|token| known_keyword(token) == Some(Keyword::Ingestor));
-    if !ingestor {
-        return None;
+        .position(|token| known_keyword(token) == Some(Keyword::Emitter))?;
+    // A relay or the emitter itself may be named `to`, so the sink clause is the first `TO` that a
+    // sink's connector keyword follows.
+    for (offset, token) in tokens[emitter..].iter().enumerate() {
+        if known_keyword(token) != Some(Keyword::To) {
+            continue;
+        }
+        let to = emitter.checked_add(offset)?;
+        if let Some(kind) = sink_kind_after(tokens, to) {
+            return Some(kind);
+        }
     }
-    match known_keyword(tokens.get(from.checked_add(1)?)?)? {
-        Keyword::Client => Some(IngestSourceKind::Client),
-        Keyword::Http => Some(IngestSourceKind::Http),
-        Keyword::Kafka => Some(IngestSourceKind::Kafka),
-        Keyword::Pulsar => Some(IngestSourceKind::Pulsar),
-        Keyword::Mqtt => Some(IngestSourceKind::Mqtt),
-        Keyword::Nats => Some(IngestSourceKind::Nats),
-        Keyword::Rabbitmq => Some(IngestSourceKind::RabbitMq),
-        Keyword::Redis => Some(IngestSourceKind::RedisPubSub),
-        Keyword::Prometheus => Some(IngestSourceKind::Prometheus),
-        Keyword::Zeromq => Some(IngestSourceKind::ZeroMq),
-        Keyword::Sqs => Some(IngestSourceKind::Sqs),
-        Keyword::Endpoint => Some(IngestSourceKind::Endpoint),
-        Keyword::Websockets => Some(IngestSourceKind::Websockets),
-        Keyword::Syslog => Some(IngestSourceKind::Syslog),
+    None
+}
+
+/// The connector and entity a sink clause names, when `to` is the position of its `TO`.
+fn sink_kind_after(tokens: &[Token], to: usize) -> Option<EmitSinkKind> {
+    match known_keyword(tokens.get(to.checked_add(1)?)?)? {
+        Keyword::Http => Some(EmitSinkKind::Http(HttpSinkEntity::Request)),
+        Keyword::Kafka => Some(EmitSinkKind::Kafka(KafkaSinkEntity::Topic)),
+        Keyword::Pulsar => Some(EmitSinkKind::Pulsar(PulsarSinkEntity::Topic)),
+        Keyword::Rabbitmq => Some(EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue)),
+        Keyword::Redis => Some(EmitSinkKind::Redis(RedisSinkEntity::PubSub)),
+        Keyword::Mqtt => Some(EmitSinkKind::Mqtt(MqttSinkEntity::Topic)),
+        Keyword::Nats => Some(EmitSinkKind::Nats(NatsSinkEntity::Subject)),
+        Keyword::Zeromq => Some(EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push)),
+        Keyword::Sqs => Some(EmitSinkKind::Sqs(SqsSinkEntity::Queue)),
+        Keyword::Sentry => Some(EmitSinkKind::Sentry(SentrySinkEntity::Event)),
+        Keyword::Syslog => Some(EmitSinkKind::Syslog(SyslogSinkEntity::Collector)),
+        Keyword::Otel => otel_sink_kind(tokens.get(to.checked_add(3)?)?),
+        Keyword::Clickhouse => Some(EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table)),
+        Keyword::Postgres => Some(EmitSinkKind::Postgres(PostgresSinkEntity::Table)),
+        Keyword::Mysql => Some(EmitSinkKind::MySql(MySqlSinkEntity::Table)),
+        Keyword::Mongodb => Some(EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection)),
+        Keyword::Iceberg => Some(EmitSinkKind::Iceberg(IcebergSinkEntity::Table)),
         _ => None,
     }
 }
 
-fn emitter_sink_kind(tokens: &[Token]) -> Option<EmitSinkKind> {
-    let to = tokens
-        .iter()
-        .position(|token| known_keyword(token) == Some(Keyword::To))?;
-    let emitter = tokens[..to]
-        .iter()
-        .any(|token| known_keyword(token) == Some(Keyword::Emitter));
-    if !emitter {
-        return None;
-    }
-    match known_keyword(tokens.get(to.checked_add(1)?)?)? {
-        Keyword::Http => Some(EmitSinkKind::Http),
-        Keyword::Kafka => Some(EmitSinkKind::Kafka),
-        Keyword::Pulsar => Some(EmitSinkKind::Pulsar),
-        Keyword::Rabbitmq => Some(EmitSinkKind::RabbitMq),
-        Keyword::Redis => Some(EmitSinkKind::Redis),
-        Keyword::Mqtt => Some(EmitSinkKind::Mqtt),
-        Keyword::Nats => Some(EmitSinkKind::Nats),
-        Keyword::Zeromq => Some(EmitSinkKind::ZeroMq),
-        Keyword::Sqs => Some(EmitSinkKind::Sqs),
-        Keyword::Sentry => Some(EmitSinkKind::Sentry),
-        Keyword::Syslog => Some(EmitSinkKind::Syslog),
-        Keyword::Otel => Some(EmitSinkKind::Otel),
-        Keyword::Clickhouse => Some(EmitSinkKind::ClickHouse),
-        Keyword::Postgres => Some(EmitSinkKind::Postgres),
-        Keyword::Mysql => Some(EmitSinkKind::MySql),
-        Keyword::Mongodb => Some(EmitSinkKind::MongoDb),
-        Keyword::Iceberg => Some(EmitSinkKind::Iceberg),
+/// The OTEL entity a sink body names by its signal keyword, which follows the client's name.
+fn otel_sink_kind(signal: &Token) -> Option<EmitSinkKind> {
+    match known_keyword(signal)? {
+        Keyword::Logs => Some(EmitSinkKind::Otel(OtelSinkEntity::Logs)),
+        Keyword::Traces => Some(EmitSinkKind::Otel(OtelSinkEntity::Traces)),
+        Keyword::Metric => Some(EmitSinkKind::Otel(OtelSinkEntity::Metrics)),
         _ => None,
     }
 }
@@ -804,6 +827,12 @@ fn expects_local_path(head: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use nervix_arbitrary::{Arbitrary, Domain};
+    use nervix_models::{
+        ClientSinkEntity, ClientSourceEntity, CreateStatement, HttpSourceEntity, KafkaSinkEntity,
+        Model, MqttSourceEntity, RequestedResourceVersion, SentrySinkEntity,
+    };
+
     use super::*;
 
     #[test]
@@ -847,31 +876,77 @@ mod tests {
     }
 
     #[test]
+    fn an_ingestor_head_narrows_the_reference_its_body_names() {
+        let expected = |input: &str, reference: SourceReferenceKind| {
+            let expectations = suggest_client_expectations(input, input.len());
+            assert!(
+                expectations.contains(&CompletionExpectation::Semantic(
+                    SemanticReference::SourceReference(reference)
+                )),
+                "{input}: {expectations:?}"
+            );
+            assert!(
+                !expectations.contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                    reference.model_kind()
+                ))),
+                "{input}: {expectations:?}"
+            );
+        };
+        expected(
+            "CREATE KAFKA TOPIC INGESTOR orders_in FROM ",
+            SourceReferenceKind::Client(nervix_models::ConnectorKind::Kafka),
+        );
+        expected(
+            "CREATE IF NOT EXISTS REDIS PUBSUB INGESTOR orders_in FROM ",
+            SourceReferenceKind::Client(nervix_models::ConnectorKind::Redis),
+        );
+        expected(
+            "CREATE WEBSOCKETS ENDPOINT INGESTOR orders_in FROM ",
+            SourceReferenceKind::Endpoint(nervix_models::EndpointType::Websockets),
+        );
+        expected(
+            "ALTER HTTP ENDPOINT INGESTOR orders_in SET FROM ",
+            SourceReferenceKind::Endpoint(nervix_models::EndpointType::Http),
+        );
+
+        let emitter = "CREATE EMITTER orders_out FROM orders TO KAFKA ";
+        assert!(
+            suggest_client_expectations(emitter, emitter.len()).contains(
+                &CompletionExpectation::Semantic(SemanticReference::Model(ModelKind::Client))
+            )
+        );
+    }
+
+    #[test]
     fn header_function_expectations_carry_the_transport_kind() {
-        let endpoint = "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON \
-                        QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_";
+        let endpoint = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE \
+                        SUSPEND DECODE USING codec TO outgoing SET value = read_";
         assert!(
             suggest_client_expectations(endpoint, endpoint.len()).contains(
                 &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
-                    BuiltinFunctionScope::IngestSource(IngestSourceKind::Endpoint),
+                    BuiltinFunctionScope::IngestSource(IngestSourceKind::Http(
+                        HttpSourceEntity::Endpoint
+                    )),
                 ))
             )
         );
 
-        let mqtt = "CREATE INGESTOR source FROM MQTT broker TOPIC events MODE NO_ACK SEQUENTIAL \
-                    ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_";
+        let mqtt = "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON \
+                    QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_";
         assert!(suggest_client_expectations(mqtt, mqtt.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
-                BuiltinFunctionScope::IngestSource(IngestSourceKind::Mqtt),
+                BuiltinFunctionScope::IngestSource(IngestSourceKind::Mqtt(MqttSourceEntity::Topic)),
             ))
         ));
 
-        let client = "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK \
-                      TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND TO outgoing \
-                      SET value = read_";
+        let client = "CREATE CLIENT PRODUCER INGESTOR source FROM SCHEMA event MODE ACK \
+                      SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND \
+                      TO outgoing SET value = read_";
         assert!(suggest_client_expectations(client, client.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
-                BuiltinFunctionScope::IngestSource(IngestSourceKind::Client),
+                BuiltinFunctionScope::IngestSource(IngestSourceKind::Client(
+                    ClientSourceEntity::Producer
+                )),
             ))
         ));
 
@@ -879,7 +954,9 @@ mod tests {
                      RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
         assert!(suggest_client_expectations(kafka, kafka.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
-                BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Kafka),
+                BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Kafka(
+                    KafkaSinkEntity::Topic
+                )),
             ))
         ));
 
@@ -887,9 +964,73 @@ mod tests {
                       BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
         assert!(suggest_client_expectations(sentry, sentry.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
-                BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Sentry),
+                BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Sentry(
+                    SentrySinkEntity::Event
+                )),
             ))
         ));
+    }
+
+    /// Bytes that differ from seed to seed, so a generated statement takes more than one shape.
+    fn generator_bytes(seed: u8) -> Vec<u8> {
+        (0..1024_u16)
+            .map(|index| {
+                let low = index.to_le_bytes()[0];
+                low.wrapping_mul(29).wrapping_add(seed.wrapping_mul(53))
+            })
+            .collect()
+    }
+
+    /// The tokens of the canonical NSPL that creates `model`.
+    fn canonical_tokens(model: Model<RequestedResourceVersion>) -> Vec<Token> {
+        let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
+        let canonical = statement
+            .to_canonical_nspl()
+            .expect("a generated Model renders as canonical NSPL");
+        completion_tokens(&canonical).assured("canonical NSPL lexes")
+    }
+
+    #[test]
+    fn an_ingestor_s_tokens_name_the_source_pair_it_reads() {
+        for kind in IngestSourceKind::all() {
+            for seed in 0..4 {
+                let bytes = generator_bytes(seed);
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let ingestor = arbitrary.create_ingestor_from(kind);
+                let tokens = canonical_tokens(Model::Ingestor(ingestor));
+                assert_eq!(ingestor_source_kind(&tokens), Some(kind));
+            }
+        }
+    }
+
+    #[test]
+    fn an_emitter_s_tokens_name_the_sink_pair_a_client_serves() {
+        for kind in EmitSinkKind::all() {
+            // A session consumer's sink publishes through no client and writes no header, so an
+            // invocation after it has the ordinary scope: the lookup names every other pair.
+            let expected = match kind {
+                EmitSinkKind::Client(ClientSinkEntity::Consumer) => None,
+                _ => Some(kind),
+            };
+            for seed in 0..4 {
+                let bytes = generator_bytes(seed);
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let emitter = arbitrary.create_emitter_to(kind);
+                let tokens = canonical_tokens(Model::Emitter(emitter));
+                assert_eq!(emitter_sink_kind(&tokens), expected, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_otel_sink_without_its_signal_names_no_pair() {
+        let unfinished = "CREATE EMITTER sink FROM incoming TO OTEL collector";
+        let tokens = completion_tokens(unfinished).assured("the statement prefix lexes");
+        assert_eq!(emitter_sink_kind(&tokens), None);
+
+        let unsignalled = "CREATE EMITTER sink FROM incoming TO OTEL collector VALUES";
+        let tokens = completion_tokens(unsignalled).assured("the statement prefix lexes");
+        assert_eq!(emitter_sink_kind(&tokens), None);
     }
 
     #[test]

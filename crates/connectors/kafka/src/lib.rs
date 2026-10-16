@@ -52,6 +52,9 @@ pub use source::{
     KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceMessage, KafkaSourceOffsetMode,
     KafkaSourcePlan, TopicPartitionInspector,
 };
+// Criterion measures the per-partition folds an acknowledgement and a rejection run.
+#[cfg(feature = "benchmarks")]
+pub use source::{earliest_message_offsets, latest_positions};
 
 const KAFKA: &str = "kafka";
 

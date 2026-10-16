@@ -119,7 +119,7 @@ native settings. Vector measures its native maximum before serialization, while 
 Arrow batch, so byte caps do not imply byte-for-byte equivalence.
 
 `kafka-filter-map` also exposes `ingestor_mode`, the ingestor's whole `MODE` clause, so the same
-graph can be measured under acknowledgement instead of the `NO_ACK PARALLEL` default. The clause
+graph can be measured under acknowledgement instead of the `NO ACK` default. The clause
 contains spaces, so quote it twice when overriding it through a `just` recipe — the outer quotes
 are consumed by the shell and the inner ones survive into the recipe:
 
@@ -187,10 +187,18 @@ consumes the output topic from its beginning on a run-scoped assignment and accu
 which also drives the live backlog signal, the warm-up handshake, and the drain wait. This checks
 the aggregate total, not each input key's identity; the report labels that distinction.
 
-Duplicates of one key are `keys_per_cycle` messages apart on one partition. That is far enough to
-exercise a live keyspace and close enough that the deduplicator's `MAX TIME` can never expire a key
-between its copies and re-emit one. Raising `dedup_max_time` widens the retained keyspace and the
-memory it costs without changing the expected output.
+Duplicates of one key are `keys_per_cycle` messages apart on one partition, far enough to exercise
+a live keyspace. Distance alone does not keep them together: the broker appends and serves records
+in record batches, and nothing bounds the time between two batches of one partition, so a broker
+that stalls between the batch holding a key's first copy and the batch holding its second delays
+only the second. When that delay exceeds `MAX TIME`, the deduplicator correctly expires the key and
+emits the second copy as well. The driver therefore sends every keyed cycle as exactly one record
+batch: `batch.num.messages` is the cycle's message count, so a batch is sent when the cycle's last
+message is queued, and a batch waits up to 50 seconds for the rest of its cycle rather than the 5
+milliseconds the uniform shapes use. A cycle that cannot fit one record batch of 1,000,000 bytes is
+refused before the run starts, and a run fails when a cycle takes 50 seconds or longer to queue.
+Raising `dedup_max_time` widens the retained keyspace and the memory it costs without changing the
+expected output.
 
 Warm-up sends at least one complete cycle per partition and continues under the same backlog bound
 for `load.warmup_seconds`. It then waits for the exact records those cycles owe and requires both

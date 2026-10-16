@@ -752,13 +752,15 @@ fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
     };
     ingestor.input =
         nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-            source: nervix_models::IngestSource::Endpoint {
-                endpoint: named("ingress"),
-                mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            source: nervix_models::IngestSource::Http(nervix_models::HttpSource::Endpoint(
+                nervix_models::HttpEndpointSource {
+                    endpoint: named("ingress"),
+                    mode: nervix_models::EndpointIngestMode::NoAck,
+                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            },
+            )),
             codec: named("event_codec"),
         });
     let desired = DomainSchedule::new(

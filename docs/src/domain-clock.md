@@ -428,13 +428,26 @@ turns the end of a session into an interruption of every clock that session held
 clock's latest state but not its tick. It attaches the followed clocks again on its next session
 before publishing that session to the client's other requests, and so before any transaction it
 attaches there. It reports the clock a restored attachment carries as an observation when the
-attachment was interrupted or the clock changed; the changes in between are not reported. A
+attachment was interrupted or the clock changed; the changes in between are not reported. When the
+new session answers the attach while the previous session still holds the attachment, as after a
+leader redirect, the attachment moves without an interruption: a clock that stays paced in the
+same generation keeps its newest tick, so the clock a caller reads is never older than a tick event
+it has already taken, and a tick of the new session is reported only when it is newer. A
 restoration the new session refuses is reported and sent again on that session after one second, a
 wait that doubles with each refusal up to thirty seconds, for as long as the client follows the
 clock and the session stays open; each new session starts again from one second. A restoration
 left unanswered past the client's request timeout ends that session instead, like any request
-that outlives the timeout, and the next session attaches the clock again. A restoration refused as
-not found ends the attachment with reason `DomainRemoved`.
+that outlives the timeout, and the next session attaches the clock again; a caller already waiting
+for the next clock event is woken and opens that session. A restoration refused as not found ends
+the attachment with reason `DomainRemoved`.
+
+A detach and a restoration of the same clock never cross. The Rust client registers a detach
+before it sends it, and no restoration decides to attach the clock while a detach of it is in
+flight: a restoration that would has its attach wait until the detach has ended, and sends it only
+if the client still follows the clock. A restoration attach decided before the detach is sent
+first, and the detach waits for it, so it reaches the session behind that attach and releases what
+the attach restored. Once the detach is answered, no session holds the clock on the client's
+behalf, and the client follows it only if a later attach of the caller's own attaches it again.
 
 ### Guarantees And Non-Guarantees
 
@@ -645,7 +658,15 @@ contract, which the runtime and every connector crate share, so a connector stam
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
-Physical monotonic time is measured with the timers and instants of the primitive boundary,
+Materialized relay branch activity uses the bound domain clock, independently of the row event
+watermarks used by `LAST BY TIMESTAMP`. Its activity tracker is not persisted: a restored relay
+initializes every restored branch at its activation-time clock snapshot and measures the complete
+TTL from that coordinate. Restoring or restarting the relay preserves the rows' event watermarks
+without turning those timestamps into activity or expiry. The physical scan only releases a
+branch once its domain-clock TTL has elapsed.
+
+Physical monotonic time is measured with the timers and instants of the
+[primitive boundary](./execution-primitives.md),
 `nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
 permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
 deadline armed on its timer stays logical, as described above. Its timers follow the clock of the

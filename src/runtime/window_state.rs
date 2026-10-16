@@ -12,6 +12,8 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+pub(in crate::runtime) mod layout;
+
 use std::io::Write as _;
 
 use arrow_schema::Schema as ArrowSchema;
@@ -155,20 +157,20 @@ pub(super) enum WindowSnapshotIssue {
 }
 
 #[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
-struct WindowSnapshotHeader {
-    revision: u64,
-    first_sequence: Option<u64>,
-    next_sequence: u64,
-    incarnation: Option<u64>,
-    rows: u64,
-    input_bytes: u64,
-    argument_bytes: u64,
-    accumulators: Vec<WindowAccumulatorDescriptor>,
-    typed_sections: u32,
+pub(in crate::runtime) struct WindowSnapshotHeader {
+    pub(in crate::runtime) revision: u64,
+    pub(in crate::runtime) first_sequence: Option<u64>,
+    pub(in crate::runtime) next_sequence: u64,
+    pub(in crate::runtime) incarnation: Option<u64>,
+    pub(in crate::runtime) rows: u64,
+    pub(in crate::runtime) input_bytes: u64,
+    pub(in crate::runtime) argument_bytes: u64,
+    pub(in crate::runtime) accumulators: Vec<WindowAccumulatorDescriptor>,
+    pub(in crate::runtime) typed_sections: u32,
 }
 
 #[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
-enum WindowAccumulatorDescriptor {
+pub(in crate::runtime) enum WindowAccumulatorDescriptor {
     Retained,
     LinearHistogram { delayed_removals: u64 },
 }
@@ -789,142 +791,13 @@ pub(super) async fn decode_window_processor_snapshot(
     lifetime: WindowSnapshotLifetime,
 ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
     let invalid = |issue| Report::new(WindowSnapshotError::Invalid { issue });
-    if payload.len() < WINDOW_SNAPSHOT_FRAME_BYTES
-        || payload[..WINDOW_SNAPSHOT_MAGIC.len()] != WINDOW_SNAPSHOT_MAGIC
-    {
-        return Err(invalid(WindowSnapshotIssue::Header));
-    }
-    let header_length = u32::from_le_bytes(
-        payload[WINDOW_SNAPSHOT_MAGIC.len()..WINDOW_SNAPSHOT_FRAME_BYTES]
-            .try_into()
-            .map_err(|_| invalid(WindowSnapshotIssue::Header))?,
-    );
-    let header_length =
-        usize::try_from(header_length).map_err(|_| invalid(WindowSnapshotIssue::Length))?;
-    if u64::try_from(header_length).unwrap_or(u64::MAX)
-        > executor.limits().snapshot_header_bytes.as_u64()
-    {
-        return Err(invalid(WindowSnapshotIssue::HeaderLimit));
-    }
-    let header_end = WINDOW_SNAPSHOT_FRAME_BYTES
-        .checked_add(header_length)
-        .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
-    let header_bytes = payload
-        .get(WINDOW_SNAPSHOT_FRAME_BYTES..header_end)
-        .ok_or_else(|| invalid(WindowSnapshotIssue::Header))?;
-    let header = decode_aligned_rkyv::<WindowSnapshotHeader>(header_bytes).change_context(
-        WindowSnapshotError::Decode {
-            section: WindowSnapshotSection::Header,
-        },
-    )?;
-    match lifetime {
-        WindowSnapshotLifetime::Branch(expected) => {
-            if header.incarnation != Some(expected) {
-                return Ok(None);
-            }
-        }
-        WindowSnapshotLifetime::Recorded => {
-            if header.incarnation.is_none() {
-                return Ok(None);
-            }
-        }
-    }
-    let input_end = header_end
-        .checked_add(
-            usize::try_from(header.input_bytes)
-                .map_err(|_| invalid(WindowSnapshotIssue::Length))?,
-        )
-        .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
-    let argument_end = input_end
-        .checked_add(
-            usize::try_from(header.argument_bytes)
-                .map_err(|_| invalid(WindowSnapshotIssue::Length))?,
-        )
-        .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
-    if argument_end > payload.len() {
-        return Err(invalid(WindowSnapshotIssue::ArrowSection));
-    }
-    let mut delayed_removals = (0..header.accumulators.len())
-        .map(|_| Vec::new())
-        .collect::<Vec<Vec<LinearHistogramDelayedRemovalSnapshot>>>();
-    let mut offset = argument_end;
-    let typed_limit = executor.limits().snapshot_record_bytes.as_u64();
-    for _ in 0..header.typed_sections {
-        nervix_primitives::task::consume_budget().await;
-        let length_end = offset
-            .checked_add(4)
-            .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
-        let length_bytes: [u8; 4] = payload
-            .get(offset..length_end)
-            .ok_or_else(|| invalid(WindowSnapshotIssue::TypedLength))?
-            .try_into()
-            .map_err(|_| invalid(WindowSnapshotIssue::TypedLength))?;
-        let length = usize::try_from(u32::from_le_bytes(length_bytes))
-            .map_err(|_| invalid(WindowSnapshotIssue::Length))?;
-        if u64::try_from(length).unwrap_or(u64::MAX) > typed_limit {
-            return Err(invalid(WindowSnapshotIssue::TypedLimit));
-        }
-        let section_end = length_end
-            .checked_add(length)
-            .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
-        let section_bytes = payload
-            .get(length_end..section_end)
-            .ok_or_else(|| invalid(WindowSnapshotIssue::TypedSection))?;
-        let section = decode_aligned_rkyv::<WindowDelayedRemovalSection>(section_bytes)
-            .change_context(WindowSnapshotError::Decode {
-                section: WindowSnapshotSection::DelayedRemovals,
-            })?;
-        let demand = usize::try_from(section.demand)
-            .map_err(|_| invalid(WindowSnapshotIssue::TypedDemand))?;
-        let descriptor = header
-            .accumulators
-            .get(demand)
-            .ok_or_else(|| invalid(WindowSnapshotIssue::TypedDemand))?;
-        let WindowAccumulatorDescriptor::LinearHistogram {
-            delayed_removals: declared,
-        } = descriptor
-        else {
-            return Err(invalid(WindowSnapshotIssue::TypedDemand));
-        };
-        let removals = &mut delayed_removals[demand];
-        let next = removals
-            .len()
-            .checked_add(section.removals.len())
-            .ok_or_else(|| invalid(WindowSnapshotIssue::RemovalCount))?;
-        if u64::try_from(next).unwrap_or(u64::MAX) > *declared {
-            return Err(invalid(WindowSnapshotIssue::RemovalCount));
-        }
-        removals.extend(section.removals);
-        offset = section_end;
-    }
-    if offset != payload.len() {
-        return Err(invalid(WindowSnapshotIssue::TrailingSections));
-    }
-    let mut accumulators = Vec::with_capacity(header.accumulators.len());
-    for (demand, descriptor) in header.accumulators.iter().enumerate() {
-        match descriptor {
-            WindowAccumulatorDescriptor::Retained => {
-                accumulators.push(WindowAccumulatorSnapshot::Retained);
-            }
-            WindowAccumulatorDescriptor::LinearHistogram {
-                delayed_removals: declared,
-            } => {
-                let removals = std::mem::take(&mut delayed_removals[demand]);
-                if u64::try_from(removals.len()).unwrap_or(u64::MAX) != *declared {
-                    return Err(invalid(WindowSnapshotIssue::RemovalCount));
-                }
-                accumulators.push(WindowAccumulatorSnapshot::LinearHistogram {
-                    delayed_removals: removals,
-                });
-            }
-        }
-    }
-    let input = payload
-        .get(header_end..input_end)
-        .ok_or_else(|| invalid(WindowSnapshotIssue::ArrowSection))?;
-    let arguments = payload
-        .get(input_end..argument_end)
-        .ok_or_else(|| invalid(WindowSnapshotIssue::ArrowSection))?;
+    let Some(layout) = layout::WindowCheckpointLayout::parse(payload, executor, lifetime, None)?
+    else {
+        return Ok(None);
+    };
+    let header = &layout.header;
+    let input = &payload[layout.input.clone()];
+    let arguments = &payload[layout.arguments.clone()];
     let input = RestoredMaterializedSnapshot::open(
         executor,
         schemas.input,
@@ -983,7 +856,7 @@ pub(super) async fn decode_window_processor_snapshot(
         entries,
         next_sequence: header.next_sequence,
         incarnation: header.incarnation,
-        accumulators,
+        accumulators: layout.accumulators,
     }))
 }
 

@@ -21,36 +21,49 @@ use crate::{
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget,
-    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
-    BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry,
-    ClientIngestMode, ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AlterSchemaOperation, AlterTransportIngestorOperation, AlterWireSchema,
+    AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
+    BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchSelection,
+    ClickHouseSink, ClickHouseTableSink, ClickHouseValueMapping, ClientConfigEntry,
+    ClientConsumerSink, ClientIngestMode, ClientProducerSource, ClientResourceMount, ClientSink,
+    CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
     DomainStartPoint, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, ExistingUserPolicy, Expression, FieldScope, Float64Literal, FlushPolicy,
-    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
-    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
-    MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
-    Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NamePosition, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
-    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
-    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
-    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
-    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    EndpointIngestMode, EndpointName, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
+    FlushPolicy, GeneralErrorPolicy, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSink,
+    HttpRequestSource, HttpSink, HttpSource, IcebergCatalog, IcebergSink, IcebergTableSink,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    IngestQuiesceMode, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
+    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
+    KafkaSource, KafkaTopicSink, KafkaTopicSource, Literal, MaterializedStateDependency,
+    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
+    MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MqttIngestMode, MqttQos,
+    MqttSession, MqttSink, MqttSource, MqttTopicSink, MqttTopicSource, MySqlConflictAction,
+    MySqlSink, MySqlTableSink, NamePosition, NatsIngestMode, NatsSink, NatsSource, NatsSubjectSink,
+    NatsSubjectSource, OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink, OutputBranch,
+    ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresSink, PostgresTableSink,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusIngestMode,
+    PrometheusQuerySource, PrometheusSource, PulsarSink, PulsarSource, PulsarTopicSink,
+    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink,
+    RabbitMqSource, RangeOperator, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource,
+    RedisSink, RedisSource, RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode,
+    RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField, SentryEventSink,
+    SentrySink, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink, SqsSource, Statement,
+    SubscriptionLiteral, SyslogCollectorSink, SyslogIngestMode, SyslogListenerSource, SyslogSink,
+    SyslogSource, TransactionInspectionTarget, UnaryOperator, WebsocketsConnectionSource,
+    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSource, WindowBound,
+    WindowStateLimit, WireSchemaField, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink,
+    ZeroMqSink, ZeroMqSource,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -1341,14 +1354,10 @@ impl AlterEmitter {
 
 impl AlterIngestor {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let operations = self
-            .operations
-            .iter()
-            .map(alter_ingestor_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
+        let operations = self.alteration.operations_to_nspl()?.join(", ");
         Ok(format!(
-            "ALTER INGESTOR {} {operations};",
+            "ALTER {} INGESTOR {} {operations};",
+            self.kind().phrase(),
             self.ingestor.as_str()
         ))
     }
@@ -1377,16 +1386,16 @@ pub fn alter_avro_wire_schema_to_canonical_nspl(
 /// This is the whole of what a pooled client renders differently: it carries a `POOL SIZE` clause
 /// between the type and the mount, because that is the order the grammar accepts.
 macro_rules! client_head_clauses {
-    ($client:expr, $type_label:literal, unpooled) => {
+    ($client:expr, $connector:expr, unpooled) => {
         vec![Clause::line(format!(
             "TYPE {}{}",
-            $type_label,
+            $connector.keyword(),
             client_mount_clause($client.mount.as_ref()),
         ))]
     };
-    ($client:expr, $type_label:literal, pooled) => {{
+    ($client:expr, $connector:expr, pooled) => {{
         let mut clauses = vec![
-            Clause::line(format!("TYPE {}", $type_label)),
+            Clause::line(format!("TYPE {}", $connector.keyword())),
             Clause::line(format!(
                 "POOL SIZE MIN {} MAX {}",
                 $client.pool.minimum(),
@@ -1405,11 +1414,11 @@ macro_rules! client_head_clauses {
 }
 
 macro_rules! impl_standard_client_canonical_nspl {
-    ($($Client:ident => $type_label:literal, $pooling:ident;)+) => {
+    ($($Client:ident => $pooling:ident;)+) => {
         $(
             impl<Version: Display> $Client<Version> {
                 pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-                    let mut clauses = client_head_clauses!(self, $type_label, $pooling);
+                    let mut clauses = client_head_clauses!(self, Self::CONNECTOR, $pooling);
                     clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
 
                     Ok(clause_statement(
@@ -1423,26 +1432,26 @@ macro_rules! impl_standard_client_canonical_nspl {
 }
 
 impl_standard_client_canonical_nspl! {
-    CreateClientKafka => "KAFKA", unpooled;
-    CreateClientPulsar => "PULSAR", unpooled;
-    CreateClientHttp => "HTTP", unpooled;
-    CreateClientSentry => "SENTRY", unpooled;
-    CreateClientOtel => "OTEL", unpooled;
-    CreateClientPrometheus => "PROMETHEUS", unpooled;
-    CreateClientMqtt => "MQTT", unpooled;
-    CreateClientNats => "NATS", unpooled;
-    CreateClientRabbitMq => "RABBITMQ", unpooled;
-    CreateClientZeroMq => "ZEROMQ", unpooled;
-    CreateClientSqs => "SQS", unpooled;
-    CreateClientGcs => "GCS", unpooled;
-    CreateClientAzureBlob => "AZURE_BLOB", unpooled;
-    CreateClientIcebergRest => "ICEBERG_REST", unpooled;
-    CreateClientSyslog => "SYSLOG", unpooled;
-    CreateClientClickHouse => "CLICKHOUSE", unpooled;
-    CreateClientRedis => "REDIS", pooled;
-    CreateClientPostgres => "POSTGRES", pooled;
-    CreateClientMySql => "MYSQL", pooled;
-    CreateClientMongoDb => "MONGODB", pooled;
+    CreateClientKafka => unpooled;
+    CreateClientPulsar => unpooled;
+    CreateClientHttp => unpooled;
+    CreateClientSentry => unpooled;
+    CreateClientOtel => unpooled;
+    CreateClientPrometheus => unpooled;
+    CreateClientMqtt => unpooled;
+    CreateClientNats => unpooled;
+    CreateClientRabbitMq => unpooled;
+    CreateClientZeroMq => unpooled;
+    CreateClientSqs => unpooled;
+    CreateClientGcs => unpooled;
+    CreateClientAzureBlob => unpooled;
+    CreateClientIcebergRest => unpooled;
+    CreateClientSyslog => unpooled;
+    CreateClientClickHouse => unpooled;
+    CreateClientRedis => pooled;
+    CreateClientPostgres => pooled;
+    CreateClientMySql => pooled;
+    CreateClientMongoDb => pooled;
 }
 
 impl<Version: Display> CreateClientS3<Version> {
@@ -1450,8 +1459,9 @@ impl<Version: Display> CreateClientS3<Version> {
         let config = config_entry_items(&self.config)?.join(", ");
 
         Ok(format!(
-            "CREATE CLIENT {} TYPE S3{} CONFIG {{{}}};",
+            "CREATE CLIENT {} TYPE {}{} CONFIG {{{}}};",
             self.name.as_str(),
+            Self::CONNECTOR.keyword(),
             client_mount_clause(self.mount.as_ref()),
             config
         ))
@@ -1464,7 +1474,8 @@ impl<Version: Display> CreateClientWebsockets<Version> {
             format!("CREATE CLIENT {}", self.name.as_str()),
             vec![
                 Clause::line(format!(
-                    "TYPE WEBSOCKETS{}{}",
+                    "TYPE {}{}{}",
+                    Self::CONNECTOR.keyword(),
                     signaling_protocol_clause(self.signaling_protocol.as_ref()),
                     client_mount_clause(self.mount.as_ref()),
                 )),
@@ -1769,24 +1780,12 @@ impl CreateIngestor {
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
             None => String::new(),
         };
-        let mut clauses = Vec::new();
-        match &self.input {
-            IngestorInput::Transport(input) => {
-                clauses.push(Clause::line(format!(
-                    "FROM {}",
-                    ingest_source_to_nspl(&input.source)
-                )));
-                clauses.push(Clause::line(format!(
-                    "DECODE USING {}",
-                    input.codec.as_str()
-                )));
-            }
-            IngestorInput::Client(source) => {
-                clauses.push(Clause::line(format!(
-                    "FROM {}",
-                    client_ingest_source_to_nspl(source)
-                )));
-            }
+        let mut clauses = vec![Clause::line(format!(
+            "FROM {}",
+            ingestor_input_body_to_nspl(&self.input)
+        ))];
+        if let Some(codec) = self.input.codec() {
+            clauses.push(Clause::line(format!("DECODE USING {}", codec.as_str())));
         }
         if !timestamp.is_empty() {
             clauses.push(Clause::line(timestamp.trim_start().to_string()));
@@ -1798,7 +1797,11 @@ impl CreateIngestor {
         )));
 
         Ok(clause_statement(
-            format!("CREATE INGESTOR {}", self.name.as_str()),
+            format!(
+                "CREATE {} INGESTOR {}",
+                self.input.source_phrase(),
+                self.name.as_str()
+            ),
             clauses,
         ))
     }
@@ -2696,21 +2699,51 @@ fn alter_emitter_operation_to_nspl(
     }
 }
 
-fn alter_ingestor_operation_to_nspl(
-    operation: &AlterIngestorOperation,
+/// The body an ingestor's statement writes after `FROM` for one entity's source, without the
+/// connector its head already names.
+pub(crate) trait IngestorBodyNspl {
+    fn body_to_nspl(&self) -> String;
+}
+
+/// The canonical NSPL of every operation of an alteration, in order.
+pub(crate) fn alter_ingestor_operations_to_nspl<Source: IngestorBodyNspl>(
+    operations: &[AlterIngestorOperation<Source>],
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+    let mut rendered = Vec::with_capacity(operations.len());
+    for operation in operations {
+        rendered.push(alter_ingestor_operation_to_nspl(operation)?);
+    }
+    Ok(rendered)
+}
+
+/// The canonical NSPL of every operation of an alteration of a transport's ingestor, in order.
+pub(crate) fn alter_transport_ingestor_operations_to_nspl<Source: IngestorBodyNspl>(
+    operations: &[AlterTransportIngestorOperation<Source>],
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+    let mut rendered = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let operation = match operation {
+            AlterTransportIngestorOperation::Ingestor(operation) => {
+                alter_ingestor_operation_to_nspl(operation)?
+            }
+            AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
+                format!("SET DECODE USING {}", codec.as_str())
+            }
+        };
+        rendered.push(operation);
+    }
+    Ok(rendered)
+}
+
+fn alter_ingestor_operation_to_nspl<Source: IngestorBodyNspl>(
+    operation: &AlterIngestorOperation<Source>,
 ) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterIngestorOperation::SetSource { source } => {
-            Ok(format!("SET FROM {}", ingest_source_to_nspl(source)))
-        }
-        AlterIngestorOperation::SetClientSource { source } => {
-            Ok(format!("SET FROM {}", client_ingest_source_to_nspl(source)))
+            Ok(format!("SET FROM {}", source.body_to_nspl()))
         }
         AlterIngestorOperation::SetQuiesce { quiesce } => {
             Ok(format!("SET QUIESCE {}", ingest_quiesce_to_nspl(quiesce)))
-        }
-        AlterIngestorOperation::SetDecodeUsing { codec } => {
-            Ok(format!("SET DECODE USING {}", codec.as_str()))
         }
         AlterIngestorOperation::SetTimestamp { source } => Ok(match source {
             IngestTimestampSource::Now => "SET TIMESTAMP NOW".to_string(),
@@ -2900,16 +2933,6 @@ pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
     }
 }
 
-/// A client source's clause after `FROM`. Its quiesce mode is always `SUSPEND`, which the grammar
-/// requires it to state.
-fn client_ingest_source_to_nspl(source: &ClientIngestSource) -> String {
-    format!(
-        "CLIENT SCHEMA {} MODE {} ON QUIESCE SUSPEND",
-        source.schema.as_str(),
-        source.mode.to_canonical_nspl()
-    )
-}
-
 impl ClientIngestMode {
     /// The mode clause of a client source, after its `MODE` keyword.
     pub fn to_canonical_nspl(&self) -> String {
@@ -2926,201 +2949,355 @@ impl ClientIngestMode {
     }
 }
 
-fn ingest_source_to_nspl(source: &IngestSource) -> String {
-    match source {
-        IngestSource::Http {
+/// `INSTANCES <n>` where a source writes it, which it leaves out at its default of one.
+fn optional_instances_to_nspl(instances: NonZeroU64) -> String {
+    if instances > NonZeroU64::MIN {
+        format!(" INSTANCES {instances}")
+    } else {
+        String::new()
+    }
+}
+
+impl IngestorBodyNspl for ClientProducerSource {
+    /// Its quiesce mode is always `SUSPEND`, which the grammar requires it to state.
+    fn body_to_nspl(&self) -> String {
+        format!(
+            "SCHEMA {} MODE {} ON QUIESCE SUSPEND",
+            self.schema.as_str(),
+            self.mode.to_canonical_nspl()
+        )
+    }
+}
+
+impl IngestorBodyNspl for HttpRequestSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             every,
+            mode,
             quiesce,
-        } => format!(
-            "HTTP {} EVERY {} ON QUIESCE {}",
+        } = self;
+        let mode = match mode {
+            HttpRequestIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} EVERY {} MODE {} ON QUIESCE {}",
             client.as_str(),
             duration_literal(every.as_nanos()),
+            mode,
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Kafka {
+        )
+    }
+}
+
+impl IngestorBodyNspl for HttpEndpointSource {
+    fn body_to_nspl(&self) -> String {
+        endpoint_intake_to_nspl(&self.endpoint, &self.mode, &self.quiesce)
+    }
+}
+
+impl IngestorBodyNspl for WebsocketsEndpointSource {
+    fn body_to_nspl(&self) -> String {
+        endpoint_intake_to_nspl(&self.endpoint, &self.mode, &self.quiesce)
+    }
+}
+
+fn endpoint_intake_to_nspl(
+    endpoint: &EndpointName,
+    mode: &EndpointIngestMode,
+    quiesce: &IngestQuiesceMode,
+) -> String {
+    let mode = match mode {
+        EndpointIngestMode::NoAck => NO_ACK,
+    };
+    format!(
+        "{} MODE {} ON QUIESCE {}",
+        endpoint.as_str(),
+        mode,
+        ingest_quiesce_to_nspl(quiesce)
+    )
+}
+
+impl IngestorBodyNspl for KafkaTopicSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             topic,
             offset_mode,
             instances,
             mode,
             quiesce,
-        } => format!(
-            "KAFKA {} TOPIC {} OFFSET BY {}{} MODE {} ON QUIESCE {}",
+        } = self;
+        format!(
+            "{} TOPIC {} OFFSET BY {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
-            topic.as_str(),
+            string_literal(topic.as_str()),
             kafka_offset_mode_to_nspl(offset_mode),
-            if *instances > NonZeroU64::MIN {
-                format!(" INSTANCES {}", instances)
-            } else {
-                String::new()
-            },
+            optional_instances_to_nspl(*instances),
             kafka_mode_to_nspl(mode),
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Pulsar {
+        )
+    }
+}
+
+impl IngestorBodyNspl for PulsarTopicSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             topic,
             subscription,
             instances,
             mode,
             quiesce,
-        } => format!(
-            "PULSAR {} TOPIC {} SUBSCRIPTION {}{} MODE {} ON QUIESCE {}",
+        } = self;
+        format!(
+            "{} TOPIC {} SUBSCRIPTION {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
-            topic.as_str(),
-            subscription.as_str(),
-            if *instances > NonZeroU64::MIN {
-                format!(" INSTANCES {}", instances)
-            } else {
-                String::new()
-            },
-            pulsar_mode_to_nspl(mode),
+            string_literal(topic.as_str()),
+            string_literal(subscription.as_str()),
+            optional_instances_to_nspl(*instances),
+            kafka_mode_to_nspl(mode),
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Mqtt {
+        )
+    }
+}
+
+impl IngestorBodyNspl for MqttTopicSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             topic,
             instances,
             mode,
             quiesce,
-        } => {
-            let instances = if *instances > NonZeroU64::MIN {
-                format!(" INSTANCES {instances}")
-            } else {
-                String::new()
-            };
-            format!(
-                "MQTT {} TOPIC {}{} {} ON QUIESCE {}",
-                client.as_str(),
-                mqtt_topic_to_nspl(topic),
-                instances,
-                mqtt_mode_to_nspl(mode),
-                ingest_quiesce_to_nspl(quiesce)
-            )
-        }
-        IngestSource::Nats {
+        } = self;
+        format!(
+            "{} TOPIC {}{} {} ON QUIESCE {}",
+            client.as_str(),
+            string_literal(topic.as_str()),
+            optional_instances_to_nspl(*instances),
+            mqtt_mode_to_nspl(mode),
+            ingest_quiesce_to_nspl(quiesce)
+        )
+    }
+}
+
+impl IngestorBodyNspl for NatsSubjectSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             subject,
             queue_group,
             instances,
             mode,
             quiesce,
-        } => format!(
-            "NATS {} SUBJECT {} QUEUE GROUP {} INSTANCES {} MODE {} ON QUIESCE {}",
+        } = self;
+        let mode = match mode {
+            NatsIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} SUBJECT {} QUEUE GROUP {} INSTANCES {} MODE {} ON QUIESCE {}",
             client.as_str(),
-            subject.as_str(),
-            queue_group.as_str(),
+            string_literal(subject.as_str()),
+            string_literal(queue_group.as_str()),
             instances,
-            nats_mode_to_nspl(mode),
+            mode,
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::RabbitMq {
+        )
+    }
+}
+
+impl IngestorBodyNspl for RabbitMqQueueSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             queue,
             instances,
             mode,
             quiesce,
-        } => format!(
-            "RABBITMQ {} QUEUE {}{} MODE {} ON QUIESCE {}",
+        } = self;
+        let RabbitMqIngestMode::AckSequential {
+            timeout,
+            retry_policy,
+        } = mode;
+        format!(
+            "{} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
-            queue.as_str(),
-            if *instances > NonZeroU64::MIN {
-                format!(" INSTANCES {}", instances)
-            } else {
-                String::new()
-            },
-            rabbitmq_mode_to_nspl(mode),
+            string_literal(queue.as_str()),
+            optional_instances_to_nspl(*instances),
+            ack_sequential_to_nspl(timeout, retry_policy),
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::RedisPubSub {
+        )
+    }
+}
+
+impl IngestorBodyNspl for RedisPubSubSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             channel,
             mode,
             quiesce,
-        } => format!(
-            "REDIS PUBSUB {} CHANNEL {} MODE {} ON QUIESCE {}",
+        } = self;
+        let mode = match mode {
+            RedisPubSubIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} CHANNEL {} MODE {} ON QUIESCE {}",
             client.as_str(),
-            channel.as_str(),
-            redis_pubsub_mode_to_nspl(mode),
+            string_literal(channel.as_str()),
+            mode,
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Prometheus {
+        )
+    }
+}
+
+impl IngestorBodyNspl for PrometheusQuerySource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             query,
             every,
+            mode,
             quiesce,
-        } => format!(
-            "PROMETHEUS {} QUERY {} EVERY {} ON QUIESCE {}",
+        } = self;
+        let mode = match mode {
+            PrometheusIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} QUERY {} EVERY {} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
             duration_literal(every.as_nanos()),
+            mode,
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::ZeroMq {
+        )
+    }
+}
+
+impl IngestorBodyNspl for ZeroMqPullSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             mode,
             quiesce,
-        } => format!(
-            "ZEROMQ {} MODE {} ON QUIESCE {}",
+        } = self;
+        let mode = match mode {
+            ZeroMqIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} MODE {} ON QUIESCE {}",
             client.as_str(),
-            zeromq_mode_to_nspl(mode),
+            mode,
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Sqs {
+        )
+    }
+}
+
+impl IngestorBodyNspl for SqsQueueSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
             client,
             queue,
             instances,
             mode,
             quiesce,
-        } => format!(
-            "SQS {} QUEUE {}{} MODE {} ON QUIESCE {}",
+        } = self;
+        let SqsIngestMode::AckSequential {
+            timeout,
+            retry_policy,
+        } = mode;
+        format!(
+            "{} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
-            queue.as_str(),
-            if *instances > NonZeroU64::MIN {
-                format!(" INSTANCES {}", instances)
-            } else {
-                String::new()
-            },
-            sqs_mode_to_nspl(mode),
+            string_literal(queue.as_str()),
+            optional_instances_to_nspl(*instances),
+            ack_sequential_to_nspl(timeout, retry_policy),
             ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Endpoint {
-            endpoint,
-            mode,
-            quiesce,
-        } => format!(
-            "ENDPOINT {} MODE {} ON QUIESCE {}",
-            endpoint.as_str(),
-            endpoint_mode_to_nspl(mode),
-            ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Websockets {
-            client,
-            mode,
-            quiesce,
-        } => format!(
-            "WEBSOCKETS {} MODE {} ON QUIESCE {}",
-            client.as_str(),
-            websockets_mode_to_nspl(mode),
-            ingest_quiesce_to_nspl(quiesce)
-        ),
-        IngestSource::Syslog { client, quiesce } => format!(
-            "SYSLOG {} MODE NO_ACK SEQUENTIAL ON QUIESCE {}",
-            client.as_str(),
-            ingest_quiesce_to_nspl(quiesce)
-        ),
+        )
     }
 }
 
-fn pulsar_mode_to_nspl(mode: &PulsarIngestMode) -> String {
-    kafka_mode_to_nspl(mode)
+impl IngestorBodyNspl for WebsocketsConnectionSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
+            client,
+            mode,
+            quiesce,
+        } = self;
+        let mode = match mode {
+            WebsocketsIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} MODE {} ON QUIESCE {}",
+            client.as_str(),
+            mode,
+            ingest_quiesce_to_nspl(quiesce)
+        )
+    }
+}
+
+impl IngestorBodyNspl for SyslogListenerSource {
+    fn body_to_nspl(&self) -> String {
+        let Self {
+            client,
+            mode,
+            quiesce,
+        } = self;
+        let mode = match mode {
+            SyslogIngestMode::NoAck => NO_ACK,
+        };
+        format!(
+            "{} MODE {} ON QUIESCE {}",
+            client.as_str(),
+            mode,
+            ingest_quiesce_to_nspl(quiesce)
+        )
+    }
+}
+
+/// The body of a transport source, as its entity's own statement writes it after `FROM`.
+fn ingest_source_body_to_nspl(source: &IngestSource) -> String {
+    match source {
+        IngestSource::Http(HttpSource::Request(source)) => source.body_to_nspl(),
+        IngestSource::Http(HttpSource::Endpoint(source)) => source.body_to_nspl(),
+        IngestSource::Kafka(KafkaSource::Topic(source)) => source.body_to_nspl(),
+        IngestSource::Pulsar(PulsarSource::Topic(source)) => source.body_to_nspl(),
+        IngestSource::Mqtt(MqttSource::Topic(source)) => source.body_to_nspl(),
+        IngestSource::Nats(NatsSource::Subject(source)) => source.body_to_nspl(),
+        IngestSource::RabbitMq(RabbitMqSource::Queue(source)) => source.body_to_nspl(),
+        IngestSource::Redis(RedisSource::PubSub(source)) => source.body_to_nspl(),
+        IngestSource::Prometheus(PrometheusSource::Query(source)) => source.body_to_nspl(),
+        IngestSource::ZeroMq(ZeroMqSource::Pull(source)) => source.body_to_nspl(),
+        IngestSource::Sqs(SqsSource::Queue(source)) => source.body_to_nspl(),
+        IngestSource::Websockets(WebsocketsSource::Connection(source)) => source.body_to_nspl(),
+        IngestSource::Websockets(WebsocketsSource::Endpoint(source)) => source.body_to_nspl(),
+        IngestSource::Syslog(SyslogSource::Listener(source)) => source.body_to_nspl(),
+    }
+}
+
+/// The body an ingestor's input writes after `FROM`, without its codec.
+pub fn ingestor_input_body_to_nspl(input: &IngestorInput) -> String {
+    match input {
+        IngestorInput::Transport(input) => ingest_source_body_to_nspl(&input.source),
+        IngestorInput::Client(source) => source.body_to_nspl(),
+    }
+}
+
+/// The `NO ACK` delivery mode, one composed phrase.
+const NO_ACK: &str = "NO ACK";
+
+fn ack_sequential_to_nspl(timeout: &str, retry_policy: &RetryPolicy) -> String {
+    format!(
+        "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
+        retry_policy_to_nspl(retry_policy)
+    )
 }
 
 fn kafka_offset_mode_to_nspl(offset_mode: &KafkaOffsetMode) -> String {
     match offset_mode {
         KafkaOffsetMode::ConsumerGroup(group) => {
-            format!("CONSUMER GROUP {}", group.as_str())
+            format!("CONSUMER GROUP {}", string_literal(group.as_str()))
         }
         KafkaOffsetMode::Domain => "DOMAIN".to_string(),
     }
@@ -3133,44 +3310,30 @@ fn kafka_mode_to_nspl(mode: &KafkaIngestMode) -> String {
             batch_timeout,
             timeout,
             retry_policy,
-        } => {
-            format!(
-                "ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} ACK TIMEOUT {timeout} RETRY \
-                 POLICY {}",
-                retry_policy_to_nspl(retry_policy)
-            )
-        }
+        } => format!(
+            "ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} ACK TIMEOUT {timeout} RETRY \
+             POLICY {}",
+            retry_policy_to_nspl(retry_policy)
+        ),
         KafkaIngestMode::AckSequential {
             timeout,
             retry_policy,
-        } => format!(
-            "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
-            retry_policy_to_nspl(retry_policy)
-        ),
-        KafkaIngestMode::NoAckParallel => "NO_ACK PARALLEL".to_string(),
+        } => ack_sequential_to_nspl(timeout, retry_policy),
+        KafkaIngestMode::NoAck => NO_ACK.to_string(),
     }
 }
 
 fn mqtt_mode_to_nspl(mode: &MqttIngestMode) -> String {
     match mode {
-        MqttIngestMode::NoAckSequential { session, qos } => {
-            format!(
-                "{}MODE NO_ACK SEQUENTIAL",
-                mqtt_delivery_to_nspl(*session, *qos)
-            )
-        }
-        MqttIngestMode::NoAckParallel { session, qos } => {
-            format!(
-                "{}MODE NO_ACK PARALLEL",
-                mqtt_delivery_to_nspl(*session, *qos)
-            )
+        MqttIngestMode::NoAck { session, qos } => {
+            format!("{}MODE {NO_ACK}", mqtt_delivery_to_nspl(*session, *qos))
         }
         MqttIngestMode::AckSequential {
             timeout,
             retry_policy,
         } => format!(
-            "SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
-            retry_policy_to_nspl(retry_policy)
+            "SESSION PERSISTENT QOS 1 MODE {}",
+            ack_sequential_to_nspl(timeout, retry_policy)
         ),
         MqttIngestMode::AckParallel {
             max,
@@ -3190,92 +3353,6 @@ fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
         String::new()
     } else {
         format!("SESSION {} QOS {} ", session.as_ref(), qos.level())
-    }
-}
-
-/// Renders an MQTT topic filter bare only when a bare word reads back as the same filter.
-///
-/// A bare word is read as a topic name, which is one identifier and is lower-cased, while MQTT
-/// topics are case-sensitive and routinely hold `/`, `.`, `+` or `#`. Any other filter is written
-/// as a string literal, which keeps its exact spelling.
-fn mqtt_topic_to_nspl(topic: &str) -> String {
-    let reads_back_bare = is_lowercase_identifier(topic)
-        && TopicName::parse(topic).is_ok_and(|name| name.as_str() == topic);
-    if reads_back_bare {
-        topic.to_string()
-    } else {
-        string_literal(topic)
-    }
-}
-
-/// Whether `text` is one lower-case identifier the NSPL lexer reads as a single word.
-fn is_lowercase_identifier(text: &str) -> bool {
-    let mut characters = text.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    let starts_well = first.is_ascii_lowercase() || first == '_';
-    starts_well
-        && characters.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        })
-}
-
-fn nats_mode_to_nspl(mode: &NatsIngestMode) -> String {
-    match mode {
-        NatsIngestMode::NoAckSequential => "NO_ACK SEQUENTIAL".to_string(),
-    }
-}
-
-fn rabbitmq_mode_to_nspl(mode: &RabbitMqIngestMode) -> String {
-    match mode {
-        RabbitMqIngestMode::AckSequential {
-            timeout,
-            retry_policy,
-        } => {
-            format!(
-                "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
-                retry_policy_to_nspl(retry_policy)
-            )
-        }
-    }
-}
-
-fn redis_pubsub_mode_to_nspl(mode: &RedisPubSubIngestMode) -> String {
-    match mode {
-        RedisPubSubIngestMode::NoAckSequential => "NO_ACK SEQUENTIAL".to_string(),
-    }
-}
-
-fn endpoint_mode_to_nspl(mode: &EndpointIngestMode) -> String {
-    match mode {
-        EndpointIngestMode::NoAckSequential => "NO_ACK SEQUENTIAL".to_string(),
-    }
-}
-
-fn websockets_mode_to_nspl(mode: &WebsocketsIngestMode) -> String {
-    match mode {
-        WebsocketsIngestMode::NoAckSequential => "NO_ACK SEQUENTIAL".to_string(),
-    }
-}
-
-fn zeromq_mode_to_nspl(mode: &ZeroMqIngestMode) -> String {
-    match mode {
-        ZeroMqIngestMode::NoAckSequential => "NO_ACK SEQUENTIAL".to_string(),
-    }
-}
-
-fn sqs_mode_to_nspl(mode: &SqsIngestMode) -> String {
-    match mode {
-        SqsIngestMode::AckSequential {
-            timeout,
-            retry_policy,
-        } => {
-            format!(
-                "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
-                retry_policy_to_nspl(retry_policy)
-            )
-        }
     }
 }
 
@@ -3366,12 +3443,12 @@ fn emit_sink_clauses(
         values,
         mut trailing,
     } = match sink {
-        EmitSink::ClickHouse {
+        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
             client,
             table,
             values,
             ..
-        } => MappedSink {
+        })) => MappedSink {
             head: format!(
                 "CLICKHOUSE {} INSERT TO TABLE {}",
                 client.as_str(),
@@ -3380,13 +3457,13 @@ fn emit_sink_clauses(
             values,
             trailing: Vec::new(),
         },
-        EmitSink::Postgres {
+        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
             client,
             table,
             values,
             conflict_action,
             ..
-        } => MappedSink {
+        })) => MappedSink {
             head: format!(
                 "POSTGRES {} INSERT TO TABLE {}",
                 client.as_str(),
@@ -3395,13 +3472,13 @@ fn emit_sink_clauses(
             values,
             trailing: conflict_clauses(postgres_conflict_action_to_nspl(conflict_action)),
         },
-        EmitSink::MySql {
+        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
             client,
             table,
             values,
             conflict_action,
             ..
-        } => MappedSink {
+        })) => MappedSink {
             head: format!(
                 "MYSQL {} INSERT TO TABLE {}",
                 client.as_str(),
@@ -3410,13 +3487,13 @@ fn emit_sink_clauses(
             values,
             trailing: conflict_clauses(mysql_conflict_action_to_nspl(conflict_action)),
         },
-        EmitSink::MongoDb {
+        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
             client,
             collection,
             values,
             conflict_action,
             ..
-        } => MappedSink {
+        })) => MappedSink {
             head: format!(
                 "MONGODB {} INSERT TO COLLECTION {}",
                 client.as_str(),
@@ -3425,7 +3502,7 @@ fn emit_sink_clauses(
             values,
             trailing: conflict_clauses(mongodb_conflict_action_to_nspl(conflict_action)),
         },
-        EmitSink::Iceberg {
+        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
             backend,
             client,
             table,
@@ -3433,7 +3510,7 @@ fn emit_sink_clauses(
             location,
             catalog,
             ..
-        } => MappedSink {
+        })) => MappedSink {
             head: format!(
                 "ICEBERG ON {} {} TABLE {}",
                 backend.as_ref(),
@@ -3467,51 +3544,53 @@ fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
 
 fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
     match sink {
-        EmitSink::Client { schema } => Ok(format!("CLIENT SCHEMA {}", schema.as_str())),
-        EmitSink::Http {
+        EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })) => {
+            Ok(format!("CLIENT SCHEMA {}", schema.as_str()))
+        }
+        EmitSink::Http(HttpSink::Request(HttpRequestSink {
             client,
             method,
             path,
-        } => Ok(format!(
+        })) => Ok(format!(
             "HTTP {} METHOD {} PATH {}",
             client.as_str(),
             expression_to_nspl(method)?,
             expression_to_nspl(path)?
         )),
-        EmitSink::Kafka { client, topic } => Ok(format!(
+        EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })) => Ok(format!(
             "KAFKA {} TOPIC {}",
             client.as_str(),
             topic.as_str()
         )),
-        EmitSink::Pulsar { client, topic } => Ok(format!(
+        EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink { client, topic })) => Ok(format!(
             "PULSAR {} TOPIC {}",
             client.as_str(),
             topic.as_str()
         )),
-        EmitSink::RabbitMq { client, queue } => Ok(format!(
-            "RABBITMQ {} QUEUE {}",
-            client.as_str(),
-            queue.as_str()
-        )),
-        EmitSink::Redis { client, channel } => Ok(format!(
+        EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue })) => Ok(
+            format!("RABBITMQ {} QUEUE {}", client.as_str(), queue.as_str()),
+        ),
+        EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink { client, channel })) => Ok(format!(
             "REDIS PUBSUB {} CHANNEL {}",
             client.as_str(),
             channel.as_str()
         )),
-        EmitSink::Mqtt { client, topic } => {
+        EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink { client, topic })) => {
             Ok(format!("MQTT {} TOPIC {}", client.as_str(), topic.as_str()))
         }
-        EmitSink::Nats { client, subject } => Ok(format!(
+        EmitSink::Nats(NatsSink::Subject(NatsSubjectSink { client, subject })) => Ok(format!(
             "NATS {} SUBJECT {}",
             client.as_str(),
             subject.as_str()
         )),
-        EmitSink::ZeroMq { client } => Ok(format!("ZEROMQ {}", client.as_str())),
-        EmitSink::Sqs {
+        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client })) => {
+            Ok(format!("ZEROMQ {}", client.as_str()))
+        }
+        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
             client,
             queue,
             fifo_group,
-        } => {
+        })) => {
             // A queue is written bare, whatever its length: the grammar reads it as words and
             // whole numbers joined by hyphens, with an optional `.fifo` suffix, and has no quoted
             // form a longer or unusual name could fall back to.
@@ -3529,20 +3608,23 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
                 fifo_group
             ))
         }
-        EmitSink::Sentry { client } => Ok(format!("SENTRY {}", client.as_str())),
-        EmitSink::Syslog { client } => Ok(format!("SYSLOG {}", client.as_str())),
-        EmitSink::Otel {
-            client,
-            signal,
-            values,
-            attributes,
-            resource,
-            scope,
-        } => {
-            let signal = match signal {
-                OtelSignal::Logs => "LOGS".to_string(),
-                OtelSignal::Traces => "TRACES".to_string(),
-                OtelSignal::Metric(metric) => {
+        EmitSink::Sentry(SentrySink::Event(SentryEventSink { client })) => {
+            Ok(format!("SENTRY {}", client.as_str()))
+        }
+        EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client })) => {
+            Ok(format!("SYSLOG {}", client.as_str()))
+        }
+        EmitSink::Otel(sink) => {
+            let OtelMappings {
+                values,
+                attributes,
+                resource,
+                scope,
+            } = sink.mappings();
+            let signal = match sink {
+                OtelSink::Logs(_) => "LOGS".to_string(),
+                OtelSink::Traces(_) => "TRACES".to_string(),
+                OtelSink::Metrics(OtelMetricsSink { metric, .. }) => {
                     let description = match &metric.description {
                         Some(description) => {
                             format!(" DESCRIPTION {}", string_literal(description))
@@ -3594,7 +3676,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
             };
             Ok(format!(
                 "OTEL {} {} VALUES {{{}}}{}{}{}",
-                client.as_str(),
+                sink.client().as_str(),
                 signal,
                 value_mappings_to_nspl(values)?,
                 attributes,
@@ -3602,12 +3684,12 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
                 scope
             ))
         }
-        EmitSink::ClickHouse {
+        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
             client,
             table,
             values,
             ..
-        } => {
+        })) => {
             let mappings = value_mappings_to_nspl(values)?;
             Ok(format!(
                 "CLICKHOUSE {} INSERT TO TABLE {} VALUES {{{}}}",
@@ -3616,13 +3698,13 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
                 mappings,
             ))
         }
-        EmitSink::Postgres {
+        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
             client,
             table,
             values,
             conflict_action,
             ..
-        } => {
+        })) => {
             let mappings = value_mappings_to_nspl(values)?;
             let conflict_action = postgres_conflict_action_to_nspl(conflict_action);
             Ok(format!(
@@ -3633,13 +3715,13 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
                 conflict_action,
             ))
         }
-        EmitSink::MySql {
+        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
             client,
             table,
             values,
             conflict_action,
             ..
-        } => {
+        })) => {
             let mappings = value_mappings_to_nspl(values)?;
             let conflict_action = mysql_conflict_action_to_nspl(conflict_action);
             Ok(format!(
@@ -3650,13 +3732,13 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
                 conflict_action,
             ))
         }
-        EmitSink::MongoDb {
+        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
             client,
             collection,
             values,
             conflict_action,
             ..
-        } => {
+        })) => {
             let mappings = value_mappings_to_nspl(values)?;
             let conflict_action = mongodb_conflict_action_to_nspl(conflict_action);
             Ok(format!(
@@ -3667,7 +3749,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
                 conflict_action,
             ))
         }
-        EmitSink::Iceberg {
+        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
             backend,
             client,
             table,
@@ -3675,7 +3757,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
             location,
             catalog,
             ..
-        } => {
+        })) => {
             let mappings = value_mappings_to_nspl(values)?;
             let catalog = match catalog {
                 IcebergCatalog::Rest { client } => format!("CATALOG {}", client.as_str()),
@@ -3911,28 +3993,37 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use crate::{
-        AckMode, AvroType, BinaryOperator, BranchSelection, ClientPoolBounds, ClientResourceMount,
-        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-        CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-        CorrelatorMatchPolicy, CreateClientHttp, CreateClientKafka, CreateClientMqtt,
-        CreateClientNats, CreateClientPostgres, CreateClientPrometheus, CreateClientRabbitMq,
-        CreateClientRedis, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-        CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
-        CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol,
-        CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterBody,
-        EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
-        FieldScope, FlushPolicy, GeneralErrorPolicy, HttpConfigEntry, IngestSource, JsonType,
-        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
-        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
-        PlacementPolicy, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
-        SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+        AckMode, AckWindow, AvroType, BinaryOperator, BranchSelection, ClientIngestMode,
+        ClientPoolBounds, ClientProducerSource, ClientResourceMount, CodecEncoding,
+        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+        CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+        CreateClientPostgres, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
+        CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientWebsockets,
+        CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+        CreateEndpoint, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+        CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterBody, EmitterPublishingMode,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy,
+        GeneralErrorPolicy, HttpConfigEntry, HttpEndpointSource, HttpRequestIngestMode,
+        HttpRequestSource, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, KafkaSink, KafkaTopicSink, KafkaTopicSource, Literal, MessageErrorPolicy,
+        Model, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbValueMapping,
+        MqttIngestMode, MqttQos, MqttSession, MqttSink, MqttTopicSink, MqttTopicSource,
+        MySqlConflictAction, MySqlSink, MySqlTableSink, MySqlValueMapping, NatsIngestMode,
+        NatsSink, NatsSubjectSink, NatsSubjectSource, OutputBranch, ParseAsType, PlacementPolicy,
+        PostgresConflictAction, PostgresSink, PostgresTableSink, PostgresValueMapping,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
+        PrometheusIngestMode, PrometheusQuerySource, PulsarSink, PulsarTopicSink,
+        PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource,
+        RabbitMqSink, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
+        SentryEventSink, SentrySink, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink,
+        SyslogCollectorSink, SyslogIngestMode, SyslogListenerSource, SyslogSink, UdfArgument,
+        UdfLanguage, UdfReturn, WebsocketsConnectionSource, WebsocketsEndpointSource,
         WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
-        expression_to_nspl,
+        ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, expression_to_nspl,
     };
 
     fn named<N>(raw: &str) -> N
@@ -4879,84 +4970,84 @@ mod tests {
     fn renders_emitters_for_all_sink_variants() {
         let sinks = [
             (
-                EmitSink::Kafka {
+                EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
                     client: named("kafka_main"),
                     topic: named("orders"),
-                },
+                })),
                 "KAFKA kafka_main TOPIC orders",
             ),
             (
-                EmitSink::Pulsar {
+                EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
                     client: named("pulsar_main"),
                     topic: named("orders"),
-                },
+                })),
                 "PULSAR pulsar_main TOPIC orders",
             ),
             (
-                EmitSink::RabbitMq {
+                EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
                     client: named("rmq_main"),
                     queue: named("orders_q"),
-                },
+                })),
                 "RABBITMQ rmq_main QUEUE orders_q",
             ),
             (
-                EmitSink::Redis {
+                EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
                     client: named("redis_main"),
                     channel: named("orders_ch"),
-                },
+                })),
                 "REDIS PUBSUB redis_main CHANNEL orders_ch",
             ),
             (
-                EmitSink::Mqtt {
+                EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
                     client: named("mqtt_main"),
                     topic: named("orders_topic"),
-                },
+                })),
                 "MQTT mqtt_main TOPIC orders_topic",
             ),
             (
-                EmitSink::Nats {
+                EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
                     client: named("nats_main"),
                     subject: named("orders_subject"),
-                },
+                })),
                 "NATS nats_main SUBJECT orders_subject",
             ),
             (
-                EmitSink::ZeroMq {
+                EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
                     client: named("zmq_main"),
-                },
+                })),
                 "ZEROMQ zmq_main",
             ),
             (
-                EmitSink::Sqs {
+                EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                     client: named("sqs_main"),
                     queue: "orders_queue".to_string(),
                     fifo_group: None,
-                },
+                })),
                 "SQS sqs_main QUEUE orders_queue",
             ),
             (
-                EmitSink::Sentry {
+                EmitSink::Sentry(SentrySink::Event(SentryEventSink {
                     client: named("sentry_main"),
-                },
+                })),
                 "SENTRY sentry_main",
             ),
             (
-                EmitSink::Syslog {
+                EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
                     client: named("syslog_main"),
-                },
+                })),
                 "SYSLOG syslog_main",
             ),
         ];
 
         for (sink, rendered_sink) in sinks {
             let publishing_mode = match &sink {
-                EmitSink::Mqtt { .. } => EmitterPublishingMode::MqttQos0 {
+                EmitSink::Mqtt(_) => EmitterPublishingMode::MqttQos0 {
                     retry_policy: retry_policy(),
                 },
-                EmitSink::Sqs { .. } => EmitterPublishingMode::SqsSingle {
+                EmitSink::Sqs(_) => EmitterPublishingMode::SqsSingle {
                     retry_policy: retry_policy(),
                 },
-                EmitSink::Sentry { .. } => request_ack_mode(),
+                EmitSink::Sentry(_) => request_ack_mode(),
                 _ => EmitterPublishingMode::NoAck {
                     retry_policy: retry_policy(),
                 },
@@ -5027,10 +5118,12 @@ mod tests {
             "ALTER JUNCTION route_events ADD FROM incoming, ADD FROM incoming WHERE input.active;"
         );
 
-        let sqs = |fifo_group| EmitSink::Sqs {
-            client: named("sqs_main"),
-            queue: "orders_queue".to_string(),
-            fifo_group,
+        let sqs = |fifo_group| {
+            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                client: named("sqs_main"),
+                queue: "orders_queue".to_string(),
+                fifo_group,
+            }))
         };
         assert_eq!(
             super::emit_sink_to_nspl(&sqs(Some(crate::SqsFifoGroup::FromBranch)))
@@ -5046,25 +5139,27 @@ mod tests {
             "SQS sqs_main QUEUE orders_queue FIFO GROUP input.tenant"
         );
 
-        let otel = EmitSink::Otel {
+        let otel = EmitSink::from(crate::OtelMetricsSink {
             client: named("otel_main"),
-            signal: crate::OtelSignal::Metric(crate::OtelMetric {
+            metric: crate::OtelMetric {
                 name: "queue.depth".to_string(),
                 unit: "1".to_string(),
                 description: None,
                 kind: crate::OtelMetricKind::Gauge,
-            }),
-            values: vec![crate::ClickHouseValueMapping {
-                column: "value".to_string(),
-                expression: scoped_field(FieldScope::Input, "depth"),
-            }],
-            attributes: Vec::new(),
-            resource: Vec::new(),
-            scope: Some(crate::OtelScope {
-                name: "nervix".to_string(),
-                version: None,
-            }),
-        };
+            },
+            mappings: crate::OtelMappings {
+                values: vec![crate::OtelValueMapping {
+                    column: "value".to_string(),
+                    expression: scoped_field(FieldScope::Input, "depth"),
+                }],
+                attributes: Vec::new(),
+                resource: Vec::new(),
+                scope: Some(crate::OtelScope {
+                    name: "nervix".to_string(),
+                    version: None,
+                }),
+            },
+        });
         assert_eq!(
             super::emit_sink_to_nspl(&otel).expect("must render"),
             "OTEL otel_main METRIC 'queue.depth' UNIT '1' GAUGE VALUES {'value' = input.depth} \
@@ -5098,7 +5193,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::Postgres {
+            sink: Box::new(EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
                 client: named("postgres_main"),
                 table: named("notification_rows"),
                 values: vec![
@@ -5114,7 +5209,7 @@ mod tests {
                 conflict_action: PostgresConflictAction::DoUpdate {
                     target: vec!["postgres_user_id".to_string()],
                 },
-            }),
+            }))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
@@ -5140,7 +5235,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::MySql {
+            sink: Box::new(EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
                 client: named("mysql_main"),
                 table: named("notification_rows"),
                 values: vec![
@@ -5154,7 +5249,7 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::DoNothing,
-            }),
+            }))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
@@ -5185,23 +5280,28 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::MongoDb {
-                client: named("mongodb_main"),
-                collection: named("notification_rows"),
-                values: vec![
-                    MongoDbValueMapping {
-                        column: "mongodb_user_id".to_string(),
-                        expression: scoped_field(FieldScope::Input, "user_id"),
+            sink: Box::new(EmitSink::MongoDb(MongoDbSink::Collection(
+                MongoDbCollectionSink {
+                    client: named("mongodb_main"),
+                    collection: named("notification_rows"),
+                    values: vec![
+                        MongoDbValueMapping {
+                            column: "mongodb_user_id".to_string(),
+                            expression: scoped_field(FieldScope::Input, "user_id"),
+                        },
+                        MongoDbValueMapping {
+                            column: "mongodb_action".to_string(),
+                            expression: call(
+                                "lower",
+                                vec![scoped_field(FieldScope::Input, "action")],
+                            ),
+                        },
+                    ],
+                    conflict_action: MongoDbConflictAction::DoUpdate {
+                        target: vec!["mongodb_user_id".to_string()],
                     },
-                    MongoDbValueMapping {
-                        column: "mongodb_action".to_string(),
-                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
-                    },
-                ],
-                conflict_action: MongoDbConflictAction::DoUpdate {
-                    target: vec!["mongodb_user_id".to_string()],
                 },
-            }),
+            ))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
@@ -5226,342 +5326,302 @@ mod tests {
         );
     }
 
+    /// An ingestor of `input` writing to `orders`, as the canonical rendering tests declare it.
+    fn orders_ingestor(name: &str, input: crate::IngestorInput) -> CreateIngestor {
+        CreateIngestor {
+            name: named(name),
+            output_routes: flushed_ingestor_outputs("orders"),
+            input,
+            timestamp_source: None,
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        }
+    }
+
+    /// A transport input decoded by `orders_codec`.
+    fn decoded(source: impl Into<IngestSource>) -> crate::IngestorInput {
+        crate::IngestorInput::Transport(crate::TransportIngestorInput {
+            source: source.into(),
+            codec: named("orders_codec"),
+        })
+    }
+
     #[test]
-    fn renders_ingestors_for_all_source_variants() {
+    fn renders_every_ingestor_pair_under_its_kinded_head() {
         let retry = RetryPolicy {
             backoff: "1s".to_string(),
             max_backoff: "30s".to_string(),
         };
+        let every = |raw: &str| -> crate::DomainClockPeriod {
+            raw.parse()
+                .assured("the fixture cadence is a positive duration")
+        };
+        let tail = "\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH \
+                    100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;";
         let expectations = [
             (
-                CreateIngestor {
-                    name: named("http_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Http {
-                            client: named("http_main"),
-                            every: "30s"
-                                .parse()
-                                .assured("the fixture cadence is a positive duration"),
-                            quiesce: crate::IngestQuiesceMode::Suspend,
-                        },
-                        codec: named("orders_codec"),
+                orders_ingestor(
+                    "http_ingestor",
+                    decoded(HttpRequestSource {
+                        client: named("http_main"),
+                        every: every("30s"),
+                        mode: HttpRequestIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR http_ingestor\n  FROM HTTP http_main EVERY 30s ON QUIESCE \
-                 SUSPEND\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH \
-                 EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE HTTP REQUEST INGESTOR http_ingestor\n  FROM http_main EVERY 30s MODE NO \
+                 ACK ON QUIESCE SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("kafka_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Kafka {
-                            client: named("kafka_main"),
-                            topic: named("orders_topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
-                            instances: nonzero!(3u64),
-                            mode: KafkaIngestMode::AckParallel {
-                                max: nonzero!(8u64),
-                                batch_timeout: "100ms".to_string(),
-                                timeout: "5s".to_string(),
-                                retry_policy: retry.clone(),
-                            },
-                            quiesce: crate::IngestQuiesceMode::Suspend,
+                orders_ingestor(
+                    "endpoint_ingestor",
+                    decoded(HttpEndpointSource {
+                        endpoint: named("orders_endpoint"),
+                        mode: EndpointIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Reject {
+                            retry_after: "5s".to_string(),
                         },
-                        codec: named("orders_codec"),
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR kafka_ingestor\n  FROM KAFKA kafka_main TOPIC orders_topic \
-                 OFFSET BY CONSUMER GROUP orders_group INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH \
-                 TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE \
-                 SUSPEND\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH \
-                 EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE HTTP ENDPOINT INGESTOR endpoint_ingestor\n  FROM orders_endpoint MODE NO \
+                 ACK ON QUIESCE REJECT RETRY AFTER 5s",
             ),
             (
-                CreateIngestor {
-                    name: named("mqtt_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Mqtt {
-                            client: named("mqtt_main"),
-                            topic: "orders_topic".to_string(),
-                            instances: nonzero!(1u64),
-                            mode: MqttIngestMode::NoAckSequential {
-                                session: MqttSession::Clean,
-                                qos: MqttQos::AtMostOnce,
-                            },
-                            quiesce: crate::IngestQuiesceMode::Drop,
+                orders_ingestor(
+                    "kafka_ingestor",
+                    decoded(KafkaTopicSource {
+                        client: named("kafka_main"),
+                        topic: named("Orders.Topic"),
+                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("Orders Group")),
+                        instances: nonzero!(3u64),
+                        mode: KafkaIngestMode::AckParallel {
+                            max: nonzero!(8u64),
+                            batch_timeout: "100ms".to_string(),
+                            timeout: "5s".to_string(),
+                            retry_policy: retry.clone(),
                         },
-                        codec: named("orders_codec"),
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR mqtt_ingestor\n  FROM MQTT mqtt_main TOPIC orders_topic MODE \
-                 NO_ACK SEQUENTIAL ON QUIESCE DROP\n  DECODE USING orders_codec\n  TO orders\n    \
-                 UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  \
-                 ON GENERAL ERROR LOG;",
+                ),
+                "CREATE KAFKA TOPIC INGESTOR kafka_ingestor\n  FROM kafka_main TOPIC \
+                 'Orders.Topic' OFFSET BY CONSUMER GROUP 'Orders Group' INSTANCES 3 MODE ACK \
+                 PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
+                 30s ON QUIESCE SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("nats_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Nats {
-                            client: named("nats_main"),
-                            subject: named("orders_subject"),
-                            queue_group: named("orders_workers"),
-                            instances: nonzero!(2u64),
-                            mode: NatsIngestMode::NoAckSequential,
-                            quiesce: crate::IngestQuiesceMode::Drop,
-                        },
-                        codec: named("orders_codec"),
+                orders_ingestor(
+                    "pulsar_ingestor",
+                    decoded(PulsarTopicSource {
+                        client: named("pulsar_main"),
+                        topic: named("persistent://public/default/Orders"),
+                        subscription: named("Readers"),
+                        instances: nonzero!(1u64),
+                        mode: KafkaIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR nats_ingestor\n  FROM NATS nats_main SUBJECT orders_subject \
-                 QUEUE GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL ON QUIESCE DROP\n  \
-                 DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX \
-                 BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE PULSAR TOPIC INGESTOR pulsar_ingestor\n  FROM pulsar_main TOPIC \
+                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' MODE NO ACK ON \
+                 QUIESCE SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("rabbit_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::RabbitMq {
-                            client: named("rmq_main"),
-                            queue: named("orders_q"),
-                            instances: nonzero!(2u64),
-                            mode: RabbitMqIngestMode::AckSequential {
-                                timeout: "10s".to_string(),
-                                retry_policy: retry.clone(),
-                            },
-                            quiesce: crate::IngestQuiesceMode::Suspend,
+                orders_ingestor(
+                    "mqtt_ingestor",
+                    decoded(MqttTopicSource {
+                        client: named("mqtt_main"),
+                        topic: named("devices/+/Orders"),
+                        instances: nonzero!(2u64),
+                        mode: MqttIngestMode::NoAck {
+                            session: MqttSession::Clean,
+                            qos: MqttQos::AtMostOnce,
                         },
-                        codec: named("orders_codec"),
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR rabbit_ingestor\n  FROM RABBITMQ rmq_main QUEUE orders_q \
-                 INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 1s MAX 30s \
-                 ON QUIESCE SUSPEND\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    \
-                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL \
-                 ERROR LOG;",
+                ),
+                "CREATE MQTT TOPIC INGESTOR mqtt_ingestor\n  FROM mqtt_main TOPIC \
+                 'devices/+/Orders' INSTANCES 2 MODE NO ACK ON QUIESCE DROP",
             ),
             (
-                CreateIngestor {
-                    name: named("redis_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::RedisPubSub {
-                            client: named("redis_main"),
-                            channel: named("orders_channel"),
-                            mode: RedisPubSubIngestMode::NoAckSequential,
-                            quiesce: crate::IngestQuiesceMode::Drop,
+                orders_ingestor(
+                    "mqtt_session_ingestor",
+                    decoded(MqttTopicSource {
+                        client: named("mqtt_main"),
+                        topic: named("devices/#"),
+                        instances: nonzero!(1u64),
+                        mode: MqttIngestMode::NoAck {
+                            session: MqttSession::Persistent,
+                            qos: MqttQos::AtLeastOnce,
                         },
-                        codec: named("orders_codec"),
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR redis_ingestor\n  FROM REDIS PUBSUB redis_main CHANNEL \
-                 orders_channel MODE NO_ACK SEQUENTIAL ON QUIESCE DROP\n  DECODE USING \
-                 orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE \
-                 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE MQTT TOPIC INGESTOR mqtt_session_ingestor\n  FROM mqtt_main TOPIC \
+                 'devices/#' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("prom_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Prometheus {
-                            client: named("prom_main"),
-                            query: "sum(rate(http_requests_total[5m]))".to_string(),
-                            every: "15s"
-                                .parse()
-                                .assured("the fixture cadence is a positive duration"),
-                            quiesce: crate::IngestQuiesceMode::Suspend,
-                        },
-                        codec: named("orders_codec"),
+                orders_ingestor(
+                    "nats_ingestor",
+                    decoded(NatsSubjectSource {
+                        client: named("nats_main"),
+                        subject: named("orders.*.created"),
+                        queue_group: named("Orders-Workers"),
+                        instances: nonzero!(2u64),
+                        mode: NatsIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR prom_ingestor\n  FROM PROMETHEUS prom_main QUERY \
-                 'sum(rate(http_requests_total[5m]))' EVERY 15s ON QUIESCE SUSPEND\n  DECODE \
-                 USING orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH \
-                 SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE NATS SUBJECT INGESTOR nats_ingestor\n  FROM nats_main SUBJECT \
+                 'orders.*.created' QUEUE GROUP 'Orders-Workers' INSTANCES 2 MODE NO ACK ON \
+                 QUIESCE DROP",
             ),
             (
-                CreateIngestor {
-                    name: named("zmq_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_main"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: crate::IngestQuiesceMode::Suspend,
+                orders_ingestor(
+                    "rabbit_ingestor",
+                    decoded(RabbitMqQueueSource {
+                        client: named("rmq_main"),
+                        queue: named("Orders Queue"),
+                        instances: nonzero!(1u64),
+                        mode: RabbitMqIngestMode::AckSequential {
+                            timeout: "20s".to_string(),
+                            retry_policy: retry.clone(),
                         },
-                        codec: named("orders_codec"),
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR zmq_ingestor\n  FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL ON \
-                 QUIESCE SUSPEND\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    \
-                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL \
-                 ERROR LOG;",
+                ),
+                "CREATE RABBITMQ QUEUE INGESTOR rabbit_ingestor\n  FROM rmq_main QUEUE 'Orders \
+                 Queue' MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON \
+                 QUIESCE SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("sqs_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Sqs {
-                            client: named("sqs_main"),
-                            queue: named("orders_queue"),
-                            instances: nonzero!(1u64),
-                            mode: SqsIngestMode::AckSequential {
-                                timeout: "20s".to_string(),
-                                retry_policy: retry.clone(),
-                            },
-                            quiesce: crate::IngestQuiesceMode::Suspend,
-                        },
-                        codec: named("orders_codec"),
+                orders_ingestor(
+                    "redis_ingestor",
+                    decoded(RedisPubSubSource {
+                        client: named("redis_main"),
+                        channel: named("orders:*"),
+                        mode: RedisPubSubIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Drop,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR sqs_ingestor\n  FROM SQS sqs_main QUEUE orders_queue MODE ACK \
-                 SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND\n  \
-                 DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX \
-                 BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE REDIS PUBSUB INGESTOR redis_ingestor\n  FROM redis_main CHANNEL \
+                 'orders:*' MODE NO ACK ON QUIESCE DROP",
             ),
             (
-                CreateIngestor {
-                    name: named("endpoint_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Endpoint {
-                            endpoint: named("orders_endpoint"),
-                            mode: EndpointIngestMode::NoAckSequential,
-                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
-                            },
-                        },
-                        codec: named("orders_codec"),
+                orders_ingestor(
+                    "prom_ingestor",
+                    decoded(PrometheusQuerySource {
+                        client: named("prom_main"),
+                        query: "rate(orders_total[5m])".to_string(),
+                        every: every("15s"),
+                        mode: PrometheusIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR endpoint_ingestor\n  FROM ENDPOINT orders_endpoint MODE NO_ACK \
-                 SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB\n  DECODE USING orders_codec\n  TO \
-                 orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE \
-                 ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE PROMETHEUS QUERY INGESTOR prom_ingestor\n  FROM prom_main QUERY \
+                 'rate(orders_total[5m])' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("ws_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Websockets {
-                            client: named("ws_main"),
-                            mode: WebsocketsIngestMode::NoAckSequential,
-                            quiesce: crate::IngestQuiesceMode::Drop,
-                        },
-                        codec: named("orders_codec"),
+                orders_ingestor(
+                    "zmq_ingestor",
+                    decoded(ZeroMqPullSource {
+                        client: named("zmq_main"),
+                        mode: ZeroMqIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR ws_ingestor\n  FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON \
-                 QUIESCE DROP\n  DECODE USING orders_codec\n  TO orders\n    UNBRANCHED\n    \
-                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL \
-                 ERROR LOG;",
+                ),
+                "CREATE ZEROMQ PULL INGESTOR zmq_ingestor\n  FROM zmq_main MODE NO ACK ON QUIESCE \
+                 SUSPEND",
             ),
             (
-                CreateIngestor {
-                    name: named("syslog_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                        source: IngestSource::Syslog {
-                            client: named("syslog_main"),
-                            quiesce: crate::IngestQuiesceMode::Buffer {
-                                max_size: "1MiB".to_string(),
-                                overflow: crate::IngestQuiesceOverflow::DropOldest,
-                            },
+                orders_ingestor(
+                    "sqs_ingestor",
+                    decoded(SqsQueueSource {
+                        client: named("sqs_main"),
+                        queue: named("Orders.fifo"),
+                        instances: nonzero!(4u64),
+                        mode: SqsIngestMode::AckSequential {
+                            timeout: "45s".to_string(),
+                            retry_policy: retry.clone(),
                         },
-                        codec: named("syslog_codec"),
+                        quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
-                    timestamp_source: None,
-                    general_error_policy: GeneralErrorPolicy::Log,
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR syslog_ingestor\n  FROM SYSLOG syslog_main MODE NO_ACK \
-                 SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST\n  DECODE \
-                 USING syslog_codec\n  TO orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH \
-                 SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;",
+                ),
+                "CREATE SQS QUEUE INGESTOR sqs_ingestor\n  FROM sqs_main QUEUE 'Orders.fifo' \
+                 INSTANCES 4 MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 1s MAX 30s \
+                 ON QUIESCE SUSPEND",
+            ),
+            (
+                orders_ingestor(
+                    "ws_ingestor",
+                    decoded(WebsocketsConnectionSource {
+                        client: named("ws_main"),
+                        mode: WebsocketsIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Drop,
+                    }),
+                ),
+                "CREATE WEBSOCKETS CONNECTION INGESTOR ws_ingestor\n  FROM ws_main MODE NO ACK ON \
+                 QUIESCE DROP",
+            ),
+            (
+                orders_ingestor(
+                    "ws_endpoint_ingestor",
+                    decoded(WebsocketsEndpointSource {
+                        endpoint: named("orders_socket"),
+                        mode: EndpointIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
+                    }),
+                ),
+                "CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor\n  FROM orders_socket \
+                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB",
+            ),
+            (
+                orders_ingestor(
+                    "syslog_ingestor",
+                    decoded(SyslogListenerSource {
+                        client: named("syslog_main"),
+                        mode: SyslogIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Drop,
+                    }),
+                ),
+                "CREATE SYSLOG LISTENER INGESTOR syslog_ingestor\n  FROM syslog_main MODE NO ACK \
+                 ON QUIESCE DROP",
             ),
         ];
 
-        for (actual, expected) in expectations {
-            assert_eq!(actual, expected);
+        for (ingestor, head) in expectations {
+            assert_eq!(
+                ingestor.to_canonical_nspl().expect("must render"),
+                format!("{head}{tail}")
+            );
         }
+    }
+
+    #[test]
+    fn renders_a_client_producer_ingestor_without_a_codec() {
+        let ingestor = orders_ingestor(
+            "orders_in",
+            crate::IngestorInput::Client(ClientProducerSource {
+                schema: named("order"),
+                mode: ClientIngestMode {
+                    window: AckWindow::Parallel {
+                        max: nonzero!(64u64),
+                    },
+                    ack_timeout: "30s".to_string(),
+                    retry_policy: RetryPolicy {
+                        backoff: "100ms".to_string(),
+                        max_backoff: "5s".to_string(),
+                    },
+                },
+            }),
+        );
+        assert_eq!(
+            ingestor.to_canonical_nspl().expect("must render"),
+            "CREATE CLIENT PRODUCER INGESTOR orders_in\n  FROM SCHEMA order MODE ACK PARALLEL MAX \
+             64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND\n  TO \
+             orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE \
+             ERROR LOG\n  ON GENERAL ERROR LOG;"
+        );
     }
 
     #[test]

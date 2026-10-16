@@ -1,0 +1,208 @@
+//! The vocabulary of application sessions as a source and a sink.
+//!
+//! Layer: vocabulary.
+//!
+//! - **Owns.** The producer source Model with its acknowledgement mode, the alterations of the
+//!   ingestors that read it, the consumer sink Model, and what each entity declares.
+//! - **Depends on.** The shared source and sink declarations, the acknowledgement and retry
+//!   vocabulary, and the schema name a body references.
+//! - **Must not know.** How a session attaches, how a batch is submitted, admitted or delivered,
+//!   or which node serves a producer or a consumer.
+//!
+//! No client Model configures this connector: an application reaches it through its own session.
+//! A producer's batches already carry the ingestor's input schema, so its source is held by
+//! [`IngestorInput`](crate::IngestorInput) beside the transport contract and never pairs with a
+//! codec, and an alteration of its ingestor holds no codec to set either.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
+use std::num::NonZeroU64;
+
+use error_stack::Report;
+use meticulous::OptionExt as _;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
+
+use super::{
+    entity_union::{ALTERED_PAIR_CHECKED, connector_sinks, connector_source_kinds},
+    source::AlteredIngestorSource,
+};
+use crate::{
+    AckWindow, AcknowledgementConfirmation, AlterIngestorError, AlterIngestorOperation,
+    CanonicalNsplError, ClientName, CreateIngestor, EmitSinkCapabilities, EmitterBatchRequirement,
+    EmitterPublishingMode, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
+    IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
+    SinkEntity, SinkReference, SourceEntity, SourceMetadataScope, SourceReferenceKind,
+};
+
+/// Application producers submitting native Arrow batches of one internal schema.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ClientProducerSource {
+    /// The internal schema every submitted batch matches exactly, before route construction.
+    pub schema: SchemaName,
+    pub mode: ClientIngestMode,
+}
+
+/// How many submitted batches may await their acknowledgement across every producer of one
+/// client ingestor, how long one waits without progress, and how a producer retries a batch that
+/// was refused before admission.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ClientIngestMode {
+    pub window: AckWindow,
+    pub ack_timeout: String,
+    pub retry_policy: RetryPolicy,
+}
+
+impl ClientIngestMode {
+    /// The acknowledgement window as a count: one batch for `ACK SEQUENTIAL`, `max` for
+    /// `ACK PARALLEL MAX <max>`.
+    pub fn window_size(&self) -> NonZeroU64 {
+        match self.window {
+            AckWindow::Sequential => NonZeroU64::MIN,
+            AckWindow::Parallel { max } => max,
+        }
+    }
+}
+
+impl SourceEntity for ClientProducerSource {
+    /// A submitted batch carries no transport headers, so its rows expose an empty header list
+    /// that no program may read.
+    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+        reads_headers: false,
+        metadata: SourceMetadataScope::Headers,
+        executes_on_every_cluster_node: false,
+        reference: SourceReferenceKind::Schema,
+        position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+    };
+}
+
+connector_source_kinds! {
+    connector Client = "CLIENT";
+    /// The entities a client source reads.
+    pub enum ClientSourceEntity {
+        Producer(ClientProducerSource) = "PRODUCER", "Client batches";
+    }
+}
+
+/// The alterations of the ingestors that read a client entity. Their batches need no codec, so no
+/// operation of theirs sets one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ClientIngestorAlteration {
+    Producer(Vec<AlterIngestorOperation<ClientProducerSource>>),
+}
+
+impl ClientIngestorAlteration {
+    /// The entity whose ingestors this alteration changes.
+    pub const fn entity(&self) -> ClientSourceEntity {
+        match self {
+            Self::Producer(_) => ClientSourceEntity::Producer,
+        }
+    }
+
+    /// Applies the operations in order to an ingestor that reads this entity.
+    pub(crate) fn apply_to(
+        &self,
+        ingestor: &mut CreateIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError> {
+        match self {
+            Self::Producer(operations) => ingestor.apply_operations(operations),
+        }
+    }
+
+    /// The canonical NSPL of each operation, in order.
+    pub(crate) fn operations_to_nspl(
+        &self,
+    ) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+        match self {
+            Self::Producer(operations) => {
+                crate::canonical::alter_ingestor_operations_to_nspl(operations)
+            }
+        }
+    }
+}
+
+impl From<Vec<AlterIngestorOperation<ClientProducerSource>>> for ClientIngestorAlteration {
+    fn from(operations: Vec<AlterIngestorOperation<ClientProducerSource>>) -> Self {
+        Self::Producer(operations)
+    }
+}
+
+impl From<Vec<AlterIngestorOperation<ClientProducerSource>>> for IngestorAlteration {
+    fn from(operations: Vec<AlterIngestorOperation<ClientProducerSource>>) -> Self {
+        Self::Client(ClientIngestorAlteration::Producer(operations))
+    }
+}
+
+impl AlteredIngestorSource for ClientProducerSource {
+    fn set_into(&self, input: &mut IngestorInput) {
+        let source = input.client_source_mut().verified(ALTERED_PAIR_CHECKED);
+        *source = self.clone();
+    }
+
+    /// A client source writes no quiesce mode: it honors `SUSPEND` alone, which setting changes
+    /// nothing.
+    fn set_quiesce_of(
+        input: &mut IngestorInput,
+        quiesce: IngestQuiesceMode,
+    ) -> error_stack::Result<(), AlterIngestorError> {
+        if !input.supports_quiesce(&quiesce) {
+            return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
+                kind: Self::KIND,
+                mode: quiesce.kind_label(),
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// Application consumers receiving this emitter's native Arrow output.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ClientConsumerSink {
+    pub schema: SchemaName,
+}
+
+impl SinkEntity for ClientConsumerSink {
+    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+        writes_headers: false,
+        requires_codec: false,
+        batch_requirement: EmitterBatchRequirement::Required,
+        requires_batch_transformation: false,
+        batch_size_maximum: None,
+    };
+
+    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
+        matches!(mode, EmitterPublishingMode::ClientAck { .. })
+    }
+}
+
+impl SinkBody for ClientConsumerSink {
+    fn reference(&self) -> SinkReference<'_> {
+        SinkReference::Schema(&self.schema)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        None
+    }
+}
+
+connector_sinks! {
+    connector Client = "CLIENT";
+    /// What a client sink writes.
+    pub enum ClientSink;
+    /// The entities a client sink writes.
+    pub enum ClientSinkEntity {
+        Consumer(ClientConsumerSink) = "CONSUMER";
+    }
+}

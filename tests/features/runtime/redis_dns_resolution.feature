@@ -29,8 +29,8 @@ Feature: Redis name resolution
         'addr' = '{{<address>}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR redis_in
-        FROM REDIS PUBSUB redis_main CHANNEL dns_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE REDIS PUBSUB INGESTOR redis_in
+        FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
@@ -90,8 +90,8 @@ Feature: Redis name resolution
         'addr' = '{{redis_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR redis_in
-        FROM REDIS PUBSUB redis_main CHANNEL dns_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE REDIS PUBSUB INGESTOR redis_in
+        FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
@@ -130,8 +130,8 @@ Feature: Redis name resolution
       CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = '{{redis_forwarded_addr}}'
       };
-      CREATE INGESTOR redis_in
-        FROM REDIS PUBSUB redis_main CHANNEL dns_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE REDIS PUBSUB INGESTOR redis_in
+        FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE

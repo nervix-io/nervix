@@ -31,18 +31,18 @@ Feature: Remote acknowledgements across a producer restart
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR restart_ack_before_source
-        FROM KAFKA restart_ack_kafka TOPIC restart_ack_before_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP restart_ack_before_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR restart_ack_before_source
+        FROM restart_ack_kafka TOPIC 'restart_ack_before_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'restart_ack_before_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING restart_ack_codec
         TO restart_ack_before_records INHERIT ALL
           BRANCHED BY restart_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR restart_ack_after_source
-        FROM KAFKA restart_ack_kafka TOPIC restart_ack_after_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP restart_ack_after_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR restart_ack_after_source
+        FROM restart_ack_kafka TOPIC 'restart_ack_after_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'restart_ack_after_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING restart_ack_codec
         TO restart_ack_after_records INHERIT ALL

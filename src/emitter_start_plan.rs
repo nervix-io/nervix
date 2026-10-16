@@ -44,11 +44,17 @@ use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
     AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ChannelName,
-    ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount,
+    ClickHouseSink, ClickHouseTableSink, ClickHouseValueMapping, ClientConfigEntry,
+    ClientConsumerSink, ClientName, ClientPoolBounds, ClientResourceMount, ClientSink,
     CollectionName, CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression,
-    FieldName, HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName,
-    RetryPolicy, RouteConstruction, SchemaName, SubjectName, TableName, TopicName,
-    parse_duration_text,
+    FieldName, HttpOrigin, HttpRequestSink, HttpSink, IcebergCatalog, IcebergSink,
+    IcebergStorageBackend, IcebergTableSink, KafkaSink, KafkaTopicSink, Literal, Model,
+    MongoDbCollectionSink, MongoDbSink, MqttSink, MqttTopicSink, MySqlSink, MySqlTableSink,
+    NatsSink, NatsSubjectSink, OtelMappings, OtelMetricsSink, OtelSink, PostgresSink,
+    PostgresTableSink, PulsarSink, PulsarTopicSink, QueueName, RabbitMqQueueSink, RabbitMqSink,
+    RedisPubSubSink, RedisSink, RetryPolicy, RouteConstruction, SchemaName, SentryEventSink,
+    SentrySink, SqsQueueSink, SqsSink, SubjectName, SyslogCollectorSink, SyslogSink, TableName,
+    TopicName, ZeroMqPushSink, ZeroMqSink, parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -284,7 +290,10 @@ impl EmitterStartPlanError {
     fn client_kind_mismatch(sink: &EmitSink, client: &Model) -> Report<Self> {
         Report::new(Self::ClientKindMismatch {
             sink: sink.transport_label(),
-            expected: sink.expected_client_type(),
+            expected: sink
+                .client_connector()
+                .verified("only external sinks resolve client Models")
+                .keyword(),
             found: Self::found_label(client),
             client: sink
                 .client()
@@ -293,11 +302,11 @@ impl EmitterStartPlanError {
         })
     }
 
-    /// How a Model that a client name resolved to reads in a kind mismatch: its client type, or
-    /// its model kind when the name resolved to something other than a client.
+    /// How a Model that a client name resolved to reads in a kind mismatch: the connector it
+    /// configures, or its model kind when the name resolved to something other than a client.
     fn found_label(model: &Model) -> &'static str {
-        match model.client_type_label() {
-            Some(label) => label,
+        match model.connector_kind() {
+            Some(connector) => connector.keyword(),
             None => model.kind().into(),
         }
     }
@@ -558,12 +567,13 @@ single_client_sink_plan! {
     }
 }
 
-/// The OTLP signal an emitter exports, as its connector states it.
-fn otel_signal(signal: &nervix_models::OtelSignal) -> OtelSignal {
-    match signal {
-        nervix_models::OtelSignal::Logs => OtelSignal::Logs,
-        nervix_models::OtelSignal::Traces => OtelSignal::Traces,
-        nervix_models::OtelSignal::Metric(metric) => OtelSignal::Metric(OtelMetric {
+/// The OTLP signal an emitter exports, as its connector states it. The entity of the sink's Model
+/// names the signal, and a metrics entity carries the metric beside it.
+fn otel_signal(sink: &OtelSink) -> OtelSignal {
+    match sink {
+        OtelSink::Logs(_) => OtelSignal::Logs,
+        OtelSink::Traces(_) => OtelSignal::Traces,
+        OtelSink::Metrics(OtelMetricsSink { metric, .. }) => OtelSignal::Metric(OtelMetric {
             name: metric.name.clone(),
             unit: metric.unit.clone(),
             description: metric.description.clone(),
@@ -876,7 +886,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         let sink = emitter.sink.as_ref();
         let mode = &emitter.publishing_mode;
         let retry_policy = Self::decide_retry_policy(mode.retry_policy())?;
-        if let EmitSink::Client { schema } = sink {
+        if let EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })) = sink {
             let EmitterPublishingMode::ClientAck {
                 window,
                 ack_timeout,
@@ -916,9 +926,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         };
         let sink_plan = match (sink, client) {
             (
-                EmitSink::Http {
+                EmitSink::Http(HttpSink::Request(HttpRequestSink {
                     client: expected, ..
-                },
+                })),
                 Model::ClientHttp(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
@@ -933,10 +943,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::Kafka {
+                EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
                     client: expected,
                     topic,
-                },
+                })),
                 Model::ClientKafka(client),
             ) => EmitterSinkPlan::Kafka(KafkaSinkPlan {
                 batch: emitter.batch,
@@ -950,10 +960,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 mode: decide_broker_publishing_mode(sink, mode)?,
             }),
             (
-                EmitSink::Pulsar {
+                EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
                     client: expected,
                     topic,
-                },
+                })),
                 Model::ClientPulsar(client),
             ) => EmitterSinkPlan::Pulsar(PulsarSinkPlan {
                 batch: emitter.batch,
@@ -967,10 +977,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 mode: decide_broker_publishing_mode(sink, mode)?,
             }),
             (
-                EmitSink::RabbitMq {
+                EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
                     client: expected,
                     queue,
-                },
+                })),
                 Model::ClientRabbitMq(client),
             ) => EmitterSinkPlan::RabbitMq(RabbitMqSinkPlan {
                 batch: emitter.batch,
@@ -984,10 +994,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 mode: decide_broker_publishing_mode(sink, mode)?,
             }),
             (
-                EmitSink::Redis {
+                EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
                     client: expected,
                     channel,
-                },
+                })),
                 Model::ClientRedis(client),
             ) => {
                 Self::require_no_ack(sink, mode)?;
@@ -1004,10 +1014,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::Mqtt {
+                EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
                     client: expected,
                     topic,
-                },
+                })),
                 Model::ClientMqtt(client),
             ) => EmitterSinkPlan::Mqtt(MqttSinkPlan {
                 batch: emitter.batch,
@@ -1021,10 +1031,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 mode: decide_mqtt_publishing_mode(sink, mode)?,
             }),
             (
-                EmitSink::Nats {
+                EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
                     client: expected,
                     subject,
-                },
+                })),
                 Model::ClientNats(client),
             ) => EmitterSinkPlan::Nats(NatsSinkPlan {
                 batch: emitter.batch,
@@ -1037,7 +1047,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 subject: subject.clone(),
                 mode: decide_nats_publishing_mode(sink, mode)?,
             }),
-            (EmitSink::ZeroMq { client: expected }, Model::ClientZeroMq(client)) => {
+            (
+                EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client: expected })),
+                Model::ClientZeroMq(client),
+            ) => {
                 Self::require_no_ack(sink, mode)?;
                 EmitterSinkPlan::ZeroMq(ZeroMqSinkPlan {
                     batch: emitter.batch,
@@ -1049,7 +1062,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                 })
             }
-            (EmitSink::Syslog { client: expected }, Model::ClientSyslog(client)) => {
+            (
+                EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client: expected })),
+                Model::ClientSyslog(client),
+            ) => {
                 Self::require_no_ack(sink, mode)?;
                 EmitterSinkPlan::Syslog(SyslogSinkPlan {
                     batch: emitter.batch,
@@ -1062,11 +1078,11 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::Sqs {
+                EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                     client: expected,
                     queue,
                     ..
-                },
+                })),
                 Model::ClientSqs(client),
             ) => EmitterSinkPlan::Sqs(SqsSinkPlan {
                 batch: emitter.batch,
@@ -1079,7 +1095,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 queue: queue.clone(),
                 mode: decide_sqs_publishing_mode(sink, mode)?,
             }),
-            (EmitSink::Sentry { client: expected }, Model::ClientSentry(client)) => {
+            (
+                EmitSink::Sentry(SentrySink::Event(SentryEventSink { client: expected })),
+                Model::ClientSentry(client),
+            ) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::Sentry(SentrySinkPlan {
                     batch: emitter.batch,
@@ -1091,27 +1110,23 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                 })
             }
-            (
-                EmitSink::Otel {
-                    client: expected,
-                    signal,
+            (EmitSink::Otel(otel), Model::ClientOtel(client)) => {
+                Self::require_request_ack(sink, mode)?;
+                let OtelMappings {
                     values,
                     attributes,
                     resource,
                     scope,
-                },
-                Model::ClientOtel(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
+                } = otel.mappings();
                 EmitterSinkPlan::Otel(OtelSinkPlan {
                     batch: emitter.batch,
                     client: EmitterClientSpec::declared(
-                        expected,
+                        otel.client(),
                         &client.name,
                         client.mount.as_ref(),
                         &client.config,
                     )?,
-                    signal: otel_signal(signal),
+                    signal: otel_signal(otel),
                     mapping: MappedValuesPlan::decide(
                         &emitter.name,
                         "OTEL",
@@ -1131,11 +1146,11 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::ClickHouse {
+                EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
                     client: expected,
                     table,
                     values,
-                },
+                })),
                 Model::ClientClickHouse(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
@@ -1157,12 +1172,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::Postgres {
+                EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
                     client: expected,
                     table,
                     values,
                     conflict_action,
-                },
+                })),
                 Model::ClientPostgres(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
@@ -1186,12 +1201,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::MySql {
+                EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
                     client: expected,
                     table,
                     values,
                     conflict_action,
-                },
+                })),
                 Model::ClientMySql(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
@@ -1210,12 +1225,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::MongoDb {
+                EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
                     client: expected,
                     collection,
                     values,
                     conflict_action,
-                },
+                })),
                 Model::ClientMongoDb(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
@@ -1234,7 +1249,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })
             }
             (
-                EmitSink::Iceberg {
+                EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                     backend,
                     client: expected,
                     table,
@@ -1243,7 +1258,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     catalog: IcebergCatalog::Rest { client: catalog },
                     commit_each,
                     max_commit_size,
-                },
+                })),
                 storage,
             ) => {
                 Self::require_request_ack(sink, mode)?;
@@ -1532,8 +1547,8 @@ mod tests {
         CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
         CreateClientPostgres, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-        CreateClientZeroMq, EmitterBatchRequirement, ErrorPolicies, FlushPolicy, ProcessorInputs,
-        RouteConstruction,
+        CreateClientZeroMq, EmitterBatchRequirement, ErrorPolicies, FlushPolicy, OtelLogsSink,
+        ProcessorInputs, RouteConstruction,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -1645,7 +1660,7 @@ mod tests {
     }
 
     fn iceberg_sink(backend: IcebergStorageBackend) -> EmitSink {
-        EmitSink::Iceberg {
+        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
             backend,
             client: named("upstream"),
             table: named("orders"),
@@ -1656,7 +1671,7 @@ mod tests {
             },
             commit_each: "1s".to_string(),
             max_commit_size: "1MiB".to_string(),
-        }
+        }))
     }
 
     fn iceberg_catalog() -> Model {
@@ -1749,11 +1764,11 @@ mod tests {
             let client = || named::<ClientName>("upstream");
             match self {
                 Self::Http => SinkCase {
-                    sink: EmitSink::Http {
+                    sink: EmitSink::Http(HttpSink::Request(HttpRequestSink {
                         client: client(),
                         method: expression("input.method"),
                         path: expression("concat('/orders/', input.id)"),
-                    },
+                    })),
                     mode: request_ack(),
                     client: Model::ClientHttp(CreateClientHttp {
                         name: client(),
@@ -1763,10 +1778,10 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Kafka => SinkCase {
-                    sink: EmitSink::Kafka {
+                    sink: EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
                         client: client(),
                         topic: named("orders"),
-                    },
+                    })),
                     mode: no_ack(),
                     client: Model::ClientKafka(CreateClientKafka {
                         name: client(),
@@ -1776,10 +1791,10 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Pulsar => SinkCase {
-                    sink: EmitSink::Pulsar {
+                    sink: EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
                         client: client(),
                         topic: named("orders"),
-                    },
+                    })),
                     mode: no_ack(),
                     client: Model::ClientPulsar(CreateClientPulsar {
                         name: client(),
@@ -1789,10 +1804,10 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::RabbitMq => SinkCase {
-                    sink: EmitSink::RabbitMq {
+                    sink: EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
                         client: client(),
                         queue: named("orders"),
-                    },
+                    })),
                     mode: no_ack(),
                     client: Model::ClientRabbitMq(CreateClientRabbitMq {
                         name: client(),
@@ -1802,10 +1817,10 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Redis => SinkCase {
-                    sink: EmitSink::Redis {
+                    sink: EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
                         client: client(),
                         channel: named("orders"),
-                    },
+                    })),
                     mode: no_ack(),
                     client: Model::ClientRedis(CreateClientRedis {
                         name: client(),
@@ -1816,10 +1831,10 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Mqtt => SinkCase {
-                    sink: EmitSink::Mqtt {
+                    sink: EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
                         client: client(),
                         topic: named("orders"),
-                    },
+                    })),
                     mode: EmitterPublishingMode::MqttQos0 {
                         retry_policy: retry_policy("100ms", "1s"),
                     },
@@ -1831,10 +1846,10 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Nats => SinkCase {
-                    sink: EmitSink::Nats {
+                    sink: EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
                         client: client(),
                         subject: named("orders"),
-                    },
+                    })),
                     mode: no_ack(),
                     client: Model::ClientNats(CreateClientNats {
                         name: client(),
@@ -1844,7 +1859,7 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::ZeroMq => SinkCase {
-                    sink: EmitSink::ZeroMq { client: client() },
+                    sink: EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client: client() })),
                     mode: no_ack(),
                     client: Model::ClientZeroMq(CreateClientZeroMq {
                         name: client(),
@@ -1854,7 +1869,9 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Syslog => SinkCase {
-                    sink: EmitSink::Syslog { client: client() },
+                    sink: EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
+                        client: client(),
+                    })),
                     mode: no_ack(),
                     client: Model::ClientSyslog(CreateClientSyslog {
                         name: client(),
@@ -1864,11 +1881,11 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Sqs => SinkCase {
-                    sink: EmitSink::Sqs {
+                    sink: EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
                         client: client(),
                         queue: "orders".to_string(),
                         fifo_group: None,
-                    },
+                    })),
                     mode: EmitterPublishingMode::SqsBatch {
                         retry_policy: retry_policy("100ms", "1s"),
                     },
@@ -1880,7 +1897,7 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Sentry => SinkCase {
-                    sink: EmitSink::Sentry { client: client() },
+                    sink: EmitSink::Sentry(SentrySink::Event(SentryEventSink { client: client() })),
                     mode: request_ack(),
                     client: Model::ClientSentry(CreateClientSentry {
                         name: client(),
@@ -1890,14 +1907,15 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Otel => SinkCase {
-                    sink: EmitSink::Otel {
+                    sink: EmitSink::from(OtelLogsSink {
                         client: client(),
-                        signal: nervix_models::OtelSignal::Logs,
-                        values: vec![value_mapping("id", "input.id")],
-                        attributes: Vec::new(),
-                        resource: Vec::new(),
-                        scope: None,
-                    },
+                        mappings: OtelMappings {
+                            values: vec![value_mapping("id", "input.id")],
+                            attributes: Vec::new(),
+                            resource: Vec::new(),
+                            scope: None,
+                        },
+                    }),
                     mode: request_ack(),
                     client: Model::ClientOtel(CreateClientOtel {
                         name: client(),
@@ -1907,11 +1925,11 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::ClickHouse => SinkCase {
-                    sink: EmitSink::ClickHouse {
+                    sink: EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
                         client: client(),
                         table: named("orders"),
                         values: vec![value_mapping("id", "input.id")],
-                    },
+                    })),
                     mode: request_ack(),
                     client: Model::ClientClickHouse(CreateClientClickHouse {
                         name: client(),
@@ -1921,12 +1939,12 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::Postgres => SinkCase {
-                    sink: EmitSink::Postgres {
+                    sink: EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
                         client: client(),
                         table: named("orders"),
                         values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::PostgresConflictAction::None,
-                    },
+                    })),
                     mode: request_ack(),
                     client: Model::ClientPostgres(CreateClientPostgres {
                         name: client(),
@@ -1937,12 +1955,12 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::MySql => SinkCase {
-                    sink: EmitSink::MySql {
+                    sink: EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
                         client: client(),
                         table: named("orders"),
                         values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::MySqlConflictAction::None,
-                    },
+                    })),
                     mode: request_ack(),
                     client: Model::ClientMySql(CreateClientMySql {
                         name: client(),
@@ -1953,12 +1971,12 @@ mod tests {
                     catalog_client: None,
                 },
                 Self::MongoDb => SinkCase {
-                    sink: EmitSink::MongoDb {
+                    sink: EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
                         client: client(),
                         collection: named("orders"),
                         values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::MongoDbConflictAction::None,
-                    },
+                    })),
                     mode: request_ack(),
                     client: Model::ClientMongoDb(CreateClientMongoDb {
                         name: client(),
@@ -2073,16 +2091,15 @@ mod tests {
     #[test]
     fn otel_plan_combines_values_and_attributes_in_declared_order() {
         let mut case = SinkKind::Otel.case();
-        let EmitSink::Otel {
-            attributes,
-            resource,
-            ..
-        } = &mut case.sink
-        else {
-            panic!("the case must be OTEL");
+        let EmitSink::Otel(OtelSink::Logs(OtelLogsSink { mappings, .. })) = &mut case.sink else {
+            panic!("the case must be OTEL logs");
         };
-        attributes.push(value_mapping("customer", "input.customer"));
-        resource.push(value_mapping("service.name", "'orders'"));
+        mappings
+            .attributes
+            .push(value_mapping("customer", "input.customer"));
+        mappings
+            .resource
+            .push(value_mapping("service.name", "'orders'"));
         let plan = case.decide().expect("OTEL mappings should be planned");
         let EmitterSinkPlan::Otel(sink) = plan.sink else {
             panic!("the plan must be OTEL");
@@ -2102,10 +2119,12 @@ mod tests {
     #[test]
     fn otel_resource_requires_a_literal_during_planning() {
         let mut case = SinkKind::Otel.case();
-        let EmitSink::Otel { resource, .. } = &mut case.sink else {
-            panic!("the case must be OTEL");
+        let EmitSink::Otel(OtelSink::Logs(OtelLogsSink { mappings, .. })) = &mut case.sink else {
+            panic!("the case must be OTEL logs");
         };
-        resource.push(value_mapping("service.name", "input.customer"));
+        mappings
+            .resource
+            .push(value_mapping("service.name", "input.customer"));
         let error = case
             .decide()
             .expect_err("resource attributes must be fixed values");
@@ -2132,10 +2151,10 @@ mod tests {
             ),
         ] {
             let mut case = SinkKind::IcebergS3.case();
-            let EmitSink::Iceberg {
+            let EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 commit_each: cadence,
                 ..
-            } = &mut case.sink
+            })) = &mut case.sink
             else {
                 panic!("the case must be Iceberg");
             };
@@ -2161,9 +2180,9 @@ mod tests {
     #[test]
     fn iceberg_commit_limits_are_parsed_during_planning() {
         let mut case = SinkKind::IcebergS3.case();
-        let EmitSink::Iceberg {
+        let EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
             max_commit_size, ..
-        } = &mut case.sink
+        })) = &mut case.sink
         else {
             panic!("the case must be Iceberg");
         };

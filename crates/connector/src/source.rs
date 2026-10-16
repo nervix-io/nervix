@@ -5,8 +5,8 @@
 //! - **Owns.** The typed source plan, broker and paced-polling connector traits, source messages,
 //!   acknowledgement policies, lifecycle operations, typed source failures, and the opaque host
 //!   handle through which a source delivers messages and reports lifecycle state.
-//! - **Depends on.** Typed ingest metadata and timestamps, `error-stack`, and Tokio's monotonic
-//!   clock.
+//! - **Depends on.** Typed ingest metadata, the vocabulary's metadata scopes and timestamps,
+//!   `error-stack`, and Tokio's monotonic clock.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
@@ -26,19 +26,11 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
-use nervix_models::Timestamp;
+use nervix_models::{PositionClass, SourceMetadataScope, Timestamp};
 use nervix_primitives::time::Instant;
 use thiserror::Error;
 
 use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
-
-/// The metadata namespace a source message makes available to ingest expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceMetadataScope {
-    Headers,
-    Kafka,
-    Syslog,
-}
 
 /// The acknowledgement behavior a source transport supports for the selected plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +48,7 @@ pub struct SourceCapabilities {
     supports_quiesce: bool,
     instances: NonZeroU64,
     acknowledgement: SourceAcknowledgementSupport,
+    position_class: PositionClass,
 }
 
 impl SourceCapabilities {
@@ -65,6 +58,7 @@ impl SourceCapabilities {
         supports_quiesce: bool,
         instances: NonZeroU64,
         acknowledgement: SourceAcknowledgementSupport,
+        position_class: PositionClass,
     ) -> Self {
         Self {
             reads_headers,
@@ -72,6 +66,7 @@ impl SourceCapabilities {
             supports_quiesce,
             instances,
             acknowledgement,
+            position_class,
         }
     }
 
@@ -93,6 +88,26 @@ impl SourceCapabilities {
 
     pub fn acknowledgement(self) -> SourceAcknowledgementSupport {
         self.acknowledgement
+    }
+
+    /// What the source's positions mean once the connection that delivered them is gone, as its
+    /// entity declares.
+    ///
+    /// The host reads it to decide, once, what to do with an acknowledgement or a rejection a
+    /// broker source could not complete:
+    ///
+    /// - [`PositionClass::Replayable`]: the host suspends and resumes the source, then retries the
+    ///   same rejection before it reads another batch. The retried rejection never depends on a
+    ///   poll, because the source can seek to its positions on any connection.
+    /// - [`PositionClass::BrokerRedelivered`]: the host suspends and resumes the source, then
+    ///   discards the pending positions and counts them as transport redeliveries. The broker
+    ///   redelivers every delivery the lost connection did not acknowledge, so nothing is retried
+    ///   against a connection that no longer exists. An acknowledgement that was in flight when
+    ///   the connection died is treated the same way, so delivery is at least once.
+    /// - [`PositionClass::None`]: nothing is pending, so the host keeps no position and reads
+    ///   again after its retry delay.
+    pub fn position_class(self) -> PositionClass {
+        self.position_class
     }
 }
 
@@ -264,6 +279,18 @@ pub trait BrokerSourceConnector: SourceConnector {
         request: SourceBatchRequest,
     ) -> SourceResult<SourceBatch<Self::Message>>;
 
+    /// Settles `positions` as processed on the transport.
+    ///
+    /// Returns once the transport has confirmed them as far as the source's entity declares in its
+    /// [`AcknowledgementConfirmation`](nervix_models::AcknowledgementConfirmation): the broker
+    /// answered the acknowledgement or the commit, or, where the protocol has no answer, the
+    /// acknowledgement was written to the connection. A source that returns before that declares
+    /// so rather than reporting a confirmation it did not get. A confirmation that fails returns
+    /// [`SourceError::Acknowledge`]: the host shows it as the ingestor's transient status and
+    /// rejects the positions, which the source's [`PositionClass`] then handles.
+    ///
+    /// Until this returns the host reports no progress for the positions: drains and ownership
+    /// handoffs keep waiting for them, and the ingestor's transient status stays as it was.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
 
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
@@ -299,23 +326,10 @@ pub trait PacedSourceConnector: SourceConnector {
     async fn poll(&mut self, scheduled_at: Timestamp) -> SourceResult<SourcePoll>;
 }
 
-/// Whether the host should attach one ACK root to every accepted source message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceIntakeMode {
-    Unacknowledged,
-    Acknowledged,
-}
-
 /// One borrowed source message crossing into host-owned decoding and dispatch.
 pub struct SourceIntakeMessage<'a> {
     pub payload: &'a [u8],
     pub metadata: IngestMetadataRow<'a>,
-}
-
-/// One source batch crossing the connector boundary once.
-pub struct SourceIntakeBatch<'a> {
-    pub messages: Vec<SourceIntakeMessage<'a>>,
-    pub mode: SourceIntakeMode,
 }
 
 /// Why host-owned source intake could not accept a batch.
@@ -341,7 +355,7 @@ pub enum SourceAcknowledgementOutcome {
     Shutdown,
 }
 
-/// The host implementation behind an opaque source acknowledgement.
+/// The host implementation behind an opaque batch acknowledgement.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -351,30 +365,32 @@ pub enum SourceAcknowledgementOutcome {
                   acknowledgements"
     )
 )]
-pub trait SourceAcknowledgementServices: Send + 'static {
-    async fn wait(self: Box<Self>, timeout: Duration) -> SourceAcknowledgementOutcome;
+pub trait SourceBatchAcknowledgementServices: Send + 'static {
+    /// Waits until every message of the batch has been acknowledged through the graph, until one
+    /// of them failed, or until the host stops. `timeout` bounds how long the acknowledgement of
+    /// one message may stay silent.
+    async fn wait(&mut self, timeout: Duration) -> SourceAcknowledgementOutcome;
 }
 
-/// One acknowledgement the host returns for one accepted source message.
-pub struct SourceAcknowledgement {
-    services: Box<dyn SourceAcknowledgementServices>,
+/// The acknowledgement the host returns for one acknowledged intake batch.
+///
+/// The host counts the batch's work as outstanding, which drains and ownership handoffs wait for,
+/// until this handle drops, also once its wait has returned. The loop therefore keeps it until the
+/// source has confirmed or rejected the batch's positions on its transport.
+pub struct SourceBatchAcknowledgement {
+    services: Box<dyn SourceBatchAcknowledgementServices>,
 }
 
-impl SourceAcknowledgement {
-    pub fn new(services: impl SourceAcknowledgementServices) -> Self {
+impl SourceBatchAcknowledgement {
+    pub fn new(services: impl SourceBatchAcknowledgementServices) -> Self {
         Self {
             services: Box::new(services),
         }
     }
 
-    pub async fn wait(self, timeout: Duration) -> SourceAcknowledgementOutcome {
+    pub async fn wait(&mut self, timeout: Duration) -> SourceAcknowledgementOutcome {
         self.services.wait(timeout).await
     }
-}
-
-/// Acknowledgements returned in the same order as an acknowledged intake batch.
-pub struct SourceIntakeOutcome {
-    pub acknowledgements: Vec<SourceAcknowledgement>,
 }
 
 /// Every runtime service exposed through one source host handle.
@@ -388,10 +404,18 @@ pub struct SourceIntakeOutcome {
     )
 )]
 pub trait SourceHostServices: Send + 'static {
-    async fn intake(
+    /// Takes in a batch whose positions nothing downstream acknowledges.
+    async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome>;
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()>;
+
+    /// Takes in a batch whose positions the source settles once every message has been
+    /// acknowledged through the graph, and returns the acknowledgement the loop waits on.
+    async fn intake_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement>;
 
     async fn flush(&mut self) -> SourceIntakeResult<()>;
     async fn replay_buffered(&mut self) -> SourceIntakeResult<bool>;
@@ -406,6 +430,11 @@ pub trait SourceHostServices: Send + 'static {
     fn clear_transient_error(&self);
     fn report_error(&self, message: String);
     fn handle_ack_failure(&self, reason: String);
+    /// Counts positions the host discarded after a reconnect because the broker redelivers them.
+    fn record_transport_redeliveries(&self, positions: usize);
+    /// Reports that the source stopped before its transport confirmed `positions` it had read,
+    /// which the transport presents again by its own redelivery contract.
+    fn record_unconfirmed_stop(&self, positions: usize);
 }
 
 /// Task-local host services a source loop drives without exposing a runtime type.
@@ -420,11 +449,18 @@ impl SourceHost {
         }
     }
 
-    pub async fn intake(
+    pub async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
-        self.services.intake(batch).await
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()> {
+        self.services.intake_unacknowledged(messages).await
+    }
+
+    pub async fn intake_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
+        self.services.intake_acknowledged(messages).await
     }
 
     pub async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -477,5 +513,13 @@ impl SourceHost {
 
     pub fn handle_ack_failure(&self, reason: String) {
         self.services.handle_ack_failure(reason);
+    }
+
+    pub fn record_transport_redeliveries(&self, positions: usize) {
+        self.services.record_transport_redeliveries(positions);
+    }
+
+    pub fn record_unconfirmed_stop(&self, positions: usize) {
+        self.services.record_unconfirmed_stop(positions);
     }
 }

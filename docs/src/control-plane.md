@@ -200,11 +200,12 @@ valid retroactively.
 
 Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
-`ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`,
-`ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry mutation: all operations are
-evaluated in written order against one candidate model map, the complete domain graph is
-revalidated, and one atomic storage batch persists the base-to-final result. Drop/recreate and
-multi-ALTER sequences are therefore classified jointly; cancelling changes can produce a no-op.
+`ALTER REORDERER`, `ALTER EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
+`ALTER GENERATOR`, `ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry
+mutation: all operations are evaluated in written order against one candidate model map, the
+complete domain graph is revalidated, and one atomic storage batch persists the base-to-final
+result. Drop/recreate and multi-ALTER sequences are therefore classified jointly; cancelling
+changes can produce a no-op.
 A failure writes nothing and does
 not swap the active registry state. This supports coordinated wire-schema, internal-schema, codec,
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
@@ -366,11 +367,12 @@ rule claims, applies rank resolution, rejects equal-rank policy conflicts, and f
 and leaves the prior models and schedule active.
 
 Schedule publication preserves the existing primary and replicas of every single-owner ingestor,
-client ingestors included, while all cluster nodes in that assignment are live. Outbound WebSocket-client ingestors follow
-this rule along with the other client sources, so unrelated graph changes, cluster-node joins or
-uncordons, and soft placement changes do not restart their external sessions. Endpoint-source and
-Syslog ingestors are the only ingestors whose assignments follow live membership, because their
-listeners execute on every cluster node.
+client ingestors included, while all cluster nodes in that assignment are live.
+`WEBSOCKETS CONNECTION` ingestors follow this rule along with the other client sources, so
+unrelated graph changes, cluster-node joins or uncordons, and soft placement changes do not restart
+their external sessions. `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors
+are the only ingestors whose assignments follow live membership, because their listeners execute
+on every cluster node.
 
 Every relay is also scheduled with one primary owner. Ordinary relays have no replicas.
 Materialized relays use the same relay schedule entry: additional assigned nodes are replicas of
@@ -714,14 +716,14 @@ gives each background task at most two seconds to stop, waits for work that sess
 started until the shutdown deadline and cancels whatever still runs then, and finally stops the
 runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
 timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
-source with external acknowledgements redelivers it after restart, and a `NO_ACK` source loses it. A
-sink that stays unavailable therefore holds the drain until its timeout. Pending `REQUIRED WAIT`
-records do not hold the drain open; every force flush retries them against the state that is
-present, and teardown negatively acknowledges whatever still waits. Payloads that other live nodes
-publish into this node's relays are admitted work as well, so an owner that keeps publishing extends
-the drain until its timeout. When every node terminates at once, each node completes its own
-admitted work within its own drain timeout, and work that reaches a peer after that peer finished
-its drain is negatively acknowledged.
+source with external acknowledgements redelivers it after restart, and a `MODE NO ACK` source loses
+it. A sink that stays unavailable therefore holds the drain until its timeout. Pending
+`REQUIRED WAIT` records do not hold the drain open; every force flush retries them against the
+state that is present, and teardown negatively acknowledges whatever still waits. Payloads that
+other live nodes publish into this node's relays are admitted work as well, so an owner that keeps
+publishing extends the drain until its timeout. When every node terminates at once, each node
+completes its own admitted work within its own drain timeout, and work that reaches a peer after
+that peer finished its drain is negatively acknowledged.
 
 `DROP NODE` records the stopped process incarnation before removing its Raft membership. It reads
 the newest identity from both live gossip and the failure detector's dead process identities, so a

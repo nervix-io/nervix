@@ -73,6 +73,10 @@ through requests, snapshots, and outcomes.
 
 ## Build Modes
 
+[Execution Primitives](./execution-primitives.md) owns backend and target selection, permission
+contracts and the difference between compile-time probes and actual execution evidence. This
+chapter owns what the Turmoil hosts simulate, the faults and the completed scenario evidence.
+
 The simulation is its own build. Its scheduler replaces the real network, so it can never share a
 compilation with the production or Shuttle builds.
 
@@ -398,7 +402,7 @@ itself.
 | `just test-turmoil-replay <record>` | Exactly the recorded package, target, test, and case, once, with the recorded inputs, in a fresh process | Exits nonzero when the replay fails, including when it reproduces the record, and when no case in the recorded test matches |
 | `just test-turmoil-replay-check` | Injects a failure at five simulated seconds into the partition-before-connect case, requires exactly one record, and requires its replay to report `turmoil replay: reproduced the recorded outcome and trace` | Fails when any of those does not hold |
 | `just test-turmoil-sweep [first] [count] [budget_seconds]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes | A real-time budget of 1,500 seconds by default; exits `124` when it expires, and fails when the sweep executes no test |
-| `just coverage-turmoil <output>` | The same tests as `just test-turmoil` under `cargo llvm-cov`, writing an LCOV report | None beyond the per-run bounds |
+| `just coverage-turmoil <output>` | The canonical `just test-turmoil` suite through the native coverage collector, copying a complete product-source LCOV report to `output` and retaining its collection evidence | The same per-run bounds, inventory validation and 480-second post-build suite budget as `just test-turmoil`; failed or interrupted collection cannot produce a complete report |
 
 The replay prints a verdict for every run:
 
@@ -492,10 +496,29 @@ committed seed of that case.
 CI runs the simulation as a job of its own, `turmoil`, only for a pull request labeled
 `turmoil`, beside the default tests and the `shuttle` and `loom` jobs. Its build enables the
 `turmoil` feature and `tokio_unstable`, so it shares no compilation with them, and a failed
-case's record is its own artifact. The job runs `just test-turmoil`, then
-`just test-turmoil-replay-check`, and on failure uploads `target/turmoil-failures` as the
-`turmoil-failures` artifact. The coverage job does not run the simulation; `just coverage-turmoil`
-measures its lines locally.
+case's record is its own artifact. The job runs `just coverage-native-extras test-turmoil`,
+which executes the canonical gating suite once under LLVM source instrumentation, then runs
+`just test-turmoil-replay-check` independently. Replay qualification contributes no counters.
+The instrumented build lives under `target/native-coverage-build-turmoil`; its failure records
+and suite logs, together with the ordinary replay's `target/turmoil-failures`, are uploaded as
+the `turmoil-failures` artifact when the job fails.
+
+The `coverage-turmoil` artifact retains the product-source report, `completion.json`,
+`executions.jsonl` and `export.log` from the collection's own attempt. Only a report beside a
+`complete` record establishes successful coverage; a failed or interrupted attempt retains its
+failure evidence. Each fresh simulation process inherits `LLVM_PROFILE_FILE` with `%p-%m`,
+so its counters are merged with the parent and the other attempts rather than overwritten.
+The exporter matches every raw profile to a retained executable by build ID and includes
+Turmoil-selected product paths in primitives, execution and interconnect. It excludes dependencies,
+generated files and harness files below `tests`, `examples` or `benches` directories.
+
+After the suite and replay qualification pass, the job publishes an advisory **Turmoil patch
+coverage** comment through `just coverage-patch --scope turmoil`. Its marker is independent of
+the ordinary coverage comment, and publication checks that the PR is open at the tested head.
+A fast simulation run cannot replace the ordinary report, and a failed collection never supplies
+a successful report. Coverage percentages and comment failures remain advisory; the simulation,
+replay and collection verdicts remain mandatory. The ordinary coverage/CRAP job uses ordinary
+reports only. `just coverage-turmoil <output>` uses this same collector for local inspection.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
 adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking. It installs `flatc`, because

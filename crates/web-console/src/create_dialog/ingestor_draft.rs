@@ -301,8 +301,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         BinaryOperator, CodecName, Expression, FieldName, FieldReference, FieldScope,
-        GeneralErrorPolicy, IngestQuiesceOverflow, IngestSourceKind, Inheritance, Literal,
-        ModelKind, ModelName, NodeRef,
+        GeneralErrorPolicy, HttpSourceEntity, IngestQuiesceOverflow, IngestSourceKind, Inheritance,
+        Literal, ModelKind, ModelName, NodeRef,
     };
 
     use super::{IngestorDraft, TimestampDraft};
@@ -321,7 +321,9 @@ mod tests {
             name: "incoming".into(),
             ..Default::default()
         };
-        draft.source.choose_kind(IngestSourceKind::Endpoint);
+        draft
+            .source
+            .choose_kind(IngestSourceKind::Http(HttpSourceEntity::Endpoint));
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));

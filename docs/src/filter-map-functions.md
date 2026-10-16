@@ -855,13 +855,13 @@ another instant instead.
 
 Header names may be dynamic `STRING` expressions, and a name matches exactly, letter case included,
 the names the connector recorded. A null name reads as absent. Header reads are available on
-Endpoint (HTTP and WebSocket), HTTP client, Kafka, NATS, Pulsar, RabbitMQ, and SQS ingestors, in
-their `FILTER WHERE` and route construction, and in an error route's construction for a failure on
-such an ingestor. Header writes are available on HTTP, Kafka, NATS, Pulsar, RabbitMQ, and SQS
-emitters. Anywhere else a statement is rejected when it is validated, with a message such as
-`function 'read_header' is only available to ingestors whose connector supports headers`, `MQTT
-ingestors do not support read_header or read_headers`, or `MQTT emitters do not support
-write_header`.
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `HTTP REQUEST`, `KAFKA TOPIC`, `NATS SUBJECT`,
+`PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
+construction, and in an error route's construction for a failure on such an ingestor. Header writes
+are available on HTTP, Kafka, NATS, Pulsar, RabbitMQ, and SQS emitters. Anywhere else a statement
+is rejected when it is validated, with a message such as `function 'read_header' is only available
+to ingestors whose connector supports headers`, `MQTT TOPIC ingestors do not support read_header or
+read_headers`, or `MQTT emitters do not support write_header`.
 
 `write_header` arguments must be statically non-null `STRING` expressions, and a sensitive argument
 requires `leak_sensitive(...)`. They are evaluated after payload construction and route filtering.
@@ -2212,8 +2212,8 @@ CREATE ENDPOINT access_ingress
   PATH '/access'
   TYPE HTTP;
 
-CREATE INGESTOR access_intake
-  FROM ENDPOINT access_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR access_intake
+  FROM access_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING access_codec
   TO access_events
     INHERIT ALL

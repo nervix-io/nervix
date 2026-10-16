@@ -9,6 +9,7 @@ version.workspace = true
 workspace = true
 
 [features]
+benchmarks = []
 default = []
 shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 testing = []
@@ -33,3 +34,12 @@ rdkafka = { workspace = true, features = [
 ] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+harness = false
+name = "partition_offsets"
+required-features = ["benchmarks"]

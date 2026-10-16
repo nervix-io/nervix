@@ -34,25 +34,26 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v1 | 128 | 4096 bytes |
 | `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
 | `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v1 | 128 | 2048 bytes |
+| `client-upload-archives` | `nervix-client-core` complete directory tree and deterministic archive bytes against an independent tar decoder | empty directories, nested and GNU long paths, arbitrary file bytes and block boundaries, v1 | 128 | 4096 bytes |
 | `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |
 | `client-row-views` | `nervix-client-wire` complete retained Row views | all scalar cells, nested vectors, fixed arrays, nulls, redaction, branches and float bits, v1 | 128 | 512 bytes |
 | `client-arbitrary-frames` | `nervix-client-wire` typed verification and decoding within budgets | arbitrary bytes at all eight frame roots, v1 | 256 | 16385 bytes |
 | `client-frame-corruption` | `nervix-client-wire` typed verification and decoding within budgets | current frame truncation, bit, offset, length and size mutations, v1 | 256 | 64 bytes |
 | `client-discriminators` | `nervix-client-wire` validate discriminants before accessing union members | all byte-valued request tags, v1 | 256 | 64 bytes |
-| `client-arrow-rows` | `nervix-server` Arrow logical values and validity against production Row views | scalar columns, nullable and nested lists, arrays, selected rows, concrete branches, frame splitting and explicit redaction, v1 | 128 | 512 bytes |
-| `client-arrow-selection` | `nervix-server` whole-input typed rejection without partial output | invalid row bounds, order, duplicates and branch alignment, v1 | 128 | 512 bytes |
+| `client-arrow-rows` | `nervix-server` Arrow logical values and validity against production Row views | scalar columns, nullable and nested lists, arrays, selected rows, concrete branches with every supported key field type, frame splitting and explicit redaction, v2 | 128 | 512 bytes |
+| `client-arrow-selection` | `nervix-server` whole-input typed rejection without partial output | invalid row bounds, order, duplicates and branch alignment, v2 | 128 | 512 bytes |
 | `client-binding-rows` | `nervix-client-ffi` complete column values and retained frame ownership | native scalar bits, states, string/bytes offsets, branch keys and nested cells, v1 | 128 | 512 bytes |
 | `client-ffi-field-descriptors` | `nervix-client-ffi` field descriptor ABI equality both ways: a host's level-by-level description becomes the complete original field, and the field and level accessors read back its canonical description as the header's `nx_type` values | every scalar inside 0 to 32 `LIST` and `FIXED_LIST` levels of 1 to `INT32_MAX` elements, either nullability and sensitivity, names from the whole name rule spelled in any letter case, v1 | 256 | 2048 bytes |
 | `client-ffi-field-descriptors-malformed` | `nervix-client-ffi` invalid-argument refusal that leaves the field list as the accepted calls built it | unknown types, lengths on scalar and `LIST` levels, empty and oversized `FIXED_LIST` levels, a 33rd list, refused names, elements without an open field, fields before the open one's element, an open last field, and reads past a field's last level or past the last field, v1 | 256 | 4096 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
-| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v6 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v7 | 128 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v4 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v4 | 256 | 2048 bytes |
+| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v7 | 256 | 2048 bytes |
+| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v8 | 128 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v5 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v5 | 256 | 2048 bytes |
 | `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v3 | 256 | 512 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v4 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v4 | 256 | 4096 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v5 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v5 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -67,10 +68,10 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v4 | 256 | 4096 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v5 | 256 | 4096 bytes |
 | `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v1 | 256 | 16 bytes |
 | `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
-| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v2 | 256 | 4096 bytes |
+| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v3 | 256 | 4096 bytes |
 | `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
 | `backup-record-manifest` | `nervix-backup` complete record and manifest encode/decode equality | all eleven current record kinds, lifecycle/catalog variants, every cut, full-width counters and ordered metadata, v4 | 256 | 4096 bytes |
 | `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest/materialized descriptors and identities, empty/multi-partition offsets and ordered branch lifecycle with bit-exact nested fields, v3 | 256 | 4096 bytes |
@@ -85,14 +86,18 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `console-pending-backups` | `nervix-web-console` pending backup entry and tab storage round-trip equality, with forgetting only by its own reference | any execution reference and query text, no domain or one in any spelling the name rule admits, recorded over an earlier record, v1 | 256 | 1024 bytes |
 | `console-pending-backups-malformed` | `nervix-web-console` exact read-back or refusal of a tab's stored record, which a refusal forgets while other entries stay | missing, canonical, edited, upper-cased and drawn reference, query and domain entries beside an unrelated entry, v1 | 256 | 1024 bytes |
 | `console-restore-drafts` | `nervix-web-console` restore draft lowering equality and existing-user option text | every `RESTORE` scope, source, mode, runtime state and lifecycle, domains in any spelling the name rule admits, every policy, v1 | 256 | 512 bytes |
-| `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
+| `backup-capture-wire` | `nervix-interconnect` complete capture/drain/inventory request and response equality and fetch request equality through each request's declared class limit | every drain action and counter, every success/refusal, empty and ordered inventories of all twelve kinds, zero/full-width lengths and counters, arbitrary digests and bounded Unicode paths, v1 | 256 | 1024 bytes |
+| `backup-capture-wire-malformed` | `nervix-interconnect` typed decode refusal or complete stable re-encoding, with management/bulk reservations released | truncated, bit-flipped, overwritten and arbitrary capture/drain/inventory request and response bytes and fetch request bytes, v1 | 256 | 1024 bytes |
+| `backup-section-mapping` | `nervix-server` total and injective capture-kind/archive-content mapping and distinct validated archive paths | all twelve section kinds over generated identities, group ordinals and branched/unbranched fingerprints, v1 | 256 | 128 bytes |
+| `restore-installation-wire` | `nervix-interconnect` complete installation request and success/refusal wire equality through the bulk class limit | all actions, authority, all eight runtime state kinds branched and unbranched, zero/full-width lengths, arbitrary digests, payload and inventory, v2 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
-| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v1 | 128 | 65536 bytes |
-| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v1 | 256 | 65600 bytes |
-| `consensus-raft-records` | `nervix-consensus` complete Raft record equality through the storage codec, and keys that name their position or section | votes, log positions, entries of every command, state metadata, snapshot manifests and sections, v1 | 256 | 4096 bytes |
-| `consensus-raft-records-malformed` | `nervix-consensus` typed storage failure or a value that stores back to the same record | arbitrary bytes as every Raft record, log key and section key, v1 | 256 | 4096 bytes |
-| `registry-stored-models` | `nervix-server` complete Model equality through listing and keyed reads of a reopened registry, from its journal and from flushed tables | Models of every family in domains and with names across the whole name rule, v1 | 64 | 4096 bytes |
-| `registry-stored-models-corruption` | `nervix-server` typed registry storage failure or Models whose own keys are exactly the stored keys | flipped, truncated, extended, recased, extended-key, copied and unknown records, v1 | 128 | 4096 bytes |
+| `restore-staging-kept-measurement` | `nervix-server` the measurement of unpublished restore staging a store kept equals one read afresh from every staged entry, after every step | histories of up to ten steps over two domains, two entities and three generations: staging of up to two whole chunks and a partial one that completes, fails its digest or is cut short, retried staging, sweeps that retain or reclaim, publication and reopening, v1 | 96 | 96 bytes |
+| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v2 | 128 | 65536 bytes |
+| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v2 | 256 | 65600 bytes |
+| `consensus-raft-records` | `nervix-consensus` complete Raft record equality through the storage codec, and keys that name their position or section | votes, log positions, entries of every command, state metadata, snapshot manifests and sections, v2 | 256 | 4096 bytes |
+| `consensus-raft-records-malformed` | `nervix-consensus` typed storage failure or a value that stores back to the same record | arbitrary bytes as every Raft record, log key and section key, v2 | 256 | 4096 bytes |
+| `registry-stored-models` | `nervix-server` complete Model equality through listing and keyed reads of a reopened registry, from its journal and from flushed tables | Models of every family in domains and with names across the whole name rule, v2 | 64 | 4096 bytes |
+| `registry-stored-models-corruption` | `nervix-server` typed registry storage failure or Models whose own keys are exactly the stored keys | flipped, truncated, extended, recased, extended-key, copied and unknown records, v2 | 128 | 4096 bytes |
 | `runtime-state-keys` | `nervix-server` exact decoded placement projection, and prefixes, index and chunk keys that reach no other placement | every state kind with schema, generation, Model kind and name and branch key, names across the whole name rule, v1 | 256 | 2048 bytes |
 | `runtime-state-keys-malformed` | `nervix-server` typed storage failure or a placement whose own key is the stored key | damaged and arbitrary keys, v1 | 256 | 2048 bytes |
 | `runtime-state-chunk-keys-malformed` | `nervix-server` typed chunk, storage-format or decoding failure, or a segment set whose placement key decodes canonically and whose chunk prefix and offset respell the key | damaged and arbitrary chunk keys, v1 | 256 | 2048 bytes |
@@ -132,18 +137,18 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `wasm-generated-pools-malformed` | `nervix-server` a typed generated-IPC or batch-count defect, or one batch of unnamed columns that writes and decodes back to itself | truncated, flipped, overwritten, shifted, trailing and arbitrary pools, v1 | 256 | 2048 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
 | `simd-constant-division` | `nervix-simd-kernels` constant quotients and remainders equal checked operations at every SIMD level | all integer widths, divisors, scalar fallback and tails, with full-range signed overflow, v1 | 256 | 128 bytes |
-| `deadlock-evidence` | `nervix-deadlock` complete evidence encode/decode equality | every finding variant, cycles up to the thread bound with omitted threads, texts cut inside multi-byte characters, absent context and extreme identities and times, v1 | 256 | 4096 bytes |
+| `deadlock-evidence` | `nervix-deadlock` complete evidence encode/decode equality | every finding and review variant, complete shared-reader cycles, cycles up to the thread bound with omitted threads, texts cut inside multi-byte characters, absent context and extreme identities and times, v4 | 256 | 4096 bytes |
 | `deadlock-evidence-malformed` | `nervix-deadlock` arbitrary bytes, bare or behind a valid evidence header, fail typed or decode within every bound to evidence that encodes back to itself | arbitrary bytes, v1 | 256 | 1024 bytes |
 | `deadlock-evidence-bounds` | `nervix-deadlock` a valid encoding that breaks one bound is refused as out of bounds | one broken bound of findings, cycle threads, omitted threads, identities, lost findings or kept texts, v1 | 256 | 1024 bytes |
-| `deadlock-evidence-summary` | `nervix-deadlock` the summary a qualification prints counts each finding once by kind, keeps repeated deliveries apart from lost findings, agrees with qualification, and names every count once | every finding variant in every scope, reviewed and unreviewed cycles, extreme repetition and loss counts, v1 | 256 | 4096 bytes |
+| `deadlock-evidence-summary` | `nervix-deadlock` the summary a qualification prints counts each finding once by kind, keeps repeated deliveries apart from lost findings, agrees with qualification, and names every count once | every finding variant in every scope, reviewed and unreviewed cycles, extreme repetition and loss counts, v3 | 256 | 4096 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 | `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
 | `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
 | `replica-progress` | `nervix-checkpoint-replication` replica reports, offers and announcer steps against the monotonic quorum contract: each replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone | bounded report, offer, step, cancel and retire sequences over four replicas and sixteen revisions, v1 | 256 | 256 bytes |
 | `replica-catch-up` | `nervix-server` an owner's catalog of branch checkpoints and a replica's catch-up rounds against convergence: whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, the replica holds every branch its lifecycle names at the owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form and encoding unchanged | bounded start, publish, stop, catalog replacement, naming, eviction, lifecycle, announcement and round sequences over four branches, unbranched work included, v1 | 256 | 256 bytes |
-| `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
+| `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | empty and multi-item findings, arguments and audit candidates; all current audit patterns, escaped Unicode text, full-width spans and counts, expansions and completion metadata, v3 | 256 | 32 bytes |
 | `typed-source-contract` | `nervix-lint-report` complete source-contract parsing equality | bounded current execution-contract annotations, v1 | 256 | 32 bytes |
-| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, with complete current reports, v3 | 256 | 32 bytes |
 | `typed-source-syntax` | `nervix-lint-report` exact cast/field counts and complete source/site representation equality | bounded inactive Rust casts, testing-gated tuple fields, raw identifiers and Unicode comments with exact locations, v1 | 256 | 32 bytes |
 | `expiry-map-operations` | `nervix-expiry-map` operation sequences against an `IndexMap` reference: iteration order, lengths, oldest entry, lookups, shared key allocations and one drop per value | up to 480 weighted insert, shared insert, keyed and oldest removal, lookup, shared-key copy and clear steps over 96 keys, v1 | 256 | 1024 bytes |
 | `vm-decimal-rounding-floats` | `nervix-vm` `round(value, digits)` over `F64` and `F32` columns against the exact decimal expansion, the identity on values holding no more digits, symmetry about zero and lane null and failure classification | any bit pattern, values rounded within their own digits, decimal-looking values and exact binary ties, counts near, within and beyond the bound, v1 | 256 | 1024 bytes |
@@ -155,9 +160,11 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `simd-elapsed-histograms` | `nervix-simd-kernels` layout refusals against an integer reference, and latest instant, totals and buckets at every level against HdrHistogram | units from a nanosecond to any 32-bit count, highest units to 2^31, up to six figures, instants before, beside half units and after the reference, v1 | 256 | 4096 bytes |
 | `simd-flag-packing` | `nervix-simd-kernels` packed flag words at every level against scalar shifts, appended to held words | runs of up to 600 flag bytes of any density, v1 | 256 | 2048 bytes |
 | `simd-window-runs` | `nervix-simd-kernels` validity, boolean, sum, extreme, non-finite and reverse folds against scalar folds at every level; compensated sums exact for integers and within their bound of an exact sum for floats | up to 300 values read at every width and as floats, unaligned validity and boolean bitmaps, v1 | 256 | 4096 bytes |
+| `simd-window-moments` | `nervix-simd-kernels` means, M2 and paired cross moments against exact addition/product references, and exact histogram placement | up to 128 finite paired values, independent sliced null masks, constant overflow-scale runs, edges and clamps, v1 | 256 | 4096 bytes |
 | `columnar-json-rows` | `nervix-columnar-json` written rows against an independent rendering of their logical values and the first refused null | every supported scalar, list, fixed-size and nested list column, sliced, every null policy and number and bytes encoding, v1 | 256 | 8192 bytes |
 | `bounded-write-limits` | `nervix-bounded-write` whole writes within the limit, capacity within it, and the outcome classification against a reference of the rule | writes, encoder failures and writing on after a refusal under limits of 1 to 1,021 bytes, v1 | 256 | 1024 bytes |
 | `connector-row-request-division` | `nervix-connector` row request division against the documented halving rule, both limits and the measurement bound | declared and native row and byte limits, up to 160 rows, measures that grow and shrink with a candidate, v1 | 256 | 1024 bytes |
+| `connector-confirmation-window` | `nervix-connector` confirmation window outcomes, end instant and in-flight bound against a reference model of the documented window rule, so no record confirmed before the publish ends is left unresolved | `MAX` one to six, `ACK TIMEOUT` one to 40 ms, up to 24 records refused at hand-over or answered confirmed, refused or failed within, at, past or never by their deadlines, pauses between hand-overs and a driver failure, on a paused clock, v1 | 256 | 512 bytes |
 | `emitter-batch-subdivision` | `nervix-server` batch candidates against the documented rule, message limit, compatibility and encoding bound | up to 96 members in three compatibility classes, failing containers, encodings that grow and shrink, v1 | 256 | 1024 bytes |
 | `emitter-batch-packing` | `nervix-server` packed payloads and rejected rows against the documented packing of exact member encodings and container framing | generated schemaful codecs and rows in carriers across two relays, three branches, three envelopes and seals, `MAX SIZE` from below one member's container to above the whole run's, v1 | 256 | 4096 bytes |
 | `codec-bounded-encodings` | `nervix-server` bounded row, member and container encodings against the unbounded bytes, and container framing | generated schemaful codecs and batches under limits short of, at, past and around each encoding, and containers of 24, 64 and 256 repeated members where a count's encoding grows, v1 | 256 | 4096 bytes |
@@ -166,6 +173,9 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `sqs-batch-requests` | `nervix-connector-sqs` measured record sizes, refusals above 256 KiB, and batch requests within every limit, ended only by a limit | small and near-limit bodies of one- to four-byte characters, attributes and FIFO groups, v1 | 256 | 1024 bytes |
 | `mqtt-publish-packets` | `nervix-connector-mqtt` measured PUBLISH sizes against the packet the client writes, the protocol's largest packet and the broker maximum | topics up to 128 bytes, every quality of service, payloads beside every Remaining Length width and the protocol limit, v1 | 256 | 512 bytes |
 | `postgres-insert-measures` | `nervix-connector-postgres` measured inserts against the statement and the arrays the driver encodes, and the Bind message bound | up to four text columns of up to eight rows with NULLs, quotes and multi-byte characters, every run of rows, v1 | 256 | 1024 bytes |
+| `websocket-signaling-protobuf-values` | `nervix-connector-websockets` complete signaling JSON through the production protobuf conversions, with double and float bit equality | explicit scalar presence, absent defaults, full-width integers, booleans, UTF-8 strings and up to eight repeated doubles and floats, v1 | 256 | 256 bytes |
+| `websocket-signaling-protobuf-malformed` | `nervix-connector-websockets` typed refusal through the production protobuf decoder | invalid tags, truncated fixed-width fields and strings, oversized varints and incomplete packed floats, v1 | 256 | 256 bytes |
+| `otel-hex-ids` | `nervix-connector-otel` complete identifier bytes and acceptance against a per-digit scalar reference, with exact refusal key and reason | nonzero trace, span and parent-span identifiers in all letter cases, arbitrary UTF-8 text, odd lengths, trailing spaces and all-zero identifiers, v1 | 256 | 128 bytes |
 
 Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
 properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
@@ -335,7 +345,11 @@ Registered properties also hold behavioral contracts against independent referen
   Bolero reads its checked-in corpus, with four random cases of at most 512 input bytes; every step
   still runs and checks its own answer, and the complete state is compared every sixteenth step and
   at the end. Mutation testing runs the property in every mutant through
-  `just test-expiry-map-mutants`.
+  `just test-expiry-map-mutants`. `connector-confirmation-window` publishes generated hand-overs,
+  refusals, pauses and scripted broker answers through the brokered sink confirmation window on a
+  paused clock, and compares the instant the publish ends, the answers the window holds after each
+  hand-over, the records it settles and the failure that ends it with a reference model of the
+  documented window rule computed in whole milliseconds.
 - **Numeric references.** The decimal rounding kernels are compared with the exact decimal
   expansion of each value and with a 128-bit integer reference. That a value holding no more
   fractional digits than the count is its own rounding is checked apart from the rounded results.
@@ -380,6 +394,60 @@ An expected sanitizer skip contributes no execution or coverage evidence. The Ch
 validation job and the Bolero randomized job retain their separate scopes and limits. Check calls
 the reusable Bolero workflow with its exact tested SHA, event and label snapshot. Scheduled and
 manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
+
+### Documentation-only Selection
+
+Before starting ordinary suites, Check's `test-selection` job proves which source it selects for.
+Its checkout must be the commit the event tests: a merge whose first parent is its base and whose
+second parent is the event's exact head. The event and the tested merge need not name the same base.
+GitHub records a pull request's base as its base branch's tip when the pull request opens, and moves
+it forward only to the newest base commit that a later head merges, while it builds the tested merge
+on the base branch's tip whenever the head changes. A push made after the base branch advanced,
+whose head does not merge the newest base, therefore tests a merge whose base is newer than the one
+its event names, and label events that follow name the same recorded base.
+
+Selection accepts the tested base when it is the event's base, or when the event's base is one of
+its ancestors. The checkout holds only the tested merge and its parents, so to decide the second
+case selection fetches the tested base's complete history as commits, without trees or file
+contents, and then answers from that local history alone. When the tested base is the event's own
+base, it fetches nothing. A checkout that is not the tested merge, a tested commit that does not
+merge the event's exact head into one base, an event base that the tested base does not descend
+from, such as a newer base or one from another branch, and a failed history fetch all fail
+selection, so none of them can authorize an exclusion.
+
+Selection then reads every changed path between the tested base and the tested merge: what the
+merge changes on the base it was tested against, never the base branch's own advance. Rename
+detection is disabled so deleting or moving product code into a prose location still requires
+execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and Markdown under
+`.agents/skills/` qualify for the documentation-only exclusion. An empty diff, code, tests, build
+configuration, workflow definitions, scripts and unknown paths require suites; `no-docker` supplies
+no evidence about this choice.
+
+A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
+diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
+unless the event carries `fuzz`. Validation and the conventional PR title check remain independent
+and mandatory. Label-selected mode checks remain selected by their labels; `fuzz` still requires
+both ordinary properties and the complete sanitizer inventory even for documentation. Label
+addition and removal compute a fresh selection from that event's label snapshot.
+
+The `ci-test-selection` artifact records run, attempt, job, event and action, the tested merge, the
+event's base, the tested base and the head, every changed path, labels and each ordinary/Bolero
+requirement. Two different bases record an advance that selection proved. Its `selected` verdict
+records a source decision, never successful property execution or coverage. Actual job conclusions
+remain in the workflow run. The reusable workflow's `bolero-selection` record is produced only
+after all of its required execution succeeds; failed, cancelled, skipped or missing required
+producers still fail its gate.
+
+A rerun of `test-selection` reads the original event and tested merge and proves the same ancestry,
+so it reaches the same selection after the base branch advances again. A validation-only rerun uses
+the original event and tested commit. Its ordinary producer selection remains in the caller, outside
+the reusable workflow's `always()` gate, so deliberate non-code exclusion never becomes a cancelled
+property campaign to excuse. Historical attempts retain their actual cancellations; this policy does
+not turn an interrupted required campaign into success. `just test-ci-selection` exercises source
+identity, advanced, stale and tampered bases, stale heads, other merges, shallow checkouts, mixed
+changes, renames, label events, reruns and strict gates; `just coverage-ci-selection` measures that
+Python contract without launching product campaigns. Selection does not claim a model-checker or
+public Cucumber result.
 
 ### Sanitizer Shards
 
@@ -610,7 +678,7 @@ runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its 
 samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
 shards' line, function and branch counters because they ran disjoint campaigns, and
 `bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
-remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
+remain separate from ordinary workspace coverage and its CRAP report. A sanitizer skip publishes no
 fuzz coverage artifact.
 
 ## Adding A Target

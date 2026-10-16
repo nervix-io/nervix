@@ -17,7 +17,7 @@ use std::{fs, num::NonZeroU64, path::PathBuf};
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
     ClientConfigEntry, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
-    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, ConsumerGroupName,
+    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat,
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
     CreateClientKafka, CreateClientSyslog, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
@@ -25,7 +25,8 @@ use nervix_models::{
     CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitSink, EmitterName,
     EmitterPublishingMode, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference,
     FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, Inheritance, JsonType, JunctionName,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, Model, ModelIndex,
+    KafkaConfigEntry, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
+    KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState, Model, ModelIndex,
     ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
     ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, RetryPolicy,
     ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint, SchemaName,
@@ -505,11 +506,11 @@ pub(in crate::registry) fn ingestor_statement(
             branch,
         ),
         input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-            source: IngestSource::Kafka {
+            source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
                 client: ClientName::parse(client).expect("valid identifier"),
-                topic: TopicName::parse("notifications").expect("valid identifier"),
+                topic: nervix_models::KafkaTopicName::parse("notifications").expect("valid topic"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                    KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                 ),
                 instances: nonzero!(1u64),
                 mode: KafkaIngestMode::AckSequential {
@@ -520,7 +521,7 @@ pub(in crate::registry) fn ingestor_statement(
                     },
                 },
                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
-            },
+            })),
             codec: named(codec),
         }),
         timestamp_source: None,
@@ -810,10 +811,10 @@ pub(in crate::registry) fn emitter(
         body: nervix_models::EmitterBody::Codec {
             codec: CodecName::parse(codec).expect("valid identifier"),
         },
-        sink: Box::new(EmitSink::Kafka {
+        sink: Box::new(EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
             client: ClientName::parse(client).expect("valid identifier"),
             topic: TopicName::parse("topic").expect("valid topic identifier"),
-        }),
+        }))),
         publishing_mode: EmitterPublishingMode::NoAck {
             retry_policy: RetryPolicy {
                 backoff: "250ms".to_string(),

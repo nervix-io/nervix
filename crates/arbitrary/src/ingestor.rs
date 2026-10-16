@@ -2,13 +2,21 @@
 
 use std::num::NonZeroUsize;
 
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
-    AckWindow, ClientIngestMode, ClientIngestSource, CreateIngestor, EndpointIngestMode,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorInput,
-    KafkaIngestMode, KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SqsIngestMode, TransportIngestorInput,
-    WebsocketsIngestMode, ZeroMqIngestMode,
+    AckWindow, ClientIngestMode, ClientProducerSource, ClientSourceEntity, CreateIngestor,
+    EndpointIngestMode, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSource,
+    HttpSourceEntity, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestSourceKind,
+    IngestTimestampSource, IngestorInput, KafkaIngestMode, KafkaOffsetMode, KafkaSourceEntity,
+    KafkaTopicSource, MqttIngestMode, MqttQos, MqttSession, MqttSourceEntity, MqttTopicSource,
+    NatsIngestMode, NatsSourceEntity, NatsSubjectSource, PrometheusIngestMode,
+    PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarTopicSource,
+    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSourceEntity, RedisPubSubIngestMode,
+    RedisPubSubSource, RedisSourceEntity, RetryPolicy, SourceBody, SqsIngestMode, SqsQueueSource,
+    SqsSourceEntity, SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity,
+    TransportIngestorInput, WebsocketsConnectionSource, WebsocketsEndpointSource,
+    WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode, ZeroMqPullSource,
+    ZeroMqSourceEntity,
 };
 
 use crate::{
@@ -17,24 +25,23 @@ use crate::{
 };
 
 impl Arbitrary<'_> {
-    /// An ingestor over a transport or a client source, whose every route constructs its own
-    /// outgoing branch.
+    /// An ingestor over a source of any connector and entity, whose every route constructs its
+    /// own outgoing branch.
     pub fn create_ingestor(&mut self) -> CreateIngestor {
-        let input = if self.entropy.byte().is_multiple_of(8) {
-            IngestorInput::Client(ClientIngestSource {
-                schema: self.name(),
-                mode: ClientIngestMode {
-                    window: self.ack_window(),
-                    ack_timeout: self.duration(),
-                    retry_policy: self.retry_policy(),
-                },
-            })
-        } else {
-            IngestorInput::Transport(TransportIngestorInput {
-                source: self.ingest_source(),
-                codec: self.name(),
-            })
-        };
+        let kind = self.ingest_source_kind();
+        self.create_ingestor_from(kind)
+    }
+
+    /// Any connector and entity an ingestor reads.
+    pub fn ingest_source_kind(&mut self) -> IngestSourceKind {
+        let kinds = IngestSourceKind::all().collect::<Vec<_>>();
+        let count = NonZeroUsize::new(kinds.len()).assured("the vocabulary declares sources");
+        kinds[self.entropy.index(count)]
+    }
+
+    /// An ingestor over a source of the requested connector and entity.
+    pub fn create_ingestor_from(&mut self, kind: IngestSourceKind) -> CreateIngestor {
+        let input = self.ingestor_input_of(kind);
         let timestamp_source = match self.entropy.byte() % 3 {
             0 => None,
             1 => Some(IngestTimestampSource::Now),
@@ -54,111 +61,283 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A transport source of any kind, quiescing in a mode that kind supports.
+    /// The input of the requested connector and entity: a transport with the codec that decodes
+    /// it, or the batches session producers submit.
+    pub fn ingestor_input_of(&mut self, kind: IngestSourceKind) -> IngestorInput {
+        match self.ingest_source_of(kind) {
+            Some(source) => IngestorInput::Transport(TransportIngestorInput {
+                source,
+                codec: self.name(),
+            }),
+            None => IngestorInput::Client(self.client_producer_source()),
+        }
+    }
+
+    /// The batches session producers submit into a client ingestor.
+    pub fn client_producer_source(&mut self) -> ClientProducerSource {
+        ClientProducerSource {
+            schema: self.name(),
+            mode: ClientIngestMode {
+                window: self.ack_window(),
+                ack_timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            },
+        }
+    }
+
+    /// A transport source of any connector and entity, quiescing in a mode it supports.
     pub fn ingest_source(&mut self) -> IngestSource {
-        let mut source = match self.entropy.byte() % 13 {
-            0 => IngestSource::Http {
-                client: self.name(),
-                every: self.clock_period(),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            1 => IngestSource::Kafka {
-                client: self.name(),
-                topic: self.name(),
-                offset_mode: if self.entropy.flag() {
-                    KafkaOffsetMode::ConsumerGroup(self.name())
-                } else {
-                    KafkaOffsetMode::Domain
-                },
-                instances: self.positive_u64(),
-                mode: self.kafka_mode(),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            2 => IngestSource::Pulsar {
-                client: self.name(),
-                topic: self.name(),
-                subscription: self.name(),
-                instances: self.positive_u64(),
-                mode: self.kafka_mode(),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            3 => IngestSource::Mqtt {
-                client: self.name(),
-                topic: self.string(),
-                instances: self.positive_u64(),
-                mode: self.mqtt_mode(),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            4 => IngestSource::Nats {
-                client: self.name(),
-                subject: self.name(),
-                queue_group: self.name(),
-                instances: self.positive_u64(),
-                mode: NatsIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            5 => IngestSource::RabbitMq {
-                client: self.name(),
-                queue: self.name(),
-                instances: self.positive_u64(),
-                mode: RabbitMqIngestMode::AckSequential {
-                    timeout: self.duration(),
-                    retry_policy: self.retry_policy(),
-                },
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            6 => IngestSource::RedisPubSub {
-                client: self.name(),
-                channel: self.name(),
-                mode: RedisPubSubIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            7 => IngestSource::Prometheus {
-                client: self.name(),
-                query: self.string(),
-                every: self.clock_period(),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            8 => IngestSource::ZeroMq {
-                client: self.name(),
-                mode: ZeroMqIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            9 => IngestSource::Sqs {
-                client: self.name(),
-                queue: self.name(),
-                instances: self.positive_u64(),
-                mode: SqsIngestMode::AckSequential {
-                    timeout: self.duration(),
-                    retry_policy: self.retry_policy(),
-                },
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            10 => IngestSource::Endpoint {
-                endpoint: self.name(),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            11 => IngestSource::Websockets {
-                client: self.name(),
-                mode: WebsocketsIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::Suspend,
-            },
-            _ => IngestSource::Syslog {
-                client: self.name(),
-                quiesce: IngestQuiesceMode::Suspend,
-            },
+        let kinds = IngestSourceKind::modeled().collect::<Vec<_>>();
+        let count =
+            NonZeroUsize::new(kinds.len()).assured("the vocabulary declares transport sources");
+        let kind = kinds[self.entropy.index(count)];
+        self.ingest_source_of(kind)
+            .verified("the kind was chosen among those the transport union holds a Model of")
+    }
+
+    /// The transport source of the requested connector and entity, quiescing in a mode it
+    /// supports. A client producer is no transport, so it has none.
+    ///
+    /// The match is exhaustive, so a new pair does not compile until the generator is taught to
+    /// build it.
+    pub fn ingest_source_of(&mut self, kind: IngestSourceKind) -> Option<IngestSource> {
+        let source = match kind {
+            IngestSourceKind::Client(ClientSourceEntity::Producer) => return None,
+            IngestSourceKind::Http(HttpSourceEntity::Request) => self.http_request_source().into(),
+            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => {
+                self.http_endpoint_source().into()
+            }
+            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => self.kafka_topic_source().into(),
+            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => {
+                self.pulsar_topic_source().into()
+            }
+            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => self.mqtt_topic_source().into(),
+            IngestSourceKind::Nats(NatsSourceEntity::Subject) => self.nats_subject_source().into(),
+            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => {
+                self.rabbitmq_queue_source().into()
+            }
+            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => self.redis_pubsub_source().into(),
+            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
+                self.prometheus_query_source().into()
+            }
+            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => self.zeromq_pull_source().into(),
+            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => self.sqs_queue_source().into(),
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
+                self.websockets_connection_source().into()
+            }
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+                self.websockets_endpoint_source().into()
+            }
+            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
+                self.syslog_listener_source().into()
+            }
         };
+        Some(source)
+    }
+
+    /// An HTTP request polled on a cadence of domain time.
+    pub fn http_request_source(&mut self) -> HttpRequestSource {
+        let source = HttpRequestSource {
+            client: self.name(),
+            every: self.clock_period(),
+            mode: HttpRequestIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// An HTTP endpoint the cluster serves.
+    pub fn http_endpoint_source(&mut self) -> HttpEndpointSource {
+        let source = HttpEndpointSource {
+            endpoint: self.name(),
+            mode: EndpointIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A Kafka topic, its offsets kept by a consumer group or by the domain.
+    pub fn kafka_topic_source(&mut self) -> KafkaTopicSource {
+        let offset_mode = if self.entropy.flag() {
+            KafkaOffsetMode::ConsumerGroup(self.kafka_consumer_group_name())
+        } else {
+            KafkaOffsetMode::Domain
+        };
+        let source = KafkaTopicSource {
+            client: self.name(),
+            topic: self.kafka_topic_name(),
+            offset_mode,
+            instances: self.positive_u64(),
+            mode: self.kafka_mode(),
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A Pulsar topic read through a subscription.
+    pub fn pulsar_topic_source(&mut self) -> PulsarTopicSource {
+        let source = PulsarTopicSource {
+            client: self.name(),
+            topic: self.pulsar_topic_name(),
+            subscription: self.pulsar_subscription_name(),
+            instances: self.positive_u64(),
+            mode: self.kafka_mode(),
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// An MQTT topic filter.
+    pub fn mqtt_topic_source(&mut self) -> MqttTopicSource {
+        let source = MqttTopicSource {
+            client: self.name(),
+            topic: self.mqtt_topic_filter(),
+            instances: self.positive_u64(),
+            mode: self.mqtt_mode(),
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A NATS subject read as a member of a queue group.
+    pub fn nats_subject_source(&mut self) -> NatsSubjectSource {
+        let source = NatsSubjectSource {
+            client: self.name(),
+            subject: self.nats_subject_name(),
+            queue_group: self.nats_queue_group_name(),
+            instances: self.positive_u64(),
+            mode: NatsIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A RabbitMQ queue.
+    pub fn rabbitmq_queue_source(&mut self) -> RabbitMqQueueSource {
+        let source = RabbitMqQueueSource {
+            client: self.name(),
+            queue: self.rabbitmq_queue_name(),
+            instances: self.positive_u64(),
+            mode: RabbitMqIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            },
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A Redis Pub/Sub channel.
+    pub fn redis_pubsub_source(&mut self) -> RedisPubSubSource {
+        let source = RedisPubSubSource {
+            client: self.name(),
+            channel: self.redis_channel_name(),
+            mode: RedisPubSubIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A PromQL query evaluated on a cadence of domain time.
+    pub fn prometheus_query_source(&mut self) -> PrometheusQuerySource {
+        let source = PrometheusQuerySource {
+            client: self.name(),
+            query: self.string(),
+            every: self.clock_period(),
+            mode: PrometheusIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A ZeroMQ pull socket.
+    pub fn zeromq_pull_source(&mut self) -> ZeroMqPullSource {
+        let source = ZeroMqPullSource {
+            client: self.name(),
+            mode: ZeroMqIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// An SQS queue.
+    pub fn sqs_queue_source(&mut self) -> SqsQueueSource {
+        let source = SqsQueueSource {
+            client: self.name(),
+            queue: self.sqs_queue_name(),
+            instances: self.positive_u64(),
+            mode: SqsIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            },
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// The connection a WebSockets client opens.
+    pub fn websockets_connection_source(&mut self) -> WebsocketsConnectionSource {
+        let source = WebsocketsConnectionSource {
+            client: self.name(),
+            mode: WebsocketsIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// A WebSockets endpoint the cluster serves.
+    pub fn websockets_endpoint_source(&mut self) -> WebsocketsEndpointSource {
+        let source = WebsocketsEndpointSource {
+            endpoint: self.name(),
+            mode: EndpointIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// The listener a syslog client binds.
+    pub fn syslog_listener_source(&mut self) -> SyslogListenerSource {
+        let source = SyslogListenerSource {
+            client: self.name(),
+            mode: SyslogIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        };
+        self.quiescing_as_supported(source)
+    }
+
+    /// `source` quiescing in one of the modes it supports.
+    fn quiescing_as_supported<Source: SourceBody>(&mut self, mut source: Source) -> Source {
         let quiesce = self.supported_quiesce(&source);
-        source
-            .set_quiesce(quiesce)
-            .verified("the quiesce mode was chosen among the modes the source supports");
+        *source.quiesce_mut() = quiesce;
         source
     }
 
+    /// Any quiesce mode a statement can write.
+    pub fn quiesce_mode(&mut self) -> IngestQuiesceMode {
+        let candidates = self.quiesce_candidates();
+        let count = NonZeroUsize::new(candidates.len()).assured("five quiesce modes exist");
+        let chosen = self.entropy.index(count);
+        candidates[chosen].clone()
+    }
+
     /// One of the quiesce modes `source` supports, as its vocabulary states them.
-    fn supported_quiesce(&mut self, source: &IngestSource) -> IngestQuiesceMode {
-        let candidates = [
+    fn supported_quiesce<Source: SourceBody>(&mut self, source: &Source) -> IngestQuiesceMode {
+        let candidates = self.quiesce_candidates();
+        let mut supported = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if source.supports_quiesce(&candidate) {
+                supported.push(candidate);
+            }
+        }
+        let count = NonZeroUsize::new(supported.len())
+            .assured("every transport supports at least one quiesce mode");
+        let chosen = self.entropy.index(count);
+        supported.swap_remove(chosen)
+    }
+
+    /// Every quiesce mode, each with its own sizes and durations.
+    fn quiesce_candidates(&mut self) -> [IngestQuiesceMode; 5] {
+        [
             IngestQuiesceMode::Suspend,
             IngestQuiesceMode::Buffer {
                 max_size: self.positive_byte_size(),
@@ -174,17 +353,7 @@ impl Arbitrary<'_> {
             IngestQuiesceMode::EndpointBuffer {
                 max_size: self.positive_byte_size(),
             },
-        ];
-        let mut supported = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            if source.supports_quiesce(&candidate) {
-                supported.push(candidate);
-            }
-        }
-        let count = NonZeroUsize::new(supported.len())
-            .assured("every transport supports at least one quiesce mode");
-        let chosen = self.entropy.index(count);
-        supported.swap_remove(chosen)
+        ]
     }
 
     fn kafka_mode(&mut self) -> KafkaIngestMode {
@@ -199,7 +368,7 @@ impl Arbitrary<'_> {
                 timeout: self.duration(),
                 retry_policy: self.retry_policy(),
             },
-            _ => KafkaIngestMode::NoAckParallel,
+            _ => KafkaIngestMode::NoAck,
         }
     }
 
@@ -210,10 +379,9 @@ impl Arbitrary<'_> {
         let qos = self
             .entropy
             .pick([MqttQos::AtMostOnce, MqttQos::AtLeastOnce]);
-        match self.entropy.byte() % 4 {
-            0 => MqttIngestMode::NoAckSequential { session, qos },
-            1 => MqttIngestMode::NoAckParallel { session, qos },
-            2 => MqttIngestMode::AckSequential {
+        match self.entropy.byte() % 3 {
+            0 => MqttIngestMode::NoAck { session, qos },
+            1 => MqttIngestMode::AckSequential {
                 timeout: self.duration(),
                 retry_policy: self.retry_policy(),
             },

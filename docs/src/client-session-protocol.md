@@ -84,7 +84,9 @@ session maps remain client-owned synchronization outside the server record-path 
 Server relay subscription fan-out remains recurring data-plane execution with its own source
 contracts and exact-operation repair expectations. The annotations change no session framing,
 recovery or delivery guarantee. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
-owns this compiler boundary.
+owns this compiler boundary. [Execution Primitives](./execution-primitives.md) owns the shared
+backend selection, portable reference types and declared unmodeled exceptions used by the Rust
+client, binding and browser; those build choices change no wire contract.
 
 ## Wire Format
 
@@ -378,9 +380,11 @@ JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference 
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
 a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
-visual ingestor uses distinct source-reference targets for each of its 13 source families. Each
-requires a domain and offers clients of the matching transport, except the endpoint target, which
-offers endpoints. Its decoding-codec target offers codecs that can decode. An unbranched-relay
+visual ingestor uses a distinct source-reference target for each of the 14 connector and entity
+pairs that read an external system; a client producer ingestor selects its schema through the
+schema target instead. Each source-reference target requires a domain and offers clients of its
+pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
+that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranched-relay
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
 with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
 takes a domain and branch reference. Ingestor decoded and output fields use the existing
@@ -1251,14 +1255,20 @@ reports the gap as an interruption when the session ends, clears its previous ti
 every clock it followed again on its next session. An attach that session refuses is reported as a
 restoration failure and sent again on the same session after a growing wait; an attach it leaves
 unanswered past the request timeout ends that session instead, and the next session attaches the
-clock again. A reply that the session already follows the clock moves the attachment to that
-session: the caller keeps the clock the previous session last reported, without a tick, until that
-session's later state or tick frames arrive. When the new session's attach reply arrives before
-the old session ends, as after a leader redirect, the attachment moves without an interruption,
-and the client reports the clock only if it changed. A detach the client sends while a clock waits
-to be restored reaches the current session: a closed session is opened again first, which attaches
-the clock before the detach releases it, and an open session that has not restored it answers
-`DomainClockNotAttached`, after which the client no longer follows the clock. After
+clock again, which a caller already waiting for clock events opens at once. A reply that the
+session already follows the clock moves the attachment to that session: the caller keeps the clock
+the previous session last reported, without a tick, until that session's later state or tick
+frames arrive. When the new session's attach reply arrives before the old session ends, as after a
+leader redirect, the attachment moves without an interruption: the client reports the clock only
+if it changed, keeps the newest tick of a clock still paced in the same generation, and reports a
+tick of the new session only when it is newer. A detach the client sends while a clock waits to be
+restored reaches the current session: a closed session is opened again first, which attaches the
+clock before the detach releases it, and an open session that has not restored it answers
+`DomainClockNotAttached`, after which the client no longer follows the clock. The client sends no
+restoration attach of a clock behind a detach of it: a detach waits until every restoration attach
+already decided for the clock is sent, so each reaches its session first, and a restoration that
+would attach the clock while the detach is in flight waits for the detach to end and attaches it
+only if the client still follows it. After
 `DomainClockAttachmentEnded`, a detach is answered `DomainClockNotAttached` and an attach is served
 as a new attachment. The shared binding exposes this event stream through
 `nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle, and the clock the
@@ -1488,6 +1498,14 @@ names the domain, the declared resource, the upload identity, and the exact size
 each chunk is non-empty and fits one frame. There is no manifest, digest, or finish frame: the
 leader hashes the archive as it stages it and verifies everything else when it installs it. The
 console WebSocket carries no upload stream.
+
+The Rust client builds one deterministic archive in a temporary file before opening an upload
+call. Archive construction uses bounded 1 MiB read and write buffers. Only a successfully
+terminated and flushed archive becomes an upload body. An I/O failure abandons the partial file
+and returns `BuildUploadArchive` above its originating I/O error; cancellation abandons it without
+finalizing in a destructor or spawning cleanup work. The command deadline may cancel construction
+and retains its typed deadline outcome. Once construction succeeds, every transport attempt reads
+the same complete archive and keeps the same upload identity.
 
 An upload is identified by its upload identity, not by an execution reference. The identity is
 chosen by the client, at most 128 bytes of ASCII letters, digits, `-`, `_`, and `.`, and is durable

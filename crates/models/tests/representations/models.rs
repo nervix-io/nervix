@@ -23,6 +23,20 @@ fn pinned(model: Model<RequestedResourceVersion>) -> Model {
 }
 
 #[test]
+fn archived_model_corpus_reaches_resumed_restore() {
+    let bytes = include_bytes!(
+        "__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus/\
+         resume"
+    );
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+    let _stored = pinned(arbitrary.model());
+    let Statement::Restore(restore) = arbitrary.statement() else {
+        panic!("the resume corpus entry generates a current restore statement");
+    };
+    assert_eq!(restore.lifecycle, nervix_models::RestoreLifecycle::Resume);
+}
+
+#[test]
 fn bolero_models_and_statements_round_trip_through_their_archives() {
     bolero::check!()
         .with_iterations(256)

@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
             [producer.name for producer in native_coverage.PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom",
+             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom", "test-turmoil",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
              "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
@@ -204,6 +204,8 @@ class InventoryTests(unittest.TestCase):
                     selected_job = job_section(workflow, "shuttle")
                 elif producer.name == "test-loom":
                     selected_job = job_section(workflow, "loom")
+                elif producer.name == "test-turmoil":
+                    selected_job = job_section(workflow, "turmoil")
                 elif producer.lane is not None:
                     lane = job_section(workflow, "deloxide")
                     self.assertIn(f"selection: [{', '.join(deloxide_lane.load_inventory(REPOSITORY).selections)}]", lane)
@@ -216,7 +218,7 @@ class InventoryTests(unittest.TestCase):
                     for artifact in ("completion.json", "lcov.info", "lane.json"):
                         self.assertIn(f"target/native-coverage/test-${{{{ matrix.selection }}}}/**/{artifact}", upload)
                     self.assertNotIn("profraw", upload)
-                    # Diagnostic coverage never joins ordinary coverage or the CRAP gate.
+                    # Diagnostic coverage never joins ordinary coverage or its CRAP report.
                     coverage = job_section(workflow, "coverage")
                     self.assertNotIn("deloxide", coverage)
                     continue
@@ -229,6 +231,8 @@ class InventoryTests(unittest.TestCase):
                 else:
                     selected_job = job
                 name = "test-primitives" if producer.name.startswith("test-primitives-") else producer.name
+                if producer.name == "test-turmoil":
+                    name += " --output target/turmoil.lcov"
                 self.assertIn(f"just coverage-native-extras {name}\n", selected_job)
         upload = step_section(job, "Upload native extra coverage")
         self.assertIn("if: always()", upload)
@@ -1665,8 +1669,15 @@ FIXTURE = {
                 std::process::exit(3);
             }
             let child = env!("CARGO_BIN_EXE_coverage-fixture-child");
-            let status = std::process::Command::new(child).status().expect("the child runs");
-            assert!(status.success());
+            let count = if std::env::var_os("COVERAGE_FIXTURE_REPEAT_CHILD").is_some() {
+                3
+            } else {
+                1
+            };
+            for _ in 0..count {
+                let status = std::process::Command::new(child).status().expect("the child runs");
+                assert!(status.success());
+            }
             if std::env::var_os("COVERAGE_FIXTURE_SKIP_PROFILE").is_some() {
                 unsafe { _exit(0) }
             }
@@ -1887,6 +1898,18 @@ class FixtureTests(unittest.TestCase):
         assert isinstance(described, dict)
         self.assertEqual(described["excluded_files"], {"harness": 1})
         self.assertEqual(set(described["packages"]), {"coverage-fixture"})
+
+    def test_fresh_attempt_processes_each_contribute_their_counters(self) -> None:
+        collection = self.collect("walk", COVERAGE_FIXTURE_REPEAT_CHILD="1")
+        self.assertEqual(collection.status, 0, collection.record.get("failure"))
+        self.assertEqual(collection.record["verdict"], "complete")
+        # One profile for the parent and one for each fresh child, even though all children
+        # execute the same binary. Their counters must add rather than overwrite one another.
+        self.assertEqual(len(collection.record["profiles"]), 4)
+        library = self.line_counts(collection.attempt / "lcov.info", "src/lib.rs")
+        self.assertEqual(library[10], 3)
+        self.assertEqual(library[19], 3)
+        self.assertEqual(len(collection.record["selection"]["children"]), 1)
 
     def test_the_ordinary_coverage_cleanup_leaves_every_collection_alone(self) -> None:
         collection = self.collect("walk")

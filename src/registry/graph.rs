@@ -24,9 +24,9 @@ use nervix_dataflow_graph::{
 };
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
-    ImpactNodeCoverage, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, ModelName,
-    NodeRef, ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaFingerprint,
+    ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaFingerprint,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::{
@@ -587,7 +587,7 @@ impl ActiveNode {
         let Model::Ingestor(ingestor) = self.config.as_ref() else {
             return None;
         };
-        let transport = ingestor.input.source_label().to_string();
+        let transport = ingestor.input.source_phrase().to_string();
         match &ingestor.input {
             IngestorInput::Transport(input) => {
                 let source = input.source.source_ref();
@@ -865,16 +865,12 @@ fn parse_as_to_dataflow_label(ty: &ParseAsType) -> String {
     }
 }
 
+/// The pair an ingestor reads, as its statement's head names it.
 fn ingestor_subtype(model: &Model) -> &str {
     let Model::Ingestor(ingestor) = model else {
         return "INGESTOR";
     };
-    if let IngestorInput::Transport(input) = &ingestor.input
-        && let IngestSource::Endpoint { .. } = input.source
-    {
-        return "INGESTOR";
-    }
-    ingestor.input.source_label()
+    ingestor.input.source_phrase()
 }
 
 fn emitter_subtype(model: &Model) -> &str {

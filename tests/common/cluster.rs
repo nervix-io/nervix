@@ -10,7 +10,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use async_nats::Client as NatsClient;
+use async_nats::{Client as NatsClient, Message as NatsMessage};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
@@ -56,6 +56,7 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+use nervix_recovery::Discarded as _;
 use paced_interconnect::PacedInterconnect;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
@@ -114,6 +115,7 @@ use super::{
         SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    nats_observer::NatsObserver,
     node_liveness::{
         NodeStartupError, NodeTaskState, NodeTaskTerminalOutcome, NodeTaskWaitOutcome,
         OwnedNodeTask, ReadinessProbeOutcome,
@@ -122,6 +124,7 @@ use super::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
         StartupPorts, cluster_startup_budget,
     },
+    node_stop::{NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord},
     peer_addressing::{
         ClusterDns, FixtureAnswer, InterconnectAddress, PeerAddressing, PublishedNode,
         qualified_name,
@@ -199,12 +202,24 @@ pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
+/// A loopback TCP proxy in front of one dependency that a scenario can pause, and whose forwarded
+/// connections it can reset, without touching the dependency other scenarios share.
 #[derive(Debug)]
 pub(crate) struct StallableTcpProxy {
     local_addr: std::net::SocketAddr,
     paused: watch::Sender<bool>,
+    /// Signalled to reset every connection the proxy forwards at that moment.
+    resets: watch::Sender<()>,
     cancellation: CancellationToken,
     task: JoinHandle<()>,
+}
+
+/// What ended one connection the proxy forwarded.
+enum ForwardingEnd {
+    /// Both directions ended: a peer closed or failed its side, or the proxy stopped.
+    Finished,
+    /// The scenario asked the proxy to reset the connections it forwards.
+    ResetRequested,
 }
 
 impl StallableTcpProxy {
@@ -212,6 +227,7 @@ impl StallableTcpProxy {
         let listener = TokioTcpListener::bind((HOST, 0)).await?;
         let local_addr = listener.local_addr()?;
         let (paused, paused_rx) = watch::channel(false);
+        let (resets, resets_rx) = watch::channel(());
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let task = nervix_primitives::task::spawn(async move {
@@ -226,34 +242,42 @@ impl StallableTcpProxy {
                 };
                 let target_host = target_host.clone();
                 let paused = paused_rx.clone();
+                // Only a reset requested after this connection was accepted resets it.
+                let mut resets = resets_rx.clone();
+                resets.mark_unchanged();
                 let connection_cancellation = task_cancellation.child_token();
                 nervix_primitives::task::spawn(async move {
-                    let Ok(upstream) =
+                    let Ok(mut upstream) =
                         TcpStream::connect((target_host.as_str(), target_port)).await
                     else {
                         return;
                     };
-                    let (downstream_read, downstream_write) = downstream.into_split();
-                    let (upstream_read, upstream_write) = upstream.into_split();
-                    let upstream_copy = copy_through_stall_gate(
-                        downstream_read,
-                        upstream_write,
-                        paused.clone(),
-                        connection_cancellation.clone(),
-                    );
-                    let downstream_copy = copy_through_stall_gate(
-                        upstream_read,
-                        downstream_write,
+                    let mut downstream = downstream;
+                    let end = forward_through_stall_gate(
+                        &mut downstream,
+                        &mut upstream,
                         paused,
+                        resets,
                         connection_cancellation,
-                    );
-                    let _ = tokio::join!(upstream_copy, downstream_copy);
+                    )
+                    .await;
+                    if let ForwardingEnd::ResetRequested = end {
+                        // An abortive close: both peers see the connection reset at once instead
+                        // of an orderly end of stream, and anything still buffered is discarded.
+                        downstream
+                            .set_zero_linger()
+                            .discarded("a socket that cannot be reset still closes when dropped");
+                        upstream
+                            .set_zero_linger()
+                            .discarded("a socket that cannot be reset still closes when dropped");
+                    }
                 });
             }
         });
         Ok(Self {
             local_addr,
             paused,
+            resets,
             cancellation,
             task,
         })
@@ -265,6 +289,47 @@ impl StallableTcpProxy {
 
     pub(crate) fn set_paused(&self, paused: bool) {
         self.paused.send_replace(paused);
+    }
+
+    /// Reset every connection the proxy forwards now, as a dependency that drops its clients
+    /// does: each peer sees its connection reset. The proxy keeps listening, so a client that
+    /// connects again is forwarded as before.
+    pub(crate) fn reset_connections(&self) {
+        self.resets.send_replace(());
+    }
+}
+
+/// Forward one accepted connection in both directions through the stall gate until it ends or a
+/// reset is requested.
+async fn forward_through_stall_gate(
+    downstream: &mut TcpStream,
+    upstream: &mut TcpStream,
+    paused: watch::Receiver<bool>,
+    mut resets: watch::Receiver<()>,
+    cancellation: CancellationToken,
+) -> ForwardingEnd {
+    let (downstream_read, downstream_write) = downstream.split();
+    let (upstream_read, upstream_write) = upstream.split();
+    let upstream_copy = copy_through_stall_gate(
+        downstream_read,
+        upstream_write,
+        paused.clone(),
+        cancellation.clone(),
+    );
+    let downstream_copy =
+        copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation);
+    let both_directions = async { tokio::join!(upstream_copy, downstream_copy) };
+    nervix_primitives::select! {
+        (upstream_copied, downstream_copied) = both_directions => {
+            upstream_copied.discarded("a forwarded connection ends with whichever side failed");
+            downstream_copied.discarded("a forwarded connection ends with whichever side failed");
+            ForwardingEnd::Finished
+        }
+        requested = resets.changed() => match requested {
+            Ok(()) => ForwardingEnd::ResetRequested,
+            // The proxy itself stopped, and its cancellation ends both directions anyway.
+            Err(_) => ForwardingEnd::Finished,
+        },
     }
 }
 
@@ -3118,6 +3183,9 @@ struct NodeHandle {
     /// How the last stop a scenario requested and waited for ended, kept after its coordinator
     /// is released so the scenario can read the outcome of each shutdown phase.
     last_shutdown: Option<ShutdownOutcome>,
+    /// When the current launch was first asked to stop and when its task ended, for the record of
+    /// a stop a scenario waits for. `None` until the node has been launched.
+    stop_clock: Option<NodeStopClock>,
     /// The cluster's storage and watchdog registration, which a node left stopping keeps until its
     /// task has ended.
     roots: Arc<ClusterRoots>,
@@ -3141,6 +3209,7 @@ impl NodeHandle {
             task: OwnedNodeTask::not_started(),
             shutdown: None,
             last_shutdown: None,
+            stop_clock: None,
             roots,
         }
     }
@@ -3240,9 +3309,13 @@ impl NodeHandle {
             .live
             .handle()
             .node_started(&self.spec.node_id, StdArc::new(shutdown.clone()));
+        let (stop_clock, ended) = NodeStopClock::start();
         self.shutdown = Some(shutdown);
+        self.stop_clock = Some(stop_clock);
         self.task = OwnedNodeTask::spawn(async move {
             let _live = live;
+            // Dropped when this task ends, however it ends, which records when that was.
+            let _ended = ended;
             application.run().await
         });
         Ok(())
@@ -3284,35 +3357,72 @@ impl NodeHandle {
     /// back here.
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
-        let task_result = match self.task.wait(PhaseDeadline::after(shutdown_timeout)).await {
+        let waited = self.task.wait(PhaseDeadline::after(shutdown_timeout)).await;
+        // A stop is printed by the wait that observed the node's ending, and only by that one.
+        let observed_by_this_wait = matches!(waited, NodeTaskWaitOutcome::Joined(_));
+        let outcome = match waited {
             NodeTaskWaitOutcome::NotStarted => return Ok(()),
             NodeTaskWaitOutcome::AlreadyObserved(outcome)
-            | NodeTaskWaitOutcome::Joined(outcome) => {
-                if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
-                    Err(io::Error::other(NodeShutdownError::Task {
-                        node: node_name(&self.spec.node_id),
-                        outcome,
-                    }))
-                } else {
-                    Ok(())
-                }
-            }
+            | NodeTaskWaitOutcome::Joined(outcome) => outcome,
             NodeTaskWaitOutcome::StillRunning | NodeTaskWaitOutcome::LeftStopping => {
-                return Err(io::Error::other(NodeShutdownError::Deadline {
-                    node: node_name(&self.spec.node_id),
-                    timeout: shutdown_timeout,
-                }));
+                let ending = match &self.shutdown {
+                    Some(shutdown) => {
+                        NodeStopEnding::StillStopping(NodeStopProgress::observe(shutdown))
+                    }
+                    // A node left stopping before this wait went to its keeper with its
+                    // coordinator.
+                    None => NodeStopEnding::LeftToKeeper,
+                };
+                let record = self.stop_record(shutdown_timeout, ending);
+                eprintln!("{record}");
+                return Err(io::Error::other(NodeShutdownError::Deadline(record)));
             }
         };
-        if let Some(shutdown) = self.shutdown.take() {
-            self.last_shutdown = shutdown.outcome();
+        let shutdown_outcome = match self.shutdown.take() {
+            Some(shutdown) => {
+                self.last_shutdown = shutdown.outcome();
+                self.last_shutdown
+            }
+            None => None,
+        };
+        if observed_by_this_wait {
+            let record = self.stop_record(
+                shutdown_timeout,
+                NodeStopEnding::Ended {
+                    task: outcome.clone(),
+                    shutdown: shutdown_outcome,
+                },
+            );
+            eprintln!("{record}");
         }
+        let task_result = if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
+            Err(io::Error::other(NodeShutdownError::Task {
+                node: node_name(&self.spec.node_id),
+                outcome,
+            }))
+        } else {
+            Ok(())
+        };
         self.fault_injection
             .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
             self.ensure_database_unlocked().await?;
         }
         task_result
+    }
+
+    /// The record of a stop this handle waited for under `watchdog`.
+    fn stop_record(&self, watchdog: Duration, ending: NodeStopEnding) -> NodeStopRecord {
+        let stopping_for = match &self.stop_clock {
+            Some(clock) => clock.stopping_for(),
+            None => None,
+        };
+        NodeStopRecord {
+            node: self.spec.node_id.clone(),
+            stopping_for,
+            watchdog,
+            ending,
+        }
     }
 
     /// Returns this node's ports to the pool unless its task still runs, here or under a keeper,
@@ -3426,11 +3536,18 @@ impl TeardownNode for NodeHandle {
     fn request_stop(&mut self) {
         if let Some(shutdown) = &self.shutdown {
             shutdown.request_stop();
+            if let Some(stop_clock) = &mut self.stop_clock {
+                stop_clock.stop_requested();
+            }
         }
     }
 
     fn owned_task(&mut self) -> &mut OwnedNodeTask {
         &mut self.task
+    }
+
+    fn stop_progress(&self) -> Option<NodeStopProgress> {
+        self.shutdown.as_ref().map(NodeStopProgress::observe)
     }
 
     fn release(&mut self) {
@@ -3497,11 +3614,10 @@ enum NodeShutdownError {
         node: ClusterNodeName,
         outcome: Arc<NodeTaskTerminalOutcome>,
     },
-    #[error("timed out after {timeout:?} waiting for node '{node}' shutdown; it is still stopping")]
-    Deadline {
-        node: ClusterNodeName,
-        timeout: Duration,
-    },
+    /// The watchdog of a stop a scenario waited for passed with the node still stopping. The
+    /// record names how long it had been stopping and where its own shutdown stood.
+    #[error("{0}")]
+    Deadline(NodeStopRecord),
 }
 
 #[derive(Debug)]
@@ -4159,17 +4275,60 @@ impl BrokerMessage {
         self.group = group;
         self
     }
+
+    /// A message a core NATS subscription delivered, with every header value under its name in the
+    /// order the message carries them.
+    fn from_nats(message: &NatsMessage) -> Self {
+        let mut headers = Vec::new();
+        if let Some(delivered) = message.headers.as_ref() {
+            for (name, values) in delivered.iter() {
+                for value in values {
+                    headers.push((name.to_string(), value.as_str().to_string()));
+                }
+            }
+        }
+        Self::from_bytes(message.payload.as_ref(), headers)
+    }
 }
 
+/// What a scenario observes on one broker destination, in the order the broker delivered it.
 #[derive(Debug)]
 pub(crate) struct BrokerObserver {
-    payload_rx: mpsc::Receiver<BrokerMessage>,
-    task: Option<JoinHandle<()>>,
+    deliveries: ObservedDeliveries,
+}
+
+/// Where an observer takes the messages its broker delivered from.
+#[derive(Debug)]
+enum ObservedDeliveries {
+    /// A task that reads the broker's client hands each message over this channel, and is aborted
+    /// with the observer.
+    Forwarded {
+        messages: mpsc::Receiver<BrokerMessage>,
+        _reader: AbortOnDropHandle<()>,
+    },
+    /// A core NATS subscription. Its client buffers what the server delivers on a task of its own,
+    /// so a step takes each message straight from that buffer.
+    Nats(NatsObserver),
 }
 
 impl BrokerObserver {
+    fn forwarded(messages: mpsc::Receiver<BrokerMessage>, reader: JoinHandle<()>) -> Self {
+        Self {
+            deliveries: ObservedDeliveries::Forwarded {
+                messages,
+                _reader: AbortOnDropHandle::new(reader),
+            },
+        }
+    }
+
+    fn nats(observer: NatsObserver) -> Self {
+        Self {
+            deliveries: ObservedDeliveries::Nats(observer),
+        }
+    }
+
     pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
-        timeout(BROKER_TIMEOUT, self.payload_rx.recv())
+        timeout(BROKER_TIMEOUT, self.deliveries.next())
             .await
             .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
             .ok_or_else(|| io::Error::other("broker observer closed before delivering payload"))
@@ -4188,7 +4347,7 @@ impl BrokerObserver {
         &mut self,
         duration: Duration,
     ) -> io::Result<Option<BrokerMessage>> {
-        match timeout(duration, self.payload_rx.recv()).await {
+        match timeout(duration, self.deliveries.next()).await {
             Ok(Some(message)) => Ok(Some(message)),
             Ok(None) => Err(io::Error::other(
                 "broker observer closed before delivering payload",
@@ -4196,12 +4355,32 @@ impl BrokerObserver {
             Err(_) => Ok(None),
         }
     }
+
+    /// What the observing client had received from its broker, for a failure message: the count of
+    /// a client that keeps one, so a message that never reached the observer reads differently from
+    /// one a step had not yet taken.
+    pub(crate) fn describe_client_receipts(&self) -> String {
+        match &self.deliveries {
+            ObservedDeliveries::Forwarded { .. } => {
+                "the observing client keeps no count of what its broker delivered".to_string()
+            }
+            ObservedDeliveries::Nats(observer) => format!(
+                "the observing NATS client had received {} messages from the server",
+                observer.received()
+            ),
+        }
+    }
 }
 
-impl Drop for BrokerObserver {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+impl ObservedDeliveries {
+    /// The next message the broker delivered, or `None` once the observer can deliver no more.
+    async fn next(&mut self) -> Option<BrokerMessage> {
+        match self {
+            Self::Forwarded { messages, .. } => messages.recv().await,
+            Self::Nats(observer) => {
+                let message = observer.next().await?;
+                Some(BrokerMessage::from_nats(&message))
+            }
         }
     }
 }
@@ -5329,10 +5508,7 @@ async fn observe_mqtt(
         .map_err(|_| io::Error::other("timed out waiting for mqtt observer subscription"))?
         .map_err(io::Error::other)?;
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_rabbitmq(
@@ -5377,10 +5553,7 @@ async fn observe_rabbitmq(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 /// The string headers of one RabbitMQ delivery in name order, which is the order the AMQP field
@@ -5424,10 +5597,7 @@ async fn observe_redis(
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_kafka(
@@ -5491,10 +5661,7 @@ async fn observe_kafka(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_pulsar(
@@ -5577,10 +5744,7 @@ async fn observe_pulsar_with_addr(
                 }
             });
 
-            Ok(BrokerObserver {
-                payload_rx,
-                task: Some(task),
-            })
+            Ok(BrokerObserver::forwarded(payload_rx, task))
         }
         .await;
 
@@ -5659,10 +5823,7 @@ async fn observe_sqs(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_nats(
@@ -5670,44 +5831,8 @@ async fn observe_nats(
     subject: &str,
 ) -> io::Result<BrokerObserver> {
     let client = nats_client(dependencies).await?;
-    let mut subscriber = client
-        .subscribe(subject.to_string())
-        .await
-        .map_err(io::Error::other)?;
-    let (payload_tx, payload_rx) = mpsc::channel(1);
-
-    let task = nervix_primitives::task::spawn(async move {
-        while let Some(message) = subscriber.next().await {
-            nervix_primitives::task::consume_budget().await;
-            let bytes = message.payload.as_ref();
-            let headers = message
-                .headers
-                .as_ref()
-                .map(|headers| {
-                    headers
-                        .iter()
-                        .flat_map(|(name, values)| {
-                            values
-                                .iter()
-                                .map(|value| (name.to_string(), value.as_str().to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if payload_tx
-                .send(BrokerMessage::from_bytes(bytes, headers))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    let observer = NatsObserver::subscribe(&client, subject).await?;
+    Ok(BrokerObserver::nats(observer))
 }
 
 async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
@@ -5742,10 +5867,7 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

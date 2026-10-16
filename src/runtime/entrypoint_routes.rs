@@ -263,7 +263,7 @@ impl ExecutionBuildDeps<'_> {
             };
             let program = bind_ingestor_filter_map_program(
                 &identifier,
-                ingestor.metadata_kind(),
+                ingestor.metadata_scope(),
                 ingestor.reads_headers(),
                 &route.construction,
                 RuntimeVmSchemaPair {
@@ -500,7 +500,8 @@ mod tests {
     use nervix_models::{
         AckMode, CreateClientZeroMq, CreateIngestor, CreateReingestor, FlushPolicy,
         GeneralErrorPolicy, IngestQuiesceMode, IngestSource, Model, OutputBranch, ParseAsType,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ZeroMqIngestMode,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ZeroMqIngestMode, ZeroMqPullSource,
+        ZeroMqSource,
     };
 
     use super::*;
@@ -567,11 +568,11 @@ mod tests {
                     .with_branch(branched_by("keyed", &["tenant"])),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::ZeroMq {
+                        source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
                             client: named("zmq"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
+                            mode: ZeroMqIngestMode::NoAck,
                             quiesce: IngestQuiesceMode::Suspend,
-                        },
+                        })),
                         codec: named("payload_codec"),
                     },
                 ),

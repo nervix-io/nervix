@@ -124,6 +124,7 @@ hyper-util = { workspace = true, features = [
 ] }
 imbl = { workspace = true }
 indexmap = { workspace = true }
+memmap2 = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
@@ -324,6 +325,11 @@ harness = false
 name = "state_replication"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "window_sketches"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",
@@ -431,6 +437,7 @@ arrow-schema = "58"
 arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
+astral-tokio-tar = { version = "0.6.4", default-features = false }
 unicode-normalization = "0.1"
 # 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
 async-nats = { version = "0.49.1", default-features = false, features = [
@@ -547,6 +554,7 @@ memchr = "2.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
 # trait implementations but not on the trait declarations, so the feature fails every release build
 # with E0046 rather than only the builds that call `todo()`.
+memmap2 = "0.9.11"
 meticulous = "0.2.0-pre.2"
 # MongoDB 3.6 exposes an explicit AWS-LC backend; its TLS defaults select another provider.
 mongodb = { version = "3.6.0", default-features = false, features = [

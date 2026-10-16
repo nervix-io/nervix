@@ -17,8 +17,11 @@
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
-    DomainName, FieldName, IngestSourceKind, NodeRef, PlacementPolicy, RequestedResourceVersion,
-    ResourceName,
+    ClientSourceEntity, DomainName, FieldName, HttpSourceEntity, IngestSourceKind,
+    KafkaSourceEntity, MqttSourceEntity, NatsSourceEntity, NodeRef, PlacementPolicy,
+    PrometheusSourceEntity, PulsarSourceEntity, RabbitMqSourceEntity, RedisSourceEntity,
+    RequestedResourceVersion, ResourceName, SqsSourceEntity, SyslogSourceEntity,
+    WebsocketsSourceEntity, ZeroMqSourceEntity,
 };
 
 use crate::{
@@ -48,7 +51,8 @@ pub enum ChoiceTarget {
     Codec,
     /// Fields of the output schema selected by one configured codec.
     CodecField,
-    IngestHttpSource,
+    IngestHttpRequestSource,
+    IngestHttpEndpointSource,
     IngestKafkaSource,
     IngestPulsarSource,
     IngestMqttSource,
@@ -58,8 +62,8 @@ pub enum ChoiceTarget {
     IngestPrometheusSource,
     IngestZeroMqSource,
     IngestSqsSource,
-    IngestEndpointSource,
-    IngestWebsocketsSource,
+    IngestWebsocketsConnectionSource,
+    IngestWebsocketsEndpointSource,
     IngestSyslogSource,
     IngestCodec,
     IngestUnbranchedRelay,
@@ -86,7 +90,8 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     SignalingProtocol,
     Codec,
     CodecField,
-    IngestHttpSource,
+    IngestHttpRequestSource,
+    IngestHttpEndpointSource,
     IngestKafkaSource,
     IngestPulsarSource,
     IngestMqttSource,
@@ -96,8 +101,8 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     IngestPrometheusSource,
     IngestZeroMqSource,
     IngestSqsSource,
-    IngestEndpointSource,
-    IngestWebsocketsSource,
+    IngestWebsocketsConnectionSource,
+    IngestWebsocketsEndpointSource,
     IngestSyslogSource,
     IngestCodec,
     IngestUnbranchedRelay,
@@ -113,38 +118,62 @@ impl ChoiceTarget {
     /// input schema its producers' batches carry.
     pub const fn for_ingest_source(kind: IngestSourceKind) -> Self {
         match kind {
-            IngestSourceKind::Client => Self::Schema,
-            IngestSourceKind::Http => Self::IngestHttpSource,
-            IngestSourceKind::Kafka => Self::IngestKafkaSource,
-            IngestSourceKind::Pulsar => Self::IngestPulsarSource,
-            IngestSourceKind::Mqtt => Self::IngestMqttSource,
-            IngestSourceKind::Nats => Self::IngestNatsSource,
-            IngestSourceKind::RabbitMq => Self::IngestRabbitMqSource,
-            IngestSourceKind::RedisPubSub => Self::IngestRedisPubSubSource,
-            IngestSourceKind::Prometheus => Self::IngestPrometheusSource,
-            IngestSourceKind::ZeroMq => Self::IngestZeroMqSource,
-            IngestSourceKind::Sqs => Self::IngestSqsSource,
-            IngestSourceKind::Endpoint => Self::IngestEndpointSource,
-            IngestSourceKind::Websockets => Self::IngestWebsocketsSource,
-            IngestSourceKind::Syslog => Self::IngestSyslogSource,
+            IngestSourceKind::Client(ClientSourceEntity::Producer) => Self::Schema,
+            IngestSourceKind::Http(HttpSourceEntity::Request) => Self::IngestHttpRequestSource,
+            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => Self::IngestHttpEndpointSource,
+            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => Self::IngestKafkaSource,
+            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => Self::IngestPulsarSource,
+            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => Self::IngestMqttSource,
+            IngestSourceKind::Nats(NatsSourceEntity::Subject) => Self::IngestNatsSource,
+            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => Self::IngestRabbitMqSource,
+            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => Self::IngestRedisPubSubSource,
+            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
+                Self::IngestPrometheusSource
+            }
+            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => Self::IngestZeroMqSource,
+            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => Self::IngestSqsSource,
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
+                Self::IngestWebsocketsConnectionSource
+            }
+            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+                Self::IngestWebsocketsEndpointSource
+            }
+            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => Self::IngestSyslogSource,
         }
     }
 
     pub const fn ingest_source_kind(self) -> Option<IngestSourceKind> {
         match self {
-            Self::IngestHttpSource => Some(IngestSourceKind::Http),
-            Self::IngestKafkaSource => Some(IngestSourceKind::Kafka),
-            Self::IngestPulsarSource => Some(IngestSourceKind::Pulsar),
-            Self::IngestMqttSource => Some(IngestSourceKind::Mqtt),
-            Self::IngestNatsSource => Some(IngestSourceKind::Nats),
-            Self::IngestRabbitMqSource => Some(IngestSourceKind::RabbitMq),
-            Self::IngestRedisPubSubSource => Some(IngestSourceKind::RedisPubSub),
-            Self::IngestPrometheusSource => Some(IngestSourceKind::Prometheus),
-            Self::IngestZeroMqSource => Some(IngestSourceKind::ZeroMq),
-            Self::IngestSqsSource => Some(IngestSourceKind::Sqs),
-            Self::IngestEndpointSource => Some(IngestSourceKind::Endpoint),
-            Self::IngestWebsocketsSource => Some(IngestSourceKind::Websockets),
-            Self::IngestSyslogSource => Some(IngestSourceKind::Syslog),
+            Self::IngestHttpRequestSource => {
+                Some(IngestSourceKind::Http(HttpSourceEntity::Request))
+            }
+            Self::IngestHttpEndpointSource => {
+                Some(IngestSourceKind::Http(HttpSourceEntity::Endpoint))
+            }
+            Self::IngestKafkaSource => Some(IngestSourceKind::Kafka(KafkaSourceEntity::Topic)),
+            Self::IngestPulsarSource => Some(IngestSourceKind::Pulsar(PulsarSourceEntity::Topic)),
+            Self::IngestMqttSource => Some(IngestSourceKind::Mqtt(MqttSourceEntity::Topic)),
+            Self::IngestNatsSource => Some(IngestSourceKind::Nats(NatsSourceEntity::Subject)),
+            Self::IngestRabbitMqSource => {
+                Some(IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue))
+            }
+            Self::IngestRedisPubSubSource => {
+                Some(IngestSourceKind::Redis(RedisSourceEntity::PubSub))
+            }
+            Self::IngestPrometheusSource => {
+                Some(IngestSourceKind::Prometheus(PrometheusSourceEntity::Query))
+            }
+            Self::IngestZeroMqSource => Some(IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull)),
+            Self::IngestSqsSource => Some(IngestSourceKind::Sqs(SqsSourceEntity::Queue)),
+            Self::IngestWebsocketsConnectionSource => Some(IngestSourceKind::Websockets(
+                WebsocketsSourceEntity::Connection,
+            )),
+            Self::IngestWebsocketsEndpointSource => Some(IngestSourceKind::Websockets(
+                WebsocketsSourceEntity::Endpoint,
+            )),
+            Self::IngestSyslogSource => {
+                Some(IngestSourceKind::Syslog(SyslogSourceEntity::Listener))
+            }
             Self::DomainPace
             | Self::PlacementPolicy
             | Self::Schema

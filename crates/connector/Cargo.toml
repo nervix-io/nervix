@@ -10,12 +10,18 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-execution/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-execution/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 arrow-array = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
+humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
@@ -27,6 +33,7 @@ rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
 serde = { workspace = true }
+shuttle = { workspace = true, optional = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -37,6 +44,7 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-model-harness = { workspace = true }
 # The physical-deadline tests advance a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 serde_json = { workspace = true }

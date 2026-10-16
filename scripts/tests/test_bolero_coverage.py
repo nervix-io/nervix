@@ -385,6 +385,15 @@ class ReportMergeTests(unittest.TestCase):
         ))
         self.assertIn("BRDA:4,0,0,-\n", self.merge("SF:x\nBRDA:4,0,0,-\nend_of_record\n"))
 
+    def test_function_records_that_name_their_end_line_merge_by_name(self) -> None:
+        first = ("SF:scripts/tool.py\nFN:3,4,Tool.run\nFN:7,9,Tool.stop\nFNDA:1,Tool.run\nFNDA:0,Tool.stop\n"
+                 "FNF:2\nFNH:1\nDA:3,1\nDA:4,1\nDA:7,0\nLF:3\nLH:2\nend_of_record\n")
+        second = "SF:scripts/tool.py\nFN:3,4,Tool.run\nFNDA:2,Tool.run\nDA:3,2\nDA:4,0\nend_of_record\n"
+        self.assertEqual(self.merge(first, second), (
+            "SF:scripts/tool.py\nFN:3,4,Tool.run\nFN:7,9,Tool.stop\nFNDA:3,Tool.run\nFNDA:0,Tool.stop\n"
+            "FNF:2\nFNH:1\nDA:3,3\nDA:4,1\nDA:7,0\nLF:3\nLH:2\nend_of_record\n"
+        ))
+
     def test_malformed_reports_are_refused(self) -> None:
         for text, reason in (
             ("DA:1,1\n", "outside a record"),
@@ -407,6 +416,14 @@ class WorkflowTests(unittest.TestCase):
         script = re.search(r"        run: \|\n((?:          .*\n|\n)*)", section)
         self.assertIsNotNone(script)
         self.script = textwrap.dedent(script[1])
+
+    def test_documentation_only_validation_rerun_excludes_reusable_test_workflow(self) -> None:
+        check = (bolero.ROOT / ".github/workflows/check.yaml").read_text()
+        caller = check.split("\n  bolero:\n", 1)[1].split("\n  conventional-pr-title:", 1)[0]
+        # The caller's selection survives a validation-only rerun. A cancelled
+        # required producer must still fail the reusable workflow's own gate.
+        self.assertIn("needs: [test-selection]", caller)
+        self.assertIn("if: needs.test-selection.outputs.bolero-required == 'true'", caller)
 
     def test_complete_required_execution_and_deliberate_skips_retain_the_tested_snapshot(self) -> None:
         for event, labels, required, result in (
@@ -436,10 +453,12 @@ class WorkflowTests(unittest.TestCase):
     def test_failed_cancelled_or_missing_required_jobs_do_not_publish_complete_selection(self) -> None:
         for random, fuzz, combined, required in (
             ("failure", "success", "success", "true"), ("cancelled", "skipped", "skipped", "false"),
+            ("skipped", "skipped", "skipped", "false"), ("", "skipped", "skipped", "false"),
             ("success", "failure", "skipped", "true"), ("success", "cancelled", "skipped", "true"),
             ("success", "skipped", "skipped", "true"), ("success", "success", "success", "false"),
             ("success", "success", "failure", "true"), ("success", "success", "skipped", "true"),
             ("success", "skipped", "success", "false"),
+            ("success", "", "success", "true"), ("success", "success", "", "true"),
         ):
             with self.subTest(random=random, fuzz=fuzz, combined=combined, required=required), tempfile.TemporaryDirectory() as directory:
                 environment = {**os.environ, "RANDOM_RESULT": random, "FUZZ_RESULT": fuzz, "COMBINED_RESULT": combined,

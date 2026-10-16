@@ -370,6 +370,13 @@ as its high watermark.
 
 ## Inferencer
 
+Commands that bind an ONNX model inspect its tensor metadata on the node's bulk workers. Each
+inspection uses its admitted worker for ONNX initialization and optimization and has a thirty-second
+bound covering the worker queue, model loading, metadata extraction and session release. A full bulk
+queue refuses the inspection with its execution cause; releasing that capacity permits the same
+valid inferencer to be created. Tensor names, element types and dimensions are checked before the
+model is committed.
+
 Inferencers keep the explicit tensor mapping surface. `INPUTS` expressions may read `input`; route
 construction cannot. Routes read immutable generated model fields, declared materialized state,
 and the branch:

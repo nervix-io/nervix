@@ -466,7 +466,6 @@ use ingest_group::{
     PayloadDecodeFailure, RawIngestAcceptance, decode_ingested_payload,
     prepare_branched_entrypoint_input,
 };
-pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
     IngestMetadataBuilders,
@@ -514,6 +513,7 @@ use message_error_plan::{
     BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
 use nervix_connector_kafka::KafkaOffsetPosition;
+pub(in crate::runtime) use nervix_models::SourceMetadataScope;
 use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::RuntimeInner;
 use planning::{
@@ -718,6 +718,9 @@ mod wasm_state;
 mod wasm_state_recovery;
 mod wasm_state_reset;
 mod window_accumulator;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub use window_accumulator::benchmark as window_sketch_benchmark;
 mod window_archive;
 #[cfg(test)]
 mod window_checkpoint_cases;

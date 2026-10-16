@@ -551,7 +551,9 @@ mod tests {
     use nervix_models::ModelName;
     use nervix_models::{
         AckMode, BranchSelection, CodecName, CreateIngestor, CreateJunction, EndpointName,
-        GeneralErrorPolicy, IngestSource, IngestorName, ModelKind, ProcessorInputs,
+        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, IngestorName, ModelKind,
+        ProcessorInputs, SyslogListenerSource, SyslogSource, WebsocketsEndpointSource,
+        WebsocketsSource,
     };
     use nonzero_ext::nonzero;
 
@@ -937,10 +939,11 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Syslog {
+        transport.source = IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
             client: named("syslog_listener"),
+            mode: nervix_models::SyslogIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        };
+        }));
         models.push(syslog_client("syslog_listener"));
         registry
             .apply_batch(&domain, models)
@@ -1113,14 +1116,16 @@ mod tests {
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint {
-                                    endpoint: EndpointName::parse("ingest_http")
-                                        .expect("valid identifier"),
-                                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                        max_size: "1MiB".to_string(),
+                                source: IngestSource::Http(HttpSource::Endpoint(
+                                    HttpEndpointSource {
+                                        endpoint: EndpointName::parse("ingest_http")
+                                            .expect("valid identifier"),
+                                        mode: nervix_models::EndpointIngestMode::NoAck,
+                                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                            max_size: "1MiB".to_string(),
+                                        },
                                     },
-                                },
+                                )),
                                 codec: CodecName::parse("event_codec").expect("valid identifier"),
                             },
                         ),
@@ -1204,14 +1209,16 @@ mod tests {
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint {
-                                    endpoint: EndpointName::parse("ingest_ws")
-                                        .expect("valid identifier"),
-                                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                        max_size: "1MiB".to_string(),
+                                source: IngestSource::Websockets(WebsocketsSource::Endpoint(
+                                    WebsocketsEndpointSource {
+                                        endpoint: EndpointName::parse("ingest_ws")
+                                            .expect("valid identifier"),
+                                        mode: nervix_models::EndpointIngestMode::NoAck,
+                                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                            max_size: "1MiB".to_string(),
+                                        },
                                     },
-                                },
+                                )),
                                 codec: CodecName::parse("event_codec").expect("valid identifier"),
                             },
                         ),

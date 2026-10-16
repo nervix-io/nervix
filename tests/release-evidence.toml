@@ -10,6 +10,7 @@
 
 [[method]]
 checks = [
+  "test-selection",
   "checks",
   "tests",
   "scenarios",
@@ -17,7 +18,7 @@ checks = [
   "extra-tests",
   "diagnostic-evidence",
 ]
-description = "Formatting, lints, validation and ratchets; unit, documentation, scenario and runner tests; coverage and its gates"
+description = "Formatting, lints, validation and ratchets; unit, documentation, scenario and runner tests; coverage report integrity and the deterministic complexity ratchet; advisory coverage percentages and CRAP scores"
 name = "ordinary"
 
 [[method]]

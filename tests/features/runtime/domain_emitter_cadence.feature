@@ -28,8 +28,8 @@ Feature: Domain-paced emitter cadence
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR emitter_cadence_source
-        FROM ENDPOINT emitter_cadence_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR emitter_cadence_source
+        FROM emitter_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -109,8 +109,8 @@ Feature: Domain-paced emitter cadence
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR emitter_hold_source
-        FROM ENDPOINT emitter_hold_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR emitter_hold_source
+        FROM emitter_hold_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -139,7 +139,7 @@ Feature: Domain-paced emitter cadence
     Then the observed broker does not receive a payload within "2s"
     When these NSPL commands are executed
       """
-      ALTER INGESTOR emitter_hold_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR emitter_hold_source SET QUIESCE BUFFER MAX SIZE 2MiB;
       """
     Then within "10s" the observed broker receives payloads
       """
@@ -180,8 +180,8 @@ Feature: Domain-paced emitter cadence
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR emitter_immediate_source
-        FROM ENDPOINT emitter_immediate_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR emitter_immediate_source
+        FROM emitter_immediate_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -250,8 +250,8 @@ Feature: Domain-paced emitter cadence
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR iceberg_cadence_source
-        FROM ENDPOINT iceberg_cadence_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR iceberg_cadence_source
+        FROM iceberg_cadence_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -327,8 +327,8 @@ Feature: Domain-paced emitter cadence
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC ack_keepalive_in_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'ack_keepalive_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications

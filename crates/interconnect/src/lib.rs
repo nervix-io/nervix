@@ -70,6 +70,10 @@ pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
 pub use peer_resolver::PeerResolver;
 pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
+// This is already the public supertrait and response bound of the typed request contracts.
+// Keep that same bounded codec nameable by callers crossing the engine boundary.
+#[doc(hidden)]
+pub use request::RkyvMessage;
 pub use request::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationHealthProbe,
     ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,
@@ -453,6 +457,7 @@ pub struct IngestorDescribeEnvelope {
     pub quiesce_buffered_bytes: u64,
     pub quiesce_dropped_total: u64,
     pub quiesce_rejected_total: u64,
+    pub transport_redeliveries_total: u64,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,

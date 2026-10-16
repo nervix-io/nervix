@@ -15,10 +15,10 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_arbitrary::{Arbitrary, Domain, ModelVariant, SinkVariant, StatementVariant};
+use nervix_arbitrary::{Arbitrary, Domain, ModelVariant, StatementVariant};
 use nervix_models::{
-    CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, Expression,
-    InspectionFormat, Model, Statement, SubscriptionDeliveryBehavior,
+    CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, EmitSinkKind,
+    Expression, IngestSourceKind, InspectionFormat, Model, Statement, SubscriptionDeliveryBehavior,
 };
 use strum::IntoEnumIterator as _;
 
@@ -238,6 +238,20 @@ fn bolero_model_roundtrip_canonical_nspl() {
 }
 
 #[test]
+fn statement_corpus_reaches_resumed_restore() {
+    let bytes = include_bytes!(
+        "__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus/\
+         resume"
+    );
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+    let ClientStatement::Server(Statement::Restore(restore)) = client_statement(&mut arbitrary)
+    else {
+        panic!("the resume corpus entry generates a current restore statement");
+    };
+    assert_eq!(restore.lifecycle, nervix_models::RestoreLifecycle::Resume);
+}
+
+#[test]
 fn bolero_statement_roundtrip_canonical_nspl() {
     bolero::check!()
         .with_iterations(256)
@@ -265,13 +279,28 @@ fn every_model_family_round_trips_canonically() {
 
 #[test]
 fn every_emitter_sink_round_trips_canonically() {
-    for variant in SinkVariant::ALL {
+    for kind in EmitSinkKind::all() {
         for seed in 0..16 {
             let bytes = sweep_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
-            let emitter = arbitrary.create_emitter_to(variant);
-            assert_eq!(SinkVariant::of(&emitter.sink), variant);
+            let emitter = arbitrary.create_emitter_to(kind);
+            assert_eq!(emitter.sink.kind(), kind);
             let model = Model::Emitter(emitter);
+            let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
+            assert_statement_round_trips(&ClientStatement::Server(statement));
+        }
+    }
+}
+
+#[test]
+fn every_ingestor_source_round_trips_canonically() {
+    for kind in IngestSourceKind::all() {
+        for seed in 0..16 {
+            let bytes = sweep_bytes(seed);
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+            let ingestor = arbitrary.create_ingestor_from(kind);
+            assert_eq!(ingestor.input.source_kind(), kind);
+            let model = Model::Ingestor(ingestor);
             let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
             assert_statement_round_trips(&ClientStatement::Server(statement));
         }

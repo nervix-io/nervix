@@ -207,6 +207,29 @@ that opened it, and a forwarded producer's link key is never reused within its p
 has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
 zero counts, never markers.
 
+**Sources and sinks.** A source or a sink is addressed by the connector that serves it and the
+entity it consumes, and its Model states both in its shape: the union holds one variant per
+connector, that variant holds one variant per entity, and each entity has its own Model with only
+the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
+an OpenTelemetry sink is a logs, a traces or a metrics sink, so only a metrics sink carries a
+metric and no signal value sits beside mappings that might contradict it. The kind that names a
+pair is read from the Model and never stored beside it. An ingestor alteration is nested the same
+way: its head selects one connector and entity, and the operations of that entity set a source of
+that entity's own Model, so `ALTER KAFKA TOPIC INGESTOR` cannot carry a Redis channel and no kind
+field sits beside the source it sets. Only a transport's operations include the codec that decodes
+its payloads, so a client producer alteration cannot hold one. A stored ingestor of another pair is
+refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
+types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
+decoded, and keeps its text exactly as written, case included, so a connector sends what the
+statement says. What every source or sink of a pair
+declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
+whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
+every node, what its body references, and for a sink whether it writes headers, needs a codec,
+requires batching and which publishing modes it accepts. A client Model names the connector it
+configures as a typed kind, so a source or a sink is matched with its client by comparing kinds
+rather than labels. A session producer's source is no transport, so the transport union holds no
+Model of it; the kind union still names it, because capability decisions ask about every source.
+
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission
 requires that validated interconnect endpoint; an incomplete publication cannot become a
@@ -293,7 +316,9 @@ callers observe typed tracking, idle, and completion outcomes rather than doing 
 encoding. Completion cannot be reactivated. This preserves the contentionless ACK path and the
 root tracker's accounting without adding a lock. The delivery and handoff boundaries themselves
 are described in [Data-Plane Concurrency](./data-plane-concurrency.md) and
-[Shutdown And Recovery](./shutdown.md).
+[Shutdown And Recovery](./shutdown.md). [Execution Primitives](./execution-primitives.md) owns which
+backend supplies the atomic; selecting a modeled atomic does not validate the owner's encoding or
+prove its transitions without the corresponding production-owner check.
 
 A source instance owns starting, ready and retired states in a private atomic byte. Its handle alone
 interprets starting=0, ready=1 and retired=2. Compare-and-swap permits readiness changes only before
@@ -593,6 +618,13 @@ A captured archive section carries its publication key, content kind and staged 
 Guest capture retains a selected checkpoint handle until its scheduled generation is checked;
 its admitted storage job records the size for later admission, and opening that handle returns
 the checkpoint revision with the reader for those exact bytes.
+
+Deduplicator and window capture likewise distinguish a live publication from an unopened stored
+checkpoint in the captured-state union. A stored selection carries its immutable view and inspected
+size, and opening it returns its actual revision with an admitted immutable artifact. Only a
+validated keyspace or window reader exposes counts, boundaries or columns. The control plane
+selects the scheduled owner and schema before opening; it receives typed conversion results rather
+than native bytes. A window's live and stored readers retain their own required lifetime and metadata.
 
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader
