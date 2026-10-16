@@ -1096,7 +1096,7 @@
             "--scale-interval-ms",
             "20",
             "--scale-cycles",
-            "3",
+            "6",
             "--scale-cycle-records",
             "3000",
             "--scale-cycle-mode",
@@ -1108,7 +1108,7 @@
           ]
         },
         {
-          "id": "traffic-only-ttl5m-1000-n3",
+          "id": "traffic-only-ttl5m-40rps-1000-n3",
           "shard": 2,
           "budget_minutes": 60,
           "run": [
@@ -1118,9 +1118,9 @@
             "--scale-branches",
             "1000",
             "--scale-interval-ms",
-            "20",
+            "25",
             "--scale-cycles",
-            "3",
+            "6",
             "--scale-cycle-records",
             "3000",
             "--scale-cycle-mode",
