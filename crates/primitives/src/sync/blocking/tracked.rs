@@ -252,6 +252,16 @@ impl<T: fmt::Display> fmt::Display for MutexGuard<'_, T> {
 
 /// A reader-writer lock whose acquisitions the deadlock detector tracks.
 ///
+/// Ordinary read and write guards are supported after installing the detector:
+///
+/// ```
+/// let _detector = nervix_primitives::deadlock::install(|_finding| {});
+/// let lock = nervix_primitives::sync::blocking::RwLock::new(1_u8);
+/// assert_eq!(*lock.read(), 1);
+/// *lock.write() = 2;
+/// assert_eq!(*lock.read(), 2);
+/// ```
+///
 /// An upgradable read, which the detector cannot track, does not exist in this build:
 ///
 /// ```compile_fail,E0599

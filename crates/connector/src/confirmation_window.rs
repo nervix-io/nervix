@@ -278,8 +278,13 @@ where
     }
 
     /// The failure that ends a publish whose window stopped waiting for the broker.
+    ///
+    /// The window describes this failure of its own in a printable attachment, which an emitter
+    /// shows as its transient error, as a connector describes the failures it reports itself.
     fn stopped(&self, error: ConfirmationWindowError) -> Report<SinkPublishError> {
-        Report::new(error).change_context(SinkPublishError::Publish { sink: self.sink })
+        Report::new(error)
+            .change_context(SinkPublishError::Publish { sink: self.sink })
+            .attach_printable(error.to_string())
     }
 }
 

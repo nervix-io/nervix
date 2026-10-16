@@ -34,6 +34,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v1 | 128 | 4096 bytes |
 | `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
 | `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v1 | 128 | 2048 bytes |
+| `client-upload-archives` | `nervix-client-core` complete directory tree and deterministic archive bytes against an independent tar decoder | empty directories, nested and GNU long paths, arbitrary file bytes and block boundaries, v1 | 128 | 4096 bytes |
 | `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |
 | `client-row-views` | `nervix-client-wire` complete retained Row views | all scalar cells, nested vectors, fixed arrays, nulls, redaction, branches and float bits, v1 | 128 | 512 bytes |
 | `client-arbitrary-frames` | `nervix-client-wire` typed verification and decoding within budgets | arbitrary bytes at all eight frame roots, v1 | 256 | 16385 bytes |
@@ -678,7 +679,7 @@ runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its 
 samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
 shards' line, function and branch counters because they ran disjoint campaigns, and
 `bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
-remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
+remain separate from ordinary workspace coverage and its CRAP report. A sanitizer skip publishes no
 fuzz coverage artifact.
 
 ## Adding A Target

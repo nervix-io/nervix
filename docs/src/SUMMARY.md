@@ -76,6 +76,7 @@
   - [Command Completion](./command-completion.md)
   - [Resource Versions And Bindings](./resource-versions.md)
   - [Data Plane](./data-plane.md)
+  - [Execution Primitives](./execution-primitives.md)
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
   - [SIMD Kernels](./simd-kernels.md)
   - [VM Functions](./vm-functions.md)

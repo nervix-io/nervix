@@ -25,10 +25,11 @@ use super::{
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    KafkaIngestMode, PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
+    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, KafkaIngestMode, PositionClass, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, TopicName,
 };
 
 configured_client!(Pulsar: unpooled CreateClientPulsar => PulsarConfigEntry);
@@ -118,6 +119,7 @@ impl SourceEntity for PulsarTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
     };
 }
 

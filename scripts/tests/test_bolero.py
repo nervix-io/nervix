@@ -161,6 +161,7 @@ class InventoryTests(unittest.TestCase):
             "client-replies",
             "client-events",
             "client-streams",
+            "client-upload-archives",
             "client-reply-transfer",
             "client-row-views",
             "client-arbitrary-frames",
@@ -336,6 +337,7 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",
             "nervix-server",

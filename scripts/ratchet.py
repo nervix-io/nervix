@@ -23,7 +23,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Callable, Sequence
 
 from scripts import cargo_crap
@@ -46,25 +46,6 @@ def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
     ]
 
 
-def unreachable_sources(root: Path, files: Sequence[RustFile]) -> list[str]:
-    """Discovered files the analyzer's walk never reads: a hidden path, a symbolic link, or a
-    tracked file that Git ignores."""
-
-    completed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--ignored", "--exclude-standard", "--", "*.rs"],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    ignored = {entry for entry in completed.stdout.split("\0") if entry}
-    unreachable = []
-    for file in files:
-        hidden = any(part.startswith(".") for part in PurePosixPath(file.path).parts)
-        if hidden or (root / file.path).is_symlink() or file.path in ignored:
-            unreachable.append(file.path)
-    return unreachable
-
-
 def count_functions_over_complexity_30(root: Path, files: Sequence[RustFile], target: Path) -> list[Site]:
     """Functions the pinned analyzer scores above the limit, over exactly the discovered files.
 
@@ -73,14 +54,15 @@ def count_functions_over_complexity_30(root: Path, files: Sequence[RustFile], ta
     function inside a macro, a trait's provided method or a function nested in another's body.
     """
 
-    unreachable = unreachable_sources(root, files)
+    unreachable = cargo_crap.unreachable_sources(root, [file.path for file in files])
     if unreachable:
         raise SystemExit(
             "error: the complexity analyzer cannot read these discovered Rust files, so the count "
             "would miss their functions:\n" + "\n".join(unreachable)
         )
+    excludes = [f"**/{directory}/**" for directory in sorted(TEST_DIRECTORIES)]
     try:
-        functions = cargo_crap.analyze(root, target, sorted(TEST_DIRECTORIES))
+        functions = cargo_crap.analyze(root, target, excludes)
     except cargo_crap.AnalyzerError as error:
         raise SystemExit(f"error: complexity analysis failed: {error}") from error
     discovered = {file.path for file in files}

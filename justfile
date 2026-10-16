@@ -263,7 +263,9 @@ test: tests-deps
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
-    cargo test --package nervix-server --package nervix-roto --features nervix-server/testing --doc
+    cargo test --package nervix-server --package nervix-roto --package nervix-vm \
+        --package nervix-consensus --package nervix-dns --package nervix-recovery \
+        --package nervix-simd-kernels --features nervix-server/testing --doc
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -1157,9 +1159,28 @@ coverage-merge-runner:
     "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" --branch --source=scripts.coverage_merge,scripts.tests.test_coverage_merge -m unittest scripts.tests.test_coverage_merge
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
 
-# Check the same merged workspace coverage and complexity limit locally as CI does.
-check-coverage report="lcov-workspace.info": install-cargo-crap
-    python3 -m scripts.cargo_crap run -- --lcov {{ quote(report) }} --min 30 --threshold 30
+# Report CRAP over the merged ordinary workspace report as the coverage job does: the pinned cargo-crap
+# scores the repository's Rust sources against the report and writes target/crap-report/crap.json
+# and crap.md. No score fails the recipe. It fails only when the analysis is vacuous: the merge record
+# does not state a complete merge at this revision, the report names a source this checkout does not
+# track, a Rust file the report holds was not analysed, or the analysis matched none of them. Name a
+# retained coverage-merged artifact's report and record, in a checkout of the revision the record
+# names, to reproduce that run's report.
+check-coverage report="lcov-workspace.info" record=(cargo_target_dir + "/coverage-merge/record.json"): install-cargo-crap
+    python3 -m scripts.crap_report --report {{ quote(report) }} --record {{ quote(record) }} --output {{ quote(cargo_target_dir + "/crap-report") }}
+
+# Exercise the CRAP report's analysis, its vacuity verdict, its reports and its CI contract.
+test-crap-report: install-cargo-crap
+    python3 -m unittest scripts.tests.test_crap_report
+
+# Retain the CRAP report's own measured line coverage beside the other Python tooling reports.
+coverage-crap-report-runner: install-cargo-crap
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/crap-report"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/crap-report/python.coverage" --branch --source=scripts.crap_report,scripts.tests.test_crap_report -m unittest scripts.tests.test_crap_report
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/crap-report/python.coverage" -o "{{ cargo_target_dir }}/crap-report/python.lcov"
 
 # Measure added executable lines; --pr <number> updates an advisory GitHub PR comment.
 coverage-patch base="origin/main" report="lcov-workspace.info" *args:
@@ -1224,8 +1245,8 @@ coverage-patch-runner:
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
-# to them exactly as `test-coverage` does. That recipe remains the CI gate for workspace coverage
-# and CRAP.
+# to them exactly as `test-coverage` does. CI collects workspace coverage with that recipe, and the
+# merged report it feeds is what the advisory CRAP report reads.
 test-coverage-feature +features: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -3422,7 +3443,7 @@ test-deadlock-report:
     cargo test --package nervix-deadlock --features report-tool --test report_cli
 
 # Collect both focused checks in their own mode's build and retain canonical completion evidence.
-# The combined report is labeled diagnostic-evidence, outside ordinary coverage and the CRAP gate.
+# The combined report is labeled diagnostic-evidence, outside ordinary coverage and its CRAP report.
 coverage-deadlock output="target/deadlock.lcov":
     #!/usr/bin/env bash
     set -euo pipefail

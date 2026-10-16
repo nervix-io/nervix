@@ -11,6 +11,21 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-core/src/__fuzz__/upload__tests__bolero_upload_archives_preserve_the_complete_tree_and_deterministic_bytes/corpus"
+domain_version = 1
+features = []
+id = "client-upload-archives"
+invariant = "Completed upload archives preserve every file byte, empty directory, nested and GNU long path, deterministic metadata and entry order; rebuilding the same tree preserves exact archive bytes and declared length."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-client-core"
+random_iterations = 128
+source = "crates/client-core/src/upload_tests.rs"
+test = "upload::tests::bolero_upload_archives_preserve_the_complete_tree_and_deterministic_bytes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
 domain_version = 1
 features = []
