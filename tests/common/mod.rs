@@ -11,6 +11,7 @@ pub(crate) mod injected_hold;
 pub(crate) mod kafka_group_member;
 pub(crate) mod materialized_state_diagnostics;
 pub(crate) mod mqtt_publish_filter;
+pub(crate) mod nats_observer;
 pub(crate) mod node_liveness;
 pub(crate) mod node_startup;
 pub(crate) mod node_stop;

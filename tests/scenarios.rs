@@ -28683,23 +28683,28 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     );
 
     let deadline = Instant::now() + duration;
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion");
     for expected_sequence in 1..=count {
         nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out after receiving {} of {count} sequential broker messages",
-            expected_sequence - 1
+            "timed out after receiving {} of {count} sequential broker messages; {}",
+            expected_sequence - 1,
+            observer.describe_client_receipts()
         );
-        let message = world
-            .broker_observer
-            .as_mut()
-            .expect("a broker observer must exist before assertion")
+        let message = observer
             .try_next_message(deadline.saturating_duration_since(now))
             .await
             .expect("failed while waiting for sequential broker message")
             .unwrap_or_else(|| {
-                panic!("timed out waiting for broker message {expected_sequence} of {count}")
+                panic!(
+                    "timed out waiting for broker message {expected_sequence} of {count}; {}",
+                    observer.describe_client_receipts()
+                )
             });
         let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
             .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
@@ -28731,10 +28736,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
         world.last_broker_headers = message.headers;
     }
 
-    let duplicate = world
-        .broker_observer
-        .as_mut()
-        .expect("a broker observer must exist before assertion")
+    let duplicate = observer
         .try_next_message(Duration::from_millis(500))
         .await
         .expect("failed while checking for a duplicate broker message");

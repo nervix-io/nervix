@@ -30,7 +30,10 @@ jobs:
       - name: Checkout tested merge
         uses: actions/checkout@v4
         with:
+          # The tested merge and its parents. Selection fetches the tested base's commit history with
+          # these credentials only when GitHub merged into a base that advanced past the event's.
           fetch-depth: 2
+          persist-credentials: true
 
       - name: Select required suites from the tested diff
         id: selection
