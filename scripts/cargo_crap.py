@@ -18,7 +18,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Sequence
+from typing import Iterable, Sequence
 
 VERSION = "0.6.1"
 CRATE = "cargo-crap"
@@ -123,12 +123,32 @@ def configuration_in_reach(directory: Path) -> Path | None:
     return None
 
 
-def analyze(root: Path, target: Path, excluded_directories: Sequence[str]) -> list[Function]:
+def unreachable_sources(root: Path, paths: Iterable[str]) -> list[str]:
+    """The Rust sources, relative to `root`, that the analyzer's walk never reads: a hidden path, a
+    symbolic link, or a tracked file that Git ignores."""
+
+    completed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--ignored", "--exclude-standard", "--", "*.rs"],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    ignored = {entry for entry in completed.stdout.split("\0") if entry}
+    unreachable = []
+    for path in paths:
+        hidden = any(part.startswith(".") for part in PurePosixPath(path).parts)
+        if hidden or (root / path).is_symlink() or path in ignored:
+            unreachable.append(path)
+    return unreachable
+
+
+def analyze(root: Path, target: Path, excludes: Sequence[str]) -> list[Function]:
     """Measure every function of the Rust sources below `root` that the analyzer's walk reaches.
 
-    The walk skips Git-ignored, hidden and symbolic-link paths and every path with a directory
-    component in `excluded_directories`. An analysis that skipped a source, read a configuration,
-    used another `?` weight or measured nothing is refused rather than read as an empty result.
+    The walk skips Git-ignored, hidden and symbolic-link paths and every path that one of the
+    `excludes` globs matches relative to `root`. An analysis that skipped a source, read a
+    configuration, used another `?` weight or measured nothing is refused rather than read as an
+    empty result.
     """
 
     path = verified_executable(target)
@@ -140,8 +160,8 @@ def analyze(root: Path, target: Path, excluded_directories: Sequence[str]) -> li
             "the analysis reads no configuration file, so remove it"
         )
     command = [str(path), "--path", ".", "--no-default-excludes"]
-    for directory in excluded_directories:
-        command.extend(["--exclude", f"**/{directory}/**"])
+    for pattern in excludes:
+        command.extend(["--exclude", pattern])
     command.extend(["--format", "json", "--sort", "file"])
     completed = subprocess.run(command, cwd=root, capture_output=True, text=True)
     if completed.returncode:
