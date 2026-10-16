@@ -261,28 +261,39 @@ class PatchCoverageTests(unittest.TestCase):
             "unmeasured": [],
         }))
         output = self.root / "target" / "patch.md"
-        with redirect_stdout(io.StringIO()):
-            status = patch_coverage.main(
-                ["--base", self.base, "--report", str(report), "--output", str(output), "--crap", "target/crap.json"],
-                root=self.root,
-            )
+        summary = self.root / "summary.md"
+        # An explicit repository, so that CI's GITHUB_REPOSITORY does not decide the links.
+        arguments = ["--base", self.base, "--report", str(report), "--output", str(output),
+                     "--crap", "target/crap.json", "--repo", "owner/repository"]
+        with mock.patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}):
+            with redirect_stdout(io.StringIO()):
+                status = patch_coverage.main(arguments, root=self.root)
         body = output.read_text()
+        head = self.git("rev-parse", "HEAD").strip()
         self.assertEqual(status, 0)
         self.assertLess(body.index("## Patch coverage"), body.index("## CRAP"))
-        self.assertIn("| <code>answer</code> | <code>src/sample.py:1</code> | 992.0 | 31 | 0.0% |", body)
+        self.assertIn(
+            f"| <code>answer</code> | [<code>src/sample.py:1</code>](https://github.com/owner/repository/blob/{head}/src/sample.py#L1)"
+            " | 992.0 | 31 | 0.0% |",
+            body,
+        )
         self.assertNotIn("elsewhere", body)
         self.assertIn("Project: 2 of 2 measured functions above 30.", body)
+        # The job summary carries the same CRAP section as the comment.
+        self.assertEqual(summary.read_text(), body)
 
     def test_a_missing_crap_report_is_stated_and_the_comment_is_still_written(self) -> None:
         self.source.write_text("def answer():\n    return 2\n")
         self.commit()
         report = self.report("coverage.lcov", "src/sample.py", {1: 1, 2: 1})
         output = self.root / "target" / "patch.md"
-        with redirect_stdout(io.StringIO()):
-            status = patch_coverage.main(
-                ["--base", self.base, "--report", str(report), "--output", str(output), "--crap", "target/missing.json"],
-                root=self.root,
-            )
+        summary = self.root / "summary.md"
+        with mock.patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}):
+            with redirect_stdout(io.StringIO()):
+                status = patch_coverage.main(
+                    ["--base", self.base, "--report", str(report), "--output", str(output), "--crap", "target/missing.json"],
+                    root=self.root,
+                )
         self.assertEqual(status, 0)
         self.assertIn("100.00%", output.read_text())
         self.assertIn("**The CRAP report is unavailable**", output.read_text())
