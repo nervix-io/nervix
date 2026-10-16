@@ -17,7 +17,8 @@ use std::time::Duration;
 
 #[cfg(not(feature = "testing"))]
 use nervix_models::{
-    ClusterNodeName, DomainName, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
+    ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName,
+    RelayName,
 };
 
 #[cfg(not(feature = "testing"))]
@@ -49,6 +50,13 @@ impl ConfiguredFaultInjection {
 
     pub(in crate::runtime) fn ingestor_is_failed(&self, _ingestor: &IngestorName) -> bool {
         false
+    }
+
+    pub(in crate::runtime) fn source_confirmation_delay(
+        &self,
+        _ingestor: &DomainNodeRef,
+    ) -> Option<Duration> {
+        None
     }
 
     pub(in crate::runtime) fn sink_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {

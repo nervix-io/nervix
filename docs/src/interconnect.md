@@ -42,8 +42,10 @@ The transport also runs, unchanged, inside a seeded Turmoil network simulation. 
 test harness outside product ownership, and
 [Deterministic Interconnect Simulation](./interconnect-simulation.md) owns it: its build mode, the
 fault model, supervision, replay and failure records, the scenario matrix, the commands and CI
-budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
-plugs into. Each seam has one production behavior, which is what every node uses:
+budget, and the limits of what it establishes. [Execution Primitives](./execution-primitives.md)
+owns the backend and target selection that make those seams build consistently across the
+dependency graph. The interconnect owns only the seams the simulation plugs into. Each seam has
+one production behavior, which is what every node uses:
 
 - **Sockets and name resolution.** The TCP listener and outbound streams are the sockets of the
   primitive boundary, `nervix_primitives::net`, which are Tokio's operating-system sockets, and

@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-use error_stack::Report;
+use error_stack::{AttachmentKind, FrameKind, Report};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{MessageErrorCode, MessageErrorOperation, Timestamp};
 use nervix_primitives::time::{Instant, Sleep, sleep, sleep_until};
@@ -570,6 +570,17 @@ fn assert_failure(
     }
 }
 
+/// The first printable attachment of `failure`: the description an emitter shows as its transient
+/// error.
+fn printable_description(failure: &Report<SinkPublishError>) -> Option<String> {
+    for frame in failure.frames() {
+        if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+            return Some(attachment.to_string());
+        }
+    }
+    None
+}
+
 #[test]
 fn bolero_a_publish_settles_every_answer_given_before_it_ends() {
     bolero::check!()
@@ -743,6 +754,11 @@ async fn a_full_window_waits_for_the_oldest_until_its_own_deadline() {
          10ms",
         "the rendered chain names the sink, then the deadline it missed"
     );
+    assert_eq!(
+        printable_description(&failure).as_deref(),
+        Some("the broker did not answer within ACK TIMEOUT 10ms"),
+        "the window describes the deadline it missed for the emitter's transient error"
+    );
     let outcome = window.fail(failure).into_parts();
     assert_eq!(sorted_delivered(&outcome), record_ids(&[1]));
     assert!(outcome.rejected.is_empty());
@@ -869,6 +885,16 @@ async fn a_deadline_past_the_clock_range_ends_the_publish() {
         Some(&ConfirmationWindowError::DeadlineOutOfRange {
             timeout: Duration::MAX
         })
+    );
+    assert_eq!(
+        printable_description(&failure),
+        Some(
+            ConfirmationWindowError::DeadlineOutOfRange {
+                timeout: Duration::MAX
+            }
+            .to_string()
+        ),
+        "the window describes the deadline it has no clock for"
     );
     assert_eq!(
         held.get(),

@@ -125,3 +125,100 @@ Feature: SQS ingestion
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: An SQS ingestor created while its service is unreachable consumes once the service returns
+    Given SQS is running
+    And cluster peers are addressed by "DNS names"
+    And a <cluster_size> node nervix cluster is started
+    And SQS is forwarded as "sqs.nervix.test" from the fixture addresses "127.0.5.1"
+    And the DNS fixture answers "sqs.nervix.test" with addresses "127.0.5.1"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "outage_{{test_id}}" exists
+    When the TCP forwarder at "127.0.5.1" stops
+    And these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+        'endpoint' = '{{sqs_forwarded_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE INGESTOR sqs_in
+        FROM sqs_main QUEUE 'outage_{{test_id}}' INSTANCES 1
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "sqs_in" on the leader node contains
+      """
+      transient error: failed to resolve SQS queue 'outage_{{test_id}}'
+      """
+    When the TCP forwarder at "127.0.5.1" restarts
+    And SQS message is published to queue "outage_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "30s" DESCRIBE INGESTOR "sqs_in" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: An SQS ingestor created for a queue that does not exist reports the queue by name
+    Given SQS is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+        'endpoint' = '{{sqs_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE INGESTOR sqs_in
+        FROM sqs_main QUEUE 'missing_{{test_id}}' INSTANCES 1
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "sqs_in" on the leader node contains
+      """
+      transient error: SQS queue 'missing_{{test_id}}' does not exist
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

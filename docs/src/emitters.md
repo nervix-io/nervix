@@ -927,14 +927,21 @@ TO KAFKA <client> TOPIC <topic>
 ```
 
 `ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration; Nervix's `ACK TIMEOUT` independently bounds
-the report wait. `NO_ACK` is fire-and-forget after local admission: Nervix acknowledges the
-emitter's `ATTACHED` ACK share when librdkafka accepts the record into its producer queue and does
-not wait for a delivery report. A later broker error, producer timeout, crash, or process exit can
-therefore lose an accepted record. A full local queue is an infrastructure condition paced by the
-declared retry policy with backpressure. Graceful shutdown drains queued records within the node
-drain bound in both modes. A definitive record-specific rejection, such as an oversized message,
-follows `ON MESSAGE ERROR`.
+compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
+also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
+name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
+the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
+delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
+milliseconds librdkafka holds refuses the emitter when it starts. `NO_ACK` is fire-and-forget after
+local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
+record into its producer queue and does not wait for a delivery report. A later broker error,
+producer timeout, crash, or process exit can therefore lose an accepted record. A full local queue
+is an infrastructure condition paced by the declared retry policy with backpressure. In `ACK` it
+ends the attempt without discarding an answer the broker already gave: the records the broker
+confirmed are delivered and are not sent again, and only the records still awaiting a report are
+retried. Graceful shutdown drains queued records within the node drain bound in both modes. A
+definitive record-specific rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 
@@ -1026,16 +1033,21 @@ TO MQTT <client> TOPIC <topic>
 QoS 0 acknowledges client acceptance. QoS 1 waits for `PUBACK`; QoS 2 waits for the complete
 exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
-policy. A definitive record rejection, such as an invalid topic or payload-format rejection,
-follows `ON MESSAGE ERROR`. So does a record whose `PUBLISH` packet would exceed the Maximum Packet
-Size the broker declared when the client connected, or the largest packet MQTT can express: the
-emitter rejects it before handing it to the client, which would otherwise lose its connection on a
-packet the broker refuses to receive.
-The client resolves the host of its `addr` through the node's asynchronous DNS resolver every time
-it connects, first and after every lost connection, and dials the answers in order within its
-five-second connect timeout. For `mqtts`, TLS verifies the configured host name. While the name
-does not resolve, the client reconnects on the declared retry policy, `DESCRIBE EMITTER` shows the
-lookup failure, and a QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
+policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
+is not the record's own, the emitter keeps every answer the broker already gave and retries only the
+records without one; `DESCRIBE EMITTER` shows why, such as
+`the broker did not answer within ACK TIMEOUT 10s`. A record the emitter stopped waiting for stays
+with the client, which sends it again after a reconnect that resumes the session, beside the
+emitter's own retry, so the broker can receive it twice. A definitive record rejection, such as an
+invalid topic or payload-format rejection, follows `ON MESSAGE ERROR`. So does a record whose
+`PUBLISH` packet would exceed the Maximum Packet Size the broker declared when the client connected,
+or the largest packet MQTT can express: the emitter rejects it before handing it to the client,
+which would otherwise lose its connection on a packet the broker refuses to receive. The client
+resolves the host of its `addr` through the node's asynchronous DNS resolver every time it connects,
+first and after every lost connection, and dials the answers in order within its five-second connect
+timeout. For `mqtts`, TLS verifies the configured host name. While the name does not resolve, the
+client reconnects on the declared retry policy, `DESCRIBE EMITTER` shows the lookup failure, and a
+QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
 
 ### NATS
 
