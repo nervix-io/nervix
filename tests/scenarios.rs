@@ -109,7 +109,8 @@ use crate::common::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
+        WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        client_connect_options, client_domain, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
@@ -12459,6 +12460,36 @@ async fn when_the_external_member_leaves_kafka_consumer_group(
         .expect("the external Kafka group member should leave");
 }
 
+/// What a scenario requires of a consumer group's committed next offset: that it reaches a
+/// threshold, or that it stays below one.
+struct KafkaOffsetCondition {
+    should_reach: bool,
+    threshold: i64,
+}
+
+impl KafkaOffsetCondition {
+    /// Reads `at least <n>` or `below <n>`.
+    fn parse(condition: &str) -> Self {
+        let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ")
+        {
+            (true, threshold)
+        } else if let Some(threshold) = condition.strip_prefix("below ") {
+            (false, threshold)
+        } else {
+            panic!(
+                "Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}"
+            );
+        };
+        let threshold = threshold
+            .parse::<i64>()
+            .expect("Kafka offset threshold must be an integer");
+        Self {
+            should_reach,
+            threshold,
+        }
+    }
+}
+
 #[then(
     expr = "within {string} Kafka consumer group {string} next offset for topic {string} \
             partition {int} is {string}"
@@ -12474,29 +12505,54 @@ async fn then_kafka_consumer_group_next_offset_is(
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
-    let condition = expand_placeholders(world, &condition);
-    let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ") {
-        (true, threshold)
-    } else if let Some(threshold) = condition.strip_prefix("below ") {
-        (false, threshold)
-    } else {
-        panic!("Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}");
-    };
-    let threshold = threshold
-        .parse::<i64>()
-        .expect("Kafka offset threshold must be an integer");
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
     world
         .cluster()
         .assert_kafka_consumer_group_next_offset(
             &group,
             &topic,
             partition,
-            threshold,
-            should_reach,
+            condition.threshold,
+            condition.should_reach,
             duration,
         )
         .await
         .expect("Kafka consumer group committed-offset assertion failed");
+}
+
+/// The committed next offset the scenario's own mock Kafka broker holds for a consumer group.
+#[then(
+    expr = "within {string} mock Kafka consumer group {string} next offset for topic {string} \
+            partition {int} is {string}"
+)]
+async fn then_mock_kafka_consumer_group_next_offset_is(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+    condition: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before its offsets are read")
+        .client_config();
+    assert_kafka_consumer_group_next_offset_through(
+        client_config,
+        &group,
+        &topic,
+        partition,
+        condition.threshold,
+        condition.should_reach,
+        duration,
+    )
+    .await
+    .expect("mock Kafka consumer group committed-offset assertion failed");
 }
 
 #[then(expr = "RabbitMQ queue {string} eventually has {int} consumers")]
@@ -22134,6 +22190,8 @@ async fn given_kafka_topic_exists_with_partitions(
 /// `{{mock_kafka_addr}}`.
 #[given(expr = "a mock Kafka broker serves topic {string}")]
 fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    // The topic's name expands the scenario's identity, which no step may have drawn yet.
+    initialize_scenario_identity(world);
     let topic = expand_placeholders(world, &topic);
     let broker =
         KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
@@ -22180,6 +22238,66 @@ fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
         .expect("a mock Kafka broker serves the scenario before it accepts writes again")
         .accept_writes()
         .expect("the mock Kafka broker accepts writes again");
+}
+
+#[given(expr = "the mock Kafka broker also serves topic {string}")]
+fn given_mock_kafka_broker_also_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it serves another topic")
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+}
+
+#[given("the mock Kafka broker refuses every offset commit")]
+fn given_mock_kafka_broker_refuses_every_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses offset commits")
+        .refuse_offset_commits()
+        .expect("the mock Kafka broker refuses offset commits");
+}
+
+#[given("the mock Kafka broker refuses the next offset commit")]
+fn given_mock_kafka_broker_refuses_the_next_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses an offset commit")
+        .refuse_next_offset_commits(1)
+        .expect("the mock Kafka broker refuses the next offset commit");
+}
+
+#[when("the mock Kafka broker accepts offset commits again")]
+fn when_mock_kafka_broker_accepts_offset_commits_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts offset commits again")
+        .accept_offset_commits()
+        .expect("the mock Kafka broker accepts offset commits again");
+}
+
+#[when(expr = "mock Kafka message is published to topic {string}")]
+async fn when_mock_kafka_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before a message is published to it")
+        .client_config();
+    world.last_publish_at = Some(Instant::now());
+    publish_kafka_record_through(client_config, &topic, None, &payload, &[])
+        .await
+        .expect("failed to publish the mock kafka message");
 }
 
 #[given(expr = "SQS queue {string} exists")]

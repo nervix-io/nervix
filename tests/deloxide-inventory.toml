@@ -121,6 +121,7 @@ tags = [
   "@shutdown_flush_before_freeze",
   "@shutdown_source_confirmation",
   "@shutdown_source_confirmation_handoff",
+  "@shutdown_kafka_refused_commit",
   "@metrics_checkpoint_handoff",
   "@websocket_source_lifecycle",
 ]
@@ -583,6 +584,16 @@ id = "scenario.shutdown-source-confirmation-handoff"
 invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
 invocation = "scenarios"
 scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "One- and three-node graceful restarts after a Kafka consumer group commit the broker refused was read and committed again, while tracked source controls and ACK completion run during the stop. The mock broker, the Kafka client and the commit's blocking-pool wait are untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-kafka-refused-commit"
+invariant = "A Kafka ingestor reports a batch as acknowledged only once the broker answered its commit, so a batch whose commit was refused is read and committed again and the restart reads nothing twice."
+invocation = "scenarios"
+scenario = "A Kafka batch whose commit the broker refused is read and committed again, so a restart on <cluster_size> nodes does not read it again"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1619,6 +1630,16 @@ scenario = "A stopping node hands a Kafka ingestor over only once its transport 
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: one- and three-node graceful restarts after a Kafka consumer group commit the broker refused was read and committed again, with tracked source controls and ACK completion during the stop. The mock broker, the Kafka client and the commit's blocking-pool wait remain untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-kafka-refused-commit"
+invariant = "A Kafka ingestor reports a batch as acknowledged only once the broker answered its commit, so a batch whose commit was refused is read and committed again and the restart reads nothing twice."
+invocation = "stress-scenarios"
+scenario = "A Kafka batch whose commit the broker refused is read and committed again, so a restart on <cluster_size> nodes does not read it again"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline remain untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -2170,6 +2191,8 @@ workloads = [
   "scenario.shutdown-source-confirmation-handoff",
   "stress.shutdown-source-confirmation",
   "stress.shutdown-source-confirmation-handoff",
+  "scenario.shutdown-kafka-refused-commit",
+  "stress.shutdown-kafka-refused-commit",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
@@ -2258,10 +2281,12 @@ workloads = [
   "scenario.client-alter-drain",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
+  "scenario.shutdown-kafka-refused-commit",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
   "stress.shutdown-source-confirmation",
   "stress.shutdown-source-confirmation-handoff",
+  "stress.shutdown-kafka-refused-commit",
   "stress.wasm-kafka-restore",
 ]
 

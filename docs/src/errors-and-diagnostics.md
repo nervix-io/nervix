@@ -580,6 +580,16 @@ record itself, an invalid or oversized message, timestamp or record, rejects tha
 `SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`.
 
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
+the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
+does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaSourceError::CommitTask`. The
+commit of an acknowledged batch fails beneath `SourceError::Acknowledge`, so the ingestor's
+transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
+the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
+`MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
+`SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context

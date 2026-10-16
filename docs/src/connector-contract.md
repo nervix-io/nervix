@@ -349,9 +349,11 @@ Arrow IPC files on the filesystem storage workers, so a node that cannot take th
 publish or the commit, which the host retries as it retries any other.
 
 A driver call that parks its thread while it waits on the network computes nothing, and admitting
-it would hold a worker idle for the whole wait. librdkafka's producer flush and metadata fetch are
-such calls, so the Kafka connector runs them on the runtime's blocking pool as declared owners
-outside the executor, bounded by the host's flush deadline and a per-request metadata timeout.
+it would hold a worker idle for the whole wait. librdkafka's producer flush, metadata fetch and
+synchronous offset commit are such calls, so the Kafka connector runs them on the runtime's blocking
+pool as declared owners outside the executor, bounded by the host's flush deadline, a per-request
+metadata timeout, and one commit in flight per source instance that the source waits for at most
+thirty seconds.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -580,10 +582,17 @@ it did not get:
 
 | Acknowledgement confirmation | Entities | When acknowledging returns |
 | --- | --- | --- |
-| `answered` | SQS | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. |
+| `answered` | SQS, Kafka | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. |
 | `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
-| `queued` | Kafka, Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Kafka consumer-group commit is never awaited, a Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `queued` | Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+
+A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
+positions it delivered on its own cadence, `auto.commit.interval.ms`, so acknowledging such a batch
+confirms nothing. Suspending or closing that source commits what the cadence has not committed yet
+and waits for the coordinator's answer before the consumer leaves its group. A source in an `ACK`
+mode has nothing outstanding at that point, because each acknowledged batch's commit was answered
+before acknowledging it returned.
 
 The host reports progress for a batch only once acknowledging it returns. Until then the
 ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
@@ -1013,6 +1022,16 @@ sequenceDiagram
 ## Integration-specific boundaries
 
 - **Kafka source.** The driver inspects topic partitions and reads or commits Kafka offsets.
+  Under `OFFSET BY CONSUMER GROUP` in an `ACK` mode, the source commits the latest offset of each
+  partition of an acknowledged batch and waits for the coordinator's answer, one round trip per
+  batch, which `ACK PARALLEL` amortizes over the batch. A commit the coordinator refuses fails the
+  acknowledgement with the driver's typed cause, so the host shows it as the ingestor's transient
+  status and rejects the positions. librdkafka keeps retrying a commit it could not send for as
+  long as the group has no reachable coordinator, so the source waits for an answer at most thirty
+  seconds and then fails the acknowledgement the same way. Such a commit stays in flight until
+  librdkafka answers it, and the source's next commit waits for it first, so an instance never
+  parks more than one blocking-pool thread on commits. In `MODE NO ACK` the driver commits on its
+  own cadence, and suspending or closing the source commits what it delivered since.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
   unacknowledged record. A consumer-group rebalance can move a partition to another group member
   while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.

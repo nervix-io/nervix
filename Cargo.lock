@@ -6887,6 +6887,7 @@ dependencies = [
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "rdkafka",
  "thiserror 2.0.21",
  "tracing",
