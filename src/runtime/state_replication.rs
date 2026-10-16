@@ -995,8 +995,9 @@ impl Runtime {
         let entity = &request.entity;
         let base_schedule_fingerprint = request.base_schedule_fingerprint;
         let target_schedule_fingerprint = request.target_schedule_fingerprint;
-        self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
-        let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
+        let scheduled = self
+            .forced_recovery_node_until(domain, entity, base_schedule_fingerprint, deadline)
+            .await?;
         if scheduled.primary_node() != Some(source) {
             return Err(OwnershipHandoffError::participant(format!(
                 "{} '{}' is no longer assigned to lost owner '{}'",
@@ -2983,6 +2984,7 @@ mod lifecycle;
 mod replica_branch_checkpoints;
 mod replica_catch_up;
 pub(in crate::runtime) mod routing;
+mod schedule_installation;
 mod tasks;
 mod wasm_processor_state;
 
@@ -2992,3 +2994,6 @@ mod wasm_processor_state;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests;
+
+#[cfg(all(test, not(feature = "loom")))]
+mod schedule_installation_tests;
