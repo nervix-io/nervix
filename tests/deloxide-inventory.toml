@@ -525,6 +525,14 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
 
 [[workload]]
+coverage = "Bulk queue recovery, charged sequential image preparation, cancellation and memory admission through the production metadata owner. Native and filesystem waits remain untracked."
+id = "owner.onnx-metadata-inspection"
+invariant = "Fresh diagnostic processes recover from a full bulk queue, validate exact tensor bindings, bound memory admission, stop image reads after cancellation and return every buffer charge."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "application::model_validation::tests::deloxide_onnx_metadata_inspection"
+
+[[workload]]
 coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
 examples = 2
 feature = "tests/features/cluster/deadlock_diagnostics.feature"

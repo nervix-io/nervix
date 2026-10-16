@@ -55,6 +55,15 @@ saturating one cannot take the slots another is entitled to.
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
 
+An ONNX binding inspection reserves 16 KiB from the bulk budget for sequential native-image
+preparation. That fixed buffer is read and released on the admitted worker, with cancellation
+checked between reads. Its thirty-second deadline includes waiting for that memory, the worker
+queue, image preparation and the native session's build, metadata extraction and release. ONNX
+Runtime's own heap remains outside this buffer charge. Only an absolute `ORT_DYLIB_PATH` naming a
+regular file receives the read hint; other library discovery and load failures remain the external
+loader's responsibility. Kernel I/O and native calls cannot be preempted by dropping their awaiter;
+a running job retains its charge until it returns and checks cancellation between bounded reads.
+
 These counts bound admission, not threads. Jobs run on the process-wide blocking pool, so a
 class's count is the number of its jobs that may be on that pool at once. A class is guaranteed its
 share of admission; it is not guaranteed an idle thread. Apart from the classes, only work that

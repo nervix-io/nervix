@@ -1866,10 +1866,16 @@ replica task takes them under the same lock.
 The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
 the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
 and three nodes. Its paired stress registration reaches the occupancy holders mutex under bounded
-scheduling disturbance. Metadata inspection keeps ONNX's operator concurrency at one, so loading
-and optimization run on the bulk worker the executor admitted. Debug phase events distinguish
-worker queue delay, session initialization and release while the thirty-second product bound stays
-in place. The dependency's own locks and threads remain outside Deloxide; the isolated native owner
+scheduling disturbance. It also observes the inspection's bulk-memory charge returning to zero.
+The `owner.onnx-metadata-inspection` workload runs the isolated production-wrapper queue recovery
+and the bounded-read and cancellation regressions, including retaining the buffer charge while a
+cancelled read is still in progress. Metadata inspection keeps ONNX's operator concurrency at one;
+sequential preparation of an explicit native image, loading, optimization and release run on the
+admitted bulk worker. The thirty-second bound includes memory admission. Phase events and budget
+snapshots distinguish memory waiting, worker queueing, image reads, session initialization and
+release. No shared cache, global lock or atomic protocol is added. Filesystem waits and native
+synchronization remain outside the detector; the existing executor cancellation Loom models own
+the flag's memory-ordering contract. The dependency's own locks and threads remain outside Deloxide; the isolated native owner
 regression measures the live temporary session's process thread count, and the public branch-batch
 scenario retains its exact interleaved-branch output oracle.
 

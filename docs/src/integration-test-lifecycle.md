@@ -68,7 +68,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
-| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
+| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
@@ -1756,6 +1756,31 @@ query. They keep the placement, branch, round, value byte length and watermarks,
 the fixture's large values. Query failure or timeout stays a diagnostic observation; the original
 exact-row assertion still fails. This observation budget starts after the row deadline and grants
 no additional time for a missing row to satisfy the assertion.
+
+`just test-diagnostic-lib <selection> <test>` runs one exact library owner test in `deloxide`,
+`deloxide-order` or `deloxide-stress`. The owner starts its diagnostic process before
+creating runtime workers or acquiring tracked locks; isolated children inherit the attempt's
+evidence directory and retain their own process records. Each attempt keeps its output under
+`target/deloxide/focused/<selection>/library.*`. The command requires completed, non-ignored tests
+and a fresh evidence directory, and qualifies every retained record. Each invocation selects one
+owner, since the detector installs once per process. Ordinary library selections use `just
+test-runtime`. This focused observation does not replace the complete lane's workload inventory
+and accounting.
+
+`just test-onnx-owner-binary <binary> <library> <filter>` replays a compiled inspection owner
+against an explicit runtime library. Retain the binary's source and execution mode, the library
+digest, the selected test and the process evidence with the replay.
+
+`just build-diagnostic-scenarios <selection>` prepares library, scenario and server executables for
+a supervised replay. Capture their source, mode and artifact identities before replaying the
+selected workloads.
+
+ONNX fixture preparation hands native-library loading, directory creation and model copies to
+`off_the_runner`; a replacement model copy uses the same owner. The scenario publishes its fixture
+placeholder after directory preparation completes and awaits any replacement before its next step.
+The runner continues polling other scenarios and the suite watchdog during that work. This is
+harness preparation: the node's subsequent metadata inspection retains its own thirty-second
+deadline, bulk admission and native-session ownership.
 
 `just test-diagnostic-harness <selection> <filter>` runs focused harness regressions in the chosen
 diagnostic build. `just coverage-harness-liveness <filter>` measures ordinary harness regressions
