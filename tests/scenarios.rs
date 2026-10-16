@@ -23201,6 +23201,10 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
 
 /// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
 /// carries `n` in `field`.
+///
+/// The message is published exactly once, because the steps after it count how many times each
+/// record arrives; a second copy would deliver every record twice. An ingestor that reports itself
+/// ready has already subscribed, so the one copy reaches it.
 #[when(
     expr = "a NATS message carrying records 1 to {int} by field {string} is published to subject \
             {string}"
@@ -23218,7 +23222,7 @@ async fn when_nats_message_carrying_records_is_published(
     let payload = serde_json::Value::Array(records).to_string();
     world
         .cluster()
-        .publish_nats(&subject, &payload)
+        .publish_nats_payloads(&subject, std::slice::from_ref(&payload))
         .await
         .expect("failed to publish a NATS message carrying records");
 }
