@@ -29,8 +29,8 @@ use crate::{
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
     IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
     LocatorName, OptionDeclaration, PositionClass, QueueName, RetryPolicy, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -143,6 +143,7 @@ pub struct RabbitMqQueueSink {
 impl SinkEntity for RabbitMqQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
+        reference: SinkReferenceKind::Client(ConnectorKind::RabbitMq),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,

@@ -10,6 +10,11 @@
 //! The generated tests go through the composed grammar, as a REPL or a client does, so a branch of
 //! another statement family that leaks into an entity's position fails them too.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{Model, RequestedResourceVersion, Statement};
 
 use crate::statement::{parse_statement, suggest_statement};

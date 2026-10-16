@@ -20,7 +20,7 @@ use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
 configured_client!(MySql: pooled, config NervixWithAddressQuery, CreateClientMySql => MySqlConfigEntry);
@@ -50,6 +50,7 @@ pub enum MySqlConflictAction {
 impl SinkEntity for MySqlTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
+        reference: SinkReferenceKind::Client(ConnectorKind::MySql),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,

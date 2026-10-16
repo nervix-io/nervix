@@ -31,7 +31,8 @@ use crate::{
     EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
     LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
     PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, TopicName,
 };
 
 configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
@@ -344,6 +345,7 @@ pub struct MqttTopicSink {
 impl SinkEntity for MqttTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
+        reference: SinkReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,

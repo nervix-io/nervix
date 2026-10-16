@@ -49,7 +49,7 @@ impl Arbitrary<'_> {
             EmitterBody::Values => RouteShape::FilterOnly,
         };
         let publishing_mode = self.accepted_publishing_mode(&sink);
-        // NSPL writes no batching clause where batching is unavailable, as for an HTTP emitter,
+        // Plexus writes no batching clause where batching is unavailable, as for an HTTP emitter,
         // whose requests carry one record each. The vocabulary can still hold one, which a stored
         // form must carry back, so its domain may draw one.
         let batch = match sink.batch_legality() {

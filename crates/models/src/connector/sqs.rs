@@ -31,8 +31,8 @@ use crate::{
     EmitterPublishingModeKind, Expression, IngestAcknowledgement, IngestQuiesceMode,
     IngestSourceCapabilities, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Sqs: unpooled, config Nervix, CreateClientSqs => SqsConfigEntry);
@@ -178,6 +178,7 @@ pub enum SqsFifoGroup {
 impl SinkEntity for SqsQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
+        reference: SinkReferenceKind::Client(ConnectorKind::Sqs),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional {
             maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),

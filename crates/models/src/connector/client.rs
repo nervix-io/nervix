@@ -36,7 +36,8 @@ use crate::{
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
     IngestDeliveryKind, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
     IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
-    SinkEntity, SinkReference, SourceEntity, SourceMetadataScope, SourceReferenceKind,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceEntity, SourceMetadataScope,
+    SourceReferenceKind,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -197,6 +198,7 @@ pub struct ClientConsumerSink {
 impl SinkEntity for ClientConsumerSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
+        reference: SinkReferenceKind::Schema,
         body: EmitterBodyForm::Native,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,

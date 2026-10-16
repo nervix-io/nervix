@@ -28,8 +28,8 @@ use crate::{
     EmitterBodyForm, EmitterPublishingModeKind, EndpointIngestMode, EndpointName, EndpointType,
     Expression, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
     OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfigEntry);
@@ -166,6 +166,7 @@ pub struct HttpRequestSink {
 impl SinkEntity for HttpRequestSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
+        reference: SinkReferenceKind::Client(ConnectorKind::Http),
         body: EmitterBodyForm::CodecOrWithoutBody,
         batch: EmitterBatchLegality::Unavailable {
             reason: BatchUnavailability::OneRequestPerRecord,

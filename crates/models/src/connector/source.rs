@@ -508,7 +508,7 @@ impl ChoiceRequirement {
     }
 
     /// Whether `body` makes every choice `requirements` need.
-    pub fn all_met_by(requirements: &[Self], body: &dyn SourceBody) -> bool {
+    pub(crate) fn all_met_by(requirements: &[Self], body: &dyn SourceBody) -> bool {
         requirements
             .iter()
             .all(|requirement| requirement.met_by(body))

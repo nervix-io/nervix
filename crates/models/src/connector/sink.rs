@@ -98,6 +98,31 @@ pub enum SinkReference<'a> {
     Schema(&'a SchemaName),
 }
 
+/// What kind of model the body of a sink statement names to publish to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkReferenceKind {
+    /// A configured client of one connector.
+    Client(ConnectorKind),
+    /// A configured client of any one of these connectors, which the statement names before it
+    /// with `ON <connector>`: the object store an Iceberg sink writes its data files to.
+    StorageClient(&'static [ConnectorKind]),
+    /// The schema of the native batches session consumers receive.
+    Schema,
+}
+
+impl SinkReferenceKind {
+    /// Whether a body of this reference kind can publish through a client of `connector`.
+    ///
+    /// A storage client is one of the object stores an entity declares, three at most.
+    pub fn admits_client(self, connector: ConnectorKind) -> bool {
+        match self {
+            Self::Client(declared) => declared == connector,
+            Self::StorageClient(declared) => declared.contains(&connector),
+            Self::Schema => false,
+        }
+    }
+}
+
 /// How an emitter's body is formed: what follows its publishing mode, or what its destination
 /// writes in place of a codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +158,8 @@ impl EmitterBodyForm {
 pub struct EmitSinkCapabilities {
     /// Whether an emitter's programs can write transport headers with `write_header`.
     pub writes_headers: bool,
+    /// What its body names to publish to.
+    pub reference: SinkReferenceKind,
     /// How an emitter's body is formed.
     pub body: EmitterBodyForm,
     /// Whether an emitter may write the batching clause, and how large a batch may grow.

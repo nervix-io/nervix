@@ -12,6 +12,11 @@
 //! quiesce mode or an option it accepts without a declaration, one it refuses although declared,
 //! or completion that offers anything else at a declared position.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use nervix_models::{

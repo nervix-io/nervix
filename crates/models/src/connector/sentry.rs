@@ -19,6 +19,7 @@ use super::{configured_client::configured_client, entity_union::connector_sinks}
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind,
 };
 
 configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => SentryConfigEntry);
@@ -36,6 +37,7 @@ impl SinkEntity for SentryEventSink {
     /// codec's batch transformation can say where in that event the members go.
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
+        reference: SinkReferenceKind::Client(ConnectorKind::Sentry),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: true,

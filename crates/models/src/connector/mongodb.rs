@@ -20,7 +20,7 @@ use crate::{
     ClientName, CollectionName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality,
     EmitterBodyForm, EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice,
     OptionDeclaration, OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SinkValueMapping, SinkValueMappings,
+    SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings,
 };
 
 configured_client!(MongoDb: pooled, config NervixWithAddressQuery, CreateClientMongoDb => MongoDbConfigEntry);
@@ -50,6 +50,7 @@ pub enum MongoDbConflictAction {
 impl SinkEntity for MongoDbCollectionSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
+        reference: SinkReferenceKind::Client(ConnectorKind::MongoDb),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,

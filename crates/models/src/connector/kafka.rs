@@ -30,7 +30,8 @@ use crate::{
     IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
     LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
     PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, TopicName,
 };
 
 configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
@@ -216,6 +217,7 @@ pub struct KafkaTopicSink {
 impl SinkEntity for KafkaTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
+        reference: SinkReferenceKind::Client(ConnectorKind::Kafka),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,

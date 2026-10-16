@@ -125,9 +125,7 @@ impl CreateEmitter {
             EmitterBatchLegality::Required { maximum }
             | EmitterBatchLegality::Optional { maximum } => maximum,
         };
-        let Some(maximum) = maximum else {
-            return None;
-        };
+        let maximum = maximum?;
         if batch.max_size.bytes() > maximum.bytes() {
             return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
                 sink,

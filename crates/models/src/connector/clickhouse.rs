@@ -18,7 +18,7 @@ use super::{configured_client::configured_client, entity_union::connector_sinks}
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, LocatorDeclaration, LocatorName, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SinkValueMapping, SinkValueMappings, TableName,
+    SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
 configured_client!(ClickHouse: unpooled, config Nervix, CreateClientClickHouse => ClickHouseConfigEntry);
@@ -38,6 +38,7 @@ pub struct ClickHouseTableSink {
 impl SinkEntity for ClickHouseTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
+        reference: SinkReferenceKind::Client(ConnectorKind::ClickHouse),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,

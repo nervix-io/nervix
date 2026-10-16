@@ -42,6 +42,8 @@ use nervix_models::{
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
 
+mod surface;
+
 fn named<N>(raw: &str) -> N
 where
     N: TryFrom<String>,

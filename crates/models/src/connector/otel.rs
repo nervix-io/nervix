@@ -21,8 +21,8 @@ use super::{configured_client::configured_client, entity_union::connector_sinks}
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkValueMapping,
-    SinkValueMappings,
+    OptionValue, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SinkValueMapping, SinkValueMappings,
 };
 
 configured_client!(Otel: unpooled, config Nervix, CreateClientOtel => OtelConfigEntry);
@@ -188,6 +188,7 @@ const METRIC: OptionDeclaration = OptionDeclaration {
 /// are mapped directly rather than encoded by a codec.
 const OTEL_SINK_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
     writes_headers: false,
+    reference: SinkReferenceKind::Client(ConnectorKind::Otel),
     body: EmitterBodyForm::Values,
     batch: EmitterBatchLegality::Optional { maximum: None },
     requires_batch_transformation: false,

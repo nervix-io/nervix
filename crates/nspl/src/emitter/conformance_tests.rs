@@ -12,16 +12,21 @@
 //! `TO` differ by connector, and [`destination`] writes them. Everything after them comes from the
 //! declaration: the locator, the options, the modes, the body and the batching clause.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use nervix_models::{
-    ClickHouseSinkEntity, ClientSinkEntity, CreateEmitter, EmitSinkCapabilities, EmitSinkKind,
-    EmitterBatchContractError, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
+    ClickHouseSinkEntity, ClientSinkEntity, ConnectorKind, CreateEmitter, EmitSinkCapabilities,
+    EmitSinkKind, EmitterBatchContractError, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
     EmitterPublishingModeKind, EnvelopeClauseKind, HttpSinkEntity, IcebergSinkEntity,
     KafkaSinkEntity, Model, MongoDbSinkEntity, MqttSinkEntity, MySqlSinkEntity, NatsSinkEntity,
     OptionDeclaration, OptionForm, OptionValue, OtelSinkEntity, PostgresSinkEntity,
-    PulsarSinkEntity, RabbitMqSinkEntity, RedisSinkEntity, SentrySinkEntity, SqsSinkEntity,
-    SyslogSinkEntity, ZeroMqSinkEntity,
+    PulsarSinkEntity, RabbitMqSinkEntity, RedisSinkEntity, SentrySinkEntity, SinkReferenceKind,
+    SqsSinkEntity, SyslogSinkEntity, ZeroMqSinkEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -104,15 +109,37 @@ fn destination(kind: EmitSinkKind) -> String {
         | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => {
             format!("{connector} sink_client {} {VALUES}", locator(&declared))
         }
-        EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => format!(
-            "{connector} {} store {} {VALUES} {} {} {}",
-            required(&declared, "ON"),
-            locator(&declared),
-            required(&declared, "LOCATION"),
-            required(&declared, "CATALOG"),
-            required(&declared, "COMMIT EACH")
-        ),
+        EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => {
+            iceberg_destination(&declared, first_store(&declared))
+        }
     }
+}
+
+/// The object stores an entity whose body names a storage client declares it may write to.
+fn stores(declared: &EmitSinkCapabilities) -> &'static [ConnectorKind] {
+    let SinkReferenceKind::StorageClient(stores) = declared.reference else {
+        panic!("the entity's body names a storage client");
+    };
+    stores
+}
+
+fn first_store(declared: &EmitSinkCapabilities) -> ConnectorKind {
+    let Some(store) = stores(declared).first() else {
+        panic!("the entity declares at least one object store");
+    };
+    *store
+}
+
+/// What a generated Iceberg emitter writes after `TO`, writing its data files to `store`.
+fn iceberg_destination(declared: &EmitSinkCapabilities, store: ConnectorKind) -> String {
+    format!(
+        "ICEBERG ON {} store {} {VALUES} {} {} {}",
+        store.keyword(),
+        locator(declared),
+        required(declared, "LOCATION"),
+        required(declared, "CATALOG"),
+        required(declared, "COMMIT EACH")
+    )
 }
 
 /// The bodies an emitter of `form` may write after its publishing mode.
@@ -298,6 +325,28 @@ fn every_declared_mode_body_and_batching_parses_into_its_kind() {
                     assert!(emitter.validate_batch().is_ok(), "{text}");
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn every_declared_object_store_parses_into_its_storage_client() {
+    for kind in EmitSinkKind::all() {
+        let declared = kind.capabilities();
+        let SinkReferenceKind::StorageClient(stores) = declared.reference else {
+            continue;
+        };
+        for store in stores {
+            let destination = iceberg_destination(&declared, *store);
+            let text = format!(
+                "CREATE EMITTER generated FROM events TO {destination} MODE {} FLUSH IMMEDIATE ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                EmitterPublishingModeKind::RequestAck.example()
+            );
+            let Some(Model::Emitter(emitter)) = created_model(&text) else {
+                panic!("the grammar refuses an object store {kind} declares: {text}");
+            };
+            assert_eq!(emitter.sink.client_connector(), Some(*store), "{text}");
         }
     }
 }

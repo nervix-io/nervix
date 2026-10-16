@@ -29,8 +29,8 @@ use crate::{
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
     IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
     LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
 };
 
 configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
@@ -186,6 +186,7 @@ pub struct NatsSubjectSink {
 impl SinkEntity for NatsSubjectSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
+        reference: SinkReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
