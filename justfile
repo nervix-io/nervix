@@ -1158,7 +1158,7 @@ coverage-merge-runner:
 # in CI, each producer job's result from the needs context. Without arguments it records a local
 # selection, whose labels name the label-enabled producers collected locally.
 coverage-full-select *args:
-    python3 -m scripts.coverage_full select --output {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} {{ args }}
+    python3 -m scripts.coverage_full select --output {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} {{ quote(args) }}
 
 # Combine every coverage producer the recorded selection requires into one workspace line-coverage
 # union, target/coverage-full/lcov-full.info, with its record, its contributor breakdown and the lines
@@ -1168,7 +1168,7 @@ coverage-full-select *args:
 # artifacts at the tested revision gives the same lines, and it fails, writing no report, when an
 # input is missing, stale, foreign, corrupt, incomplete or not selected.
 coverage-full *inputs:
-    python3 -m scripts.coverage_full union --selection {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} --directory {{ quote(cargo_target_dir + "/coverage-full") }} {{ inputs }}
+    python3 -m scripts.coverage_full union --selection {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} --directory {{ quote(cargo_target_dir + "/coverage-full") }} {{ quote(inputs) }}
 
 # Exercise the union's selection, validation, attribution and CI contract.
 test-coverage-full:

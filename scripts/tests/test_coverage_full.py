@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -1046,6 +1047,24 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(f"            target/coverage-full/{name}\n", upload)
         self.assertIn("python3 -m scripts.coverage_full select", recipe_body(self.justfile, "coverage-full-select"))
         self.assertIn("python3 -m scripts.coverage_full union", recipe_body(self.justfile, "coverage-full"))
+
+    def test_the_recipes_pass_every_argument_through_intact(self) -> None:
+        # GitHub's toJSON writes the label snapshot and the needs context across several lines.
+        labels = json.dumps(["no-docker", "fuzz"], indent=2)
+        jobs = json.dumps({job: {"result": "success", "outputs": {}} for job in JOBS}, indent=2)
+        cases = {
+            "coverage-full-select": ["--event", "pull_request", "--labels", labels, "--jobs", jobs],
+            "coverage-full": ["coverage-full-inputs/with space", "--selection", "retained/selection.json"],
+        }
+        for recipe, arguments in cases.items():
+            with self.subTest(recipe=recipe):
+                dry_run = subprocess.run(
+                    ["just", "--dry-run", recipe, *arguments], cwd=ROOT, capture_output=True, text=True, timeout=120,
+                )
+                self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+                command = shlex.split(dry_run.stderr)
+                self.assertEqual(command[:3], ["python3", "-m", "scripts.coverage_full"])
+                self.assertEqual(command[-len(arguments):], arguments)
 
     def test_each_label_enabled_job_collects_its_producers_into_the_artifact_the_union_reads(self) -> None:
         for requirement in REQUIREMENTS:
