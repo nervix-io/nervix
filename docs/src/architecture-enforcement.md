@@ -87,7 +87,8 @@ dependencies, including browser and ordinary release graphs.
 `hidden_tunables` counts one site for each numeric `const` item typed as `Duration`, `usize`,
 `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`, `NonZero*` or `ByteUnit`. Associated constants
 count too. A counted initializer contributes no further policy-call sites. Names are read from
-the source type, following explicit import renames and type aliases within their lexical scope.
+the source type, following explicit import renames and type aliases within their lexical scope,
+independent of their declaration order.
 This syntax rule does not resolve custom types, glob imports or cross-file reexports; the
 eventual compiler rule owns those semantic facts.
 

@@ -236,6 +236,11 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
             "fn data(capacity: usize) { Vec::with_capacity(capacity); let text = \
              \"Duration::from_secs(3)\"; }\n",
         );
+        source.push_str(
+            "struct Group { budget: Field<Spec> }\nuse Setting as Field;\ntype Config = \
+             Group;\nimpl Default for Config { fn default() -> Self { Duration::from_secs(9); \
+             make() } }\n",
+        );
         let input = SourceInput { path, source };
         let encoded =
             serde_json::to_vec(&input).assured("current source input has a JSON representation");
@@ -251,6 +256,43 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
             serde_json::from_slice(&encoded).assured("the complete sites were just serialized");
         assert_eq!(decoded, result);
     });
+}
+
+#[test]
+fn class_groups_resolve_late_aliases_within_each_scope() {
+    let declaration = "struct Group { budget: Field<Spec> } use Setting as Field; type Config = \
+                       Group; impl Default for Config { fn default() -> Self { \
+                       Duration::from_secs(3); make() } }";
+    for source in [
+        declaration.to_owned(),
+        format!("mod area {{ {declaration} }}"),
+        format!("fn configure() {{ {declaration} }}"),
+    ] {
+        assert!(sites(&source).is_empty());
+    }
+    assert_eq!(
+        sites(
+            "struct Group { budget: usize } impl Default for Group { fn default() -> Self { \
+             Duration::from_secs(3); make() } }"
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        sites(
+            "struct Group { budget: Setting<Spec> } mod area { struct Group { budget: usize } \
+             impl Default for Group { fn default() -> Self { Duration::from_secs(3); make() } } }"
+        )
+        .len(),
+        1
+    );
+    assert!(
+        sites(
+            "use Other as Group; mod area { struct Group { budget: Setting<Spec> } impl Default \
+             for Group { fn default() -> Self { Duration::from_secs(3); make() } } }"
+        )
+        .is_empty()
+    );
 }
 
 #[test]

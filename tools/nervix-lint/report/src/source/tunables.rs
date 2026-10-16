@@ -35,7 +35,7 @@ pub(super) fn scan(
         return Ok(Vec::new());
     }
     let mut declarations = Declarations::default();
-    declarations.visit_file(file);
+    declarations.collect_items(file.items.iter());
     let mut scanner = Tunables {
         path,
         declarations,
@@ -67,6 +67,20 @@ fn type_name(value: &Type) -> Option<String> {
 }
 
 impl Declarations {
+    fn collect_items<'ast>(&mut self, items: impl Iterator<Item = &'ast Item> + Clone) {
+        // Rust aliases cover their entire scope, including groups declared before the import.
+        for item in items.clone() {
+            if !matches!(item, Item::Struct(_)) {
+                self.visit_item(item);
+            }
+        }
+        for item in items {
+            if matches!(item, Item::Struct(_)) {
+                self.visit_item(item);
+            }
+        }
+    }
+
     fn import(&mut self, tree: &UseTree) {
         match tree {
             UseTree::Path(value) => self.import(&value.tree),
@@ -137,13 +151,16 @@ impl<'ast> Visit<'ast> for Declarations {
         }
     }
     fn visit_item_struct(&mut self, value: &'ast syn::ItemStruct) {
+        let name = value.ident.unraw().to_string();
+        self.aliases.remove(&name);
+        self.settings.remove(&name);
         if !value.fields.is_empty()
             && value.fields.iter().all(|field| {
                 type_name(&field.ty)
                     .is_some_and(|name| self.canonical(&name).as_deref() == Some("Setting"))
             })
         {
-            self.settings.insert(value.ident.unraw().to_string());
+            self.settings.insert(name);
         }
         visit::visit_item_struct(self, value);
     }
@@ -296,9 +313,7 @@ impl<'ast> Visit<'ast> for Tunables<'_> {
     fn visit_item_mod(&mut self, value: &'ast syn::ItemMod) {
         let saved = self.declarations.clone();
         if let Some((_, items)) = &value.content {
-            for item in items {
-                self.declarations.visit_item(item);
-            }
+            self.declarations.collect_items(items.iter());
         }
         visit::visit_item_mod(self, value);
         self.declarations = saved;
@@ -306,11 +321,11 @@ impl<'ast> Visit<'ast> for Tunables<'_> {
 
     fn visit_block(&mut self, value: &'ast syn::Block) {
         let saved = self.declarations.clone();
-        for statement in &value.stmts {
-            if let syn::Stmt::Item(item) = statement {
-                self.declarations.visit_item(item);
-            }
-        }
+        self.declarations
+            .collect_items(value.stmts.iter().filter_map(|statement| match statement {
+                syn::Stmt::Item(item) => Some(item),
+                _ => None,
+            }));
         visit::visit_block(self, value);
         self.declarations = saved;
     }
@@ -363,6 +378,7 @@ impl<'ast> Visit<'ast> for Tunables<'_> {
         };
         if trait_name.as_deref() == Some("Default")
             && type_name(&value.self_ty)
+                .and_then(|name| self.declarations.canonical(&name))
                 .is_some_and(|name| self.declarations.settings.contains(&name))
         {
             return;
