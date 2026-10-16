@@ -30,6 +30,12 @@ pub(crate) enum FeatureLimit {
     Unlimited,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScenarioAttempt {
+    First,
+    Retry,
+}
+
 impl FeatureLimit {
     pub(crate) fn for_name(name: &str) -> Self {
         if WEB_CONSOLE_FEATURE_NAMES.contains(&name) {
@@ -107,14 +113,33 @@ struct Waiter {
 }
 
 #[derive(Default)]
+struct AttemptQueues {
+    first: VecDeque<Waiter>,
+    retries: VecDeque<Waiter>,
+}
+
+impl AttemptQueues {
+    fn for_attempt(&mut self, attempt: ScenarioAttempt) -> &mut VecDeque<Waiter> {
+        match attempt {
+            ScenarioAttempt::First => &mut self.first,
+            ScenarioAttempt::Retry => &mut self.retries,
+        }
+    }
+
+    fn waiting(&self) -> impl Iterator<Item = &Waiter> {
+        self.retries.iter().chain(&self.first)
+    }
+}
+
+#[derive(Default)]
 struct AdmissionState {
     available_slots: usize,
     available_web_console: usize,
     available_wasm_state_reset: usize,
-    web_console: VecDeque<Waiter>,
+    web_console: AttemptQueues,
     web_console_grants: BTreeMap<String, usize>,
-    wasm_state_reset: VecDeque<Waiter>,
-    ordinary: VecDeque<Waiter>,
+    wasm_state_reset: AttemptQueues,
+    ordinary: AttemptQueues,
 }
 
 impl AdmissionState {
@@ -136,42 +161,42 @@ impl AdmissionState {
         }
     }
 
-    fn queue(&mut self, limit: FeatureLimit, waiter: Waiter) {
-        match limit {
-            FeatureLimit::WebConsole => self.web_console.push_back(waiter),
-            FeatureLimit::WasmStateReset => self.wasm_state_reset.push_back(waiter),
-            FeatureLimit::Unlimited => self.ordinary.push_back(waiter),
-        }
+    fn queue(&mut self, limit: FeatureLimit, attempt: ScenarioAttempt, waiter: Waiter) {
+        let queue = match limit {
+            FeatureLimit::WebConsole => &mut self.web_console,
+            FeatureLimit::WasmStateReset => &mut self.wasm_state_reset,
+            FeatureLimit::Unlimited => &mut self.ordinary,
+        };
+        queue.for_attempt(attempt).push_back(waiter);
     }
 
     fn next_eligible(&mut self) -> Option<(FeatureLimit, Waiter)> {
-        if self.available_wasm_state_reset > 0
-            && let Some(waiter) = self.wasm_state_reset.pop_front()
-        {
-            return Some((FeatureLimit::WasmStateReset, waiter));
-        }
-        if self.available_web_console > 0
-            && let Some(index) = self
-                .web_console
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, waiter)| {
+        for attempt in [ScenarioAttempt::Retry, ScenarioAttempt::First] {
+            if self.available_wasm_state_reset > 0
+                && let Some(waiter) = self.wasm_state_reset.for_attempt(attempt).pop_front()
+            {
+                return Some((FeatureLimit::WasmStateReset, waiter));
+            }
+            if self.available_web_console > 0 {
+                let queue = self.web_console.for_attempt(attempt);
+                let next = queue.iter().enumerate().min_by_key(|(_, waiter)| {
                     self.web_console_grants
                         .get(&waiter.feature_name)
                         .copied()
                         .unwrap_or_default()
-                })
-                .map(|(index, _)| index)
-        {
-            let waiter = self
-                .web_console
-                .remove(index)
-                .verified("the selected web console waiter is still at its queue index");
-            return Some((FeatureLimit::WebConsole, waiter));
+                });
+                if let Some((index, _)) = next {
+                    let waiter = queue
+                        .remove(index)
+                        .verified("the selected web console waiter is still at its queue index");
+                    return Some((FeatureLimit::WebConsole, waiter));
+                }
+            }
+            if let Some(waiter) = self.ordinary.for_attempt(attempt).pop_front() {
+                return Some((FeatureLimit::Unlimited, waiter));
+            }
         }
-        self.ordinary
-            .pop_front()
-            .map(|waiter| (FeatureLimit::Unlimited, waiter))
+        None
     }
 
     fn take_feature(&mut self, limit: FeatureLimit) {
@@ -197,7 +222,7 @@ impl AdmissionState {
             (FeatureLimit::Unlimited, &self.ordinary),
         ] {
             let reason = self.waiting_for(limit);
-            for waiter in queue {
+            for waiter in queue.waiting() {
                 let previous = *waiter.reason.borrow();
                 if previous != reason {
                     waiter.reason.send_replace(reason);
@@ -274,6 +299,7 @@ impl ScenarioRunSlots {
         &self,
         limit: FeatureLimit,
         feature_name: &str,
+        attempt: ScenarioAttempt,
         mut waiting_for: impl FnMut(AdmissionWait),
     ) -> ScenarioAdmission {
         let (grant, mut granted) = oneshot::channel();
@@ -283,6 +309,7 @@ impl ScenarioRunSlots {
             let (reason_sender, reason_changes) = watch::channel(reason);
             state.queue(
                 limit,
+                attempt,
                 Waiter {
                     feature_name: feature_name.to_owned(),
                     grant,
