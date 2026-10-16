@@ -14,6 +14,7 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
+use error_stack::ResultExt as _;
 use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
 
 use super::{
@@ -25,11 +26,15 @@ use super::{
 impl ZeroMqIngestorStartPlan {
     pub(super) async fn compose(
         self,
+        runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let ZeroMqIngestorStartPlan { client, mode } = self;
+        let resolved = runtime
+            .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
-            connector: ZeroMqSourcePlan::new(client.config),
+            connector: ZeroMqSourcePlan::new(resolved.entries),
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
@@ -37,7 +42,7 @@ impl ZeroMqIngestorStartPlan {
             // Unread messages stay in the socket's kernel buffers while the loop waits, and then
             // the pushing peers' sends wait: nothing is dropped and memory stays bounded.
             unacknowledged_admission: QueueAdmission::WaitForPlace,
-            client_mounts: Vec::new(),
+            client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "zeromq",
         }
         .open::<ZeroMqSource>(ingestor)

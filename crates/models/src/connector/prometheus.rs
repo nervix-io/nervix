@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{configured_client::configured_client, entity_union::connector_sources};
 use crate::{
-    ClientName, ConnectorKind, DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DomainClockPeriod,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Prometheus: unpooled CreateClientPrometheus => PrometheusConfigEntry);
@@ -45,6 +45,7 @@ impl SourceEntity for PrometheusQuerySource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 

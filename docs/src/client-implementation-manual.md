@@ -13,6 +13,11 @@ binding inherits every rule below from it except those in [Using The Shared
 Binding](#using-the-shared-binding). An implementation that speaks the protocol itself, as the Go
 and TypeScript conformance clients do, follows all of it.
 
+The Rust reference implementation's execution modes and native/browser capability boundaries are
+specified in [Execution Primitives](./execution-primitives.md). Those repository build and
+verification contracts apply to the Rust implementation; independent clients continue to implement
+the protocol rules in this manual using their own runtime.
+
 ## Conformance Language
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as RFC 2119 defines them.
@@ -607,6 +612,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   non-empty and within one frame, adding up to exactly `total_bytes`, and then the client
   half-closes the stream. The Rust client sends 64 KiB chunks.
   [Resources](./resources.md#upload-format) defines the archive format.
+  A client that prepares a local archive MUST finish and flush it before using it as an upload
+  body. A preparation failure or cancellation MUST abandon the partial archive while preserving
+  the original failure or cancellation outcome. Local preparation has not admitted an upload.
 - **U-2.** A client MUST create one upload identity per logical upload, 1 to 128 bytes of ASCII
   letters, digits, `-`, `_`, and `.`, and SHOULD make it a UUIDv7. It MUST keep the identity and the
   exact archive bytes until the upload's outcome is known, and every attempt MUST send both

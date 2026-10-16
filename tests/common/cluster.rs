@@ -10,7 +10,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use async_nats::Client as NatsClient;
+use async_nats::{Client as NatsClient, Message as NatsMessage};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
@@ -56,6 +56,7 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+use nervix_recovery::Discarded as _;
 use paced_interconnect::PacedInterconnect;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
@@ -114,6 +115,7 @@ use super::{
         SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    nats_observer::NatsObserver,
     node_liveness::{
         NodeStartupError, NodeTaskState, NodeTaskTerminalOutcome, NodeTaskWaitOutcome,
         OwnedNodeTask, ReadinessProbeOutcome,
@@ -200,12 +202,24 @@ pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
+/// A loopback TCP proxy in front of one dependency that a scenario can pause, and whose forwarded
+/// connections it can reset, without touching the dependency other scenarios share.
 #[derive(Debug)]
 pub(crate) struct StallableTcpProxy {
     local_addr: std::net::SocketAddr,
     paused: watch::Sender<bool>,
+    /// Signalled to reset every connection the proxy forwards at that moment.
+    resets: watch::Sender<()>,
     cancellation: CancellationToken,
     task: JoinHandle<()>,
+}
+
+/// What ended one connection the proxy forwarded.
+enum ForwardingEnd {
+    /// Both directions ended: a peer closed or failed its side, or the proxy stopped.
+    Finished,
+    /// The scenario asked the proxy to reset the connections it forwards.
+    ResetRequested,
 }
 
 impl StallableTcpProxy {
@@ -213,6 +227,7 @@ impl StallableTcpProxy {
         let listener = TokioTcpListener::bind((HOST, 0)).await?;
         let local_addr = listener.local_addr()?;
         let (paused, paused_rx) = watch::channel(false);
+        let (resets, resets_rx) = watch::channel(());
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let task = nervix_primitives::task::spawn(async move {
@@ -227,34 +242,42 @@ impl StallableTcpProxy {
                 };
                 let target_host = target_host.clone();
                 let paused = paused_rx.clone();
+                // Only a reset requested after this connection was accepted resets it.
+                let mut resets = resets_rx.clone();
+                resets.mark_unchanged();
                 let connection_cancellation = task_cancellation.child_token();
                 nervix_primitives::task::spawn(async move {
-                    let Ok(upstream) =
+                    let Ok(mut upstream) =
                         TcpStream::connect((target_host.as_str(), target_port)).await
                     else {
                         return;
                     };
-                    let (downstream_read, downstream_write) = downstream.into_split();
-                    let (upstream_read, upstream_write) = upstream.into_split();
-                    let upstream_copy = copy_through_stall_gate(
-                        downstream_read,
-                        upstream_write,
-                        paused.clone(),
-                        connection_cancellation.clone(),
-                    );
-                    let downstream_copy = copy_through_stall_gate(
-                        upstream_read,
-                        downstream_write,
+                    let mut downstream = downstream;
+                    let end = forward_through_stall_gate(
+                        &mut downstream,
+                        &mut upstream,
                         paused,
+                        resets,
                         connection_cancellation,
-                    );
-                    let _ = tokio::join!(upstream_copy, downstream_copy);
+                    )
+                    .await;
+                    if let ForwardingEnd::ResetRequested = end {
+                        // An abortive close: both peers see the connection reset at once instead
+                        // of an orderly end of stream, and anything still buffered is discarded.
+                        downstream
+                            .set_zero_linger()
+                            .discarded("a socket that cannot be reset still closes when dropped");
+                        upstream
+                            .set_zero_linger()
+                            .discarded("a socket that cannot be reset still closes when dropped");
+                    }
                 });
             }
         });
         Ok(Self {
             local_addr,
             paused,
+            resets,
             cancellation,
             task,
         })
@@ -266,6 +289,47 @@ impl StallableTcpProxy {
 
     pub(crate) fn set_paused(&self, paused: bool) {
         self.paused.send_replace(paused);
+    }
+
+    /// Reset every connection the proxy forwards now, as a dependency that drops its clients
+    /// does: each peer sees its connection reset. The proxy keeps listening, so a client that
+    /// connects again is forwarded as before.
+    pub(crate) fn reset_connections(&self) {
+        self.resets.send_replace(());
+    }
+}
+
+/// Forward one accepted connection in both directions through the stall gate until it ends or a
+/// reset is requested.
+async fn forward_through_stall_gate(
+    downstream: &mut TcpStream,
+    upstream: &mut TcpStream,
+    paused: watch::Receiver<bool>,
+    mut resets: watch::Receiver<()>,
+    cancellation: CancellationToken,
+) -> ForwardingEnd {
+    let (downstream_read, downstream_write) = downstream.split();
+    let (upstream_read, upstream_write) = upstream.split();
+    let upstream_copy = copy_through_stall_gate(
+        downstream_read,
+        upstream_write,
+        paused.clone(),
+        cancellation.clone(),
+    );
+    let downstream_copy =
+        copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation);
+    let both_directions = async { tokio::join!(upstream_copy, downstream_copy) };
+    nervix_primitives::select! {
+        (upstream_copied, downstream_copied) = both_directions => {
+            upstream_copied.discarded("a forwarded connection ends with whichever side failed");
+            downstream_copied.discarded("a forwarded connection ends with whichever side failed");
+            ForwardingEnd::Finished
+        }
+        requested = resets.changed() => match requested {
+            Ok(()) => ForwardingEnd::ResetRequested,
+            // The proxy itself stopped, and its cancellation ends both directions anyway.
+            Err(_) => ForwardingEnd::Finished,
+        },
     }
 }
 
@@ -4211,17 +4275,60 @@ impl BrokerMessage {
         self.group = group;
         self
     }
+
+    /// A message a core NATS subscription delivered, with every header value under its name in the
+    /// order the message carries them.
+    fn from_nats(message: &NatsMessage) -> Self {
+        let mut headers = Vec::new();
+        if let Some(delivered) = message.headers.as_ref() {
+            for (name, values) in delivered.iter() {
+                for value in values {
+                    headers.push((name.to_string(), value.as_str().to_string()));
+                }
+            }
+        }
+        Self::from_bytes(message.payload.as_ref(), headers)
+    }
 }
 
+/// What a scenario observes on one broker destination, in the order the broker delivered it.
 #[derive(Debug)]
 pub(crate) struct BrokerObserver {
-    payload_rx: mpsc::Receiver<BrokerMessage>,
-    task: Option<JoinHandle<()>>,
+    deliveries: ObservedDeliveries,
+}
+
+/// Where an observer takes the messages its broker delivered from.
+#[derive(Debug)]
+enum ObservedDeliveries {
+    /// A task that reads the broker's client hands each message over this channel, and is aborted
+    /// with the observer.
+    Forwarded {
+        messages: mpsc::Receiver<BrokerMessage>,
+        _reader: AbortOnDropHandle<()>,
+    },
+    /// A core NATS subscription. Its client buffers what the server delivers on a task of its own,
+    /// so a step takes each message straight from that buffer.
+    Nats(NatsObserver),
 }
 
 impl BrokerObserver {
+    fn forwarded(messages: mpsc::Receiver<BrokerMessage>, reader: JoinHandle<()>) -> Self {
+        Self {
+            deliveries: ObservedDeliveries::Forwarded {
+                messages,
+                _reader: AbortOnDropHandle::new(reader),
+            },
+        }
+    }
+
+    fn nats(observer: NatsObserver) -> Self {
+        Self {
+            deliveries: ObservedDeliveries::Nats(observer),
+        }
+    }
+
     pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
-        timeout(BROKER_TIMEOUT, self.payload_rx.recv())
+        timeout(BROKER_TIMEOUT, self.deliveries.next())
             .await
             .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
             .ok_or_else(|| io::Error::other("broker observer closed before delivering payload"))
@@ -4240,7 +4347,7 @@ impl BrokerObserver {
         &mut self,
         duration: Duration,
     ) -> io::Result<Option<BrokerMessage>> {
-        match timeout(duration, self.payload_rx.recv()).await {
+        match timeout(duration, self.deliveries.next()).await {
             Ok(Some(message)) => Ok(Some(message)),
             Ok(None) => Err(io::Error::other(
                 "broker observer closed before delivering payload",
@@ -4248,12 +4355,32 @@ impl BrokerObserver {
             Err(_) => Ok(None),
         }
     }
+
+    /// What the observing client had received from its broker, for a failure message: the count of
+    /// a client that keeps one, so a message that never reached the observer reads differently from
+    /// one a step had not yet taken.
+    pub(crate) fn describe_client_receipts(&self) -> String {
+        match &self.deliveries {
+            ObservedDeliveries::Forwarded { .. } => {
+                "the observing client keeps no count of what its broker delivered".to_string()
+            }
+            ObservedDeliveries::Nats(observer) => format!(
+                "the observing NATS client had received {} messages from the server",
+                observer.received()
+            ),
+        }
+    }
 }
 
-impl Drop for BrokerObserver {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+impl ObservedDeliveries {
+    /// The next message the broker delivered, or `None` once the observer can deliver no more.
+    async fn next(&mut self) -> Option<BrokerMessage> {
+        match self {
+            Self::Forwarded { messages, .. } => messages.recv().await,
+            Self::Nats(observer) => {
+                let message = observer.next().await?;
+                Some(BrokerMessage::from_nats(&message))
+            }
         }
     }
 }
@@ -5381,10 +5508,7 @@ async fn observe_mqtt(
         .map_err(|_| io::Error::other("timed out waiting for mqtt observer subscription"))?
         .map_err(io::Error::other)?;
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_rabbitmq(
@@ -5429,10 +5553,7 @@ async fn observe_rabbitmq(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 /// The string headers of one RabbitMQ delivery in name order, which is the order the AMQP field
@@ -5476,14 +5597,20 @@ async fn observe_redis(
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_kafka(
     dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_kafka_through(kafka_client_config(dependencies)?, topic).await
+}
+
+/// Observes `topic` through a consumer that `client_config` connects to its broker, such as the mock
+/// broker a scenario owns.
+pub(crate) async fn observe_kafka_through(
+    mut client_config: ClientConfig,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
     let consumer_group = format!(
@@ -5494,7 +5621,6 @@ async fn observe_kafka(
             .expect("system clock must be after unix epoch")
             .as_nanos()
     );
-    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: StreamConsumer = client_config
         .set("group.id", &consumer_group)
         .set("enable.partition.eof", "false")
@@ -5543,10 +5669,7 @@ async fn observe_kafka(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_pulsar(
@@ -5629,10 +5752,7 @@ async fn observe_pulsar_with_addr(
                 }
             });
 
-            Ok(BrokerObserver {
-                payload_rx,
-                task: Some(task),
-            })
+            Ok(BrokerObserver::forwarded(payload_rx, task))
         }
         .await;
 
@@ -5711,10 +5831,7 @@ async fn observe_sqs(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_nats(
@@ -5722,44 +5839,8 @@ async fn observe_nats(
     subject: &str,
 ) -> io::Result<BrokerObserver> {
     let client = nats_client(dependencies).await?;
-    let mut subscriber = client
-        .subscribe(subject.to_string())
-        .await
-        .map_err(io::Error::other)?;
-    let (payload_tx, payload_rx) = mpsc::channel(1);
-
-    let task = nervix_primitives::task::spawn(async move {
-        while let Some(message) = subscriber.next().await {
-            nervix_primitives::task::consume_budget().await;
-            let bytes = message.payload.as_ref();
-            let headers = message
-                .headers
-                .as_ref()
-                .map(|headers| {
-                    headers
-                        .iter()
-                        .flat_map(|(name, values)| {
-                            values
-                                .iter()
-                                .map(|value| (name.to_string(), value.as_str().to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if payload_tx
-                .send(BrokerMessage::from_bytes(bytes, headers))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    let observer = NatsObserver::subscribe(&client, subject).await?;
+    Ok(BrokerObserver::nats(observer))
 }
 
 async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
@@ -5794,10 +5875,7 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

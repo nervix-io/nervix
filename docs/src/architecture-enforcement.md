@@ -7,13 +7,13 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The three structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The four structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
 ## Rule Contracts
 
-The fourteen rule families below have one implementation each. The family name remains useful
+The fifteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
@@ -33,6 +33,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
+| `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
 `map_or_else`, `ok_or`, `ok_or_else`, `or_else`, `unwrap_or`, `unwrap_or_default` and
@@ -59,10 +60,10 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The three
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The four
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
-file size but are excluded from cast/field debt. Test-only items are excluded from those two
+file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
 syntax counts. Other inactive configuration branches remain visible. These exclusions belong
 to these counts; they do not exempt a file from the primitive, manifest, clock or language
 provenance validators, which own their broader authored-source contracts.
@@ -79,6 +80,50 @@ The parser requires no rustc internals or analysis driver. `just typed-ratchet-s
 builds it on the stable toolchain. Native compiler coverage builds it on that producer's pinned
 toolchain so LLVM profiles and exporters match. The tooling workspace stays outside product
 dependencies, including browser and ordinary release graphs.
+
+## Function Complexity
+
+`functions_over_complexity_30` counts the functions whose cyclomatic complexity exceeds 30, as one
+pinned analyzer measures it: cargo-crap at the version `scripts/cargo_crap.py` declares, the same
+build the advisory CRAP report of `just check-coverage` runs. `just install-cargo-crap` builds that
+version with `cargo install --locked` into `target/tools/cargo-crap-<version>/`, through the
+compiler wrapper the host configures, and keeps a build that is already there. `just ratchet`,
+`just test-ratchet-units`, `just check-coverage`, `just test-crap-report` and
+`just coverage-crap-report-runner` depend on it, and the CI `checks`, `coverage` and `extra-tests`
+jobs build it through kache. A binary that reports another version is refused with
+the command that installs the pinned one; a different version in `PATH` is never used.
+
+The complexity is classical McCabe: one, plus one for every `if`, `for`, `while`, `loop`, `match`
+arm, `&&`, `||` and `?`. A function at exactly 30 is not counted and one at 31 is. Growing a
+function that already exceeds 30 leaves the count unchanged; a new function above 30, or one that
+crosses it, raises the count.
+
+The analyzer walks the repository root with the eligibility above. It reads syntax and expands
+nothing, so these are outside the count:
+
+- a `#[test]` function and everything inside a `#[cfg(test)]` module;
+- a function inside a macro, whether an authored `macro_rules!` body or an invoked item macro such
+  as `cfg_if!`;
+- the body of a trait's provided method;
+- a function nested in another function's body, and the decisions of a closure, which belong to
+  no reported function.
+
+Fixtures pin each limit, so a new analyzer version that changes one fails a test. Inactive
+configuration branches stay visible.
+
+Missing analysis never reads as zero debt. The count fails, naming the cause, when the pinned
+binary is missing or reports another version; when the analyzer exits with an error or writes a
+warning, which it does only for a source it could not read or parse; when it measures no function;
+when its report has another version or a `?` weight other than one; when a `.cargo-crap.toml`
+in the repository root or above it could change the analysis; when it measures a file source
+discovery does not govern, such as one in a nested repository; and when a discovered file is
+hidden, a symbolic link or tracked but ignored by Git, which the analyzer's walk would skip.
+
+`just ratchet --show functions_over_complexity_30` lists each function's file, line, name and
+complexity. The baseline holds counts rather than sites, so when a count rises the gate lists every
+site of that count and the function a change added is named among them. Decomposing a function is
+the repair. Extracting a forwarding wrapper only to move the number is the workaround
+`just lint-audit` attributes to a lowering of this count.
 
 ## Exceptions And Ownership Review
 

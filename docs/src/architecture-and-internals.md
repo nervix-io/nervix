@@ -5,6 +5,9 @@ This section explains how Nervix is built and how it behaves internally.
 Use it for:
 
 - control-plane and data-plane structure
+- [coverage reports: producer scopes, source mapping, integrity verdicts, advisory scores and the complexity gate](./coverage-reports.md)
+- [execution primitives: backend selection, native and browser capabilities, permissions, and verification boundaries](./execution-primitives.md)
+- [data-plane concurrency: publication, ownership, ordering, production-owner models, and diagnostic locks](./data-plane-concurrency.md)
 - [execution plans: the committed schedule, typed revisions, local binding, publication, and recovery](./execution-plans.md)
 - [typed failure ownership, the report model, fixed outcome boundaries, sensitivity, recovery, enforcement, and public diagnostics](./errors-and-diagnostics.md)
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)

@@ -318,6 +318,30 @@ class RepositoryTests(unittest.TestCase):
         rule = [item for item in elsewhere["rules"] if item["rule"] == "result_string_errors"][0]
         self.assertEqual((rule["file_spelling_removed"], rule["commit_spelling_removed"]), (False, True))
 
+    def forwarding(self, path: str, line: int) -> dict[str, Any]:
+        source = (self.root / path).read_text().splitlines()[line - 1].strip()
+        raw = {"owner": "crate::route", "context": None, "span": span(path, line, source), "expansion": [],
+               "pattern": {"kind": "forwarding_wrapper", "callee": "crate::route_branches", "callers": 1,
+                           "contract": False, "implementation": False, "relocated": False}}
+        return lint_audit.collect([evidence("ordinary", raw)])[0]
+
+    def test_a_forwarding_wrapper_written_by_a_complexity_lowering_is_suspected(self) -> None:
+        self.commit("2026-09-21", "count complex functions", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 2, "functions_over_complexity_30": 2}),
+            "src/route.rs": "fn route(value: u32) -> u32 {\n    if value > 1 { value } else { 0 }\n}\n",
+        })
+        # The lowering hides the branches behind a wrapper instead of decomposing them.
+        self.commit("2026-09-22", "split routing", {
+            "debt-baseline.json": json.dumps({"data_plane_lock_acquisitions": 2, "functions_over_complexity_30": 1}),
+            "src/route.rs": ("fn route(value: u32) -> u32 {\n    route_branches(value)\n}\n\n"
+                             "fn route_branches(value: u32) -> u32 {\n    if value > 1 { value } else { 0 }\n}\n"),
+        })
+        attribution = self.attribute(self.forwarding("src/route.rs", 2))
+        self.assertEqual(attribution["suggestion"], "suspected")
+        self.assertEqual(attribution["commit"]["subject"], "split routing")
+        rule = [item for item in attribution["rules"] if item["rule"] == "functions_over_complexity_30"][0]
+        self.assertEqual((rule["event"], rule["predates_rule"]), ("lowered 2->1", False))
+
     def test_error_signature_spelling_names_a_plain_failure_not_a_report(self) -> None:
         spelling = lint_audit.RULES["bare_error_signatures"].spelling
         self.assertTrue(spelling.search("fn parse() -> Result<u8, ParseError> {"))

@@ -79,6 +79,13 @@ with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextua
 returns a report; a missing value does not silently turn one into a success. The resolved compiler
 gate and report-carrier obligations are described in [Errors And Diagnostics](errors-and-diagnostics.md).
 
+The outbound WebSocket source distinguishes a peer Close carrying its code and reason, a Close
+without a status, an ended stream and a local close-handshake timeout as typed failure states.
+No fabricated close code stands for an absent status. The source removes the exact transport
+before its bounded closing wait, so cancellation leaves it needing a new resume. The
+[connector contract](./connector-contract.md#source-boundary) owns the retry and payload lifetime
+effects.
+
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
 that result is part of the function contract. Arrow values under a null or failure validity mask
@@ -309,7 +316,9 @@ callers observe typed tracking, idle, and completion outcomes rather than doing 
 encoding. Completion cannot be reactivated. This preserves the contentionless ACK path and the
 root tracker's accounting without adding a lock. The delivery and handoff boundaries themselves
 are described in [Data-Plane Concurrency](./data-plane-concurrency.md) and
-[Shutdown And Recovery](./shutdown.md).
+[Shutdown And Recovery](./shutdown.md). [Execution Primitives](./execution-primitives.md) owns which
+backend supplies the atomic; selecting a modeled atomic does not validate the owner's encoding or
+prove its transitions without the corresponding production-owner check.
 
 A source instance owns starting, ready and retired states in a private atomic byte. Its handle alone
 interprets starting=0, ready=1 and retired=2. Compare-and-swap permits readiness changes only before

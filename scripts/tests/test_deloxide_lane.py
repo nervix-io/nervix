@@ -477,21 +477,14 @@ class InventoryTests(unittest.TestCase):
         )
         # The stress selections together run every scenario of the active-only selection but the
         # report tool's triage, which drives no lifecycle path: the capture, restore and
-        # checkpoint-transfer features in the restore selection, and each under its own `stress.`
+        # checkpoint-transfer scenarios in the restore selection, and each under its own `stress.`
         # identity with the scenario, examples and invariant of its active-only counterpart.
-        restore_features = {
-            "tests/features/cluster/backup_stored_branch_capture.feature",
-            "tests/features/cluster/backup.feature",
-            "tests/features/cluster/backup_generation.feature",
-            "tests/features/cluster/backup_branch_state.feature",
-            "tests/features/cluster/backup_branch_state_large.feature",
-            "tests/features/cluster/backup_materialized.feature",
-            "tests/features/cluster/backup_staging.feature",
-            "tests/features/cluster/backup_wait.feature",
-            "tests/features/cluster/backup_metadata.feature",
-            "tests/features/cluster/backup_guest_saves.feature",
-            "tests/features/runtime/large_wasm_state_replication.feature",
-            "tests/features/runtime/window_processor.feature",
+        restore_invocation = inventory.invocations["stress-restore-scenarios"]
+        restore_scenarios = deloxide_lane.discover_scenarios(
+            REPOSITORY, restore_invocation.inputs, restore_invocation.tags
+        )
+        restore_identities = {
+            (scenario.feature, scenario.name) for scenario in restore_scenarios
         }
         stressed = {
             (workload.feature, workload.scenario): workload
@@ -514,7 +507,7 @@ class InventoryTests(unittest.TestCase):
                     self.assertEqual(counterpart.invocation, "stress-paced-simulation")
                 else:
                     self.assertEqual(counterpart.id, workload.id.replace("scenario.", "stress.", 1))
-                    if workload.feature in restore_features:
+                    if identity in restore_identities:
                         self.assertEqual(counterpart.invocation, "stress-restore-scenarios")
                     else:
                         self.assertEqual(counterpart.invocation, "stress-scenarios")
@@ -522,9 +515,9 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(counterpart.invariant, workload.invariant)
                 self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 44)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 53)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 48)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 50)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):

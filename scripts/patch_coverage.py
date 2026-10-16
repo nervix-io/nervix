@@ -5,7 +5,9 @@
 patch from its merge base to HEAD. `--pr <number>` publishes through the authenticated
 GitHub CLI. Reports must describe the checked-out sources, including line coordinates.
 Sources map onto tracked files exactly as `just coverage-merge` maps them, so the merged
-repository-relative report needs no producer's checkout root.
+repository-relative report needs no producer's checkout root. `--crap <json>` appends the
+section that `scripts/crap_report.py` renders from its JSON report for the files the patch
+changes.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
+from scripts import crap_report
 from scripts.coverage_merge import Checkout, MergeError, Tracked
 from scripts.native_coverage import RunnerError, lcov_records
 
@@ -65,7 +68,15 @@ def command(arguments: Sequence[str], *, root: Path = ROOT, input_text: str | No
 class Patch:
     base: str
     head: str
+    # The lines the patch adds, by file.
     lines: dict[str, set[int]]
+    # The files the patch changes without adding a line, such as one it only shortens.
+    removals: frozenset[str]
+
+    @property
+    def files(self) -> frozenset[str]:
+        """Every file the patch changes that the tested commit holds."""
+        return frozenset(self.lines) | self.removals
 
     @classmethod
     def load(cls, root: Path, base: str, head: str) -> Patch:
@@ -81,6 +92,7 @@ class Patch:
             encoding_errors="replace",
         )
         added: dict[str, set[int]] = {}
+        changed: set[str] = set()
         source: str | None = None
         header = False
         for line in diff.splitlines():
@@ -93,13 +105,14 @@ class Patch:
                     path = ast.literal_eval(path)
                 if path != "/dev/null":
                     source = path.removeprefix("b/")
+                    changed.add(source)
             elif match := HUNK.match(line):
                 header = False
                 count = int(match[2]) if match[2] is not None else 1
                 if source is not None and count:
                     start = int(match[1])
                     added.setdefault(source, set()).update(range(start, start + count))
-        return cls(merge_base, head_sha, added)
+        return cls(merge_base, head_sha, added, frozenset(changed.difference(added)))
 
 
 @dataclass(frozen=True)
@@ -189,7 +202,8 @@ class Measurement:
     def covered(self) -> int:
         return sum(item.covered for item in self.files)
 
-    def markdown(self, repo: str | None = None, scope: Scope = Scope.ORDINARY) -> str:
+    def markdown(self, repo: str | None = None, scope: Scope = Scope.ORDINARY, sections: Sequence[str] = ()) -> str:
+        """The comment body: the patch's line coverage, then each further section in order."""
         lines = [scope.marker(), f"## {scope.title()}", ""]
         if self.executable:
             lines.append(f"**Patch line coverage: {100 * self.covered / self.executable:.2f}%** ({self.covered} / {self.executable} added executable lines).")
@@ -205,6 +219,8 @@ class Measurement:
             if len(self.files) > FILE_LIMIT:
                 lines.extend(["", f"Showing {FILE_LIMIT} of {len(self.files)} changed files; totals include every measured file."])
         lines.extend(["", "Only added lines with LCOV line counters enter the patch percentage. Files absent from LCOV are unavailable; non-executable lines in measured files are excluded.", "", "Advisory report: coverage percentages and reporting failures do not fail the build."])
+        for section in sections:
+            lines.extend(["", section.rstrip("\n")])
         run_id = os.environ.get("GITHUB_RUN_ID")
         if repo and run_id:
             lines.extend(["", f"[Coverage artifacts and workflow run](https://github.com/{repo}/actions/runs/{run_id})."])
@@ -251,6 +267,7 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     parser.add_argument("--pr", type=int)
     parser.add_argument("--pr-head", help="PR head SHA when coverage was collected from a synthetic merge commit")
     parser.add_argument("--scope", type=Scope, choices=list(Scope), default=Scope.ORDINARY, help="execution scope and independent PR comment")
+    parser.add_argument("--crap", type=Path, help="the JSON CRAP report whose section for the changed files the body carries")
     options = parser.parse_args(arguments)
     try:
         patch = Patch.load(root, options.base, options.head)
@@ -264,7 +281,10 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
         coverage = Coverage.load(root, options.report or [root / "lcov-workspace.info"], origins)
         measured = coverage.measure(patch)
         repo = options.repo
-        body = measured.markdown(repo, options.scope)
+        sections = []
+        if options.crap is not None:
+            sections.append(crap_report.pull_request_section(root / options.crap, patch.files, repo, patch.head))
+        body = measured.markdown(repo, options.scope, sections)
         output = root / options.output
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(body, encoding="utf-8")

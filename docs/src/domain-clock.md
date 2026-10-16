@@ -658,7 +658,15 @@ contract, which the runtime and every connector crate share, so a connector stam
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
-Physical monotonic time is measured with the timers and instants of the primitive boundary,
+Materialized relay branch activity uses the bound domain clock, independently of the row event
+watermarks used by `LAST BY TIMESTAMP`. Its activity tracker is not persisted: a restored relay
+initializes every restored branch at its activation-time clock snapshot and measures the complete
+TTL from that coordinate. Restoring or restarting the relay preserves the rows' event watermarks
+without turning those timestamps into activity or expiry. The physical scan only releases a
+branch once its domain-clock TTL has elapsed.
+
+Physical monotonic time is measured with the timers and instants of the
+[primitive boundary](./execution-primitives.md),
 `nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
 permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
 deadline armed on its timer stays logical, as described above. Its timers follow the clock of the

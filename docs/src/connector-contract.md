@@ -44,7 +44,7 @@ runtime policy or connector lifecycle change.
 The contract and every integration crate take their execution-sensitive primitives from
 `nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
 backoff are measured with, and every socket a connector opens itself. A modeled build therefore
-selects them for the whole graph, as [Data-Plane Concurrency](./data-plane-concurrency.md)
+selects them for the whole graph, as [Execution Primitives](./execution-primitives.md)
 describes. The sockets and timers a driver library creates inside itself stay the driver's and are
 outside that selection. A connector's own code never resolves a name through the operating system:
 it resolves through the node's resolver, as the sections below describe, and a driver that resolves
@@ -276,20 +276,25 @@ use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
 cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
-lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
-error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
+lookup failure. A lookup failure reaches the connector as a cause of the driver's connection error,
+where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
 existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
-source read or acknowledgement failure. The report's message names the host and the lookup
-failure. An SQS source looks its queue up when its ingestor starts; a failure there, a lookup
-failure included, fails that start, and the runtime keeps the failure's text as the start failure's
-reason. Any other failure to reach the service, including a certificate that does not name the
-configured host, is described by every cause of the driver's connection error, which describes the
-connection and never a record; a service's own response keeps its existing description. None of
-these failures rejects a record or acknowledges input. The host retries each on its declared
-backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS source keeps the SDK's
-standard retry mode, which makes up to three attempts at a request whose connection failed, lookup
-failures included, before the source reports the failure. Pooled connections stay open when their
-host's answer changes or expires; the next connection resolves again.
+source resume, read or acknowledgement failure. The report's message names the host and the lookup
+failure. An SQS source plan builds its client from configuration and TLS material alone; each
+instance looks its queue up when it first resumes and keeps the queue's URL. A failure there, a
+lookup failure included, is a resume failure, which the host shows as the source's transient error
+and retries on the source's retry policy. A queue the service does not have is the typed
+`SqsSourceError::MissingQueue`, which names it, whether the service answers with AWS's
+query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ does, only with the
+JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
+certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and never a record; a service's own response keeps
+its existing description. None of these failures rejects a record or acknowledges input. The host
+retries each on its declared backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS
+source keeps the SDK's standard retry mode, which makes up to three attempts at a request whose
+connection failed, lookup failures included, before the source reports the failure. Pooled
+connections stay open when their host's answer changes or expires; the next connection resolves
+again.
 
 ### DNS for OTEL gRPC
 
@@ -347,7 +352,7 @@ A driver call that parks its thread while it waits on the network computes nothi
 it would hold a worker idle for the whole wait. librdkafka's producer flush and metadata fetch are
 such calls, so the Kafka connector runs them on the runtime's blocking pool as declared owners
 outside the executor, bounded by the host's flush deadline and a per-request metadata timeout.
-[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor)
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
 
@@ -380,7 +385,9 @@ the position class the source's entity declares.
 The source owns `open`, `suspend`, `resume`, `close`, the next broker batch or scheduled poll, and
 the meaning of acknowledging or rejecting its own position. A broker message lends its payload,
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
-the host never interprets one as a graph identity.
+the host never interprets one as a graph identity. Each source entity also declares its
+acknowledgement confirmation, how far its transport has confirmed positions once acknowledging them
+returns; see [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 A client source's plan is not a connector plan: it carries the input schema, its compiled form, the
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
@@ -470,8 +477,10 @@ At the start of a graceful stop, the host closes intake on the stopping node bef
 plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
 admission regardless of the ingestor's declared `ON QUIESCE` mode; already admitted payloads and
 ACK roots continue through the graph. The connector does not choose the move or finish its own
-acknowledgements early. A source started on the destination node after handoff uses that node's
-open intake.
+acknowledgements early. A batch's work stays outstanding until its source has confirmed the
+batch's positions on the transport, so both the move and the in-place drain wait for that
+confirmation; see [Confirmed acknowledgements](#confirmed-acknowledgements). A source started on
+the destination node after handoff uses that node's open intake.
 
 A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
 `MODE NO ACK`, cannot be presented again either. An acknowledged batch the extension workers refuse
@@ -501,17 +510,33 @@ stays unacknowledged until its consumer reconnects.
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
-timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
-transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. What the host does when rejection itself fails depends on the position
-class each source entity declares, which states what its positions still mean once the connection
-that delivered them is gone. The host handles each class once:
+timeout. The host takes in an acknowledged batch as one batch acknowledgement and waits for every
+accepted message's ACK outcome before acknowledging the batch's transport positions; a message a
+quiesce buffer or drop policy took over adds nothing to wait for. A failed or timed-out ACK rejects
+the positions and retries according to the source's delivery policy. What the host does when
+rejection itself fails depends on the position class each source entity declares, which states what
+its positions still mean once the connection that delivered them is gone. The host handles each
+class once:
 
 | Position class | Entities | After a failed rejection |
 | --- | --- | --- |
 | `replayable` | Kafka, Pulsar | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
 | `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+
+The broker host applies the same retry backoff to a failed resume, a failed read and a requested
+reconnect. A successful connection alone does not reset it: the next accepted batch resets the
+backoff and clears the transient failure. This prevents a peer that accepts and immediately closes
+from keeping every reconnect at the floor delay. A source with no declared retry policy uses the
+host's 250 ms initial delay, doubling to at most 30 seconds. Stop and quiesce changes interrupt the
+wait.
+
+The outbound WebSocket source sends a Close frame on suspension or close and waits for the peer's
+Close within a one-second budget covering both the send and the reply. The transport is detached
+before waiting, so cancellation also drops that exact connection. Suspension retains accepted
+signaling payloads; terminal close clears them even if the handshake fails. A peer-initiated Close
+is answered before releasing the transport and becomes a typed transient read failure carrying
+its status code and reason. An EOF or transport failure also reaches the host's retry path.
 
 A transport acknowledgement that fails because the connection died is handled the same way: the
 host rejects the positions, that rejection fails on the same lost connection, and the class decides.
@@ -532,11 +557,53 @@ sequenceDiagram
     Graph-->>Host: One ACK outcome per accepted message
     alt All ACK roots succeed
         Host->>Source: Acknowledge transport positions
+        alt The transport confirms them
+            Source-->>Host: Confirmed
+            Host->>Host: Report progress, release the batch's work
+        else The confirmation fails
+            Source-->>Host: Typed acknowledgement failure
+            Host->>Host: Show the transient status
+            Host->>Source: Reject transport positions
+        end
     else Intake or an ACK root fails
         Host->>Source: Reject transport positions
         Host->>Host: Apply declared retry policy
     end
 ```
+
+### Confirmed acknowledgements
+
+`acknowledge` returns only once the source's transport has confirmed the positions, as far as the
+source's entity declares in its acknowledgement confirmation, or with a typed acknowledgement
+failure. A source whose client returns before that declares so rather than reporting a confirmation
+it did not get:
+
+| Acknowledgement confirmation | Entities | When acknowledging returns |
+| --- | --- | --- |
+| `answered` | SQS | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. |
+| `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+| `queued` | Kafka, Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Kafka consumer-group commit is never awaited, a Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+
+The host reports progress for a batch only once acknowledging it returns. Until then the
+ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
+the batch's acknowledgement roots to resolve keeps counting against its domain and ingestor until
+the source loop drops the batch acknowledgement after `acknowledge` or `reject` returns. A drain or
+an ownership handoff that waits for admitted acknowledgement roots therefore also waits for the
+source's confirmation, and a node's graceful stop completes outstanding acknowledgements before
+the source closes, within the drain timeout. A root that waits only on what a drain does not wait
+for, such as a `REQUIRED WAIT` dependency or a window that retains its row, still does not hold
+the drain, and neither do the resolved roots of the batch it belongs to, because the batch cannot
+be acknowledged until it resolves.
+
+A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
+a later acknowledgement is confirmed, and the host rejects the positions for their position class
+to handle. A stop that reaches the source loop once a batch's acknowledgement roots have resolved
+does not abandon the batch: the loop takes the resolved outcome before the stop and confirms the
+batch first. A batch whose roots had not all resolved when its source stopped is left unconfirmed;
+the source instance logs `source instance stopped before its transport confirmed positions it
+read; the transport presents them again` with the count, and its transport's own redelivery
+contract applies.
 
 ## Sink boundary
 
@@ -644,19 +711,47 @@ answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was h
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
 given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
-missed its deadline, or a deadline is past the monotonic clock's range. The window holds the
-publish's outcome, and both ways of ending a publish go through it, so before it reports a failure
-it settles every answer the broker already gave, the oldest's included: a confirmed record is
-delivered and a refused one rejected, and the host's retry never resends a record the broker
-confirmed. A record without an answer, or whose answer failed, stays unresolved and is sent again,
-which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property
-`connector-confirmation-window` holds the window to a reference model of this rule over scripted
-answers given within, at, past or never by each deadline, failed answers and driver failures, and
-the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
-hold its settlement while answers arrive concurrently with the publish. The Kafka, Pulsar, NATS
-JetStream and MQTT sinks still await their answers through windows of their own, which drop their
-in-flight records when the driver refuses to take one, so a retry can resend records their broker
-already confirmed; RabbitMQ settles its records when it loses a channel instead.
+missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
+failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
+which the emitter shows as its transient error; a failure the connector hands it carries the
+connector's own description. The window holds the publish's outcome, and both ways of ending a
+publish go through it, so before it reports a failure it settles every answer the broker already
+gave, the oldest's included: a confirmed record is delivered and a refused one rejected, and the
+host's retry never resends a record the broker confirmed. A record without an answer, or whose
+answer failed, stays unresolved and is sent again, which is the at-least-once delivery `MODE ACK`
+promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+reference model of this rule over scripted answers given within, at, past or never by each deadline,
+failed answers and driver failures, and the Shuttle checks of the
+[confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
+while answers arrive concurrently with the publish.
+
+The MQTT sink awaits its QoS 1 and QoS 2 answers through the window. A completed handshake confirms
+a record, a reason code about the record itself (not authorized, an invalid topic name or an
+invalid payload format) refuses it, and every other ending leaves it unresolved: the client, its
+connection or its session failed, or the reason code is not about the record. The client's request
+queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
+so the client can refuse a record only while the queue still holds an earlier failed attempt's
+requests, before the broker answered any record of the publish.
+
+The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
+hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
+invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
+unresolved, including a producer that drops the record without one. When the producer refuses to
+take a record for a reason that is not the record's own, such as a full producer queue, the publish
+ends through the window, so every record the broker already confirmed is delivered first and is not
+sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
+own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
+producer left at librdkafka's five-minute default would keep retrying a record after the publish
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
+librdkafka checks message timeouts about once a second, so the producer gives a record up within
+about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
+holds refuses the sink when it starts. In `MODE NO ACK` the producer taking a record into its queue
+delivers it, and the client's own delivery bound applies.
+
+The Pulsar and NATS JetStream sinks still await their answers through windows of their own, which
+drop their in-flight records when the driver refuses to take one, so a retry can resend records
+their broker already confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
