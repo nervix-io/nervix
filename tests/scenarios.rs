@@ -15552,7 +15552,9 @@ async fn then_transaction_eventually_has_state(
     let leader = current_leader_node(world).await;
     let expected_id = format!("id={transaction_id}");
     let expected_state_fragment = format!("state={expected_state}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A state such as EXPIRED arrives only after a configured timer, and a loaded node reports it
+    // later still. The wait ends as soon as the state is listed, so its bound is generous.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_output = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -15986,7 +15988,11 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
     let transaction_id = expand_placeholders(world, &transaction_id);
     let leader = current_leader_node(world).await;
     let expected_id = format!("id={transaction_id}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A tombstone is removed only once the configured retention has passed, so the wait spans
+    // that retention and then leaves the cleanup a minute of its own.
+    let deadline = Instant::now()
+        + world.cluster_config.transaction_tombstone_retention
+        + Duration::from_secs(60);
     let mut last_output = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
