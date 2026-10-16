@@ -1497,6 +1497,14 @@ each chunk is non-empty and fits one frame. There is no manifest, digest, or fin
 leader hashes the archive as it stages it and verifies everything else when it installs it. The
 console WebSocket carries no upload stream.
 
+The Rust client builds one deterministic archive in a temporary file before opening an upload
+call. Archive construction uses bounded 1 MiB read and write buffers. Only a successfully
+terminated and flushed archive becomes an upload body. An I/O failure abandons the partial file
+and returns `BuildUploadArchive` above its originating I/O error; cancellation abandons it without
+finalizing in a destructor or spawning cleanup work. The command deadline may cancel construction
+and retains its typed deadline outcome. Once construction succeeds, every transport attempt reads
+the same complete archive and keeps the same upload identity.
+
 An upload is identified by its upload identity, not by an execution reference. The identity is
 chosen by the client, at most 128 bytes of ASCII letters, digits, `-`, `_`, and `.`, and is durable
 under the key of the authenticated user, the domain, and the resource. The first complete body

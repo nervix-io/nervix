@@ -562,7 +562,11 @@ not name the configured host, or a refused MQTT handshake. A source keeps the er
 those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
 error or the driver's description. A sink's event loop records the connection error's message as
 the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
-retry policy. None rejects a record or acknowledges input.
+retry policy. None rejects a record or acknowledges input. A QoS 1 or 2 publish keeps the driver's
+`ClientError` when the client refuses to take a record, and its `PublishNoticeError` when an answer
+leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the connector's
+description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
+confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
@@ -1391,6 +1395,12 @@ restoration failure the client reports as a subscription or domain clock event c
 chain as its message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
+
+Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
+Failure and cancellation abandon the partial temporary archive; they perform no destructor
+finalization that could replace the cause, panic, or start asynchronous cleanup. If the enclosing
+command deadline cancels local construction, the caller receives its typed `RetryDeadline`.
+The client opens no upload call until archive finalization and flush have both succeeded.
 
 A Rust client subscribe or unsubscribe runs on a task of its own, so that an attempt its caller
 stops waiting for still completes. Its caller classifies that task's report by its current

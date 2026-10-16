@@ -643,18 +643,45 @@ answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was h
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
 given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
-missed its deadline, or a deadline is past the monotonic clock's range. The window holds the
-publish's outcome, and both ways of ending a publish go through it, so before it reports a failure
-it settles every answer the broker already gave, the oldest's included: a confirmed record is
-delivered and a refused one rejected, and the host's retry never resends a record the broker
-confirmed. A record without an answer, or whose answer failed, stays unresolved and is sent again,
-which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property
-`connector-confirmation-window` holds the window to a reference model of this rule over scripted
-answers given within, at, past or never by each deadline, failed answers and driver failures, and
-the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
-hold its settlement while answers arrive concurrently with the publish. The Kafka sink awaits its
-answers through the window, as the [Kafka sink](#integration-specific-boundaries) describes. The
-Pulsar, NATS JetStream and MQTT sinks still await their answers through windows of their own, which
+missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
+failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
+which the emitter shows as its transient error; a failure the connector hands it carries the
+connector's own description. The window holds the publish's outcome, and both ways of ending a
+publish go through it, so before it reports a failure it settles every answer the broker already
+gave, the oldest's included: a confirmed record is delivered and a refused one rejected, and the
+host's retry never resends a record the broker confirmed. A record without an answer, or whose
+answer failed, stays unresolved and is sent again, which is the at-least-once delivery `MODE ACK`
+promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+reference model of this rule over scripted answers given within, at, past or never by each deadline,
+failed answers and driver failures, and the Shuttle checks of the
+[confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
+while answers arrive concurrently with the publish.
+
+The MQTT sink awaits its QoS 1 and QoS 2 answers through the window. A completed handshake confirms
+a record, a reason code about the record itself (not authorized, an invalid topic name or an
+invalid payload format) refuses it, and every other ending leaves it unresolved: the client, its
+connection or its session failed, or the reason code is not about the record. The client's request
+queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
+so the client can refuse a record only while the queue still holds an earlier failed attempt's
+requests, before the broker answered any record of the publish.
+
+The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
+hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
+invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
+unresolved, including a producer that drops the record without one. When the producer refuses to
+take a record for a reason that is not the record's own, such as a full producer queue, the publish
+ends through the window, so every record the broker already confirmed is delivered first and is not
+sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
+own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
+producer left at librdkafka's five-minute default would keep retrying a record after the publish
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
+librdkafka checks message timeouts about once a second, so the producer gives a record up within
+about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
+holds refuses the sink when it starts. In `MODE NO ACK` the producer taking a record into its queue
+delivers it, and the client's own delivery bound applies.
+
+The Pulsar and NATS JetStream sinks still await their answers through windows of their own, which
 drop their in-flight records when the driver refuses to take one, so a retry can resend records
 their broker already confirmed; RabbitMQ settles its records when it loses a channel instead.
 
@@ -940,23 +967,6 @@ sequenceDiagram
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
   acknowledgement boundary remains the state's highest durable replica progress.
-
-- **Kafka sink.** In `MODE ACK` the sink gives the confirmation window the delivery report
-  librdkafka produces for each record it hands the producer. A delivered record is confirmed. A
-  delivery error about the record itself, an invalid or oversized message, timestamp or record,
-  refuses it for good. Any other report, including a producer that drops the record without one,
-  leaves the record's outcome unknown. When the producer refuses to take a record for a reason
-  that is not the record's own, such as a full producer queue, the publish ends through the
-  window, so every record the broker already confirmed is delivered first and is not sent again.
-  The sink also hands librdkafka the window's bound. It sets the producer's `message.timeout.ms` to
-  `ACK TIMEOUT`, rounded up to the millisecond, after the client's own entries, and drops
-  `delivery.timeout.ms`, the other name librdkafka reads that bound from. A producer left at
-  librdkafka's five-minute default would keep retrying a record after the publish stopped waiting
-  for it, and could deliver that copy beside the one the host's retry sends. librdkafka checks
-  message timeouts about once a second, so the producer gives a record up within about a second of
-  `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka holds refuses
-  the sink when it starts. In `MODE NO ACK` the producer taking a record into its queue delivers it,
-  and the client's delivery bound applies unchanged.
 
 - **Pulsar client.** The Pulsar source and sink build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected`. The fork keeps each
