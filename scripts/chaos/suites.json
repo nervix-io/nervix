@@ -965,6 +965,71 @@
           ]
         }
       ]
+    },
+    "backup07stall": {
+      "description": "Backup 07: three-node 1000-branch backup cycles with ample traffic, and a control with the same graph and traffic and no backup",
+      "entries": [
+        {
+          "id": "scale-1000-n3-a",
+          "shard": 1,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--records",
+            "60000",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "3000"
+          ]
+        },
+        {
+          "id": "scale-1000-n3-b",
+          "shard": 2,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--records",
+            "60000",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "3000"
+          ]
+        },
+        {
+          "id": "control-1000-n3",
+          "shard": 3,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--records",
+            "45000",
+            "--scale-cycles",
+            "0",
+            "--scale-cycle-records",
+            "3000"
+          ]
+        }
+      ]
     }
   }
 }
