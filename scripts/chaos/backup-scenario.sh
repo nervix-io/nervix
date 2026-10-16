@@ -147,7 +147,7 @@ backup_cut_window() {
 # the source and the sink have each passed their first ten records.
 backup_traffic_start() {
     jq -nc --arg run_id "${run_id}" --argjson count "${record_count}" \
-        --argjson branches "${scale_branches}" \
+        --argjson branches "${scale_branches:-3}" \
         -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
     [[ "$(wc -l <"${artifact_dir}/fixtures/input.ndjson")" -eq "${record_count}" ]] \
         || backup_fail 'input fixture generation was incomplete'
@@ -177,7 +177,7 @@ backup_final_boundary() {
 # The accepted records' expected output counts of the backup state graph: the unique records below
 # sequence 30, and every branch's complete windows of twelve records.
 backup_state_expected_counts() {
-    jq -s --argjson modulus "$((scale_branches * 10))" '{unique: (map(select(.sequence < $modulus)) | length),
+    jq -s --argjson modulus "$((${scale_branches:-3} * 10))" '{unique: (map(select(.sequence < $modulus)) | length),
             windows: (group_by(.branch_name) | map(length / 12 | floor) | add // 0)}' "$1"
 }
 
@@ -206,7 +206,7 @@ backup_state_verdict() {
             : >"${case_dir}/${topic}.ndjson"
         fi
     done
-    CHAOS_SCALE_MODULUS="$((scale_branches * 10))" \
+    CHAOS_SCALE_MODULUS="$((${scale_branches:-3} * 10))" \
         "${script_dir}/verify-backup-state.sh" "${artifact_dir}/traffic/accepted-input.ndjson" \
         "${case_dir}/chaos_unique_output.ndjson" "${case_dir}/chaos_window_output.ndjson" \
         "${artifact_dir}/results/backup-state.json" >"${case_dir}/backup-state.txt"
@@ -214,7 +214,7 @@ backup_state_verdict() {
 
 # The cycles a backup-cycles run alternates with its traffic: each backs the domain up, verifies
 # the archive offline, restores it as a new stopped domain and compares the restored generation.
-backup_cycle_count="${scale_cycles}"
+backup_cycle_count="${scale_cycles:-8}"
 
 # The highest chaos_input offset the archive DESCRIPTION records for the domain.
 backup_archived_offset() {
@@ -248,7 +248,7 @@ run_backup_cycles() {
         local output_before
         output_before="$(topic_end_offset chaos_output)"
         wait_for "new acknowledged traffic before cycle ${cycle}" 1800 \
-            topic_progressed chaos_output "$((output_before + scale_cycle_records))"
+            topic_progressed chaos_output "$((output_before + ${scale_cycle_records:-2}))"
         local started_ms
         started_ms="$(epoch_ms)"
         backup_archive_domain "${cycle_dir}" chaos_baseline "${cycle_dir}/domain.nvxb" \
