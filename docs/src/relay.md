@@ -240,7 +240,12 @@ Operational notes:
   `RESTORE ... RESUME` installs them on owners and replicas before generators start, retaining
   the archived domain start generation. A default stopped restore followed by `START` clears them.
   See [Backup And Restore](backup-and-restore.md#what-a-restore-recreates).
-- per-group TTL metadata is not yet persisted, so crash recovery does not currently perform a startup sweep of stale materialized entries
+- Materialized branch activity times are not persisted. Restoring a materialized relay starts
+  each restored branch's idle lifetime at that relay's activation time in the domain clock.
+  Preserved row event watermarks still select `LAST BY TIMESTAMP`; they do not supply branch
+  activity or an expiry deadline. The first maintenance scan therefore retains restored rows
+  until their full TTL has elapsed from activation, even when their event timestamps are in the
+  distant past or future.
 
 Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.
 
