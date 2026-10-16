@@ -562,7 +562,11 @@ not name the configured host, or a refused MQTT handshake. A source keeps the er
 those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
 error or the driver's description. A sink's event loop records the connection error's message as
 the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
-retry policy. None rejects a record or acknowledges input.
+retry policy. None rejects a record or acknowledges input. A QoS 1 or 2 publish keeps the driver's
+`ClientError` when the client refuses to take a record, and its `PublishNoticeError` when an answer
+leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the connector's
+description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
+confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a

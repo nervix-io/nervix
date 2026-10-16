@@ -6918,7 +6918,6 @@ dependencies = [
  "bolero",
  "bytes",
  "error-stack",
- "futures-util",
  "humantime",
  "meticulous",
  "nervix-connector",
