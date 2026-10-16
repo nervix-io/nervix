@@ -146,7 +146,7 @@ impl Runtime {
             SourceStartPlan::RabbitMq(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::RedisPubSub(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Prometheus(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::ZeroMq(plan) => plan.compose(ingestor).await?,
+            SourceStartPlan::ZeroMq(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Sqs(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Endpoint(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
@@ -164,14 +164,15 @@ impl Runtime {
 )]
 mod tests {
     use nervix_models::{
-        ClientPoolBounds, CreateClientMqtt, CreateClientRedis, CreateClientSqs, HttpRequestSource,
-        HttpSource, MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource,
-        PrometheusQuerySource, PrometheusSource, RabbitMqIngestMode, RabbitMqQueueSource,
-        RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource, SqsIngestMode,
-        SqsQueueSource, SqsSource,
+        ClientPoolBounds, CreateClientMqtt, CreateClientRedis, CreateClientSqs, CreateClientZeroMq,
+        HttpRequestSource, HttpSource, MqttIngestMode, MqttQos, MqttSession, MqttSource,
+        MqttTopicSource, PrometheusQuerySource, PrometheusSource, RabbitMqIngestMode,
+        RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
+        SqsIngestMode, SqsQueueSource, SqsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
     };
 
     use super::*;
+    use crate::runtime::resources::RuntimeResourceError;
 
     fn named<T>(value: &str) -> T
     where
@@ -497,5 +498,123 @@ mod tests {
                  is not installed"
             );
         }
+    }
+
+    /// The ZeroMQ client `upstream`, reading `addr` with the optional resource mount.
+    fn zeromq_client(mount: Option<ClientResourceMount>, addr: &str) -> CreateClientZeroMq {
+        CreateClientZeroMq {
+            name: named("upstream"),
+            mount,
+            config: vec![ClientConfigEntry {
+                key: "addr".to_string(),
+                value: addr.to_string(),
+            }],
+        }
+    }
+
+    /// Composes the ZeroMQ ingestor `source` of domain `sales`, which reads `client`.
+    async fn compose_zeromq_source(
+        runtime: &Runtime,
+        client: CreateClientZeroMq,
+    ) -> error_stack::Result<source::SourceStart, IngestorStartError> {
+        let domain: DomainName = named("sales");
+        let pull = IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+            client: client.name.clone(),
+            mode: ZeroMqIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::Suspend,
+        }));
+        let plans = planned_source_ingestor(&domain, pull, Model::ClientZeroMq(client));
+        let plan = plans
+            .ingestor(&named("source"))
+            .assured("the fixture schedules the ingestor named source");
+        let IngestorInputPlan::Transport(transport) = &plan.input else {
+            panic!("the fixture ingestor reads a transport");
+        };
+        let SourceStartPlan::ZeroMq(zeromq) = transport.source.clone() else {
+            panic!("the fixture ingestor reads a ZeroMQ client");
+        };
+        zeromq.compose(runtime, &plan.ingestor).await
+    }
+
+    #[nervix_primitives::test]
+    async fn a_zeromq_source_resolves_its_client_configuration_before_it_opens() {
+        let runtime = Runtime::default();
+        let feed = ClientResourceMount {
+            resource: named("feed"),
+            version: 1,
+        };
+        let cases = [
+            (
+                zeromq_client(None, "ipc://{{ feed }}/ingest.sock"),
+                "client configuration entry 'addr' has an invalid template",
+            ),
+            (
+                zeromq_client(Some(feed), "ipc://{{ feed }}/ingest.sock"),
+                "client resource 'feed' in domain 'sales' requires a resource store",
+            ),
+        ];
+        for (client, cause) in cases {
+            let Err(report) = compose_zeromq_source(&runtime, client).await else {
+                panic!("a ZeroMQ source must resolve its client configuration before it opens");
+            };
+            assert!(
+                matches!(
+                    report.current_context(),
+                    IngestorStartError::Initialize { domain, ingestor }
+                        if domain.as_str() == "sales" && ingestor.as_str() == "source"
+                ),
+                "the failure must name the ingestor that could not start: {report:?}"
+            );
+            assert!(
+                report.contains::<RuntimeResourceError>(),
+                "the client configuration failure must be the typed cause: {report:?}"
+            );
+            assert_eq!(
+                format!("{report:#}"),
+                format!("failed to initialize ingestor 'source' in domain 'sales': {cause}")
+            );
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_zeromq_source_renders_its_address_over_a_mount_it_keeps() {
+        let store_root = tempfile::tempdir().expect("resource store tempdir");
+        let content_root = tempfile::tempdir().expect("resource content tempdir");
+        std::fs::write(content_root.path().join("feed.txt"), "feed")
+            .expect("resource file should be written");
+        let store = ResourceStore::open(store_root.path(), Executor::default())
+            .expect("resource store should open");
+        store
+            .install_from_directory(
+                ResourceId::new(named("sales"), named("feed"), 1),
+                content_root.path(),
+                named("node-1"),
+                Timestamp::from_unix_nanos(0),
+            )
+            .await
+            .expect("resource version should install");
+        let runtime = Runtime::default();
+        runtime.attach_resource_store(StdArc::new(store));
+        let feed = ClientResourceMount {
+            resource: named("feed"),
+            version: 1,
+        };
+
+        let composed = compose_zeromq_source(
+            &runtime,
+            zeromq_client(Some(feed), "ipc://{{ feed }}/ingest.sock"),
+        )
+        .await;
+
+        let start = match composed {
+            Ok(start) => start,
+            Err(report) => panic!("a ZeroMQ source over an installed mount composes: {report:?}"),
+        };
+        assert_eq!(start.instances.len(), 1);
+        assert_eq!(
+            start.client_mounts.len(),
+            1,
+            "the source keeps its client mount for as long as its instance runs"
+        );
     }
 }

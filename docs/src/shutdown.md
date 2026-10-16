@@ -589,6 +589,14 @@ schedule, activation fails and leaves every saved checkpoint unchanged. State is
 the accepted decision either stages a recreated inventory or reports a reset for every state
 component the entity owns.
 
+The destination first waits for the execution schedule it validates to finish installing, within
+the existing five-second preparation deadline. Lifecycle state can be published before the graph,
+so recovery also orders its schedule read after local application completes. A missing startup
+execution is a wait for installation, rather than evidence that the replica lacks checkpoints.
+An installed schedule with a different fingerprint still refuses preparation. Expiry identifies
+the domain and scheduled entity as an installation deadline failure; the existing failed-preparation
+recreation policy remains in effect.
+
 A forced recovery of a WASM processor starts a new guest-state generation for every branch in the
 same schedule publication, and activation publishes the staged checkpoints in that generation. The
 former owner's saves, and those of any replica that missed the recovery, belong to the generation it
@@ -647,6 +655,11 @@ Shutdown does not change any connector's delivery contract. It changes only whet
 reaches its completion point before the process ends.
 
 ### Sources
+
+An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
+waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
+is reported and the socket is released; the shutdown deadline still bounds the surrounding
+lifecycle. This protocol handshake does not acknowledge payload delivery or add redelivery.
 
 A source acknowledges or commits the work that reached its sinks before its session stops. A batch
 acknowledged through the graph stays outstanding admitted work until its source has confirmed the
@@ -896,8 +909,10 @@ snapshot interval. Restore streams its complete sealed container into the genera
 including containers larger than the bulk memory budget. `RESUME` activates the archived domain
 generation only after every assigned owner and replica has published its complete set. These
 rows reopen from one pinned database snapshot across a node restart; the stored clock mapping
-projects downtime under the recovered authority. A failed installation retains its durable
-activation gate across restart. A normal `START` creates a new generation and clears materialized
+projects downtime under the recovered authority. The materializer's nonpersisted branch activity
+registry starts at that task's activation time in the recovered domain clock, giving restored
+branches a full idle lifetime while preserving their record event watermarks. A failed installation
+retains its durable activation gate across restart. A normal `START` creates a new generation and clears materialized
 rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See

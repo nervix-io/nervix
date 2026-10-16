@@ -99,6 +99,12 @@ predecessor for a retry, including after a local WASM reset operation. A node st
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
 
+Forced-recovery preparation subscribes to domain installation before checking for its execution,
+and takes the runtime's application sequence while selecting that execution. This waits for a
+startup installation whose lifecycle is already visible but whose graph is still being built.
+The same preparation deadline bounds the wait. A completed installation must match the requested
+schedule fingerprint; the sequence is released before transferring checkpoints or restoring guests.
+
 A full running build binds the domain clock, pinned resources, codecs, relay boundaries, state
 placements, processor and error plans, connectors, and node tasks from the revision. Its
 `DomainExecution` retains the revision and node-local task ownership. The domain routing snapshot
