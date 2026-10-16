@@ -26,11 +26,11 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ByteSizeUnit, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PayloadSizeLimit, PositionClass, RetryPolicy, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, EmitSinkCapabilities,
+    EmitterBatchRequirement, EmitterPublishingMode, Expression, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSourceCapabilities, PayloadSizeLimit, PositionClass, RetryPolicy,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Sqs: unpooled CreateClientSqs => SqsConfigEntry);
@@ -82,6 +82,7 @@ impl SourceEntity for SqsQueueSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
     };
 }
 

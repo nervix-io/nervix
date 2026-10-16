@@ -25,10 +25,11 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
+    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, SubjectName,
 };
 
 configured_client!(Nats: unpooled CreateClientNats => NatsConfigEntry);
@@ -104,6 +105,7 @@ impl SourceEntity for NatsSubjectSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Nats),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 

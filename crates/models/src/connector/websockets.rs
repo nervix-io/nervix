@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use super::entity_union::connector_sources;
 use crate::{
-    ClientConfigEntry, ClientName, ClientResourceMount, ConnectorKind, EndpointIngestMode,
-    EndpointName, EndpointType, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SignalingProtocolName, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientName, ClientResourceMount, ConnectorKind,
+    EndpointIngestMode, EndpointName, EndpointType, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, PositionClass, SignalingProtocolName, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 #[derive(
@@ -59,6 +59,7 @@ impl SourceEntity for WebsocketsConnectionSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 
@@ -120,6 +121,7 @@ impl SourceEntity for WebsocketsEndpointSource {
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 

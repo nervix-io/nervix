@@ -26,10 +26,11 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
+    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, PositionClass, RetryPolicy, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, TopicName,
 };
 
 configured_client!(Mqtt: unpooled CreateClientMqtt => MqttConfigEntry);
@@ -83,6 +84,7 @@ impl SourceEntity for MqttTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
     };
 }
 

@@ -10706,6 +10706,19 @@ async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
         .delay_shutdown_cordon_release_of(crate::common::cluster::node_name(&node_id), delay);
 }
 
+#[given(expr = "the transport of ingestor {string} takes {string} to confirm its acknowledgements")]
+async fn given_source_confirmation_delay(
+    world: &mut ScenarioWorld,
+    ingestor: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    world
+        .fault_injection
+        .delay_source_confirmation(ingestor, delay);
+}
+
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
 async fn then_last_shutdown_reports_drain_support_phase(
     world: &mut ScenarioWorld,

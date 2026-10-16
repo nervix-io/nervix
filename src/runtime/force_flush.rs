@@ -434,6 +434,12 @@ impl IngestorAckRootTrackers {
         AckSet::tracked_roots(vec![self.domain.clone(), self.ingestor.clone()])
     }
 
+    /// A root of a message whose source confirms it on its transport. The root keeps counting
+    /// against both trackers after it resolves, until its completion drops.
+    pub(in crate::runtime) fn confirmed_root(&self) -> (AckSet, AckCompletion) {
+        AckSet::confirmed_roots(vec![self.domain.clone(), self.ingestor.clone()])
+    }
+
     /// Trackers of one ingestor that no runtime shares, for a check that drives its roots alone.
     #[cfg(test)]
     pub(in crate::runtime) fn detached() -> Self {
@@ -450,9 +456,15 @@ impl IngestorAckRootTrackers {
     }
 
     /// The roots of this ingestor an ownership handoff's drain still waits for.
-    #[cfg(all(test, feature = "loom"))]
+    #[cfg(test)]
     pub(in crate::runtime) fn ingestor_outstanding_for_ownership_handoff(&self) -> usize {
         self.ingestor.outstanding_for_ownership_handoff()
+    }
+
+    /// The roots of this ingestor's domain a node's shutdown drain still waits for.
+    #[cfg(test)]
+    pub(in crate::runtime) fn domain_outstanding_for_ownership_handoff(&self) -> usize {
+        self.domain.outstanding_for_ownership_handoff()
     }
 }
 
