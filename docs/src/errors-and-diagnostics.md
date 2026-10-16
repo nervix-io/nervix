@@ -1140,6 +1140,10 @@ truncation or digest failure; none can publish or acknowledge a partial checkpoi
 handoff destination converts the same fetch failure to a checkpoint preparation failure before
 persisting or activating the candidate state. Diagnostics include the revision and lengths when
 useful, never guest bytes.
+Forced-recovery preparation treats an absent destination execution during startup as an installation
+wait within its current operation deadline. Its `ScheduleInstallationDeadline` context carries the
+typed domain and node when that wait expires. An installed fingerprint mismatch remains a schedule
+validation failure. Neither diagnostic includes checkpoint contents.
 Kafka offset replica catch-up uses the same typed envelope for its revision description. A
 subsequent bulk stream failure remains a transport request failure, with the target, placement and
 typed staging, admission, verification or native conversion cause retained beneath it. The

@@ -517,7 +517,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(set(stressed), expected)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 56)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 50)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 51)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
