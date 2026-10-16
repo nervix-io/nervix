@@ -1096,6 +1096,18 @@ outside jemalloc and is not the process's complete resident set.
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
+| Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given; archive assembly and the download follow the resume |
+
+The freeze covers only the drain of admitted work, the confirming force flush and the owners'
+staging. The leader resumes the domain before it assembles the archive, so neither the archive's
+size nor the client's download rate lengthens the freeze, and a domain whose sink stops
+acknowledging stays frozen only until the timeout fails the backup. A fault during the freeze never
+yields a partial archive: when a state owner crashes or loses contact with its peers, the backup
+either completes from a cut that every owner captured or fails with `backup failed:`, and the
+domain resumes either way, a node that was unreachable resuming once it rejoins. A leader change
+refuses the cut it interrupted, and the new leader cuts again for a client that retries the
+execution reference. Stopping or restarting the node that holds an archive ends its download, and
+the archive is lost with it.
 
 A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.
