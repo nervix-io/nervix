@@ -109,6 +109,7 @@ use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 pub(crate) use super::raw_session::{TestSession, open_raw_session};
 use super::{
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
+    command_recovery::LeaderRoutes,
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
         PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
@@ -1842,6 +1843,19 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         open_raw_session(&handle.spec.grpc_uri(handle.config.grpc_mode), domain).await
+    }
+
+    /// The gRPC endpoint of every node, by node id, which a command whose leader moved is sent to
+    /// again until the node that leads now answers it.
+    pub(crate) fn leader_routes(&self) -> LeaderRoutes {
+        let mut endpoints = BTreeMap::new();
+        for (node_id, handle) in &self.nodes {
+            endpoints.insert(
+                node_id.clone(),
+                handle.spec.grpc_uri(handle.config.grpc_mode),
+            );
+        }
+        LeaderRoutes::new(endpoints)
     }
 
     pub(crate) fn grpc_uri(&self, node_id: &str) -> io::Result<String> {
