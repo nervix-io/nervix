@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -11,6 +12,12 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from scripts import cargo_crap
+
+ROOT = Path(cargo_crap.__file__).resolve().parents[1]
+
+# The ratchet's unit tests run the pinned analyzer: by module name, or as part of discovering
+# every script test.
+RATCHET_TESTS = ("scripts.tests.test_ratchet", "discover -s scripts/tests")
 
 
 def write_analyzer(path: Path, version: str) -> Path:
@@ -181,6 +188,40 @@ class MainTests(unittest.TestCase):
                     mock.patch("scripts.cargo_crap.os.execv") as execv:
                 cargo_crap.main(["run", "--", "--lcov", "report.info"])
         execv.assert_called_once_with(path, [str(path), "--lcov", "report.info"])
+
+
+def dependencies(recipes: dict[str, dict], name: str) -> set[str]:
+    """Every recipe `name` depends on, directly or through another dependency."""
+
+    found: set[str] = set()
+    pending = [name]
+    while pending:
+        current = pending.pop()
+        for dependency in recipes[current]["dependencies"]:
+            recipe = dependency["recipe"]
+            if recipe not in found:
+                found.add(recipe)
+                pending.append(recipe)
+    return found
+
+
+class RecipeTests(unittest.TestCase):
+    """Every recipe that runs the ratchet's unit tests installs the analyzer they run first."""
+
+    def test_every_recipe_running_the_ratchet_tests_installs_the_pinned_analyzer(self) -> None:
+        dumped = subprocess.run(
+            ["just", "--dump", "--dump-format", "json"], cwd=ROOT, capture_output=True, text=True, check=True,
+        )
+        recipes = json.loads(dumped.stdout)["recipes"]
+        runners = []
+        for name, recipe in sorted(recipes.items()):
+            body = json.dumps(recipe["body"])
+            if any(marker in body for marker in RATCHET_TESTS):
+                runners.append(name)
+        # Both forms are found, so an empty selection cannot pass.
+        self.assertLessEqual({"test-ratchet-units", "test-docs"}, set(runners))
+        uninstalled = [name for name in runners if "install-cargo-crap" not in dependencies(recipes, name)]
+        self.assertEqual(uninstalled, [])
 
 
 if __name__ == "__main__":

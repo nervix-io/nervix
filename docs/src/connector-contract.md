@@ -276,20 +276,25 @@ use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
 cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
-lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
-error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
+lookup failure. A lookup failure reaches the connector as a cause of the driver's connection error,
+where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
 existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
-source read or acknowledgement failure. The report's message names the host and the lookup
-failure. An SQS source looks its queue up when its ingestor starts; a failure there, a lookup
-failure included, fails that start, and the runtime keeps the failure's text as the start failure's
-reason. Any other failure to reach the service, including a certificate that does not name the
-configured host, is described by every cause of the driver's connection error, which describes the
-connection and never a record; a service's own response keeps its existing description. None of
-these failures rejects a record or acknowledges input. The host retries each on its declared
-backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS source keeps the SDK's
-standard retry mode, which makes up to three attempts at a request whose connection failed, lookup
-failures included, before the source reports the failure. Pooled connections stay open when their
-host's answer changes or expires; the next connection resolves again.
+source resume, read or acknowledgement failure. The report's message names the host and the lookup
+failure. An SQS source plan builds its client from configuration and TLS material alone; each
+instance looks its queue up when it first resumes and keeps the queue's URL. A failure there, a
+lookup failure included, is a resume failure, which the host shows as the source's transient error
+and retries on the source's retry policy. A queue the service does not have is the typed
+`SqsSourceError::MissingQueue`, which names it, whether the service answers with AWS's
+query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ does, only with the
+JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
+certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and never a record; a service's own response keeps
+its existing description. None of these failures rejects a record or acknowledges input. The host
+retries each on its declared backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS
+source keeps the SDK's standard retry mode, which makes up to three attempts at a request whose
+connection failed, lookup failures included, before the source reports the failure. Pooled
+connections stay open when their host's answer changes or expires; the next connection resolves
+again.
 
 ### DNS for OTEL gRPC
 
@@ -686,19 +691,30 @@ answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was h
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
 given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
-missed its deadline, or a deadline is past the monotonic clock's range. The window holds the
-publish's outcome, and both ways of ending a publish go through it, so before it reports a failure
-it settles every answer the broker already gave, the oldest's included: a confirmed record is
-delivered and a refused one rejected, and the host's retry never resends a record the broker
-confirmed. A record without an answer, or whose answer failed, stays unresolved and is sent again,
-which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property
-`connector-confirmation-window` holds the window to a reference model of this rule over scripted
-answers given within, at, past or never by each deadline, failed answers and driver failures, and
-the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
-hold its settlement while answers arrive concurrently with the publish. The Kafka, Pulsar, NATS
-JetStream and MQTT sinks still await their answers through windows of their own, which drop their
-in-flight records when the driver refuses to take one, so a retry can resend records their broker
-already confirmed; RabbitMQ settles its records when it loses a channel instead.
+missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
+failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
+which the emitter shows as its transient error; a failure the connector hands it carries the
+connector's own description. The window holds the publish's outcome, and both ways of ending a
+publish go through it, so before it reports a failure it settles every answer the broker already
+gave, the oldest's included: a confirmed record is delivered and a refused one rejected, and the
+host's retry never resends a record the broker confirmed. A record without an answer, or whose
+answer failed, stays unresolved and is sent again, which is the at-least-once delivery `MODE ACK`
+promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+reference model of this rule over scripted answers given within, at, past or never by each deadline,
+failed answers and driver failures, and the Shuttle checks of the
+[confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
+while answers arrive concurrently with the publish.
+
+The MQTT sink awaits its QoS 1 and QoS 2 answers through the window. A completed handshake confirms
+a record, a reason code about the record itself (not authorized, an invalid topic name or an
+invalid payload format) refuses it, and every other ending leaves it unresolved: the client, its
+connection or its session failed, or the reason code is not about the record. The client's request
+queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
+so the client can refuse a record only while the queue still holds an earlier failed attempt's
+requests, before the broker answered any record of the publish. The Kafka, Pulsar and NATS
+JetStream sinks still await their answers through windows of their own, which drop their in-flight
+records when the driver refuses to take one, so a retry can resend records their broker already
+confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one

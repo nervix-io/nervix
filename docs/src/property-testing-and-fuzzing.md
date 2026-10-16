@@ -34,6 +34,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v1 | 128 | 4096 bytes |
 | `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
 | `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v1 | 128 | 2048 bytes |
+| `client-upload-archives` | `nervix-client-core` complete directory tree and deterministic archive bytes against an independent tar decoder | empty directories, nested and GNU long paths, arbitrary file bytes and block boundaries, v1 | 128 | 4096 bytes |
 | `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |
 | `client-row-views` | `nervix-client-wire` complete retained Row views | all scalar cells, nested vectors, fixed arrays, nulls, redaction, branches and float bits, v1 | 128 | 512 bytes |
 | `client-arbitrary-frames` | `nervix-client-wire` typed verification and decoding within budgets | arbitrary bytes at all eight frame roots, v1 | 256 | 16385 bytes |
@@ -396,14 +397,31 @@ manual Bolero runs execute randomized checks and record a deliberate sanitizer s
 
 ### Documentation-only Selection
 
-Before starting ordinary suites, Check's `test-selection` job verifies that its checkout is the
-event's exact merge of the stated base and head, then reads every changed path between the base
-and tested merge. Rename detection is disabled so deleting or moving product code into a prose
-location still requires execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and
-Markdown under `.agents/skills/` qualify for the documentation-only exclusion. An empty diff,
-code, tests, build configuration, workflow definitions, scripts and unknown paths require suites;
-`no-docker` supplies no evidence about this choice. Missing or mismatched source identity fails
-selection and cannot authorize an exclusion.
+Before starting ordinary suites, Check's `test-selection` job proves which source it selects for.
+Its checkout must be the commit the event tests: a merge whose first parent is its base and whose
+second parent is the event's exact head. The event and the tested merge need not name the same base.
+GitHub records a pull request's base as its base branch's tip when the pull request opens, and moves
+it forward only to the newest base commit that a later head merges, while it builds the tested merge
+on the base branch's tip whenever the head changes. A push made after the base branch advanced,
+whose head does not merge the newest base, therefore tests a merge whose base is newer than the one
+its event names, and label events that follow name the same recorded base.
+
+Selection accepts the tested base when it is the event's base, or when the event's base is one of
+its ancestors. The checkout holds only the tested merge and its parents, so to decide the second
+case selection fetches the tested base's complete history as commits, without trees or file
+contents, and then answers from that local history alone. When the tested base is the event's own
+base, it fetches nothing. A checkout that is not the tested merge, a tested commit that does not
+merge the event's exact head into one base, an event base that the tested base does not descend
+from, such as a newer base or one from another branch, and a failed history fetch all fail
+selection, so none of them can authorize an exclusion.
+
+Selection then reads every changed path between the tested base and the tested merge: what the
+merge changes on the base it was tested against, never the base branch's own advance. Rename
+detection is disabled so deleting or moving product code into a prose location still requires
+execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and Markdown under
+`.agents/skills/` qualify for the documentation-only exclusion. An empty diff, code, tests, build
+configuration, workflow definitions, scripts and unknown paths require suites; `no-docker` supplies
+no evidence about this choice.
 
 A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
 diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
@@ -412,20 +430,24 @@ and mandatory. Label-selected mode checks remain selected by their labels; `fuzz
 both ordinary properties and the complete sanitizer inventory even for documentation. Label
 addition and removal compute a fresh selection from that event's label snapshot.
 
-The `ci-test-selection` artifact records run, attempt, job, event and action, tested/base/head
-identities, every changed path, labels and each ordinary/Bolero requirement. Its `selected` verdict
+The `ci-test-selection` artifact records run, attempt, job, event and action, the tested merge, the
+event's base, the tested base and the head, every changed path, labels and each ordinary/Bolero
+requirement. Two different bases record an advance that selection proved. Its `selected` verdict
 records a source decision, never successful property execution or coverage. Actual job conclusions
 remain in the workflow run. The reusable workflow's `bolero-selection` record is produced only
 after all of its required execution succeeds; failed, cancelled, skipped or missing required
 producers still fail its gate.
 
-A validation-only rerun uses the original event and tested commit. Its ordinary producer selection
-remains in the caller, outside the reusable workflow's `always()` gate, so deliberate non-code
-exclusion never becomes a cancelled property campaign to excuse. Historical attempts retain their
-actual cancellations; this policy does not turn an interrupted required campaign into success.
-`just test-ci-selection` exercises source identity, mixed changes, renames, label events, reruns and
-strict gates; `just coverage-ci-selection` measures that Python contract without launching product
-campaigns. Selection does not claim a model-checker or public Cucumber result.
+A rerun of `test-selection` reads the original event and tested merge and proves the same ancestry,
+so it reaches the same selection after the base branch advances again. A validation-only rerun uses
+the original event and tested commit. Its ordinary producer selection remains in the caller, outside
+the reusable workflow's `always()` gate, so deliberate non-code exclusion never becomes a cancelled
+property campaign to excuse. Historical attempts retain their actual cancellations; this policy does
+not turn an interrupted required campaign into success. `just test-ci-selection` exercises source
+identity, advanced, stale and tampered bases, stale heads, other merges, shallow checkouts, mixed
+changes, renames, label events, reruns and strict gates; `just coverage-ci-selection` measures that
+Python contract without launching product campaigns. Selection does not claim a model-checker or
+public Cucumber result.
 
 ### Sanitizer Shards
 

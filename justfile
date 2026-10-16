@@ -128,7 +128,7 @@ qualify-bolero: bolero-deps
 # Exercise the inventory and runner's validation and failure paths, and the runner load recorder
 # the sanitizer shards keep their measurements with.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_ci_test_selection scripts.tests.test_record_runner_load
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_ci_test_selection scripts.tests.test_record_runner_load scripts.tests.test_wasm_bindgen
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
@@ -136,7 +136,7 @@ coverage-bolero-runner:
     set -euo pipefail
     mkdir -p target/bolero
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.wasm_bindgen,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_wasm_bindgen
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect distinct Python runner and live Rust source reports, then qualify failure retention.
@@ -146,9 +146,9 @@ coverage-bolero duration="2" shard="1/1": bolero-deps
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }} --shard {{ quote(shard) }}
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero qualify
+    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.wasm_bindgen,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_wasm_bindgen
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.wasm_bindgen,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }} --shard {{ quote(shard) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.wasm_bindgen,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
@@ -1254,6 +1254,11 @@ test-coverage-backup-packages:
         --package nervix-client-wire --package nervix-consensus --package nervix-interconnect \
         --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-primitives
 
+# Add the unit tests of one workspace package to the instrumented profile, such as a connector crate
+# whose patch the scenario suite exercises only in part.
+test-coverage-package-lib package *args:
+    cargo llvm-cov --no-report --lib --package {{ package }} {{ args }}
+
 # Extend an existing instrumented profile with focused public regressions after a correction.
 test-coverage-scenario-filter feature filter:
     #!/usr/bin/env bash
@@ -1910,9 +1915,10 @@ benchmark *args:
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
 
-# Measure the load driver's preparation controls with ordinary native coverage.
-coverage-benchmark-load output="target/benchmark-load.lcov":
-    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- empty_topic_setup
+# Measure the load driver's tests whose names contain `filter` with ordinary native coverage; by
+# default its preparation controls, and every test with an empty filter.
+coverage-benchmark-load output="target/benchmark-load.lcov" filter="empty_topic_setup":
+    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(filter) }}
 
 # Build the pinned Flink image with its matching Kafka SQL connector.
 benchmark-flink-image:
@@ -2639,7 +2645,9 @@ coverage-go-ci-tool:
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
-test-docs: typed-ratchet-source-build
+# Every script test runs here, the ratchet's included, so this installs the source parser and the
+# pinned complexity analyzer those tests measure with.
+test-docs: typed-ratchet-source-build install-cargo-crap
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
@@ -2892,7 +2900,7 @@ client *args: build-deps
     cargo run --package nervix-cli -- {{ args }}
 
 build-web-console:
-    python3 scripts/build_web_console.py
+    python3 -m scripts.build_web_console
 
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server
