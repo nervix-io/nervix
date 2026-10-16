@@ -170,6 +170,29 @@ class CompleteAnalysisTests(unittest.TestCase):
 
         self.assertEqual(reports[0], reports[1])
 
+    def test_a_report_and_record_named_elsewhere_write_the_same_reports(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "checkout"
+            root.mkdir()
+            write_repository(root, {"src/lib.rs": COMPLEX, "src/unmeasured.rs": SIMPLE})
+            write_report(root, {"src/lib.rs": covering(COMPLEX, 1)})
+            self.assertEqual(check(root)[0], 0)
+            output = root / crap_report.OUTPUT
+            in_place = ((output / crap_report.JSON_REPORT).read_bytes(), (output / crap_report.MARKDOWN_REPORT).read_bytes())
+            # A downloaded artifact keeps the report and its record outside the checkout.
+            artifact = Path(directory) / "artifact"
+            (artifact / RECORD.parent).mkdir(parents=True)
+            (artifact / "lcov-workspace.info").write_bytes((root / "lcov-workspace.info").read_bytes())
+            (artifact / RECORD).write_bytes((root / RECORD).read_bytes())
+            (root / "lcov-workspace.info").unlink()
+            (root / RECORD).unlink()
+
+            status, _, _ = check(root, "--report", str(artifact / "lcov-workspace.info"), "--record", str(artifact / RECORD))
+            elsewhere = ((output / crap_report.JSON_REPORT).read_bytes(), (output / crap_report.MARKDOWN_REPORT).read_bytes())
+
+        self.assertEqual(status, 0)
+        self.assertEqual(elsewhere, in_place)
+
     def test_a_score_above_30_never_fails_the_check(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -476,12 +476,13 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     report = root / options.report
     record = root / options.record
     output = root / options.output
-    shown = display(report, root)
-    content: dict[str, object] = {"report": shown, "analyzer": f"{cargo_crap.CRATE} {cargo_crap.VERSION}", "threshold": THRESHOLD}
+    # The reports name the analysed report by its file name, so that a run over a retained artifact
+    # writes the same reports wherever the artifact was downloaded.
+    content: dict[str, object] = {"report": report.name, "analyzer": f"{cargo_crap.CRATE} {cargo_crap.VERSION}", "threshold": THRESHOLD}
     status = 1
     try:
         analysis = Analysis.run(root, cargo_crap.default_target(), report, record)
-        content = analysis.describe(shown)
+        content = analysis.describe(report.name)
         status = 0
     except VacuousAnalysis as error:
         content.update({

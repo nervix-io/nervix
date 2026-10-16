@@ -999,8 +999,9 @@ function. CI's coverage job runs the check after the merge and retains both repo
 above 30 in the files the pull request changes, the project's total above 30 and the unmeasured
 count, or the cause of a vacuous analysis.
 
-A retained `coverage-merged` artifact reproduces its report without the coverage binaries, in a
-checkout of the revision its merge record names:
+The reports name the analysed report by its file name, so a retained `coverage-merged` artifact
+reproduces its reports byte for byte without the coverage binaries, in a checkout of the revision
+its merge record names:
 
 ```bash
 just check-coverage <artifact>/lcov-workspace.info <artifact>/target/coverage-merge/record.json
