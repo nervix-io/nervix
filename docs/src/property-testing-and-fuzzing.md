@@ -680,6 +680,12 @@ shards' line, function and branch counters because they ran disjoint campaigns, 
 remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
 fuzz coverage artifact.
 
+Check's `coverage-full` job reads both artifacts. For a pull request carrying `fuzz`, it requires
+the gate's successful randomized and sanitizer verdicts and the combined campaign of this run's
+shards over every target of the tested inventory, and adds the campaign's lines to the
+[full workspace union](./developing-nervix.md#the-full-workspace-union). Without `fuzz`, it requires
+the recorded deliberate skip and refuses any fuzz report.
+
 ## Adding A Target
 
 Put the Bolero test beside its production owner, name it `bolero_...`, bound iterations

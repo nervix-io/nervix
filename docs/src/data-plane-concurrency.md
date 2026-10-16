@@ -1638,8 +1638,11 @@ runs in the command processes and supplies no ordering, wakeups or branches insi
 The per-mode build directories and fresh attempt directories prevent one mode from replacing
 another's executable or counters. Native source-line execution complements each model's claim;
 it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
-the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
-collection, artifacts, filtering and replay commands.
+the ordinary coverage and CRAP gate. The [full workspace union](developing-nervix.md#the-full-workspace-union)
+adds them to the ordinary report with their mode attribution, and accepts a Shuttle or Loom
+collection only with complete, unfiltered `models.json` evidence. See
+[native extra coverage](developing-nervix.md) for collection, artifacts, filtering and replay
+commands.
 
 The integrated ordinary cost probe is `just bench-primitives`. It measures the boundary's atomic
 access, `ArcSwap` publication, an uncontended blocking mutex, and shared-reference clone/drop
@@ -2023,7 +2026,10 @@ through Cargo's configured runner, and hands `lane.json` to the collector, which
 unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
-coverage stays out of ordinary coverage and the CRAP gate. The [Integration Test
+coverage stays out of ordinary coverage and the CRAP gate. For a pull request labeled `deloxide`,
+Check's `coverage-full` job requires each selection's complete collection with its complete
+`lane.json`, and adds their lines to the
+[full workspace union](./developing-nervix.md#the-full-workspace-union). The [Integration Test
 Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
 reserves.
 

@@ -261,6 +261,7 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report. The CRAP step runs the pinned cargo-crap, which the job builds through kache |
+| `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./developing-nervix.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -1455,7 +1456,9 @@ publication are advisory and never change the build verdict. The complexity verd
 and which reads no coverage.
 The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
 artifact retains the report, its merge record `target/coverage-merge/record.json` and
-`target/patch-coverage.md`.
+`target/patch-coverage.md`. The `coverage-full` job later reads that report unchanged and adds the
+modeled, diagnostic and fuzz collections the run selected; their counters never enter the ordinary
+report, its patch coverage or its CRAP report.
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
