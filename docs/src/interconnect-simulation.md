@@ -581,6 +581,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101, 1000 | 320 s / 400,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair; six 6 MiB materialized column sections, 36 MiB in all, stream in 64 KiB chunks and install as one checkpoint |
 | window section partition and repair | `transport::backup::window_sections_larger_than_the_bulk_budget_stream_across_a_partition` | 103 | 320 s / 400,000 / 90 s | The same fences and faults for three window groups of input rows and argument columns, each section classified by its own kind; 36 MiB, beyond the 32 MiB bulk budget, streams in 64 KiB chunks and installs as one branched window checkpoint |
 | backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 320 s / 400,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
+| backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the request's five-second deadline; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
@@ -655,9 +656,14 @@ that claims another process epoch is rejected before the capture or stream handl
 partition case bounds a stalled fetch by its request deadline, leaves the staged section available
 when the link is partitioned, repairs the link, and reads the verified section. The restart case
 ends an owner process after its first stream chunk;
-the incomplete stream fails, and the rebound owner has no stage from that process. These are
-transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
-server's archive and restore behavior.
+the incomplete stream fails, and the rebound owner has no stage from that process. The inventory
+case partitions the coordinator's link to the capture owner, and later holds it, while the
+coordinator asks for the staged section inventory. Each request fails at the inventory request's
+deadline, and a request over the repaired or released link lists the whole stage unchanged: a
+disrupted inventory request consumes and alters nothing, and the owner captured only once. These
+are transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
+server's archive and restore behavior, and the external `backup-fault` chaos scenario the same
+boundaries between packaged processes.
 
 ### Stalled-Peer Isolation
 
