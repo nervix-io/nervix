@@ -25,10 +25,10 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, QueueName, RetryPolicy, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
+    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, PositionClass, QueueName, RetryPolicy, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
     SourceReferenceKind,
 };
 
@@ -65,6 +65,7 @@ impl SourceEntity for RabbitMqQueueSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Written,
     };
 }
 

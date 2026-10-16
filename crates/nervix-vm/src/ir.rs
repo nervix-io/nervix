@@ -337,6 +337,17 @@ pub struct CompiledProgram {
 /// predicate compiler and can execute it only through the predicate runtime entry point, so a
 /// construction-capable [`CompiledProgram`] cannot be substituted at either boundary.
 ///
+/// The predicate handle exposes its input schema while retaining the program:
+///
+/// ```
+/// use nervix_vm::CompiledPredicate;
+///
+/// fn inspect(predicate: &CompiledPredicate) {
+///     let _ = predicate.input_schema();
+///     let retained: CompiledPredicate = predicate.clone();
+/// }
+/// ```
+///
 /// A general compiled program cannot be converted into this capability:
 ///
 /// ```compile_fail

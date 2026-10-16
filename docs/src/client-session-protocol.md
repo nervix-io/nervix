@@ -84,7 +84,9 @@ session maps remain client-owned synchronization outside the server record-path 
 Server relay subscription fan-out remains recurring data-plane execution with its own source
 contracts and exact-operation repair expectations. The annotations change no session framing,
 recovery or delivery guarantee. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
-owns this compiler boundary.
+owns this compiler boundary. [Execution Primitives](./execution-primitives.md) owns the shared
+backend selection, portable reference types and declared unmodeled exceptions used by the Rust
+client, binding and browser; those build choices change no wire contract.
 
 ## Wire Format
 
@@ -1496,6 +1498,14 @@ names the domain, the declared resource, the upload identity, and the exact size
 each chunk is non-empty and fits one frame. There is no manifest, digest, or finish frame: the
 leader hashes the archive as it stages it and verifies everything else when it installs it. The
 console WebSocket carries no upload stream.
+
+The Rust client builds one deterministic archive in a temporary file before opening an upload
+call. Archive construction uses bounded 1 MiB read and write buffers. Only a successfully
+terminated and flushed archive becomes an upload body. An I/O failure abandons the partial file
+and returns `BuildUploadArchive` above its originating I/O error; cancellation abandons it without
+finalizing in a destructor or spawning cleanup work. The command deadline may cancel construction
+and retains its typed deadline outcome. Once construction succeeds, every transport attempt reads
+the same complete archive and keeps the same upload identity.
 
 An upload is identified by its upload identity, not by an execution reference. The identity is
 chosen by the client, at most 128 bytes of ASCII letters, digits, `-`, `_`, and `.`, and is durable

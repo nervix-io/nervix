@@ -140,6 +140,10 @@ pub enum LoadShape {
     /// every `keys_per_cycle` keys carrying the retain marker in their padded value. A cycle
     /// therefore survives filtering and deduplication as exactly `retained_keys` records, which a
     /// window processor aggregates into summaries carrying `count_field`.
+    ///
+    /// The count holds only while a key's copies reach the deduplicator within its `MAX TIME` of
+    /// each other, so the driver sends every cycle as exactly one Kafka record batch: a broker
+    /// that stalls between two batches then delays whole cycles, never one copy of a key.
     KeyedWindowed {
         keys_per_cycle: u64,
         retained_keys: u64,

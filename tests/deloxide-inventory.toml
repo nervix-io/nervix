@@ -119,6 +119,8 @@ tags = [
   "@shutdown_kafka_handoff",
   "@shutdown_leader_change",
   "@shutdown_flush_before_freeze",
+  "@shutdown_source_confirmation",
+  "@shutdown_source_confirmation_handoff",
   "@metrics_checkpoint_handoff",
 ]
 target = "test:scenarios"
@@ -560,6 +562,26 @@ id = "scenario.shutdown-kafka-handoff"
 invariant = "A stopping Kafka owner admits no new source work during its emitter handoff and completes the drain with every admitted record delivered."
 invocation = "scenarios"
 scenario = "A stopping Kafka ingestor closes intake while its attached emitter hands over"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A one-node in-place drain that waits for a Kafka source's delayed transport confirmation, while tracked source controls, ACK completion and the confirmed root's hand-over run during the stop. The confirmation delay, the Kafka client and the drain's poll are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-source-confirmation"
+invariant = "A node that stops in place completes its drain only after the transport confirmed the source offsets of the work it admitted, so the offsets are committed when the stop ends."
+invocation = "scenarios"
+scenario = "A node that stops in place keeps draining until its transport confirms the source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, while tracked entity-gate state, source controls and ACK completion run during the stop. The confirmation delay, the Kafka client and transport waits are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-source-confirmation-handoff"
+invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
+invocation = "scenarios"
+scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1536,6 +1558,26 @@ scenario = "A stopping Kafka ingestor closes intake while its attached emitter h
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: a one-node in-place drain that waits for a Kafka source's delayed transport confirmation, with tracked source controls and ACK completion during the stop. The confirmation delay, the Kafka client and the drain's poll remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-source-confirmation"
+invariant = "A node that stops in place completes its drain only after the transport confirmed the source offsets of the work it admitted, so the offsets are committed when the stop ends."
+invocation = "stress-scenarios"
+scenario = "A node that stops in place keeps draining until its transport confirms the source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, with tracked entity-gate state, source controls and ACK completion during the stop. The confirmation delay, the Kafka client and transport waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-source-confirmation-handoff"
+invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
+invocation = "stress-scenarios"
+scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline remain untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -2077,6 +2119,10 @@ path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
+  "scenario.shutdown-source-confirmation",
+  "scenario.shutdown-source-confirmation-handoff",
+  "stress.shutdown-source-confirmation",
+  "stress.shutdown-source-confirmation-handoff",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
@@ -2152,7 +2198,11 @@ workloads = [
 path = "src/runtime_ack.rs"
 workloads = [
   "scenario.client-alter-drain",
+  "scenario.shutdown-source-confirmation",
+  "scenario.shutdown-source-confirmation-handoff",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
+  "stress.shutdown-source-confirmation",
+  "stress.shutdown-source-confirmation-handoff",
   "stress.wasm-kafka-restore",
 ]

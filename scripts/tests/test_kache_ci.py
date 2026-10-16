@@ -40,6 +40,7 @@ KACHE_JOBS = {
         "deloxide",
         "tests",
         "scenarios",
+        "coverage",
         "client-conformance",
         "extra-tests",
         "shuttle",
