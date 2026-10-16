@@ -16,14 +16,14 @@ use std::fs;
 
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
-    CodecName, CodecWireFormat, CreateClientHttp, CreateClientS3, CreateClientSqs,
-    CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend, IcebergTableSink,
-    IngestSource, IngestorName, JsonType, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState,
-    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource,
-    OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink,
-    ProcessorInputs, ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink,
+    CodecName, CodecWireFormat, CreateClientHttp, CreateClientKafka, CreateClientS3,
+    CreateClientSqs, CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
+    GeneralErrorPolicy, HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend,
+    IcebergTableSink, IngestSource, IngestorName, JsonType, KafkaConsumerGroupName,
+    KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
+    MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource,
+    MqttTopicSource, OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink,
+    PostgresTableSink, ProcessorInputs, ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink,
     SignalingProtobufConfig, SyslogCollectorSink, SyslogListenerSource, SyslogSink,
     WireSchemaField, WireSchemaName, ZeroMqPushSink, ZeroMqSink,
 };
@@ -1891,4 +1891,59 @@ fn apply_batch_rejects_duplicate_vhost_hostnames() {
     );
 
     let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn a_kafka_client_may_not_set_a_key_nervix_decides_in_any_spelling() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let identifier: ModelName = named("kafka_main");
+    let bootstrap = ClientConfigEntry {
+        key: "bootstrap.servers".to_string(),
+        value: "localhost:9092".to_string(),
+    };
+    for spelling in ["allow.auto.create.topics", "Allow.Auto.Create.Topics"] {
+        let client = CreateClientKafka {
+            name: named("kafka_main"),
+            mount: None,
+            config: vec![
+                bootstrap.clone(),
+                ClientConfigEntry {
+                    key: spelling.to_string(),
+                    value: "false".to_string(),
+                },
+            ],
+        };
+
+        let error = validate_kafka_client(&domain, &identifier, &client)
+            .expect_err("a Kafka client may not decide whether a consumer creates topics");
+
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::NervixOwnedClientConfigKey {
+                domain: domain.clone(),
+                client: identifier.clone(),
+                key: NervixOwnedConfigKey::KafkaAllowAutoCreateTopics,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "client 'kafka_main' in domain 'default' cannot set CONFIG key \
+             'allow.auto.create.topics': Nervix never lets a Kafka consumer create the topic it \
+             reads"
+        );
+    }
+
+    let client = CreateClientKafka {
+        name: named("kafka_main"),
+        mount: None,
+        config: vec![
+            bootstrap,
+            ClientConfigEntry {
+                key: "auto.offset.reset".to_string(),
+                value: "earliest".to_string(),
+            },
+        ],
+    };
+    validate_kafka_client(&domain, &identifier, &client)
+        .expect("a Kafka client that leaves the keys Nervix decides alone is valid");
 }

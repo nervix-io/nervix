@@ -266,6 +266,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- A Kafka client never sets `allow.auto.create.topics`; `CREATE CLIENT` refuses it. Provision each
+  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
+  it exists.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.
