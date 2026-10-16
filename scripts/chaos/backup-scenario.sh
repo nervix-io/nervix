@@ -27,6 +27,121 @@ backup_graph_fixture() {
     printf '%s' "${baseline_graph/"${consumer_group_clause}"/OFFSET BY DOMAIN}"
 }
 
+# Backs DOMAIN up through the packaged CLI on cli_host into ARCHIVE, a file directly under
+# ARCHIVE_DIR, and writes the CLI's JSON report to REPORT. Further CLI options follow. Returns the
+# CLI's exit status; judging the report is the caller's.
+backup_archive_domain() {
+    local archive_dir="$1"
+    local domain="$2"
+    local archive="$3"
+    local report="$4"
+    shift 4
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup" admin \
+        nervix-cli --server "http://${cli_host}:47391" \
+        --domain "${domain}" --password "${CHAOS_PASSWORD}" \
+        backup domain "${domain}" --output "/chaos-backup/${archive##*/}" \
+        --timeout 30s --format json "$@" >"${report}"
+}
+
+# Requires the backup REPORT to name one domain with a completed quiesced cut.
+backup_require_quiesced_report() {
+    local report="$1"
+    jq -e '.domains | length == 1' "${report}" >/dev/null \
+        || backup_fail 'the backup report does not name one domain'
+    jq -e '.domains[0].cut.kind == "quiesced" and .domains[0].cut.engaged_at != null and .domains[0].cut.released_at != null' \
+        "${report}" >/dev/null \
+        || backup_fail 'the backup report does not contain a completed quiesced cut'
+}
+
+# Describes ARCHIVE, a file directly under ARCHIVE_DIR, offline through the packaged CLI into
+# DESCRIPTION, and requires a quiesced cut of chaos_baseline that holds branch lifecycle state and
+# acknowledged Kafka domain offsets at or past MINIMUM_OFFSET.
+backup_verify_archive() {
+    local archive_dir="$1"
+    local archive="$2"
+    local description="$3"
+    local minimum_offset="$4"
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup:ro" admin \
+        nervix-cli --command \
+        "DESCRIBE BACKUP '/chaos-backup/${archive##*/}' FORMAT JSON;" \
+        >"${description}" \
+        || backup_fail 'the packaged CLI could not verify the archive offline'
+    jq -e '.scope == "domain" and .domains[0].domain == "chaos_baseline" and .domains[0].cut.kind == "quiesced"' \
+        "${description}" >/dev/null \
+        || backup_fail 'the verified archive has the wrong domain or cut'
+    jq -e '[.domains[0].runtime_state[] | select(.kind == "branch_lifecycle")] | length > 0' \
+        "${description}" >/dev/null \
+        || backup_fail 'the archive omitted branch lifecycle state'
+    jq -e --argjson minimum "${minimum_offset}" \
+        '[.domains[0].runtime_state[] | select(.kind == "kafka_offsets") | .positions[] |
+            select(.topic == "chaos_input" and .partition == 0 and .next_offset >= $minimum)] |
+            length > 0' \
+        "${description}" >/dev/null \
+        || backup_fail 'the archive omitted acknowledged Kafka domain offsets'
+}
+
+# Restores ARCHIVE, described in DESCRIPTION, as the stopped domain TARGET, backs TARGET up again and
+# requires its public checkpoint identities, revisions, branch counts and exact source positions to
+# equal the archive's. The restore report, the re-export's archive, report and description, and
+# both state projections go to the paths that follow TARGET, all directly under ARCHIVE_DIR.
+backup_verify_restore() {
+    local archive_dir="$1"
+    local archive="$2"
+    local description="$3"
+    local target="$4"
+    local restore_report="$5"
+    local restored_archive="$6"
+    local restored_report="$7"
+    local restored_description="$8"
+    local expected_state="$9"
+    local restored_state="${10}"
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup:ro" admin \
+        nervix-cli --server "http://${cli_host}:47391" \
+        --domain chaos_baseline --password "${CHAOS_PASSWORD}" \
+        restore domain chaos_baseline --as "${target}" \
+        --input "/chaos-backup/${archive##*/}" --format json \
+        >"${restore_report}" \
+        || backup_fail 'the packaged CLI could not publish the complete restored generation'
+    jq -e '.domains | length == 1' "${restore_report}" >/dev/null \
+        || backup_fail 'the restore report does not name one domain'
+    jq -e --arg target "${target}" '.domains[0].domain == $target' \
+        "${restore_report}" >/dev/null \
+        || backup_fail 'the restore report names the wrong target'
+    backup_archive_domain "${archive_dir}" "${target}" "${restored_archive}" "${restored_report}" \
+        || backup_fail 'the stopped restored domain could not be backed up'
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup:ro" admin \
+        nervix-cli --command \
+        "DESCRIBE BACKUP '/chaos-backup/${restored_archive##*/}' FORMAT JSON;" \
+        >"${restored_description}" \
+        || backup_fail 'the restored generation could not be verified offline'
+    # The renamed domain has different section paths and encoded record digests. Compare its
+    # public checkpoint identities, revisions, branch counts and exact source positions.
+    local state_projection='[.domains[0].runtime_state[] |
+        {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
+        sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
+    jq -S "${state_projection}" "${description}" >"${expected_state}"
+    jq -S "${state_projection}" "${restored_description}" >"${restored_state}"
+    cmp "${expected_state}" "${restored_state}" \
+        || backup_fail 'restored lifecycle or source checkpoints differ from the complete cut'
+}
+
+# Sets backup_engaged_at, backup_released_at, backup_engaged_ms and backup_released_ms from the
+# completed cut the backup REPORT names, and requires the release not to precede the engagement.
+backup_cut_window() {
+    local report="$1"
+    backup_engaged_at="$(jq -r '.domains[0].cut.engaged_at' "${report}")"
+    backup_released_at="$(jq -r '.domains[0].cut.released_at' "${report}")"
+    backup_engaged_ms="$(date -u -d "${backup_engaged_at}" +%s%3N)" \
+        || backup_fail 'the cut engagement time cannot be parsed'
+    backup_released_ms="$(date -u -d "${backup_released_at}" +%s%3N)" \
+        || backup_fail 'the cut release time cannot be parsed'
+    ((backup_released_ms >= backup_engaged_ms)) || backup_fail 'the cut release precedes engagement'
+}
+
 run_backup_scenario() {
     phase 'healthy acknowledged Kafka traffic'
     mkdir -p "${artifact_dir}/backup"
@@ -47,77 +162,20 @@ run_backup_scenario() {
     local archive_dir="${artifact_dir}/backup"
     local backup_report="${archive_dir}/report.json"
     local archive="${archive_dir}/domain.nvxb"
-    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
-        -v "${archive_dir}:/chaos-backup" admin \
-        nervix-cli --server "http://${cli_host}:47391" \
-        --domain chaos_baseline --password "${CHAOS_PASSWORD}" \
-        backup domain chaos_baseline --output /chaos-backup/domain.nvxb \
-        --timeout 30s --format json >"${backup_report}" \
+    backup_archive_domain "${archive_dir}" chaos_baseline "${archive}" "${backup_report}" \
         || backup_fail 'the packaged CLI could not create the quiesced archive'
     [[ -s "${archive}" ]] || backup_fail 'the backup archive was not retained'
-    jq -e '.domains | length == 1' "${backup_report}" >/dev/null \
-        || backup_fail 'the backup report does not name one domain'
-    jq -e '.domains[0].cut.kind == "quiesced" and .domains[0].cut.engaged_at != null and .domains[0].cut.released_at != null' \
-        "${backup_report}" >/dev/null \
-        || backup_fail 'the backup report does not contain a completed quiesced cut'
+    backup_require_quiesced_report "${backup_report}"
 
     phase 'offline archive verification'
-    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
-        -v "${archive_dir}:/chaos-backup:ro" admin \
-        nervix-cli --command \
-        "DESCRIBE BACKUP '/chaos-backup/domain.nvxb' FORMAT JSON;" \
-        >"${archive_dir}/description.json" \
-        || backup_fail 'the packaged CLI could not verify the archive offline'
-    jq -e '.scope == "domain" and .domains[0].domain == "chaos_baseline" and .domains[0].cut.kind == "quiesced"' \
-        "${archive_dir}/description.json" >/dev/null \
-        || backup_fail 'the verified archive has the wrong domain or cut'
-    jq -e '[.domains[0].runtime_state[] | select(.kind == "branch_lifecycle")] | length > 0' \
-        "${archive_dir}/description.json" >/dev/null \
-        || backup_fail 'the archive omitted branch lifecycle state'
-    jq -e '[.domains[0].runtime_state[] | select(.kind == "kafka_offsets") | .positions[] |
-            select(.topic == "chaos_input" and .partition == 0 and .next_offset >= 9)] |
-            length > 0' \
-        "${archive_dir}/description.json" >/dev/null \
-        || backup_fail 'the archive omitted acknowledged Kafka domain offsets'
+    backup_verify_archive "${archive_dir}" "${archive}" "${archive_dir}/description.json" 9
 
     phase 'complete generation restore through the packaged CLI'
-    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
-        -v "${archive_dir}:/chaos-backup:ro" admin \
-        nervix-cli --server "http://${cli_host}:47391" \
-        --domain chaos_baseline --password "${CHAOS_PASSWORD}" \
-        restore domain chaos_baseline --as chaos_restored \
-        --input /chaos-backup/domain.nvxb --format json \
-        >"${archive_dir}/restore-report.json" \
-        || backup_fail 'the packaged CLI could not publish the complete restored generation'
-    jq -e '.domains | length == 1' "${archive_dir}/restore-report.json" >/dev/null \
-        || backup_fail 'the restore report does not name one domain'
-    jq -e '.domains[0].domain == "chaos_restored"' \
-        "${archive_dir}/restore-report.json" >/dev/null \
-        || backup_fail 'the restore report names the wrong target'
-    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
-        -v "${archive_dir}:/chaos-backup" admin \
-        nervix-cli --server "http://${cli_host}:47391" \
-        --domain chaos_restored --password "${CHAOS_PASSWORD}" \
-        backup domain chaos_restored --output /chaos-backup/restored.nvxb \
-        --timeout 30s --format json >"${archive_dir}/restored-backup-report.json" \
-        || backup_fail 'the stopped restored domain could not be backed up'
-    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
-        -v "${archive_dir}:/chaos-backup:ro" admin \
-        nervix-cli --command \
-        "DESCRIBE BACKUP '/chaos-backup/restored.nvxb' FORMAT JSON;" \
-        >"${archive_dir}/restored-description.json" \
-        || backup_fail 'the restored generation could not be verified offline'
-    # The renamed domain has different section paths and encoded record digests. Compare its
-    # public checkpoint identities, revisions, branch counts and exact source positions.
-    local state_projection='[.domains[0].runtime_state[] |
-        {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
-        sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
-    jq -S "${state_projection}" "${archive_dir}/description.json" \
-        >"${archive_dir}/expected-state.json"
-    jq -S "${state_projection}" "${archive_dir}/restored-description.json" \
-        >"${archive_dir}/restored-state.json"
-    cmp "${archive_dir}/expected-state.json" "${archive_dir}/restored-state.json" \
-        || backup_fail 'restored lifecycle or source checkpoints differ from the complete cut'
+    backup_verify_restore "${archive_dir}" "${archive}" "${archive_dir}/description.json" \
+        chaos_restored "${archive_dir}/restore-report.json" \
+        "${archive_dir}/restored.nvxb" "${archive_dir}/restored-backup-report.json" \
+        "${archive_dir}/restored-description.json" \
+        "${archive_dir}/expected-state.json" "${archive_dir}/restored-state.json"
 
     phase 'post-cut continuity'
     check_support_containers
@@ -128,19 +186,12 @@ run_backup_scenario() {
     local source_after output_after
     source_after="$(topic_end_offset chaos_input)"
     output_after="$(topic_end_offset chaos_output)"
-    local engaged_at released_at engaged_ms released_ms
-    engaged_at="$(jq -r '.domains[0].cut.engaged_at' "${backup_report}")"
-    released_at="$(jq -r '.domains[0].cut.released_at' "${backup_report}")"
-    engaged_ms="$(date -u -d "${engaged_at}" +%s%3N)" \
-        || backup_fail 'the cut engagement time cannot be parsed'
-    released_ms="$(date -u -d "${released_at}" +%s%3N)" \
-        || backup_fail 'the cut release time cannot be parsed'
-    ((released_ms >= engaged_ms)) || backup_fail 'the cut release precedes engagement'
+    backup_cut_window "${backup_report}"
     jq -n \
         --argjson source_before "${source_before}" --argjson source_after "${source_after}" \
         --argjson output_before "${output_before}" --argjson output_after "${output_after}" \
-        --argjson freeze_duration_ms "$((released_ms - engaged_ms))" \
-        --arg engaged_at "${engaged_at}" --arg released_at "${released_at}" \
+        --argjson freeze_duration_ms "$((backup_released_ms - backup_engaged_ms))" \
+        --arg engaged_at "${backup_engaged_at}" --arg released_at "${backup_released_at}" \
         '{source_before:$source_before,source_after:$source_after,
           output_before:$output_before,output_after:$output_after,
           engaged_at:$engaged_at,released_at:$released_at,
