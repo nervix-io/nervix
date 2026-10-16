@@ -1030,6 +1030,55 @@
           ]
         }
       ]
+    },
+    "backup07trigger": {
+      "description": "Backup 07: which activity starts the three-node 1000-branch relay stall",
+      "entries": [
+        {
+          "id": "backups-only-1000-n3",
+          "shard": 1,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--records",
+            "60000",
+            "--scale-cycles",
+            "8",
+            "--scale-cycle-records",
+            "3000",
+            "--scale-cycle-mode",
+            "backup-only"
+          ]
+        },
+        {
+          "id": "traffic-only-1000-n3",
+          "shard": 2,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--records",
+            "60000",
+            "--scale-cycles",
+            "8",
+            "--scale-cycle-records",
+            "3000",
+            "--scale-cycle-mode",
+            "traffic-only"
+          ]
+        }
+      ]
     }
   }
 }

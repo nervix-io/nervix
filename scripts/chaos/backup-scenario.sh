@@ -285,6 +285,13 @@ run_backup_cycles() {
             topic_progressed chaos_output "$((output_before + ${scale_cycle_records:-2}))"
         local started_ms
         started_ms="$(epoch_ms)"
+        if [[ "${scale_cycle_mode:-full}" == traffic-only ]]; then
+            # Campaign control: the same pacing as a cycle, with neither a backup nor a restore.
+            sleep 60
+            jq -nc --argjson cycle "${cycle}" --argjson offset "$(topic_end_offset chaos_input)" \
+                '{cycle:$cycle, archived_offset:$offset, control:"traffic-only"}' >>"${cycles_dir}/cycles.ndjson"
+            continue
+        fi
         backup_archive_domain "${cycle_dir}" chaos_baseline "${cycle_dir}/domain.nvxb" \
             "${cycle_dir}/report.json" \
             || backup_fail "cycle ${cycle}: the packaged CLI could not create the quiesced archive"
@@ -299,11 +306,16 @@ run_backup_cycles() {
         local archived_offset
         archived_offset="$(backup_archived_offset "${cycle_dir}/description.json")"
         started_ms="$(epoch_ms)"
+        if [[ "${scale_cycle_mode:-full}" == backup-only ]]; then
+            # Campaign control: the backup and its offline verification, without a restore.
+            sleep 30
+        else
         backup_verify_restore "${cycle_dir}" "${cycle_dir}/domain.nvxb" "${cycle_dir}/description.json" \
             "chaos_cycle_${cycle}" "${cycle_dir}/restore-report.json" \
             "${cycle_dir}/restored.nvxb" "${cycle_dir}/restored-backup-report.json" \
             "${cycle_dir}/restored-description.json" \
             "${cycle_dir}/expected-state.json" "${cycle_dir}/restored-state.json"
+        fi
         local restore_ms=$(($(epoch_ms) - started_ms))
         jq -nc --argjson cycle "${cycle}" --argjson offset "${archived_offset}" \
             --argjson freeze_ms "$((backup_released_ms - backup_engaged_ms))" \

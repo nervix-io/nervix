@@ -124,6 +124,7 @@ scale_interval_ms=""
 scale_cycles=8
 scale_cycle_records=2
 scale_wasm_bytes=""
+scale_cycle_mode=full
 records_option_set=false
 timeout_option_set=false
 mixed_option_set=false
@@ -260,7 +261,7 @@ while [[ "$#" -gt 0 ]]; do
             keep_resources=true
             shift
             ;;
-        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records | --scale-wasm-bytes)
+        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records | --scale-wasm-bytes | --scale-cycle-mode)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
             case "$1" in
                 --scale-branches) scale_branches="$2" ;;
@@ -268,6 +269,7 @@ while [[ "$#" -gt 0 ]]; do
                 --scale-cycles) scale_cycles="$2" ;;
                 --scale-cycle-records) scale_cycle_records="$2" ;;
                 --scale-wasm-bytes) scale_wasm_bytes="$2" ;;
+                --scale-cycle-mode) scale_cycle_mode="$2" ;;
             esac
             shift 2
             ;;
