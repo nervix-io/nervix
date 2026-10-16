@@ -1114,6 +1114,12 @@ refuses the cut it interrupted, and the new leader cuts again for a client that 
 execution reference. Stopping or restarting the node that holds an archive ends its download, and
 the archive is lost with it.
 
+A freeze grows with the branches the domain holds and the state they carry. The freezes measured
+for [Backup 07](https://app.clickup.com/t/86bc8dbxv), with the commands and image identities that
+produced them, range from a tenth of a second for a few branches to about three seconds for a
+thousand branches on one node and seven on three, and stay under two seconds with 72 MiB of WASM
+guest state, all far inside the drain timeout.
+
 A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.
 
