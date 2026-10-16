@@ -29,6 +29,7 @@ pub use rdkafka as testing_rdkafka;
 mod source;
 
 use std::{
+    ffi::c_int,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -77,6 +78,10 @@ const LONGEST_MESSAGE_TIMEOUT_MILLIS: u32 = i32::MAX.unsigned_abs();
 
 /// Nanoseconds in one millisecond, the unit `message.timeout.ms` counts in.
 const NANOS_PER_MILLI: u32 = 1_000_000;
+
+/// The longest single wait inside librdkafka's flush. A finish waits in such steps until its
+/// deadline, so each step's milliseconds fit the C `int` librdkafka takes.
+const FLUSH_STEP: Duration = Duration::from_secs(1);
 
 pub struct KafkaSinkConfig {
     pub config: Vec<ClientConfigEntry>,
@@ -338,6 +343,37 @@ impl KafkaSink {
             .attach_printable(description)
     }
 
+    /// Sends every record `producer` queues, whatever `linger.ms` says, until each is delivered
+    /// or `deadline` passes.
+    ///
+    /// librdkafka ignores `linger.ms` only while a flush call waits: each broker thread reads that
+    /// state when it next serves its partitions. rust-rdkafka's `Producer::flush` calls librdkafka's
+    /// flush with no wait and polls between calls, so a broker thread that does not serve within
+    /// that instant keeps lingering, and a loaded node reaches the deadline with every record still
+    /// queued. This waits inside librdkafka's flush instead, one step at a time, while the
+    /// producer's polling thread takes the delivery reports that let the flush end.
+    fn flush_until(producer: &FutureProducer, deadline: Instant) -> Result<(), KafkaError> {
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO);
+            let step = remaining.min(FLUSH_STEP);
+            let step_millis = c_int::try_from(step.as_millis())
+                .assured("a flush step lasts at most FLUSH_STEP, one second of milliseconds");
+            let native = producer.client().native_ptr();
+            // SAFETY: `producer` keeps the librdkafka handle `native` alive for the whole call, and
+            // librdkafka lets any thread flush a producer while its polling thread polls it.
+            let answer = unsafe { rdkafka::bindings::rd_kafka_flush(native, step_millis) };
+            let code = RDKafkaErrorCode::from(answer);
+            if code == RDKafkaErrorCode::NoError {
+                return Ok(());
+            }
+            if code != RDKafkaErrorCode::OperationTimedOut || remaining.is_zero() {
+                return Err(KafkaError::Flush(code));
+            }
+        }
+    }
+
     /// How many records the producer holds that have no delivery report yet.
     fn queued_records(&self) -> u64 {
         u64::try_from(self.producer.in_flight_count())
@@ -369,14 +405,11 @@ impl SinkLifecycle for KafkaSink {
             return Ok(SinkFinish::NothingHeld);
         }
         let producer = self.producer.clone();
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO);
-        let flushed = nervix_primitives::task::spawn_blocking(move || producer.flush(remaining))
-            .await
-            .map_err(|source| {
-                Report::new(source).change_context(SinkFinishError::Flush { sink: KAFKA })
-            })?;
+        let flushing =
+            nervix_primitives::task::spawn_blocking(move || Self::flush_until(&producer, deadline));
+        let flushed = flushing.await.map_err(|source| {
+            Report::new(source).change_context(SinkFinishError::Flush { sink: KAFKA })
+        })?;
         match flushed {
             Ok(()) => Ok(SinkFinish::Flushed),
             Err(error @ KafkaError::Flush(RDKafkaErrorCode::OperationTimedOut)) => {

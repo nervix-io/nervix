@@ -731,13 +731,20 @@ event. What a stop leaves to a finish, and what the finish does with it, differs
 
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
-| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered | Flushes the producer queue by the deadline, ignoring `linger.ms`, in both modes, and counts what is still queued when it passes |
+| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts what is still queued when the deadline passes |
 | Pulsar | `NO_ACK`: messages the producer accepted and has not sent. `ACK`: nothing | Discards them with the producer |
 | MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
 | ZeroMQ | Nothing: each send writes and flushes its frame to a peer's socket | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
+
+librdkafka sends lingering records at once only while a call to its flush is waiting: each broker
+thread checks that state when it next serves its partitions. rust-rdkafka's `flush` calls
+librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss
+that instant and the records linger past the deadline. The Kafka finish therefore waits inside
+librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
+the delivery reports that end the flush.
 
 A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
