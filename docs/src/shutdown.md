@@ -656,6 +656,11 @@ reaches its completion point before the process ends.
 
 ### Sources
 
+An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
+waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
+is reported and the socket is released; the shutdown deadline still bounds the surrounding
+lifecycle. This protocol handshake does not acknowledge payload delivery or add redelivery.
+
 A source acknowledges or commits the work that reached its sinks before its session stops. A batch
 acknowledged through the graph stays outstanding admitted work until its source has confirmed the
 batch's positions on its transport, so the drain waits for that confirmation as it waits for any

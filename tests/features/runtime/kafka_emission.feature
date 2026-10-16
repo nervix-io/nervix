@@ -405,3 +405,84 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  @kafka_emitter_stale_copy_recovery
+  Scenario Outline: A Kafka emitter whose broker refused its records leaves no stale copy, so recovery delivers each record once
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "stale_copy_in_{{test_id}}" exists with 1 partitions
+    And a mock Kafka broker serves topic "stale_copy_out_{{test_id}}"
+    And the mock Kafka broker refuses every write
+    And mock Kafka topic "stale_copy_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE CLIENT kafka_sink TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'queue.buffering.max.messages' = '1'
+      };
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+      FROM kafka_ingress TOPIC 'stale_copy_in_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'stale_copy_group_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+      ON QUIESCE SUSPEND DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH IMMEDIATE
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE DETACHED EMITTER kafka_stale_copy
+      FROM notifications
+      TO KAFKA kafka_sink TOPIC stale_copy_out_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 10s MAX 10s
+        ENCODE USING notification_codec
+      INHERIT ALL
+      FLUSH IMMEDIATE
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    Then Kafka consumer group "stale_copy_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "stale_copy_in_{{test_id}}"
+      """
+      {"user_id":1}
+      """
+    And Kafka message is published to topic "stale_copy_in_{{test_id}}"
+      """
+      {"user_id":2}
+      """
+    # The broker refuses the first record, which fills the producer queue of one record, until the
+    # emitter stops waiting for it at ACK TIMEOUT. The producer gives that copy up by then, at its
+    # next timeout scan a second later at most, so it holds no copy for the broker's recovery to
+    # deliver beside the one the emitter's next attempt sends.
+    Then within "60s" DESCRIBE EMITTER "kafka_stale_copy" on the leader node reports a transient error with its next attempt at most "8s" away
+    When the mock Kafka broker accepts writes again
+    Then within "60s" DESCRIBE EMITTER "kafka_stale_copy" on the leader node contains
+      """
+      transient error: -
+      """
+    And within "30s" the observed broker receives exactly these payloads
+      """
+      {"user_id":1}
+      {"user_id":2}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -109,7 +109,7 @@ use crate::common::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain,
+        WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
@@ -126,6 +126,7 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -168,6 +169,7 @@ mod paced_simulation;
 mod process_cluster;
 mod restarted_voter;
 mod session_protocol;
+mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -305,6 +307,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -454,6 +457,9 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
+    /// shared test broker.
+    kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
@@ -577,6 +583,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
@@ -15239,6 +15246,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
 }
 
 #[when("these NSPL commands are executed on the leader node")]
+#[when("these Plexus statements are executed on the leader node")]
 async fn when_these_nspl_commands_are_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16712,6 +16720,7 @@ async fn then_nspl_commands_complete_on_leader_within(
 }
 
 #[given("the leader node is configured with these NSPL commands")]
+#[given("the leader node is configured with these Plexus statements")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -21449,6 +21458,96 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     }
 }
 
+/// What DESCRIBE EMITTER reports about an emitter's failed attempt and its next one.
+struct DescribedEmitterRetry {
+    /// The failure DESCRIBE reports, absent while there is none.
+    transient_error: Option<String>,
+    /// How long the emitter waits before its next attempt, absent while none is scheduled.
+    reconnect_wait: Option<Duration>,
+}
+
+impl DescribedEmitterRetry {
+    fn from_describe_output(output: &str) -> Self {
+        let mut described = Self {
+            transient_error: None,
+            reconnect_wait: None,
+        };
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(error) = line.strip_prefix("transient error: ") {
+                if error != "-" {
+                    described.transient_error = Some(error.to_string());
+                }
+                continue;
+            }
+            let Some(wait) = line.strip_prefix("reconnect wait: ") else {
+                continue;
+            };
+            let Some(millis) = wait.strip_suffix("ms") else {
+                continue;
+            };
+            let millis = millis
+                .parse::<u64>()
+                .expect("DESCRIBE EMITTER reports the reconnect wait in whole milliseconds");
+            described.reconnect_wait = Some(Duration::from_millis(millis));
+        }
+        described
+    }
+
+    /// Whether the emitter failed and its next attempt, which has not started yet, is at most
+    /// `wait` away.
+    ///
+    /// DESCRIBE keeps reporting a failure until a publish succeeds, so once the next attempt is
+    /// due it reports a wait of zero while that attempt runs.
+    fn retries_within(&self, wait: Duration) -> bool {
+        if self.transient_error.is_none() {
+            return false;
+        }
+        match self.reconnect_wait {
+            Some(reconnect_wait) => !reconnect_wait.is_zero() && reconnect_wait <= wait,
+            None => false,
+        }
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports a transient error with the emitter's next attempt at most
+/// `wait` away, so a scenario acts at a known point between a failed attempt and the next one.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports a transient \
+            error with its next attempt at most {string} away"
+)]
+async fn then_within_duration_describe_emitter_reports_transient_error_with_next_attempt_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    wait: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let wait =
+        parse_duration_text(&wait).expect("the next attempt's wait must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let deadline = Instant::now() + duration;
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if DescribedEmitterRetry::from_describe_output(&output).retries_within(wait) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report a transient error with \
+             its next attempt at most {wait:?} away. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "node {string} eventually reports status containing {string}")]
 async fn then_node_eventually_reports_status_containing(
     world: &mut ScenarioWorld,
@@ -22064,6 +22163,58 @@ async fn given_kafka_topic_exists_with_partitions(
         .ensure_kafka_topic_partitions(&topic, partitions)
         .await
         .expect("failed to create kafka topic");
+}
+
+/// Starts the scenario's own mock Kafka broker with `topic` and names its address
+/// `{{mock_kafka_addr}}`.
+#[given(expr = "a mock Kafka broker serves topic {string}")]
+fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let broker =
+        KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
+    broker
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+    world.placeholders.insert(
+        "mock_kafka_addr".to_string(),
+        broker.bootstrap_servers().to_string(),
+    );
+    world.kafka_mock_broker = Some(broker);
+}
+
+#[given(expr = "mock Kafka topic {string} is observed")]
+async fn given_mock_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before it is observed")
+        .client_config();
+    world.broker_observer = Some(
+        observe_kafka_through(client_config, &topic)
+            .await
+            .expect("failed to observe the mock kafka topic"),
+    );
+}
+
+#[given("the mock Kafka broker refuses every write")]
+fn given_mock_kafka_broker_refuses_every_write(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses writes")
+        .refuse_writes()
+        .expect("the mock Kafka broker refuses writes");
+}
+
+#[when("the mock Kafka broker accepts writes again")]
+fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts writes again")
+        .accept_writes()
+        .expect("the mock Kafka broker accepts writes again");
 }
 
 #[given(expr = "SQS queue {string} exists")]
@@ -29087,6 +29238,9 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
 /// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
 /// end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
+    if let Some(peer) = world.websocket_peer.take() {
+        peer.stop().await;
+    }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
     world.otlp_receivers.clear();
