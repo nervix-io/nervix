@@ -5,8 +5,7 @@
 //!   or, when the emitter declares `BATCH`, one batch payload per packed candidate — pairing each
 //!   record with its key, headers and ordering group, preparing its external bytes once, rejecting
 //!   the rows that cannot be encoded or do not fit, and handing one write to the record sink: the
-//!   payloads earlier attempts
-//!   retained, unchanged, followed by the ones packed now.
+//!   payloads earlier attempts retained, unchanged, followed by the ones prepared now.
 //! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, the
 //!   record identities and retained payloads a write is answered through, the connector
 //!   contract's record sink and record value type, and the node's bounded executor, whose extension
@@ -90,11 +89,12 @@ impl EmitterSink for EncodedRecordSink {
         &mut *self.sink
     }
 
-    /// Encodes every row the batches still hold and publishes them in one write.
+    /// Encodes every row no payload carries yet and publishes them in one write.
     ///
-    /// With `BATCH`, the write carries every batch payload the emitter retains: the ones earlier
-    /// attempts prepared and the sink left unanswered, written again exactly as they were first
-    /// written, and the ones packed now from rows no payload carries yet.
+    /// The write carries every payload the emitter retains: the ones earlier attempts prepared and
+    /// the sink left unanswered, written again exactly as they were first written, and the ones
+    /// prepared now, one per row or, with `BATCH`, one per packed candidate. The sink prepares a
+    /// new payload's external bytes once, before the emitter retains it.
     async fn publish_batches(
         &mut self,
         context: &EmitterSinkContext,

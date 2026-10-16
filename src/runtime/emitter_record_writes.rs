@@ -183,15 +183,15 @@ pub(super) trait PreparedContent {
     fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> Self::Written;
 }
 
-/// A batch payload for a record sink: the envelope every member shares and exactly the bytes the
-/// codec produced and the connector prepared.
+/// A payload for a record sink, carrying one row or, with `BATCH`, one packed candidate: the
+/// envelope every member shares and exactly the bytes the connector prepared from the codec output.
 #[derive(Debug)]
 pub(super) struct EncodedPayload {
     /// The key, headers and ordering group every member shares.
     pub(super) envelope: BatchEnvelope,
     /// Exactly the external bytes the connector prepared from the codec output. Every attempt
-    /// writes these bytes, so a duplicate a
-    /// retry produces is the payload the destination may already hold.
+    /// writes these bytes, so a duplicate a retry produces is the payload the destination may
+    /// already hold.
     pub(super) payload: Vec<u8>,
 }
 
