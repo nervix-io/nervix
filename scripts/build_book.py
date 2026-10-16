@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT / "docs"
 OUTPUT_DIR = DOCS_DIR / "book"
-# The rendered theme and the PDF's in-document links both depend on this exact
-# release, so local builds and CI must agree on it. CI reads this constant.
+# CI pins this release for reproducible builds. Local builds accept any patch
+# release in the same major/minor series. CI reads this constant.
 MDBOOK_VERSION = "0.5.3"
 MDBOOK_LLMS_COMMAND = ROOT / "scripts" / "mdbook_llms.py"
 # Chapters reference images as `images/<name>`, and mdBook copies non-Markdown
@@ -389,10 +389,16 @@ def verify_mdbook_version() -> None:
         raise SystemExit(f"mdbook --version failed: {error}")
 
     installed = reported.strip().removeprefix("mdbook").strip().removeprefix("v")
-    if installed != MDBOOK_VERSION:
+    installed_parts = installed.split(".")
+    expected_series = MDBOOK_VERSION.rsplit(".", 1)[0]
+    if (
+        len(installed_parts) != 3
+        or not all(part.isdigit() for part in installed_parts)
+        or ".".join(installed_parts[:2]) != expected_series
+    ):
         raise SystemExit(
-            f"mdBook {MDBOOK_VERSION} is required, found {installed or 'nothing'}. "
-            "The rendered theme and the PDF's in-document links depend on this exact release."
+            f"mdBook {expected_series}.x is required, found {installed or 'nothing'}. "
+            "The rendered theme and the PDF's in-document links depend on this release series."
         )
 
 

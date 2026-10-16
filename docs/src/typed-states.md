@@ -713,7 +713,10 @@ later paced generation; initial and contract-change opens retain the stopped-dom
 The opened producer's generation and its paced clock still own permission to plan readings.
 
 Healthy connector status is absence of a failure; a failure contains its safe error and an optional
-retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
+retry in one publication. A Syslog stream source separately represents its listener's existence
+and the listening socket's presence. An absent socket after accept failure requires rebind, while
+the same listener still owns established connection tasks and queued frames; source close ends
+that retained state. Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
 a present assignment contains its state identity, optional primary, executors and replicas
 together. An absent primary represents an assignment without one primary owner. Replication routes

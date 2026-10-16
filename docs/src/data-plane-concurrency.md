@@ -244,6 +244,17 @@ writer.
 
 | Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces and unreferenced active chunk sets. Publication runs on stopped-domain lifecycle paths. The admitted maintenance loop also follows running checkpoint replacement and purge under the installation barrier; record delivery adds no lock. |
 
+The Syslog stream source gives each accepted connection its own decoder and one bounded intake
+channel send. After decoding a frame, the connection completes that send even when a SUSPEND watch
+change races a full channel; it observes the pause before its next read. An accept error removes
+only the listening socket, leaving the connection tasks and channel owned by the same source until
+resume rebinds the socket. Source close aborts those tasks. The registered Syslog Shuttle check
+explores the full-channel handoff against a pause change. One-node and three-node Cucumber
+scenarios exercise every listener. They check the delivered frame count through entity quiescence
+and keep one connection streaming after an injected accept failure while the source rebinds its
+listening socket. The test-only fault channel enters through the source plan; no shared lock or map
+is reached per frame.
+
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
 `just test-deloxide-order` and `just test-deloxide-stress`, plus the public one-node and three-node `@restore_installation`

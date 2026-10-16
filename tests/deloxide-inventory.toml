@@ -103,6 +103,8 @@ tags = [
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
+  "@syslog_suspend_handoff",
+  "@syslog_listener_rebind",
   "@deadlock_reports",
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
@@ -869,6 +871,26 @@ scenario = "An alteration drains buffered branches on a shared relay before repl
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Syslog listener source suspension while its bounded frame intake and downstream dispatch are occupied. The source's async channel and watch are outside Deloxide; the scenario reaches the runtime's tracked alteration and quiesce owners."
+examples = 4
+feature = "tests/features/runtime/syslog_support.feature"
+id = "scenario.syslog-suspend-handoff"
+invariant = "One-node and every three-node Syslog listener delivers every numbered frame once through entity suspension and resume."
+invocation = "scenarios"
+scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Syslog accept failure injection while an established connection streams; the source retains its connection tasks and rebinds the listening socket."
+examples = 4
+feature = "tests/features/runtime/syslog_support.feature"
+id = "scenario.syslog-listener-rebind"
+invariant = "One-node and every three-node Syslog listener delivers frames on the established connection across accept failure and admits a fresh connection after rebind."
+invocation = "scenarios"
+scenario = "A Syslog accept error keeps an established TCP connection on <cluster_size> nodes via <node_id>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Failed drains, rejected engagements and released client admission during an alteration."
 examples = 8
 feature = "tests/features/runtime/client_ingestors.feature"
@@ -1156,6 +1178,26 @@ id = "stress.client-alter-drain"
 invariant = "An alteration drains buffered branches on a shared relay before replacing a client ingestor's contract."
 invocation = "stress-scenarios"
 scenario = "An alteration drains buffered branches on a shared relay before replacing its client contract"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Syslog listener suspension with occupied intake, through the runtime's tracked alteration and quiesce owners; async frame handoff remains outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/syslog_support.feature"
+id = "stress.syslog-suspend-handoff"
+invariant = "One-node and every three-node Syslog listener delivers every numbered frame once through entity suspension and resume."
+invocation = "stress-scenarios"
+scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Syslog accept failure injection while an established connection streams, through the runtime's tracked source lifecycle owners."
+examples = 4
+feature = "tests/features/runtime/syslog_support.feature"
+id = "stress.syslog-listener-rebind"
+invariant = "One-node and every three-node Syslog listener delivers frames on the established connection across accept failure and admits a fresh connection after rebind."
+invocation = "stress-scenarios"
+scenario = "A Syslog accept error keeps an established TCP connection on <cluster_size> nodes via <node_id>"
 selections = ["deloxide-stress"]
 
 [[workload]]

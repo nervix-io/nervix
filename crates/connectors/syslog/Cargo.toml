@@ -12,7 +12,13 @@ workspace = true
 # Exposes the stream framer to the Criterion benchmark.
 benchmarks = []
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-connector/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
+testing = []
 
 [dependencies]
 ahash = { workspace = true }
@@ -28,6 +34,7 @@ nervix-primitives = { workspace = true, features = ["native"] }
 nonzero_ext = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
@@ -44,6 +51,7 @@ url = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 criterion = { workspace = true }
+nervix-model-harness = { workspace = true }
 nervix-test-environment = { workspace = true }
 tempfile = { workspace = true }
 

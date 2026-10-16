@@ -387,6 +387,14 @@ class MdbookVersionTests(unittest.TestCase):
         ):
             verify_mdbook_version()
 
+    def test_newer_patch_version_is_accepted(self) -> None:
+        major, minor, patch_version = map(int, MDBOOK_VERSION.split("."))
+        with patch(
+            "scripts.build_book.subprocess.run",
+            return_value=self.completed(f"mdbook v{major}.{minor}.{patch_version + 1}\n"),
+        ):
+            verify_mdbook_version()
+
     def test_other_version_is_rejected_by_name(self) -> None:
         with patch(
             "scripts.build_book.subprocess.run",
@@ -395,7 +403,7 @@ class MdbookVersionTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 verify_mdbook_version()
 
-        self.assertIn(MDBOOK_VERSION, str(raised.exception))
+        self.assertIn(f"{MDBOOK_VERSION.rsplit('.', 1)[0]}.x", str(raised.exception))
         self.assertIn("0.4.40", str(raised.exception))
 
     def test_missing_mdbook_is_reported(self) -> None:
