@@ -44,7 +44,7 @@ runtime policy or connector lifecycle change.
 The contract and every integration crate take their execution-sensitive primitives from
 `nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
 backoff are measured with, and every socket a connector opens itself. A modeled build therefore
-selects them for the whole graph, as [Data-Plane Concurrency](./data-plane-concurrency.md)
+selects them for the whole graph, as [Execution Primitives](./execution-primitives.md)
 describes. The sockets and timers a driver library creates inside itself stay the driver's and are
 outside that selection. A connector's own code never resolves a name through the operating system:
 it resolves through the node's resolver, as the sections below describe, and a driver that resolves
@@ -352,7 +352,7 @@ A driver call that parks its thread while it waits on the network computes nothi
 it would hold a worker idle for the whole wait. librdkafka's producer flush and metadata fetch are
 such calls, so the Kafka connector runs them on the runtime's blocking pool as declared owners
 outside the executor, bounded by the host's flush deadline and a per-request metadata timeout.
-[Blocking work outside the executor](./data-plane-concurrency.md#blocking-work-outside-the-executor)
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
 

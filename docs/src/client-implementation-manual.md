@@ -13,6 +13,11 @@ binding inherits every rule below from it except those in [Using The Shared
 Binding](#using-the-shared-binding). An implementation that speaks the protocol itself, as the Go
 and TypeScript conformance clients do, follows all of it.
 
+The Rust reference implementation's execution modes and native/browser capability boundaries are
+specified in [Execution Primitives](./execution-primitives.md). Those repository build and
+verification contracts apply to the Rust implementation; independent clients continue to implement
+the protocol rules in this manual using their own runtime.
+
 ## Conformance Language
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as RFC 2119 defines them.

@@ -309,7 +309,9 @@ callers observe typed tracking, idle, and completion outcomes rather than doing 
 encoding. Completion cannot be reactivated. This preserves the contentionless ACK path and the
 root tracker's accounting without adding a lock. The delivery and handoff boundaries themselves
 are described in [Data-Plane Concurrency](./data-plane-concurrency.md) and
-[Shutdown And Recovery](./shutdown.md).
+[Shutdown And Recovery](./shutdown.md). [Execution Primitives](./execution-primitives.md) owns which
+backend supplies the atomic; selecting a modeled atomic does not validate the owner's encoding or
+prove its transitions without the corresponding production-owner check.
 
 A source instance owns starting, ready and retired states in a private atomic byte. Its handle alone
 interprets starting=0, ready=1 and retired=2. Compare-and-swap permits readiness changes only before
