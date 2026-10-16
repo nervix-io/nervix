@@ -10,7 +10,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use async_nats::Client as NatsClient;
+use async_nats::{Client as NatsClient, Message as NatsMessage};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
@@ -114,6 +114,7 @@ use super::{
         SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    nats_observer::NatsObserver,
     node_liveness::{
         NodeStartupError, NodeTaskState, NodeTaskTerminalOutcome, NodeTaskWaitOutcome,
         OwnedNodeTask, ReadinessProbeOutcome,
@@ -4211,17 +4212,60 @@ impl BrokerMessage {
         self.group = group;
         self
     }
+
+    /// A message a core NATS subscription delivered, with every header value under its name in the
+    /// order the message carries them.
+    fn from_nats(message: &NatsMessage) -> Self {
+        let mut headers = Vec::new();
+        if let Some(delivered) = message.headers.as_ref() {
+            for (name, values) in delivered.iter() {
+                for value in values {
+                    headers.push((name.to_string(), value.as_str().to_string()));
+                }
+            }
+        }
+        Self::from_bytes(message.payload.as_ref(), headers)
+    }
 }
 
+/// What a scenario observes on one broker destination, in the order the broker delivered it.
 #[derive(Debug)]
 pub(crate) struct BrokerObserver {
-    payload_rx: mpsc::Receiver<BrokerMessage>,
-    task: Option<JoinHandle<()>>,
+    deliveries: ObservedDeliveries,
+}
+
+/// Where an observer takes the messages its broker delivered from.
+#[derive(Debug)]
+enum ObservedDeliveries {
+    /// A task that reads the broker's client hands each message over this channel, and is aborted
+    /// with the observer.
+    Forwarded {
+        messages: mpsc::Receiver<BrokerMessage>,
+        _reader: AbortOnDropHandle<()>,
+    },
+    /// A core NATS subscription. Its client buffers what the server delivers on a task of its own,
+    /// so a step takes each message straight from that buffer.
+    Nats(NatsObserver),
 }
 
 impl BrokerObserver {
+    fn forwarded(messages: mpsc::Receiver<BrokerMessage>, reader: JoinHandle<()>) -> Self {
+        Self {
+            deliveries: ObservedDeliveries::Forwarded {
+                messages,
+                _reader: AbortOnDropHandle::new(reader),
+            },
+        }
+    }
+
+    fn nats(observer: NatsObserver) -> Self {
+        Self {
+            deliveries: ObservedDeliveries::Nats(observer),
+        }
+    }
+
     pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
-        timeout(BROKER_TIMEOUT, self.payload_rx.recv())
+        timeout(BROKER_TIMEOUT, self.deliveries.next())
             .await
             .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
             .ok_or_else(|| io::Error::other("broker observer closed before delivering payload"))
@@ -4240,7 +4284,7 @@ impl BrokerObserver {
         &mut self,
         duration: Duration,
     ) -> io::Result<Option<BrokerMessage>> {
-        match timeout(duration, self.payload_rx.recv()).await {
+        match timeout(duration, self.deliveries.next()).await {
             Ok(Some(message)) => Ok(Some(message)),
             Ok(None) => Err(io::Error::other(
                 "broker observer closed before delivering payload",
@@ -4248,12 +4292,32 @@ impl BrokerObserver {
             Err(_) => Ok(None),
         }
     }
+
+    /// What the observing client had received from its broker, for a failure message: the count of
+    /// a client that keeps one, so a message that never reached the observer reads differently from
+    /// one a step had not yet taken.
+    pub(crate) fn describe_client_receipts(&self) -> String {
+        match &self.deliveries {
+            ObservedDeliveries::Forwarded { .. } => {
+                "the observing client keeps no count of what its broker delivered".to_string()
+            }
+            ObservedDeliveries::Nats(observer) => format!(
+                "the observing NATS client had received {} messages from the server",
+                observer.received()
+            ),
+        }
+    }
 }
 
-impl Drop for BrokerObserver {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+impl ObservedDeliveries {
+    /// The next message the broker delivered, or `None` once the observer can deliver no more.
+    async fn next(&mut self) -> Option<BrokerMessage> {
+        match self {
+            Self::Forwarded { messages, .. } => messages.recv().await,
+            Self::Nats(observer) => {
+                let message = observer.next().await?;
+                Some(BrokerMessage::from_nats(&message))
+            }
         }
     }
 }
@@ -5381,10 +5445,7 @@ async fn observe_mqtt(
         .map_err(|_| io::Error::other("timed out waiting for mqtt observer subscription"))?
         .map_err(io::Error::other)?;
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_rabbitmq(
@@ -5429,10 +5490,7 @@ async fn observe_rabbitmq(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 /// The string headers of one RabbitMQ delivery in name order, which is the order the AMQP field
@@ -5476,10 +5534,7 @@ async fn observe_redis(
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_kafka(
@@ -5543,10 +5598,7 @@ async fn observe_kafka(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_pulsar(
@@ -5629,10 +5681,7 @@ async fn observe_pulsar_with_addr(
                 }
             });
 
-            Ok(BrokerObserver {
-                payload_rx,
-                task: Some(task),
-            })
+            Ok(BrokerObserver::forwarded(payload_rx, task))
         }
         .await;
 
@@ -5711,10 +5760,7 @@ async fn observe_sqs(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_nats(
@@ -5722,44 +5768,8 @@ async fn observe_nats(
     subject: &str,
 ) -> io::Result<BrokerObserver> {
     let client = nats_client(dependencies).await?;
-    let mut subscriber = client
-        .subscribe(subject.to_string())
-        .await
-        .map_err(io::Error::other)?;
-    let (payload_tx, payload_rx) = mpsc::channel(1);
-
-    let task = nervix_primitives::task::spawn(async move {
-        while let Some(message) = subscriber.next().await {
-            nervix_primitives::task::consume_budget().await;
-            let bytes = message.payload.as_ref();
-            let headers = message
-                .headers
-                .as_ref()
-                .map(|headers| {
-                    headers
-                        .iter()
-                        .flat_map(|(name, values)| {
-                            values
-                                .iter()
-                                .map(|value| (name.to_string(), value.as_str().to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if payload_tx
-                .send(BrokerMessage::from_bytes(bytes, headers))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    let observer = NatsObserver::subscribe(&client, subject).await?;
+    Ok(BrokerObserver::nats(observer))
 }
 
 async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
@@ -5794,10 +5804,7 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
