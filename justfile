@@ -2676,7 +2676,9 @@ coverage-go-ci-tool:
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
-test-docs: typed-ratchet-source-build
+# Every script test runs here, the ratchet's included, so this installs the source parser and the
+# pinned complexity analyzer those tests measure with.
+test-docs: typed-ratchet-source-build install-cargo-crap
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
