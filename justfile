@@ -263,7 +263,7 @@ test: tests-deps
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
-    cargo test --package nervix-server --package nervix-roto --package nervix-vm \
+    cargo test --package nervix-server --package nervix-roto --package nervix-vm --package nervix-models \
         --package nervix-consensus --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --features nervix-server/testing --doc
 
