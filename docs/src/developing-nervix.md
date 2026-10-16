@@ -426,9 +426,14 @@ where the report ends, how it is rendered and which evidence holds it.
 
 ### Capability doctests
 
+[Execution Primitives](./execution-primitives.md#verification-contracts) distinguishes API
+doctests, Cargo graph and target probes, compiler fixtures, adapter conformance and actual
+production-owner model execution. Keep each verdict with the configuration and claim it checks.
+
 `just test-capability-docs` checks runtime state handles, logical and physical deadlines,
-subscription predicates, and the UDF execution context with `compile_fail` doctests beside their
-APIs. Paired compiling examples check that the imports and current signatures remain valid. These
+subscription and VM predicates, the UDF execution context, consensus capabilities, DNS error
+carriers, recovery outcomes and SIMD byte classes with `compile_fail` doctests beside their APIs.
+Paired compiling examples check that the imports and current signatures remain valid. These
 checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
 the runtime examples require the `testing` feature, which the recipe enables.
 

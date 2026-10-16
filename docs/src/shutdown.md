@@ -140,6 +140,8 @@ error, records it as evidence, and exits with `3`, or with `4` when the recordin
 running a destructor, an exit handler or a remaining phase, as
 [Diagnostic deadlock detection](./data-plane-concurrency.md#diagnostic-deadlock-detection)
 describes. Its durable state recovers as after any forced exit.
+[Execution Primitives](./execution-primitives.md#builds-modes-and-product-binaries) owns how the
+diagnostic binary is selected and why it is a separate artifact from an ordinary release.
 
 ## Terminating Incarnation And Placement Eligibility
 
