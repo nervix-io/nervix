@@ -195,6 +195,16 @@ typed contracts. Route plans decide whether output is unbranched, preserves an i
 constructs a new key; the actual branch state remains local to each concrete branch. Transport
 headers remain connector-owned and enter a relay only when copied into schema-backed fields.
 
+An input that owns external session state is retired from its previous typed plan after its source
+tasks stop. `IngestorStartPlan` decides whether the source changed, independently of codec or route
+changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
+installed revision, and the composition root dispatches retirement. Passive revisions retain the
+same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
+connector compares validated session identities and subscriptions, cleans up obsolete identities
+best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
+No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
+and ownership transfer with an unchanged input preserve external sessions.
+
 The emitter plan pairs its ordered relay inputs with one typed sink and its applicable client,
 codec, expression, flush, batching, and error contracts. A native `TO CLIENT` sink has no
 external client or codec. Its plan carries the exact output schema, acknowledging sequential or

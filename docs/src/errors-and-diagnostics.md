@@ -569,6 +569,15 @@ leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the c
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
+MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
+ingestor, above the connector's `MqttSourceError::RetireInstance` and instance index. The report
+keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
+deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
+its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
+events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
+the replacement's changed sessions remains an installation failure. Neither path rejects a record
+or confirms payload delivery.
+
 A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
 refuses to take a record for a reason that is not the record's own, a full producer queue included,
 and when a delivery report leaves a confirmed publish's record unresolved. A record the producer

@@ -164,6 +164,7 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod mqtt_sessions;
 mod paced_replication;
 mod paced_simulation;
 mod process_cluster;

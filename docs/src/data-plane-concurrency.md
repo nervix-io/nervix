@@ -36,6 +36,15 @@ it resolved when its task, branch, channel, or attempt was created. A shared reg
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
 
+MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
+plans from the installed execution, releases the registry guard, stops the source tasks, and
+then performs network cleanup and replacement preparation. Each connection has one mutable
+owner; simultaneous attempts are bounded by the declared source instance count. Matching session
+identities keep their broker state across instance-count changes. The public drop, topic-change
+and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
+diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
+tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and

@@ -571,6 +571,38 @@ sequenceDiagram
     end
 ```
 
+### MQTT session retirement
+
+MQTT source identities default to `<domain>~<ingestor>` for one instance and
+`<domain>~<ingestor>~<instance>` for multiple instances. The emitter default is
+`<domain>~<emitter>`. An explicit multi-instance source identity contains `{{instance}}`.
+
+Stopping an execution retains its persistent broker state. Retiring a declared input is a
+separate host operation after its exact source tasks stop. The host compares the previous and
+replacement typed plans, including a stopped domain's passive plan, on the previous scheduled
+owner. The MQTT composition root resolves their client entries and retains their resource mounts
+through the operation. The connector validates an immutable catalog of configured broker
+endpoints and effective client identities; matching subscription settings retain their sessions.
+Each distinct obsolete identity is retired once, including a declaration that repeats an explicit
+identity and therefore could not resume.
+
+Retirement opens a clean connection, sends `UNSUBSCRIBE`, checks `UNSUBACK`, and sends
+`DISCONNECT` with session expiry zero. The clean connection also releases state from a source
+that already stopped or suspended. The driver's broker-only resume mode deliberately refuses
+new subscription packet identifiers without a local protocol checkpoint; retirement needs no
+checkpoint or persisted hot-path state. A refused unsubscribe remains a typed failure and still
+attempts the disconnect. A silent peer ends at the client's existing five-second connection
+budget, which encloses the whole network cleanup after configuration and client construction.
+The node resolver and the ordinary MQTT dialer remain in use.
+
+Cleanup of the preceding endpoint is best-effort and reports every failure. A replacement
+independently prepares each changed identity at its own endpoint, so an unreachable preceding
+endpoint cannot pin the input there or make the replacement inherit its filter. Failure to prepare
+the replacement remains a runtime installation failure. Matching sessions keep their queues;
+retired subscriptions lose theirs. Each phase runs at most its declared instance count of
+connections concurrently, and keeps no discovery-map guard while awaiting a connection.
+The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
+
 ### Confirmed acknowledgements
 
 `acknowledge` returns only once the source's transport has confirmed the positions, as far as the

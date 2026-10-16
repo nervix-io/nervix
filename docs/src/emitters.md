@@ -1023,6 +1023,9 @@ still verifies the configured hostname and uses its configured CA and optional c
 
 ### MQTT
 
+The default client identity is `<domain>~<emitter>`. A `client_id` in the client configuration
+overrides that identity.
+
 ```nspl,ignore
 TO MQTT <client> TOPIC <topic>
   MODE QOS 0 RETRY POLICY BACKOFF <duration> MAX <duration>
