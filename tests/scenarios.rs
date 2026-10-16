@@ -126,6 +126,7 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -454,6 +455,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
+    mqtt_publish_filter: Option<MqttPublishFilter>,
     /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
     /// that connect through it.
     nats_endpoint: Option<NatsEndpoint>,
@@ -578,6 +581,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
@@ -957,6 +961,65 @@ fn when_controlled_nats_endpoint_forwards_everything(world: &mut ScenarioWorld) 
 #[when(expr = "the controlled NATS endpoint holds what each client sends after {int} publishes")]
 fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishes: usize) {
     controlled_nats_endpoint(world).hold_after(publishes);
+}
+
+/// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
+/// its address `{{mqtt_filtered_addr}}`.
+#[given("an MQTT endpoint that drops chosen publishes is configured")]
+async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(MQTT_ADDR)
+        .unwrap_or_else(|error| panic!("MQTT endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse MQTT endpoint '{endpoint}': {error}"));
+    // `mqtt` is not a special URL scheme, so the URL keeps its host as opaque text.
+    let broker_ip = match endpoint_url.host() {
+        Some(url::Host::Ipv4(address)) => std::net::IpAddr::V4(address),
+        Some(url::Host::Ipv6(address)) => std::net::IpAddr::V6(address),
+        Some(url::Host::Domain(host)) => host.parse().unwrap_or_else(|error| {
+            panic!("MQTT endpoint '{endpoint}' does not name the broker by its IP address: {error}")
+        }),
+        None => panic!("MQTT endpoint '{endpoint}' has no host"),
+    };
+    let broker_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("MQTT endpoint '{endpoint}' has no explicit port"));
+    let filter = MqttPublishFilter::start(std::net::SocketAddr::new(broker_ip, broker_port))
+        .await
+        .unwrap_or_else(|error| panic!("failed to start the MQTT publish filter: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in MQTT endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(filter.local_port()))
+        .unwrap_or_else(|()| panic!("failed to replace port in MQTT endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert("mqtt_filtered_addr".to_string(), endpoint_url.to_string());
+    world.mqtt_publish_filter = Some(filter);
+}
+
+/// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
+/// broker never sees, delivers or answers it.
+#[when("the MQTT endpoint drops every publish carrying")]
+fn when_mqtt_endpoint_drops_publishes_carrying(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let payload = expand_placeholders(world, docstring(step).trim());
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .drop_publishes_carrying(payload.into_bytes());
+}
+
+#[when("the MQTT endpoint forwards every publish")]
+fn when_mqtt_endpoint_forwards_every_publish(world: &mut ScenarioWorld) {
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .forward_every_publish();
 }
 
 #[given("a stallable Pulsar endpoint is configured")]
@@ -29454,6 +29517,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.mqtt_publish_filter = None;
                 world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
