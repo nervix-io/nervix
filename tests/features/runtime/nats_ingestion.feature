@@ -105,15 +105,15 @@ Feature: NATS ingestion
       transient error: ingestor fault injector failed source
       """
     When ingestor "nats_notifications" leaves fault mode
-    Then within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
-      """
-      transient error: -
-      """
-    And within "10s" repeatedly publishing NATS message to subject "notifications_reconnect_{{test_id}}" yields a relay subscription payload
+    Then within "10s" repeatedly publishing NATS message to subject "notifications_reconnect_{{test_id}}" yields a relay subscription payload
       """
       {"user_id":43}
       """
     And the last relay subscription payload contains key fragment '{"user_id":43}'
+    And within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
+      """
+      transient error: -
+      """
 
     Examples:
       | cluster_size | replica_count |
