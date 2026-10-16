@@ -36,6 +36,15 @@ Install:
 - `just` (latest release)
 - `zellij`
 
+`just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
+from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
+GitHub without retrying. So the build installs that exact version with `cargo install --locked`
+into `target/tools/wasm-bindgen-<version>`, through the configured compiler wrapper, puts it first
+on `PATH` and runs `trunk build --offline`. Cargo checks the crate against the registry index and
+retries its own transient network failures. Offline, trunk stops at once when the CLI is missing or
+reports another version. The image's `builder` stage runs the same installer,
+`python3 scripts/wasm_bindgen.py install`, before its own offline trunk build.
+
 ## Build Container Images
 
 ```bash
