@@ -2081,14 +2081,14 @@ impl Cluster {
         nats_stream_message_count(&self.dependencies, stream).await
     }
 
-    /// How many messages of JetStream `stream` carry each value of the integer `field` of their
-    /// JSON payload.
-    pub(crate) async fn count_nats_stream_field_values(
+    /// The integer `field` of the JSON payload of every message JetStream `stream` holds, in the
+    /// order the stream stored them.
+    pub(crate) async fn nats_stream_field_values(
         &self,
         stream: &str,
         field: &str,
-    ) -> io::Result<BTreeMap<i64, usize>> {
-        count_nats_stream_field_values(&self.dependencies, stream, field).await
+    ) -> io::Result<Vec<i64>> {
+        nats_stream_field_values(&self.dependencies, stream, field).await
     }
 
     pub(crate) async fn publish_nats_payloads(
@@ -5894,13 +5894,13 @@ async fn nats_stream_message_count(
 }
 
 /// Reads every message JetStream `stream` holds when the read begins, through an ordered consumer
-/// of its own, and counts the messages that carry each value of the integer `field` of their JSON
-/// payload.
-async fn count_nats_stream_field_values(
+/// of its own, and returns the integer `field` of each message's JSON payload in the order the
+/// stream stored them.
+async fn nats_stream_field_values(
     dependencies: &DependencyEndpoints,
     stream: &str,
     field: &str,
-) -> io::Result<BTreeMap<i64, usize>> {
+) -> io::Result<Vec<i64>> {
     let client = nats_client(dependencies).await?;
     let mut stream_handle = async_nats::jetstream::new(client)
         .get_stream(stream)
@@ -5912,9 +5912,9 @@ async fn count_nats_stream_field_values(
         .map_err(io::Error::other)?
         .state
         .messages;
-    let mut counts = BTreeMap::new();
+    let mut values = Vec::new();
     if held == 0 {
-        return Ok(counts);
+        return Ok(values);
     }
     let consumer = stream_handle
         .create_consumer(async_nats::jetstream::consumer::pull::OrderedConfig::default())
@@ -5944,12 +5944,9 @@ async fn count_nats_stream_field_values(
                  {payload}"
             )));
         };
-        let count = counts.entry(value).or_insert(0_usize);
-        *count = count
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("a stream holds more messages than usize counts"))?;
+        values.push(value);
     }
-    Ok(counts)
+    Ok(values)
 }
 
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

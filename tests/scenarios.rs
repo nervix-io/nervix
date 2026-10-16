@@ -23160,6 +23160,37 @@ async fn when_nats_message_carrying_records_is_published(
         .expect("failed to publish a NATS message carrying records");
 }
 
+/// The runs of consecutive values in `values`, in order, such as `1-16, 17-5900, 1-12000`: how
+/// the records a stream holds were published, attempt by attempt. At most `limit` runs are named.
+fn consecutive_runs(values: &[i64], limit: usize) -> String {
+    struct ValueRun {
+        first: i64,
+        last: i64,
+    }
+    let mut runs: Vec<ValueRun> = Vec::new();
+    for value in values {
+        let next_of_last_run = match runs.last() {
+            Some(run) => run.last.checked_add(1) == Some(*value),
+            None => false,
+        };
+        match runs.last_mut() {
+            Some(run) if next_of_last_run => run.last = *value,
+            _ => runs.push(ValueRun {
+                first: *value,
+                last: *value,
+            }),
+        }
+    }
+    let mut named = Vec::new();
+    for run in runs.iter().take(limit) {
+        named.push(format!("{}-{}", run.first, run.last));
+    }
+    if runs.len() > limit {
+        named.push(format!("… {} runs in all", runs.len()));
+    }
+    named.join(", ")
+}
+
 /// Waits until JetStream `stream` holds a message for every value from 1 to `last` of `field`,
 /// then requires that it holds exactly one message for each value from 1 to `once`.
 #[then(
@@ -23178,7 +23209,7 @@ async fn then_nats_jetstream_stream_holds_records(
     let stream = expand_placeholders(world, &stream);
     let deadline = Instant::now() + duration;
     let least = u64::try_from(last).expect("a record count is not negative");
-    let counts = loop {
+    let values = loop {
         nervix_primitives::task::consume_budget().await;
         // The stream cannot hold every record before it holds as many messages, and counting the
         // messages is far cheaper than reading them.
@@ -23198,21 +23229,22 @@ async fn then_nats_jetstream_stream_holds_records(
             nervix_primitives::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
-        let counts = world
+        let values = world
             .cluster()
-            .count_nats_stream_field_values(&stream, &field)
+            .nats_stream_field_values(&stream, &field)
             .await
             .unwrap_or_else(|error| {
                 panic!("failed to read NATS JetStream stream '{stream}': {error}")
             });
+        let held_values = values.iter().copied().collect::<BTreeSet<_>>();
         let mut missing = Vec::new();
         for value in 1..=last {
-            if !counts.contains_key(&value) {
+            if !held_values.contains(&value) {
                 missing.push(value);
             }
         }
         if missing.is_empty() {
-            break counts;
+            break values;
         }
         assert!(
             Instant::now() < deadline,
@@ -23223,6 +23255,13 @@ async fn then_nats_jetstream_stream_holds_records(
         );
         nervix_primitives::time::sleep(Duration::from_millis(500)).await;
     };
+    let mut counts = BTreeMap::new();
+    for value in &values {
+        let count = counts.entry(*value).or_insert(0_usize);
+        *count = count
+            .checked_add(1)
+            .expect("a stream holds fewer messages than usize counts");
+    }
     let mut repeated = Vec::new();
     for value in 1..=once {
         let held = match counts.get(&value) {
@@ -23236,9 +23275,12 @@ async fn then_nats_jetstream_stream_holds_records(
     assert!(
         repeated.is_empty(),
         "NATS JetStream stream '{stream}' holds {} of the records 1 to {once} by '{field}' other \
-         than exactly once, as (record, messages): {:?}",
+         than exactly once, as (record, messages): {:?}. It holds {} messages, stored as the runs \
+         {}",
         repeated.len(),
         repeated.iter().take(16).collect::<Vec<_>>(),
+        values.len(),
+        consecutive_runs(&values, 32),
     );
 }
 

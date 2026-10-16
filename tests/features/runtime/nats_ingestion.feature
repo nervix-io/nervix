@@ -163,9 +163,17 @@ Feature: NATS ingestion
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
-    Then within "30s" repeatedly publishing NATS message to subject "notifications_lost_{{test_id}}" yields a relay subscription payload
+    Then within "30s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
+      """
+      ready: true
+      """
+    When NATS message is published to subject "notifications_lost_{{test_id}}"
       """
       {"user_id":41}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      "user_id":41
       """
     When the controlled NATS endpoint goes down
     Then within "30s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
@@ -181,11 +189,14 @@ Feature: NATS ingestion
       """
       transient error: -
       """
-    And within "30s" repeatedly publishing NATS message to subject "notifications_lost_{{test_id}}" yields a relay subscription payload
+    When NATS message is published to subject "notifications_lost_{{test_id}}"
       """
       {"user_id":43}
       """
-    And the last relay subscription payload contains key fragment '{"user_id":43}'
+    Then within "30s" the relay subscription receives payloads
+      """
+      "user_id":43
+      """
 
     Examples:
       | cluster_size | replica_count |
