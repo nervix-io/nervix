@@ -643,17 +643,20 @@ run_backup_fault() {
     fi
     backup_fault_fresh_backup "${case_dir}"
     check_support_containers
-    local error_code="" error_message=""
+    # A completed report names its execution reference at the top, a failure inside its error.
+    local error_code="" error_message="" reported_reference=""
     if [[ -s "${case_dir}/fault-backup.json" ]]; then
         error_code="$(jq -r '.error.code // empty' "${case_dir}/fault-backup.json" 2>/dev/null || true)"
         error_message="$(jq -r '.error.message // empty' "${case_dir}/fault-backup.json" 2>/dev/null || true)"
+        reported_reference="$(jq -r '.execution_reference // .error.execution_reference // empty' \
+            "${case_dir}/fault-backup.json" 2>/dev/null || true)"
     fi
     jq -n \
         --arg fault "${fault}" \
         --slurpfile placement "${case_dir}/placement.json" \
         --arg outcome "${backup_fault_outcome}" \
         --arg recovery "${backup_fault_recovery}" \
-        --arg reference "${backup_fault_reference}" \
+        --arg reference "${reported_reference}" \
         --arg error_code "${error_code}" \
         --arg error_message "${error_message}" \
         --argjson started "${backup_fault_backup_started_ms}" \
