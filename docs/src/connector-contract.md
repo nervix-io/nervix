@@ -524,6 +524,20 @@ class once:
 | `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
 
+The broker host applies the same retry backoff to a failed resume, a failed read and a requested
+reconnect. A successful connection alone does not reset it: the next accepted batch resets the
+backoff and clears the transient failure. This prevents a peer that accepts and immediately closes
+from keeping every reconnect at the floor delay. A source with no declared retry policy uses the
+host's 250 ms initial delay, doubling to at most 30 seconds. Stop and quiesce changes interrupt the
+wait.
+
+The outbound WebSocket source sends a Close frame on suspension or close and waits for the peer's
+Close within a one-second budget covering both the send and the reply. The transport is detached
+before waiting, so cancellation also drops that exact connection. Suspension retains accepted
+signaling payloads; terminal close clears them even if the handshake fails. A peer-initiated Close
+is answered before releasing the transport and becomes a typed transient read failure carrying
+its status code and reason. An EOF or transport failure also reaches the host's retry path.
+
 A transport acknowledgement that fails because the connection died is handled the same way: the
 host rejects the positions, that rejection fails on the same lost connection, and the class decides.
 A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message

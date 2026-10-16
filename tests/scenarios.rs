@@ -168,6 +168,7 @@ mod paced_simulation;
 mod process_cluster;
 mod restarted_voter;
 mod session_protocol;
+mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -305,6 +306,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -15204,6 +15206,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
 }
 
 #[when("these NSPL commands are executed on the leader node")]
+#[when("these Plexus statements are executed on the leader node")]
 async fn when_these_nspl_commands_are_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16677,6 +16680,7 @@ async fn then_nspl_commands_complete_on_leader_within(
 }
 
 #[given("the leader node is configured with these NSPL commands")]
+#[given("the leader node is configured with these Plexus statements")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -29052,6 +29056,9 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
 /// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
 /// end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
+    if let Some(peer) = world.websocket_peer.take() {
+        peer.stop().await;
+    }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
     world.otlp_receivers.clear();
