@@ -9,6 +9,7 @@ pub(crate) mod grpc_receiver;
 pub(crate) mod http_receiver;
 pub(crate) mod injected_hold;
 pub(crate) mod kafka_group_member;
+pub(crate) mod kafka_mock_broker;
 pub(crate) mod materialized_state_diagnostics;
 pub(crate) mod nats_observer;
 pub(crate) mod node_liveness;

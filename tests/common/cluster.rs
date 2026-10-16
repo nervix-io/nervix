@@ -5541,6 +5541,15 @@ async fn observe_kafka(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
+    observe_kafka_through(kafka_client_config(dependencies)?, topic).await
+}
+
+/// Observes `topic` through a consumer that `client_config` connects to its broker, such as the mock
+/// broker a scenario owns.
+pub(crate) async fn observe_kafka_through(
+    mut client_config: ClientConfig,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
     let consumer_group = format!(
         "nervix-cucumber-observer-{}-{}",
         std::process::id(),
@@ -5549,7 +5558,6 @@ async fn observe_kafka(
             .expect("system clock must be after unix epoch")
             .as_nanos()
     );
-    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: StreamConsumer = client_config
         .set("group.id", &consumer_group)
         .set("enable.partition.eof", "false")
