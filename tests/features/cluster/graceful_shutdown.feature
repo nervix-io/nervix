@@ -719,9 +719,10 @@ Feature: Graceful shutdown
     And the observed broker does not receive a payload within "10s"
 
   @shutdown_kafka_refused_commit @deloxide_stress
-  Scenario Outline: A Kafka batch whose commit the broker refused is read and committed again, so a restart on <cluster_size> nodes does not read it again
+  Scenario Outline: A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "40s"
+    And the production sticky scheduler is configured
     And a mock Kafka broker serves topic "refused_stop_in_{{test_id}}"
     And the mock Kafka broker also serves topic "refused_stop_out_{{test_id}}"
     And the mock Kafka broker refuses the next offset commit
@@ -768,7 +769,13 @@ Feature: Graceful shutdown
       {"event_id":1}
       {"event_id":1}
       """
-    When the cluster is restarted
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE INGESTOR refused_stop_source;
+      """
+    Then the last command output owner is saved as placeholder "refused_stop_owner"
+    When node "{{refused_stop_owner}}" is gracefully stopped
+    And node "{{refused_stop_owner}}" is started
     And mock Kafka message is published to topic "refused_stop_in_{{test_id}}"
       """
       {"event_id":2}

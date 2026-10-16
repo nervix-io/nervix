@@ -610,9 +610,8 @@ impl BrokerSourceConnector for KafkaSource {
                 group_id,
                 commit: KafkaGroupCommit::EachAcknowledgedBatch,
             } => {
-                let offsets = offset_commit(&positions)
+                let request = GroupCommitRequest::acknowledged(&positions)
                     .change_context(SourceError::Acknowledge { connector: KAFKA })?;
-                let request = GroupCommitRequest::Acknowledged(offsets);
                 self.commits
                     .commit(&self.consumer, group_id, request)
                     .await
@@ -757,6 +756,26 @@ enum GroupCommitRequest {
 }
 
 impl GroupCommitRequest {
+    /// The commit of an acknowledged batch's `positions`, each the next offset of its partition.
+    fn acknowledged(positions: &[KafkaOffsetPosition]) -> Result<Self, Report<KafkaSourceError>> {
+        let mut offsets = TopicPartitionList::new();
+        for position in positions {
+            offsets
+                .add_partition_offset(
+                    &position.topic,
+                    position.partition,
+                    Offset::Offset(position.offset),
+                )
+                .map_err(|source| {
+                    Report::new(source).change_context(KafkaSourceError::BuildOffsetCommit {
+                        topic: position.topic.clone(),
+                        partition: position.partition,
+                    })
+                })?;
+        }
+        Ok(Self::Acknowledged(offsets))
+    }
+
     /// Commits through `consumer` and returns the coordinator's answer.
     ///
     /// librdkafka's synchronous commit parks the calling thread until the coordinator answers.
@@ -888,29 +907,6 @@ impl AssignedPartitions {
     fn contains(&self, position: &KafkaOffsetPosition) -> bool {
         position.topic == self.topic && self.partitions.contains(&position.partition)
     }
-}
-
-/// The consumer-group commit of `positions`, each the next offset of its partition.
-fn offset_commit(
-    positions: &[KafkaOffsetPosition],
-) -> Result<TopicPartitionList, Report<KafkaSourceError>> {
-    let mut offsets = TopicPartitionList::new();
-    for position in positions {
-        offsets
-            .add_partition_offset(
-                &position.topic,
-                position.partition,
-                Offset::Offset(position.offset),
-            )
-            .map_err(|source| {
-                Report::new(KafkaSourceError::BuildOffsetCommit {
-                    topic: position.topic.clone(),
-                    partition: position.partition,
-                })
-                .attach_printable(source.to_string())
-            })?;
-    }
-    Ok(offsets)
 }
 
 /// The latest acknowledged offset of every partition, ordered by topic and partition, which the

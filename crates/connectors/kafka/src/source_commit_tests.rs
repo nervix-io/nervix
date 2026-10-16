@@ -26,7 +26,7 @@ use rdkafka::{
 
 use super::{
     GroupCommitRequest, GroupCommits, KafkaGroupCommit, KafkaOffsetPosition, KafkaSource,
-    KafkaSourceError, KafkaSourceOffsetMode, KafkaSourcePlan, offset_commit,
+    KafkaSourceError, KafkaSourceOffsetMode, KafkaSourcePlan,
 };
 
 const TOPIC: &str = "orders";
@@ -217,8 +217,8 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         .broker_down(1)
         .assured("the mock cluster takes down a broker it has");
     for _attempt in 0..2 {
-        let offsets = offset_commit(&positions).assured("the read position is a valid offset");
-        let request = GroupCommitRequest::Acknowledged(offsets);
+        let request = GroupCommitRequest::acknowledged(&positions)
+            .assured("the read position is a valid offset");
         let committed = commits.commit(&source.consumer, GROUP, request).await;
         let Err(report) = committed else {
             panic!("a commit no coordinator answers fails at its deadline");
@@ -239,13 +239,10 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         .broker_up(1)
         .assured("the mock cluster brings back a broker it has");
     commits.deadline = READ_DEADLINE;
-    let offsets = offset_commit(&positions).assured("the read position is a valid offset");
+    let request =
+        GroupCommitRequest::acknowledged(&positions).assured("the read position is a valid offset");
     commits
-        .commit(
-            &source.consumer,
-            GROUP,
-            GroupCommitRequest::Acknowledged(offsets),
-        )
+        .commit(&source.consumer, GROUP, request)
         .await
         .assured("the group's coordinator answers once its broker is back");
     assert!(commits.unanswered.is_none());
