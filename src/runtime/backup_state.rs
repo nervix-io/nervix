@@ -1715,4 +1715,87 @@ mod tests {
             "the lifecycle charge ends with its read"
         );
     }
+
+    /// A deduplicator placement of `domain`, as one of its branch tasks registers it.
+    fn deduplicator_of(domain: &DomainName) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            kind: ModelKind::Deduplicator,
+            identifier: ModelName::parse("unique_orders").assured("deduplicator is valid"),
+            state: RuntimeState::Deduplicator {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+            },
+            branch_key: super::super::string_branch_key("tenant", "alpha"),
+        }
+    }
+
+    /// A window placement of `domain`, as one of its branch tasks registers it.
+    fn window_of(domain: &DomainName) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            kind: ModelKind::WindowProcessor,
+            identifier: ModelName::parse("order_totals").assured("window is valid"),
+            state: RuntimeState::WindowProcessor {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+            },
+            branch_key: super::super::string_branch_key("tenant", "alpha"),
+        }
+    }
+
+    /// Publishing a restored generation clears the runtime handles of the domain it restored: the
+    /// first deduplicator and window branch tasks after activation build new handles from the
+    /// published checkpoints instead of reusing one created before the restore, and another
+    /// domain keeps its handles.
+    #[test]
+    fn a_restored_domain_drops_its_deduplicator_and_window_handles() {
+        const BUILT: &str = "a runtime without a state store returns a held handle or builds one \
+                             from no checkpoint";
+        let runtime = Runtime::default();
+        let restored = DomainName::parse("orders").assured("domain is valid");
+        let other = DomainName::parse("payments").assured("domain is valid");
+        let restored_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&restored))
+            .assured(BUILT);
+        let restored_window = runtime
+            .replicated_window_processor_state(window_of(&restored))
+            .assured(BUILT);
+        let other_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&other))
+            .assured(BUILT);
+        let other_window = runtime
+            .replicated_window_processor_state(window_of(&other))
+            .assured(BUILT);
+
+        runtime.clear_runtime_state_for_domain(&restored);
+
+        let started_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&restored))
+            .assured(BUILT);
+        let started_window = runtime
+            .replicated_window_processor_state(window_of(&restored))
+            .assured(BUILT);
+        assert!(
+            !nervix_primitives::sync::Arc::ptr_eq(&started_deduplicator, &restored_deduplicator),
+            "a deduplicator branch task started after the restore reused a handle created before \
+             it"
+        );
+        assert!(
+            !nervix_primitives::sync::Arc::ptr_eq(&started_window, &restored_window),
+            "a window branch task started after the restore reused a handle created before it"
+        );
+        let kept_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&other))
+            .assured(BUILT);
+        let kept_window = runtime
+            .replicated_window_processor_state(window_of(&other))
+            .assured(BUILT);
+        assert!(
+            nervix_primitives::sync::Arc::ptr_eq(&kept_deduplicator, &other_deduplicator),
+            "the restore cleared another domain's deduplicator handle"
+        );
+        assert!(
+            nervix_primitives::sync::Arc::ptr_eq(&kept_window, &other_window),
+            "the restore cleared another domain's window handle"
+        );
+    }
 }
