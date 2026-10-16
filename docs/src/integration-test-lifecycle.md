@@ -260,7 +260,7 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one. `just check-coverage` then scores the repository's Rust sources against that report with the pinned cargo-crap, which the job builds through kache, and fails only when the analysis is vacuous: no CRAP score fails the job. The retained artifact and an advisory patch line coverage comment, which carries the CRAP section for the changed files, read the same report |
+| `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -1438,34 +1438,18 @@ After collecting unit and scenario profiles, `just coverage-report-workspace` ex
 workspace packages, including executed test files, as `lcov-workspace.info` with the checkout path
 beside it, and `just coverage-merge` maps that report onto the repository.
 
-Both CI collectors export `lcov-workspace.info` from every collected profile, with no package
-selection, and with `--no-default-ignore-filename-regex`, and write the absolute checkout path they
-ran in to `coverage-source-root.txt` beside it. Test lines stay in these reports, so merging native
-extra reports cannot make executed library properties appear uncovered because their files were
-filtered. Executing a crate's tests does not include that crate in a report whose package selection
-names only the root package. Filtering happens in the merge, not in the exports: the coverage job
-runs `just coverage-merge` over the `coverage-tests`, `coverage-scenarios` and
-`coverage-native-extras` artifacts, which maps every record onto the files tracked at the tested
-revision, drops dependency, toolchain and generated records by class, leaves out the native
-collections of other modes, and fails rather than publish a report that misses an input or a
-workspace member. It passes that one report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. Patch coverage, CRAP scores and
-comment publication are advisory and never change the build verdict; the CRAP step fails only when
-its analysis cannot describe the merged report. The complexity verdict is the `just ratchet` count
-of functions above cyclomatic complexity 30, which the `checks` job enforces and which reads no
-coverage.
-The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
-artifact retains the report, its merge record `target/coverage-merge/record.json`,
-`target/patch-coverage.md` and the CRAP reports `target/crap-report/crap.json` and
-`target/crap-report/crap.md`.
+[Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the producer catalog,
+export flags, checkout-root mapping, tracked-source policy, ordinary merge record and integrity
+failures. That chapter also owns the advisory patch/CRAP reports and the separate deterministic
+complexity verdict. The `coverage-merged` artifact retains the ordinary report, its merge record
+and both advisory reports.
+
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
 deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
 The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
 Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
-The merge reads each producer's checkout path explicitly when it maps LCOV sources from Blacksmith
-onto files on its GitHub-hosted runner.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
