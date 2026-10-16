@@ -1874,8 +1874,9 @@ The ONNX inspection admission scenario saturates the leader's bulk workers and w
 the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
 and three nodes. Its paired stress registration reaches the occupancy holders mutex under bounded
 scheduling disturbance. It also observes the inspection's bulk-memory charge returning to zero.
-The `owner.onnx-metadata-inspection` workload runs the isolated production-wrapper queue recovery
-and the bounded-read and cancellation regressions, including retaining the buffer charge while a
+The `owner.onnx-metadata-inspection` workload runs production-wrapper queue recovery in the fresh
+process the lane launches for that exact owner, then the bounded-read and cancellation regressions,
+including retaining the buffer charge while a
 cancelled read is still in progress. Metadata inspection keeps ONNX's operator concurrency at one;
 sequential preparation of an explicit native image, loading, optimization and release run on the
 admitted bulk worker. The thirty-second bound includes memory admission. Phase events and budget

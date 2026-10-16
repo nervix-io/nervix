@@ -856,7 +856,7 @@ mod tests {
     ))]
     #[test]
     fn deloxide_onnx_metadata_inspection() {
-        a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights();
+        run_metadata_inspection(released_bulk_queue_model_preflights());
         metadata_image_reads_use_a_bounded_buffer_and_leave_load_errors_to_the_loader();
         cancelling_image_preparation_stops_before_the_next_read_and_releases_its_charge();
         image_preparation_preserves_the_external_loaders_path_and_error_ownership();
@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
-    fn isolated_metadata_inspection(scenario: &str, inspection: impl Future<Output = ()>) {
+    fn run_metadata_inspection(inspection: impl Future<Output = ()>) {
         #[cfg(feature = "deloxide")]
         {
             let directory = std::env::var_os("NERVIX_DEADLOCK_EVIDENCE")
@@ -1132,7 +1132,12 @@ mod tests {
             .enable_all()
             .build()
             .assured("the isolated inspection test can start its runtime");
-        runtime.block_on(async {
+        runtime.block_on(inspection);
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    fn isolated_metadata_inspection(scenario: &str, inspection: impl Future<Output = ()>) {
+        run_metadata_inspection(async {
             const CHILD: &str = "NERVIX_ONNX_INSPECTION_SCENARIO";
             const DIRECTORY: &str = "NERVIX_ONNX_INSPECTION_DIRECTORY";
             if std::env::var(CHILD).as_deref() != Ok(scenario) {
@@ -1211,125 +1216,152 @@ mod tests {
     fn a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights() {
         isolated_metadata_inspection(
             "application::model_validation::tests::a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights",
-            async {
-                let executor = nervix_execution::Executor::default();
-                let crate::application::test_fixtures::TestService {
-                    service,
-                    registry: _registry,
-                    path,
-                } = crate::application::test_fixtures::build_test_service_with_executor(
-                    false,
-                    executor.clone(),
-                )
-                .await;
-                let matrix = InferencerTensorSchema {
-                    representation: InferencerTensorRepresentation::Dense,
-                    element_type: InferencerTensorElementType::F32,
-                    dimensions: vec![
-                        InferencerTensorDimension::Fixed(nonzero!(2u32)),
-                        InferencerTensorDimension::Fixed(nonzero!(3u32)),
-                    ],
-                };
-                let processor = CreateInferencer {
-                    file: "matrix_identity.onnx".to_string(),
-                    inputs: vec![nervix_models::InferencerTensorMapping {
-                        tensor: "matrix".to_string(),
-                        schema: matrix.clone(),
-                        expression: nervix_models::Expression::Literal(nervix_models::Literal::Null),
-                    }],
-                    output_schema: vec![nervix_models::InferencerTensorDeclaration {
-                        tensor: "transformed".to_string(),
-                        schema: matrix,
-                    }],
-                    ..inferencer()
-                };
-                let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/onnx/matrix_identity.onnx");
-                let before = executor.snapshot().bulk_cpu;
-                let mut releases = Vec::new();
-                let mut holders = nervix_primitives::task::JoinSet::new();
-                for _ in 0..before.workers {
-                    nervix_primitives::task::consume_budget().await;
-                    let worker = executor.clone();
-                    let reservation = worker.try_reserve(MemoryClass::Bulk, 0)
-                        .assured("occupancy requires no memory charge");
-                    let (entered, entry) = nervix_primitives::sync::oneshot::channel();
-                    let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
-                    holders.spawn(async move {
-                        worker.run_cpu(CpuClass::Bulk, reservation, move |_, _| {
-                            entered.send(()).assured("the test observes each occupied worker");
-                            held.recv().expect_err("releasing occupancy disconnects its gate");
-                        }).await.assured("each holder has one admitted bulk worker");
-                    });
-                    entry.await.assured("the holder reached its actual worker");
-                    releases.push(release);
-                }
-                let mut empty_jobs = nervix_primitives::task::JoinSet::new();
-                for _ in 0..before.queue_capacity {
-                    nervix_primitives::task::consume_budget().await;
-                    let worker = executor.clone();
-                    let reservation = worker.try_reserve(MemoryClass::Bulk, 0)
-                        .assured("an empty queued job requires no memory charge");
-                    empty_jobs.spawn(async move {
-                        worker.run_cpu(CpuClass::Bulk, reservation, |_, _| ())
-                            .await.assured("each empty job has one bounded queue place");
-                    });
-                }
-                while executor.snapshot().bulk_cpu.pending != before.queue_capacity {
-                    nervix_primitives::task::consume_budget().await;
-                    nervix_primitives::task::yield_now().await;
-                }
-                let refusal = service.validate_inferencer_model_metadata(&processor, &model)
-                    .await.expect_err("the full queue refuses an uninspected model");
-                assert!(matches!(refusal.current_context(), InferencerBindingValidationError::InspectionTask { .. }));
-                assert!(matches!(refusal.downcast_ref::<ExecutionError>(), Some(ExecutionError::QueueFull { .. })));
-                drop(releases);
-                let pending_limit = before.queue_capacity.checked_sub(4)
-                    .assured("the default queue holds four preflights");
-                while executor.snapshot().bulk_cpu.pending > pending_limit {
-                    nervix_primitives::task::consume_budget().await;
-                    nervix_primitives::task::yield_now().await;
-                }
-                let mut preflights = nervix_primitives::task::JoinSet::new();
-                for job in 0..4 {
-                    let service = service.clone();
-                    let processor = CreateInferencer {
-                        name: named(&format!("queued_matrix_{job}")),
-                        ..processor.clone()
-                    };
-                    let model = model.clone();
-                    preflights.spawn(async move {
-                        service.validate_inferencer_model_metadata(&processor, &model).await
-                            .assured("the released queue admits a matching model within its product bound");
-                    });
-                }
-                while let Some(preflight) = preflights.join_next().await {
-                    nervix_primitives::task::consume_budget().await;
-                    preflight.assured("the admitted production preflight did not panic");
-                }
-                while let Some(empty) = empty_jobs.join_next().await {
-                    nervix_primitives::task::consume_budget().await;
-                    empty.assured("the queued empty job completed");
-                }
-                while let Some(holder) = holders.join_next().await {
-                    nervix_primitives::task::consume_budget().await;
-                    holder.assured("the released holder completed");
-                }
-                let completed = before.workers.checked_add(before.queue_capacity)
-                    .and_then(|jobs| jobs.checked_add(4))
-                    .assured("the bounded default workers, queue and preflights fit usize");
-                let completed = u64::try_from(completed)
-                    .assured("the bounded job count fits the execution counters");
-                let after = executor.snapshot();
-                assert_eq!(after.bulk_cpu.admitted - before.admitted, completed);
-                assert_eq!(after.bulk_cpu.completed - before.completed, completed);
-                assert_eq!(after.bulk_cpu.refused - before.refused, 1);
-                assert_eq!(after.bulk_cpu.running, 0);
-                assert_eq!(after.bulk_cpu.pending, 0);
-                assert_eq!(after.bulk_memory.reserved_bytes, 0);
-                std::fs::remove_dir_all(path).assured("the completed service fixture can be removed");
-            },
+            released_bulk_queue_model_preflights(),
         );
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    async fn released_bulk_queue_model_preflights() {
+        let executor = nervix_execution::Executor::default();
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service_with_executor(
+            false,
+            executor.clone(),
+        )
+        .await;
+        let matrix = InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions: vec![
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
+            ],
+        };
+        let processor = CreateInferencer {
+            file: "matrix_identity.onnx".to_string(),
+            inputs: vec![nervix_models::InferencerTensorMapping {
+                tensor: "matrix".to_string(),
+                schema: matrix.clone(),
+                expression: nervix_models::Expression::Literal(nervix_models::Literal::Null),
+            }],
+            output_schema: vec![nervix_models::InferencerTensorDeclaration {
+                tensor: "transformed".to_string(),
+                schema: matrix,
+            }],
+            ..inferencer()
+        };
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+        let before = executor.snapshot().bulk_cpu;
+        let mut releases = Vec::new();
+        let mut holders = nervix_primitives::task::JoinSet::new();
+        for _ in 0..before.workers {
+            nervix_primitives::task::consume_budget().await;
+            let worker = executor.clone();
+            let reservation = worker
+                .try_reserve(MemoryClass::Bulk, 0)
+                .assured("occupancy requires no memory charge");
+            let (entered, entry) = nervix_primitives::sync::oneshot::channel();
+            let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+            holders.spawn(async move {
+                worker
+                    .run_cpu(CpuClass::Bulk, reservation, move |_, _| {
+                        entered
+                            .send(())
+                            .assured("the test observes each occupied worker");
+                        held.recv()
+                            .expect_err("releasing occupancy disconnects its gate");
+                    })
+                    .await
+                    .assured("each holder has one admitted bulk worker");
+            });
+            entry.await.assured("the holder reached its actual worker");
+            releases.push(release);
+        }
+        let mut empty_jobs = nervix_primitives::task::JoinSet::new();
+        for _ in 0..before.queue_capacity {
+            nervix_primitives::task::consume_budget().await;
+            let worker = executor.clone();
+            let reservation = worker
+                .try_reserve(MemoryClass::Bulk, 0)
+                .assured("an empty queued job requires no memory charge");
+            empty_jobs.spawn(async move {
+                worker
+                    .run_cpu(CpuClass::Bulk, reservation, |_, _| ())
+                    .await
+                    .assured("each empty job has one bounded queue place");
+            });
+        }
+        while executor.snapshot().bulk_cpu.pending != before.queue_capacity {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+        let refusal = service
+            .validate_inferencer_model_metadata(&processor, &model)
+            .await
+            .expect_err("the full queue refuses an uninspected model");
+        assert!(matches!(
+            refusal.current_context(),
+            InferencerBindingValidationError::InspectionTask { .. }
+        ));
+        assert!(matches!(
+            refusal.downcast_ref::<ExecutionError>(),
+            Some(ExecutionError::QueueFull { .. })
+        ));
+        drop(releases);
+        let pending_limit = before
+            .queue_capacity
+            .checked_sub(4)
+            .assured("the default queue holds four preflights");
+        while executor.snapshot().bulk_cpu.pending > pending_limit {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+        let mut preflights = nervix_primitives::task::JoinSet::new();
+        for job in 0..4 {
+            let service = service.clone();
+            let processor = CreateInferencer {
+                name: named(&format!("queued_matrix_{job}")),
+                ..processor.clone()
+            };
+            let model = model.clone();
+            preflights.spawn(async move {
+                service
+                    .validate_inferencer_model_metadata(&processor, &model)
+                    .await
+                    .assured("the released queue admits a matching model within its product bound");
+            });
+        }
+        while let Some(preflight) = preflights.join_next().await {
+            nervix_primitives::task::consume_budget().await;
+            preflight.assured("the admitted production preflight did not panic");
+        }
+        while let Some(empty) = empty_jobs.join_next().await {
+            nervix_primitives::task::consume_budget().await;
+            empty.assured("the queued empty job completed");
+        }
+        while let Some(holder) = holders.join_next().await {
+            nervix_primitives::task::consume_budget().await;
+            holder.assured("the released holder completed");
+        }
+        let completed = before
+            .workers
+            .checked_add(before.queue_capacity)
+            .and_then(|jobs| jobs.checked_add(4))
+            .assured("the bounded default workers, queue and preflights fit usize");
+        let completed =
+            u64::try_from(completed).assured("the bounded job count fits the execution counters");
+        let after = executor.snapshot();
+        assert_eq!(after.bulk_cpu.admitted - before.admitted, completed);
+        assert_eq!(after.bulk_cpu.completed - before.completed, completed);
+        assert_eq!(after.bulk_cpu.refused - before.refused, 1);
+        assert_eq!(after.bulk_cpu.running, 0);
+        assert_eq!(after.bulk_cpu.pending, 0);
+        assert_eq!(after.bulk_memory.reserved_bytes, 0);
+        std::fs::remove_dir_all(path).assured("the completed service fixture can be removed");
     }
 
     #[cfg(target_os = "linux")]

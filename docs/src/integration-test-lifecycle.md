@@ -1770,6 +1770,11 @@ owner, since the detector installs once per process. Ordinary library selections
 test-runtime`. This focused observation does not replace the complete lane's workload inventory
 and accounting.
 
+Each registered `owner-tests` workload uses the fresh process the canonical lane launches and
+records one process observation. The ONNX queue-recovery body runs directly in that process; its
+ordinary test uses a supervised child to establish native-library isolation within the full unit
+suite.
+
 `just test-onnx-owner-binary <binary> <library> <filter>` replays a compiled inspection owner
 against an explicit runtime library. Retain the binary's source and execution mode, the library
 digest, the selected test and the process evidence with the replay.
