@@ -196,7 +196,7 @@ class InventoryTests(unittest.TestCase):
             "stopping-node-drain-wire",
             "restore-installation-storage",
             "restore-staging-kept-measurement",
-            "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax",
+            "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "nspl-statement",
             "nspl-statement-text",
             "nspl-expression-text",
