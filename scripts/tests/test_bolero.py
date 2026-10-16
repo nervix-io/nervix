@@ -91,25 +91,45 @@ class ConsoleAssetTests(unittest.TestCase):
             root = pathlib.Path(directory)
             console = root / "crates/web-console"
             console.mkdir(parents=True)
+            tools = root / "target/tools/wasm-bindgen-0.2.129/bin"
 
             def build(args: list[str], **kwargs: object) -> None:
-                self.assertEqual(args[:4], ["trunk", "build", "--release", "--dist"])
+                # Offline, trunk takes the wasm-bindgen first on PATH and never downloads one.
+                self.assertEqual(args[:5], ["trunk", "build", "--release", "--offline", "--dist"])
                 self.assertEqual(kwargs["cwd"], console)
                 self.assertNotIn("NO_COLOR", kwargs["env"])
+                self.assertEqual(kwargs["env"]["PATH"].split(os.pathsep)[0], str(tools))
                 self.assertTrue(kwargs["check"])
-                staging = pathlib.Path(args[4])
+                staging = pathlib.Path(args[5])
                 staging.mkdir()
                 (staging / "index.html").write_bytes(b"current console")
 
             with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.wasm_bindgen, "install", return_value=tools) as install, \
                     mock.patch.object(build_web_console.subprocess, "run", side_effect=build):
                 build_web_console.main()
+            install.assert_called_once_with(root, build_web_console.wasm_bindgen.default_target())
             with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.wasm_bindgen, "install", return_value=tools), \
                     mock.patch.object(build_web_console.subprocess, "run",
                                       side_effect=subprocess.CalledProcessError(1, "trunk")):
                 with self.assertRaises(subprocess.CalledProcessError):
                     build_web_console.main()
             self.assertEqual((console / "dist/index.html").read_bytes(), b"current console")
+
+    def test_a_failed_tool_install_stops_the_build_before_trunk_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "crates/web-console/dist").mkdir(parents=True)
+            (root / "crates/web-console/dist/index.html").write_bytes(b"current console")
+            refusal = build_web_console.wasm_bindgen.ToolError("installing wasm-bindgen-cli 0.2.129 failed with exit 101")
+            with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.wasm_bindgen, "install", side_effect=refusal), \
+                    mock.patch.object(build_web_console.subprocess, "run") as run:
+                with self.assertRaisesRegex(build_web_console.wasm_bindgen.ToolError, "failed with exit 101"):
+                    build_web_console.main()
+            run.assert_not_called()
+            self.assertEqual((root / "crates/web-console/dist/index.html").read_bytes(), b"current console")
 
 
 class InventoryTests(unittest.TestCase):
@@ -141,6 +161,7 @@ class InventoryTests(unittest.TestCase):
             "client-replies",
             "client-events",
             "client-streams",
+            "client-upload-archives",
             "client-reply-transfer",
             "client-row-views",
             "client-arbitrary-frames",
@@ -296,6 +317,7 @@ class InventoryTests(unittest.TestCase):
             "columnar-json-rows",
             "bounded-write-limits",
             "connector-row-request-division",
+            "connector-confirmation-window",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",
@@ -315,6 +337,7 @@ class InventoryTests(unittest.TestCase):
             "ingestor-describe-envelope",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",
             "nervix-server",

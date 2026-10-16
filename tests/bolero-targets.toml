@@ -11,6 +11,21 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-core/src/__fuzz__/upload__tests__bolero_upload_archives_preserve_the_complete_tree_and_deterministic_bytes/corpus"
+domain_version = 1
+features = []
+id = "client-upload-archives"
+invariant = "Completed upload archives preserve every file byte, empty directory, nested and GNU long path, deterministic metadata and entry order; rebuilding the same tree preserves exact archive bytes and declared length."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-client-core"
+random_iterations = 128
+source = "crates/client-core/src/upload_tests.rs"
+test = "upload::tests::bolero_upload_archives_preserve_the_complete_tree_and_deterministic_bytes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
 domain_version = 1
 features = []
@@ -2706,6 +2721,21 @@ package = "nervix-connector"
 random_iterations = 256
 source = "crates/connector/src/row_requests.rs"
 test = "row_requests::tests::bolero_divisions_hold_every_member_once_within_both_limits"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connector/src/__fuzz__/confirmation_window__tests__bolero_a_publish_settles_every_answer_given_before_it_ends/corpus"
+domain_version = 1
+features = []
+id = "connector-confirmation-window"
+invariant = "Under any MAX and ACK TIMEOUT, records refused at hand-over, answers confirmed, refused or failed within, at, past or never by each record's deadline, pauses between hand-overs and a driver failure, the window ends the publish exactly when the documented rule does, holds fewer than MAX answers after each hand-over, delivers exactly the records the broker confirmed before the end and rejects exactly those refused at hand-over or before the end, so no confirmed record is ever returned as unresolved, and reports the driver's failure, the oldest's failed answer or its missed deadline as the rule names."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector"
+random_iterations = 256
+source = "crates/connector/src/confirmation_window_tests.rs"
+test = "confirmation_window::tests::bolero_a_publish_settles_every_answer_given_before_it_ends"
 test_target = "lib"
 
 [[target]]

@@ -34,6 +34,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v1 | 128 | 4096 bytes |
 | `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
 | `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v1 | 128 | 2048 bytes |
+| `client-upload-archives` | `nervix-client-core` complete directory tree and deterministic archive bytes against an independent tar decoder | empty directories, nested and GNU long paths, arbitrary file bytes and block boundaries, v1 | 128 | 4096 bytes |
 | `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |
 | `client-row-views` | `nervix-client-wire` complete retained Row views | all scalar cells, nested vectors, fixed arrays, nulls, redaction, branches and float bits, v1 | 128 | 512 bytes |
 | `client-arbitrary-frames` | `nervix-client-wire` typed verification and decoding within budgets | arbitrary bytes at all eight frame roots, v1 | 256 | 16385 bytes |
@@ -163,6 +164,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `columnar-json-rows` | `nervix-columnar-json` written rows against an independent rendering of their logical values and the first refused null | every supported scalar, list, fixed-size and nested list column, sliced, every null policy and number and bytes encoding, v1 | 256 | 8192 bytes |
 | `bounded-write-limits` | `nervix-bounded-write` whole writes within the limit, capacity within it, and the outcome classification against a reference of the rule | writes, encoder failures and writing on after a refusal under limits of 1 to 1,021 bytes, v1 | 256 | 1024 bytes |
 | `connector-row-request-division` | `nervix-connector` row request division against the documented halving rule, both limits and the measurement bound | declared and native row and byte limits, up to 160 rows, measures that grow and shrink with a candidate, v1 | 256 | 1024 bytes |
+| `connector-confirmation-window` | `nervix-connector` confirmation window outcomes, end instant and in-flight bound against a reference model of the documented window rule, so no record confirmed before the publish ends is left unresolved | `MAX` one to six, `ACK TIMEOUT` one to 40 ms, up to 24 records refused at hand-over or answered confirmed, refused or failed within, at, past or never by their deadlines, pauses between hand-overs and a driver failure, on a paused clock, v1 | 256 | 512 bytes |
 | `emitter-batch-subdivision` | `nervix-server` batch candidates against the documented rule, message limit, compatibility and encoding bound | up to 96 members in three compatibility classes, failing containers, encodings that grow and shrink, v1 | 256 | 1024 bytes |
 | `emitter-batch-packing` | `nervix-server` packed payloads and rejected rows against the documented packing of exact member encodings and container framing | generated schemaful codecs and rows in carriers across two relays, three branches, three envelopes and seals, `MAX SIZE` from below one member's container to above the whole run's, v1 | 256 | 4096 bytes |
 | `codec-bounded-encodings` | `nervix-server` bounded row, member and container encodings against the unbounded bytes, and container framing | generated schemaful codecs and batches under limits short of, at, past and around each encoding, and containers of 24, 64 and 256 repeated members where a count's encoding grows, v1 | 256 | 4096 bytes |
@@ -343,7 +345,11 @@ Registered properties also hold behavioral contracts against independent referen
   Bolero reads its checked-in corpus, with four random cases of at most 512 input bytes; every step
   still runs and checks its own answer, and the complete state is compared every sixteenth step and
   at the end. Mutation testing runs the property in every mutant through
-  `just test-expiry-map-mutants`.
+  `just test-expiry-map-mutants`. `connector-confirmation-window` publishes generated hand-overs,
+  refusals, pauses and scripted broker answers through the brokered sink confirmation window on a
+  paused clock, and compares the instant the publish ends, the answers the window holds after each
+  hand-over, the records it settles and the failure that ends it with a reference model of the
+  documented window rule computed in whole milliseconds.
 - **Numeric references.** The decimal rounding kernels are compared with the exact decimal
   expansion of each value and with a 128-bit integer reference. That a value holding no more
   fractional digits than the count is its own rounding is checked apart from the rounded results.
@@ -388,6 +394,60 @@ An expected sanitizer skip contributes no execution or coverage evidence. The Ch
 validation job and the Bolero randomized job retain their separate scopes and limits. Check calls
 the reusable Bolero workflow with its exact tested SHA, event and label snapshot. Scheduled and
 manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
+
+### Documentation-only Selection
+
+Before starting ordinary suites, Check's `test-selection` job proves which source it selects for.
+Its checkout must be the commit the event tests: a merge whose first parent is its base and whose
+second parent is the event's exact head. The event and the tested merge need not name the same base.
+GitHub records a pull request's base as its base branch's tip when the pull request opens, and moves
+it forward only to the newest base commit that a later head merges, while it builds the tested merge
+on the base branch's tip whenever the head changes. A push made after the base branch advanced,
+whose head does not merge the newest base, therefore tests a merge whose base is newer than the one
+its event names, and label events that follow name the same recorded base.
+
+Selection accepts the tested base when it is the event's base, or when the event's base is one of
+its ancestors. The checkout holds only the tested merge and its parents, so to decide the second
+case selection fetches the tested base's complete history as commits, without trees or file
+contents, and then answers from that local history alone. When the tested base is the event's own
+base, it fetches nothing. A checkout that is not the tested merge, a tested commit that does not
+merge the event's exact head into one base, an event base that the tested base does not descend
+from, such as a newer base or one from another branch, and a failed history fetch all fail
+selection, so none of them can authorize an exclusion.
+
+Selection then reads every changed path between the tested base and the tested merge: what the
+merge changes on the base it was tested against, never the base branch's own advance. Rename
+detection is disabled so deleting or moving product code into a prose location still requires
+execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and Markdown under
+`.agents/skills/` qualify for the documentation-only exclusion. An empty diff, code, tests, build
+configuration, workflow definitions, scripts and unknown paths require suites; `no-docker` supplies
+no evidence about this choice.
+
+A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
+diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
+unless the event carries `fuzz`. Validation and the conventional PR title check remain independent
+and mandatory. Label-selected mode checks remain selected by their labels; `fuzz` still requires
+both ordinary properties and the complete sanitizer inventory even for documentation. Label
+addition and removal compute a fresh selection from that event's label snapshot.
+
+The `ci-test-selection` artifact records run, attempt, job, event and action, the tested merge, the
+event's base, the tested base and the head, every changed path, labels and each ordinary/Bolero
+requirement. Two different bases record an advance that selection proved. Its `selected` verdict
+records a source decision, never successful property execution or coverage. Actual job conclusions
+remain in the workflow run. The reusable workflow's `bolero-selection` record is produced only
+after all of its required execution succeeds; failed, cancelled, skipped or missing required
+producers still fail its gate.
+
+A rerun of `test-selection` reads the original event and tested merge and proves the same ancestry,
+so it reaches the same selection after the base branch advances again. A validation-only rerun uses
+the original event and tested commit. Its ordinary producer selection remains in the caller, outside
+the reusable workflow's `always()` gate, so deliberate non-code exclusion never becomes a cancelled
+property campaign to excuse. Historical attempts retain their actual cancellations; this policy does
+not turn an interrupted required campaign into success. `just test-ci-selection` exercises source
+identity, advanced, stale and tampered bases, stale heads, other merges, shallow checkouts, mixed
+changes, renames, label events, reruns and strict gates; `just coverage-ci-selection` measures that
+Python contract without launching product campaigns. Selection does not claim a model-checker or
+public Cucumber result.
 
 ### Sanitizer Shards
 
@@ -618,7 +678,7 @@ runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its 
 samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
 shards' line, function and branch counters because they ran disjoint campaigns, and
 `bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
-remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
+remain separate from ordinary workspace coverage and its CRAP report. A sanitizer skip publishes no
 fuzz coverage artifact.
 
 ## Adding A Target

@@ -23,10 +23,11 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities,
+    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(Redis: pooled CreateClientRedis => RedisConfigEntry);
@@ -62,6 +63,7 @@ impl SourceEntity for RedisPubSubSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Redis),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 
