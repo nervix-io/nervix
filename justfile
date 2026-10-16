@@ -888,16 +888,21 @@ test-turmoil-replay-check:
 
 # Explore every interconnect scenario over `count` consecutive seeds from `first` instead of its
 # committed regression seeds, running each seed twice, inside a real-time budget of
-# `budget_seconds`; the recipe ends with status 124 when the budget expires. A failure leaves a
+# `budget_seconds`; the recipe ends with status 124 when the budget expires. A nonempty `filter`
+# selects the scenario tests whose names contain it, as a libtest filter does. A failure leaves a
 # record like any other run. A seed that exposes a defect joins its scenario's committed seeds
 # with the fix. A sweep that executes no scenario fails.
-test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
+test-turmoil-sweep first="1000" count="64" budget_seconds="1500" filter="":
     #!/usr/bin/env bash
     set -euo pipefail
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
     first={{ quote(first) }}
     end=$((first + {{ count }}))
+    filter_args=()
+    if [[ -n {{ quote(filter) }} ]]; then
+        filter_args=({{ quote(filter) }})
+    fi
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-interconnect --features turmoil --test simulation
     logs="$(mktemp -d)"
@@ -906,7 +911,7 @@ test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
     NERVIX_TURMOIL_SWEEP="${first}..${end}" RUSTFLAGS="${turmoil_rustflags}" \
         timeout --kill-after=30 {{ budget_seconds }} \
         cargo test --package nervix-interconnect --features turmoil --test simulation -- \
-            --test-threads=1 2>&1 | tee "${logs}/sweep.log"
+            "${filter_args[@]}" --test-threads=1 2>&1 | tee "${logs}/sweep.log"
     status="${PIPESTATUS[0]}"
     set -e
     if ((status == 124)); then
