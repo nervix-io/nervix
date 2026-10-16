@@ -896,8 +896,10 @@ snapshot interval. Restore streams its complete sealed container into the genera
 including containers larger than the bulk memory budget. `RESUME` activates the archived domain
 generation only after every assigned owner and replica has published its complete set. These
 rows reopen from one pinned database snapshot across a node restart; the stored clock mapping
-projects downtime under the recovered authority. A failed installation retains its durable
-activation gate across restart. A normal `START` creates a new generation and clears materialized
+projects downtime under the recovered authority. The materializer's nonpersisted branch activity
+registry starts at that task's activation time in the recovered domain clock, giving restored
+branches a full idle lifetime while preserving their record event watermarks. A failed installation
+retains its durable activation gate across restart. A normal `START` creates a new generation and clears materialized
 rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
