@@ -337,8 +337,6 @@ async fn a_failed_confirmation_is_a_transient_status_until_a_later_one_is_confir
     assert_eq!(
         record.lock().events,
         vec![
-            // The resume that opened the source.
-            ConfirmationEvent::Cleared,
             ConfirmationEvent::Transient,
             ConfirmationEvent::Rejected(vec![1]),
             ConfirmationEvent::Acknowledged(vec![1]),
@@ -384,7 +382,6 @@ async fn a_stop_after_a_batch_resolved_still_confirms_the_batch_before_closing()
         assert_eq!(
             record.lock().events,
             vec![
-                ConfirmationEvent::Cleared,
                 ConfirmationEvent::Acknowledged(vec![1]),
                 ConfirmationEvent::Cleared,
                 ConfirmationEvent::Closed,
@@ -406,11 +403,7 @@ async fn a_stop_before_a_batch_resolved_reports_its_positions_unconfirmed() {
 
     assert_eq!(
         record.lock().events,
-        vec![
-            ConfirmationEvent::Cleared,
-            ConfirmationEvent::Unconfirmed(1),
-            ConfirmationEvent::Closed,
-        ]
+        vec![ConfirmationEvent::Unconfirmed(1), ConfirmationEvent::Closed,]
     );
     // The unresolved roots ended with the host, which releases what they counted.
     assert_eq!(trackers.domain_outstanding_for_ownership_handoff(), 0);

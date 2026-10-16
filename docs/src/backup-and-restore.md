@@ -1065,6 +1065,11 @@ sampled per-node bulk and metadata reservations separately from harness allocato
 Mappings are included in their admission class; jemalloc's resident figure excludes mappings
 outside jemalloc and is not the process's complete resident set.
 
+Materialized row watermarks are preserved event times, including explicit `TIMESTAMP AT` values.
+Materialized branch activity is not archived with those rows. A resumed or restarted relay starts
+its restored branches' retention at its activation-time domain-clock snapshot; a preserved past
+or future event timestamp cannot expire a restored branch early or extend its idle lifetime.
+
 ## Limits
 
 | Limit | Value |

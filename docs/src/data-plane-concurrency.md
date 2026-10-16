@@ -703,6 +703,12 @@ another publishes once, so an observer never sees the relay above its capacity. 
 established branch refreshes that branch's activity in the owner's map and publishes nothing; it
 takes no lock and writes no shared timestamp.
 
+A materialized relay initializes its task-owned retention registry from the restored branch keys
+and one activation-time domain-clock snapshot. Activity is not stored with its materialized rows;
+the rows' event watermarks remain ordering metadata and never become the registry's activity
+times. Every restored branch receives its complete TTL from activation, and subsequent admitted
+batches refresh activity in the same exclusive owner.
+
 Each owner lifetime claims the presence when its task is spawned. The claim publishes an empty
 membership that replaces whatever an earlier owner left behind, including the branches of an owner
 aborted before its teardown ran, and from then on only the claiming owner changes what the presence
@@ -1789,6 +1795,13 @@ modeled configurations retain their own feature selections. A record is a review
 the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
+
+The WebSocket source lifecycle workloads drop an ingestor, move its owner and recover from repeated
+peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
+locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's
+observation; public peer observations measure the delays, and a paused-clock host regression checks
+that successful upgrades keep backoff until a delivered batch resets it. Direct connector tests
+exercise suspension and close without claiming those socket waits are tracked locks.
 
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-

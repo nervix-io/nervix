@@ -927,14 +927,21 @@ TO KAFKA <client> TOPIC <topic>
 ```
 
 `ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration; Nervix's `ACK TIMEOUT` independently bounds
-the report wait. `NO_ACK` is fire-and-forget after local admission: Nervix acknowledges the
-emitter's `ATTACHED` ACK share when librdkafka accepts the record into its producer queue and does
-not wait for a delivery report. A later broker error, producer timeout, crash, or process exit can
-therefore lose an accepted record. A full local queue is an infrastructure condition paced by the
-declared retry policy with backpressure. Graceful shutdown drains queued records within the node
-drain bound in both modes. A definitive record-specific rejection, such as an oversized message,
-follows `ON MESSAGE ERROR`.
+compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
+also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
+name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
+the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
+delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
+milliseconds librdkafka holds refuses the emitter when it starts. `NO_ACK` is fire-and-forget after
+local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
+record into its producer queue and does not wait for a delivery report. A later broker error,
+producer timeout, crash, or process exit can therefore lose an accepted record. A full local queue
+is an infrastructure condition paced by the declared retry policy with backpressure. In `ACK` it
+ends the attempt without discarding an answer the broker already gave: the records the broker
+confirmed are delivered and are not sent again, and only the records still awaiting a report are
+retried. Graceful shutdown drains queued records within the node drain bound in both modes. A
+definitive record-specific rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 

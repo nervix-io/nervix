@@ -133,3 +133,119 @@ Feature: Websocket client ingestion
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  @websocket_source_lifecycle @deloxide_stress
+  Scenario Outline: Dropping a WebSocket ingestor sends its peer a Close frame on <cluster_size> nodes
+    Given a WebSocket lifecycle peer closes its first 0 connections
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR ws_notifications;
+      """
+    Then the WebSocket lifecycle peer receives a Close frame
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @websocket_source_lifecycle @deloxide_stress
+  Scenario Outline: A repeatedly closing WebSocket peer is reconnected with growing delays on <cluster_size> nodes
+    Given a WebSocket lifecycle peer closes its first 3 connections
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then the WebSocket lifecycle peer observes growing reconnect delays
+    And within "10s" DESCRIBE INGESTOR "ws_notifications" on the leader node contains
+      """
+      transient error: WebSocket peer closed with code 1013: fixture restart
+      """
+    And within "10s" DESCRIBE INGESTOR "ws_notifications" on the leader node contains
+      """
+      reconnect backoff: 1s
+      """
+    When the WebSocket lifecycle peer sends its payload
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "10s" DESCRIBE INGESTOR "ws_notifications" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @websocket_source_lifecycle @deloxide_stress
+  Scenario: Moving a WebSocket ingestor closes its former session gracefully
+    Given a WebSocket lifecycle peer closes its first 0 connections
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification ( user_id I64 );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "ws_notifications" is saved as placeholder "original_ws_owner"
+    When these Plexus statements are executed on the leader node
+      """
+      DRAIN NODE {{original_ws_owner}};
+      """
+    Then the WebSocket lifecycle peer receives a Close frame
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
