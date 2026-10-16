@@ -13530,7 +13530,10 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // The leader reclaims a reference only once its retry window has passed, so the wait spans
+    // the configured window and then leaves the reclamation a minute of its own.
+    let deadline =
+        Instant::now() + world.cluster_config.command_retry_validity + Duration::from_secs(60);
     loop {
         nervix_primitives::task::consume_budget().await;
         assert!(
