@@ -38,6 +38,10 @@ Five rules hold throughout:
 
 ## Ownership By Layer
 
+The predicate capability and its execution entry point keep paired supported and rejection
+Rustdoc examples beside their APIs. `just test-capability-docs` runs them in normal tests and CI,
+separately from [execution and concurrency evidence](./execution-primitives.md#verification-contracts).
+
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |

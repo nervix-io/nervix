@@ -140,6 +140,17 @@ Each entity accepts only the modes it can honor, and completion offers only thos
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
+In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and
+error delivery the message unfolded into has completed, and it reports that progress only once
+the transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
+broker's answer to its deletion, a `RABBITMQ QUEUE` for its acknowledgement to be written to the
+connection, and a `KAFKA TOPIC`, `PULSAR TOPIC` or `MQTT TOPIC` only for its client to queue the
+acknowledgement. An acknowledgement the transport fails to confirm is a source error that
+`DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
+messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
+confirmations before it closes them; see
+[Shutdown And Recovery](shutdown.md#connector-contracts).
+
 ## Altering Ingestors
 
 `ALTER` names the connector and entity of the stored ingestor in its head and applies one or more
@@ -1051,18 +1062,20 @@ Suspension stops polling. Messages remain only for the queue's configured retent
 already received message remains invisible until its visibility timeout and may then be redelivered
 as a duplicate; the ingestor resumes by polling past anything the service expired.
 
-The source resolves the host of its client's `endpoint` through the node's asynchronous resolver
-each time it opens a connection, and tries the answers in order. Every request is still signed for
-the configured host, and over HTTPS the service certificate must name that host. Without
-`tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
-`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
-alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
-queue lookup the ingestor makes when it starts, a poll, or a deletion. The AWS SDK's standard retry
-mode makes up to three attempts at each such request. A failed queue lookup then fails the
-ingestor's start, with the lookup failure in its reason; a failed poll or deletion is a transient
-source failure that `DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`. A
-message is deleted only once it is acknowledged, so a lookup failure never removes one from the
-queue.
+Starting the ingestor sends no request to the service. Each source instance looks its queue up
+before its first poll and keeps the queue's URL from then on. The source resolves the host of its
+client's `endpoint` through the node's asynchronous resolver each time it opens a connection, and
+tries the answers in order. Every request is still signed for the configured host, and over HTTPS
+the service certificate must name that host. Without `tls_ca_file` the client trusts the platform's
+native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment
+variables; with it, the client trusts that CA alone and connects directly. A missing name, a silent
+name server or an unreachable answer fails the queue lookup, a poll, or a deletion. The AWS SDK's
+standard retry mode makes up to three attempts at each such request. A failed lookup, poll or
+deletion is then a transient source failure that `DESCRIBE INGESTOR` shows and the source retries
+on its `RETRY POLICY`, so an ingestor started while the service is unreachable consumes once the
+service answers. A queue that does not exist fails the lookup with its name, such as
+`SQS queue 'orders' does not exist`, and is retried the same way; Nervix never creates it. A message
+is deleted only once it is acknowledged, so a lookup failure never removes one from the queue.
 
 ### Prometheus
 

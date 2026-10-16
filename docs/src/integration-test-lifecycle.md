@@ -71,6 +71,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
+| Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
@@ -259,7 +260,7 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report. The CRAP step runs the pinned cargo-crap, which the job builds through kache |
+| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one. `just check-coverage` then scores the repository's Rust sources against that report with the pinned cargo-crap, which the job builds through kache, and fails only when the analysis is vacuous: no CRAP score fails the job. The retained artifact and an advisory patch line coverage comment, which carries the CRAP section for the changed files, read the same report |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -1253,6 +1254,35 @@ scenario cleanup forced: gRPC receiver <name>: <the same record>
 A call that panics takes its connection with it, so the stop counts it among the panicked
 connections.
 
+## Broker Observers
+
+A scenario about a node that publishes to a broker observes the destination through a client of its
+own: a Kafka consumer, a subscriber of MQTT, RabbitMQ, Redis, Pulsar or SQS, a ZeroMQ socket, or a
+core NATS subscription. Its steps then assert on what the broker delivered to that client, in the
+order the broker delivered it.
+
+Those steps run on the runner task, so how an observer hands a message to its step decides how many
+polls of that task a burst of messages costs. Most observers run one task on the binary's runtime
+that reads the broker's client and hands each message to the step over a bounded channel, and the
+scenario aborts that task when it drops the observer. A core NATS observer has no task of its own:
+the NATS client already reads what the server delivers into the subscription's own buffer on a task
+of its own, and the step takes each message straight from that buffer. A step that is behind takes
+as many buffered messages in one poll of the runner task as the poll's cooperative budget allows.
+
+Under the suite's concurrency the runner task comes back to a step only after it has polled every
+other woken scenario. While the NATS observer handed each message on through a one-message channel,
+every message waited for a poll of its own, and on a loaded runner the NATS emission scenarios
+drained their 32,768 messages too slowly for their 90-second bound although the observing client
+had already received every one of them.
+
+The NATS client buffers at most 65,536 messages for one subscription and, as a slow consumer, drops
+what arrives beyond them, so a scenario keeps the messages its step has not yet taken below that
+bound.
+
+A step that waits for a sequence of messages and times out names how many messages the observing
+client had received from its broker, for a client that counts them, so a message that never reached
+the observer reads differently from one the step had not yet taken.
+
 ## DNS Authorities
 
 A scenario about how nodes find one another by name selects its cluster's peer addressing before the
@@ -1419,13 +1449,15 @@ runs `just coverage-merge` over the `coverage-tests`, `coverage-scenarios` and
 revision, drops dependency, toolchain and generated records by class, leaves out the native
 collections of other modes, and fails rather than publish a report that misses an input or a
 workspace member. It passes that one report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. Patch coverage and comment
-publication are advisory and never change the build verdict. The complexity verdict is the
-`just ratchet` count of functions above cyclomatic complexity 30, which the `checks` job enforces
-and which reads no coverage.
+contribute to patch coverage alongside server and client tests. Patch coverage, CRAP scores and
+comment publication are advisory and never change the build verdict; the CRAP step fails only when
+its analysis cannot describe the merged report. The complexity verdict is the `just ratchet` count
+of functions above cyclomatic complexity 30, which the `checks` job enforces and which reads no
+coverage.
 The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
-artifact retains the report, its merge record `target/coverage-merge/record.json` and
-`target/patch-coverage.md`.
+artifact retains the report, its merge record `target/coverage-merge/record.json`,
+`target/patch-coverage.md` and the CRAP reports `target/crap-report/crap.json` and
+`target/crap-report/crap.md`.
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
@@ -1907,8 +1939,8 @@ Its limits:
 ## Qualification Evidence
 
 `just test-harness-liveness` runs the focused regressions that hold this contract. They drive
-stand-in session services on real loopback sockets and stand-in node tasks, most of them on a paused
-clock. The `tests` job runs them beside the separate scenario job.
+stand-in session services and a stand-in NATS server on real loopback sockets, and stand-in node
+tasks, most of them on a paused clock. The `tests` job runs them beside the separate scenario job.
 
 | Contract | Regressions |
 | --- | --- |
@@ -1924,6 +1956,7 @@ clock. The `tests` job runs them beside the separate scenario job.
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
+| A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
