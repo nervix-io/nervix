@@ -486,6 +486,11 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
+  The forced-recovery startup fixture holds the promoted replica's initial installation across a
+  whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
+  unavailable. The destination records its missing schedule before releasing the held installation
+  once, so the regression reaches that boundary without spending the recovery budget between
+  scenario steps. Public placement, recovery outcome and both branches' output remain the verdict.
   `just coverage-harness-liveness <filter>` measures the ordinary startup and other harness owner
   regressions with counters of their own, as the [diagnostic lane](#diagnostic-lane) section
   describes. A patch that also changes product code passes the retained `lcov.info` to
