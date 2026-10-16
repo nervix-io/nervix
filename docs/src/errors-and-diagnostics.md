@@ -745,10 +745,14 @@ failure when the pinned file is decoded. Neither failure silently selects anothe
 ONNX binding preflight preserves the distinction between invalid tensor bindings, an ONNX loading
 failure, worker refusal, worker panic and inspection timeout. Worker refusal retains the bounded
 executor's report beneath the inferencer context; it does not classify an uninspected model as
-malformed. The thirty-second inspection bound covers admission to a bulk worker through release of
-the temporary session. Debug events record submission, worker entry, builder initialization, model
-loading and session release. A timeout also records the bulk class's configured workers, running
-jobs and pending jobs, so an operator can correlate queue delay with dependency work. These are
+malformed. The thirty-second inspection bound begins before the bulk-memory reservation and ends
+after release of the temporary session. A cancelled image read preserves the executor's ordinary
+`Cancelled` outcome beneath its inspection context; the awaiting request still receives its timeout
+or ends with its caller. Advisory image-read failures leave native image selection and load errors
+to ONNX Runtime. Debug events record memory admission, submission, worker entry, native-image
+preparation, builder initialization, model loading and session release. A timeout also records bulk
+memory capacity and reserved bytes beside configured workers, running jobs and pending jobs, so an
+operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
 
