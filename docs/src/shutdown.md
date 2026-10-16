@@ -140,6 +140,8 @@ error, records it as evidence, and exits with `3`, or with `4` when the recordin
 running a destructor, an exit handler or a remaining phase, as
 [Diagnostic deadlock detection](./data-plane-concurrency.md#diagnostic-deadlock-detection)
 describes. Its durable state recovers as after any forced exit.
+[Execution Primitives](./execution-primitives.md#builds-modes-and-product-binaries) owns how the
+diagnostic binary is selected and why it is a separate artifact from an ordinary release.
 
 ## Terminating Incarnation And Placement Eligibility
 
@@ -646,11 +648,21 @@ reaches its completion point before the process ends.
 
 ### Sources
 
-Acknowledgements and commits complete before the source session stops, for work that reached its
-sinks. A Kafka consumer-group offset is committed during the drain once the records it covers have
-been acknowledged through the graph. Work whose acknowledgement root is still unresolved when the
-drain ends is negatively acknowledged, so the source's own redelivery contract applies. This is why
-a drain that times out leaves Kafka offsets uncommitted rather than advancing them.
+A source acknowledges or commits the work that reached its sinks before its session stops. A batch
+acknowledged through the graph stays outstanding admitted work until its source has confirmed the
+batch's positions on its transport, so the drain waits for that confirmation as it waits for any
+other acknowledgement root, within the drain timeout. What a source's confirmation means is the
+acknowledgement confirmation its entity declares; see
+[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion
+is answered by the broker and a RabbitMQ acknowledgement is written to the connection before the
+drain moves on, while a Kafka consumer-group commit, a Pulsar acknowledgement and an MQTT `PUBACK`
+are only queued by their clients, so the drain does not wait for their brokers to answer them.
+
+Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
+so the source's own redelivery contract applies. A source instance that stops while it still waits
+on such a batch logs `source instance stopped before its transport confirmed positions it read; the
+transport presents them again` at `info`, with the count of positions. This is why a drain that
+times out leaves Kafka offsets uncommitted rather than advancing them.
 
 What that contract is depends on the source, and three groups differ sharply:
 
@@ -1137,6 +1149,11 @@ node itself when it leads, and carry the leader's account of each moved unit as 
 `timed out clearing shutdown drain cordon` carries the `timeout` the release waited. Each phase
 record carries its outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
 or forced one.
+
+A source instance that stops before its transport confirmed positions it read records
+`source instance stopped before its transport confirmed positions it read; the transport presents
+them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
+`positions`.
 
 Runtime teardown records every domain task it had to abort, at `warn`:
 `shutdown task exceeded grace period; aborting` carries the `domain`, the task's entity as

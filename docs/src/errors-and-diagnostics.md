@@ -30,6 +30,7 @@ chapter that owns its subsystem:
 | Exchange forms, remote failure classes on the wire and relay acknowledgements | [Cluster Interconnect](./interconnect.md#failure-ownership-and-persistence) |
 | Durable appends, uncertain writes and a failed consensus store | [Consensus Storage And Replication](./consensus-storage-and-replication.md#appended-batches) |
 | Planning, binding and message-error delivery while a schedule is applied | [Execution Plans](./execution-plans.md#failures-guarantees-and-limits) |
+| Primitive mode, target and permission rejection; distinctions between verification outcomes | [Execution Primitives](./execution-primitives.md#verification-contracts) |
 | Branch-local execution and acknowledgement tracking | [Data Plane](./data-plane.md) and [Data-Plane Concurrency](./data-plane-concurrency.md) |
 | Command dispositions, typed rejections and exact recovery | [Client Session Protocol](./client-session-protocol.md#command-dispositions) |
 | Planned and actual transaction impact diagnostics | [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) |
@@ -562,21 +563,27 @@ not name the configured host, or a refused MQTT handshake. A source keeps the er
 those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
 error or the driver's description. A sink's event loop records the connection error's message as
 the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
-retry policy. None rejects a record or acknowledges input.
+retry policy. None rejects a record or acknowledges input. A QoS 1 or 2 publish keeps the driver's
+`ClientError` when the client refuses to take a record, and its `PublishNoticeError` when an answer
+leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the connector's
+description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
+confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
 beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
 an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
-`SqsSourceError` of receiving or deleting beneath the source's `SourceError`. An SQS source looks
-its queue up while its ingestor starts; the runtime keeps that failure's text, the lookup failure
-included, as the reason of the ingestor's start failure rather than as a typed cause. The failure's
-message names the host and the lookup failure, which `DESCRIBE EMITTER` and `DESCRIBE INGESTOR`
-show. Any other failure to reach the service, such as a refused connection or a certificate that
-does not name the configured host, is described by every cause of the driver's connection error,
-which describes the connection and carries neither credentials nor a record; a response from the
-service keeps its existing description. None is a record rejection, and none acknowledges input.
+`SqsSourceError` of looking its queue up, receiving or deleting beneath the source's `SourceError`.
+An SQS source looks its queue up when an instance resumes, so that failure is `SourceError::Resume`
+above the typed lookup failure: a queue the service does not have is `SqsSourceError::MissingQueue`,
+which names it, and the source host shows the deepest cause as the source's transient error and
+retries it. The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER`
+and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection
+or a certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and carries neither credentials nor a record; a
+response from the service keeps its existing description. None is a record rejection, and none
+acknowledges input.
 
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the
@@ -1392,6 +1399,12 @@ restoration failure the client reports as a subscription or domain clock event c
 chain as its message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
+
+Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
+Failure and cancellation abandon the partial temporary archive; they perform no destructor
+finalization that could replace the cause, panic, or start asynchronous cleanup. If the enclosing
+command deadline cancels local construction, the caller receives its typed `RetryDeadline`.
+The client opens no upload call until archive finalization and flush have both succeeded.
 
 A Rust client subscribe or unsubscribe runs on a task of its own, so that an attempt its caller
 stops waiting for still completes. Its caller classifies that task's report by its current

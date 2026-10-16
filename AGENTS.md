@@ -176,14 +176,18 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   delivery, session attachment with its observer, delivery order and what an attached client
   observes, execution snapshots, admission, logical and physical deadline ownership, recovery, and
   distributed-time guarantees.
+- [Execution Primitives](docs/src/execution-primitives.md) is the authoritative architecture
+  reference for the primitive boundary: governed families, backend selection, feature propagation,
+  target capabilities, authored-source scope, permissions, build contracts, and the distinction
+  between API, graph, compiler and execution evidence. Any change to those contracts keeps that
+  chapter current in the same change. Resolver, clock, executor and protocol policy stays with its
+  existing architecture owner.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
-  reference for synchronization on record, batch, remote-frame, and acknowledgement paths, and for
-  the primitive boundary those paths are built from. Any change to hot-path state publication,
-  task or branch ownership, delivery or assignment fences, the data-plane lock ratchet, the
-  primitive boundary or its execution modes, or a Shuttle check or Loom model must keep that
-  chapter current in the same change. Its scope includes the contentionless rule, published and
-  pre-resolved state, mutable execution state, bounded synchronization, review classification for
-  new lock sites, the primitive surface with its per-mode visibility and permitted real primitives,
+  reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
+  change to hot-path state publication, task or branch ownership, delivery or assignment fences,
+  the data-plane lock ratchet, or a Shuttle check or Loom model must keep that chapter current in
+  the same change. Its scope includes the contentionless rule, published and pre-resolved state,
+  mutable execution state, bounded synchronization, review classification for new lock sites,
   deterministic checks of data-plane concurrency protocols, memory-ordering models, and the
   diagnostic mode's deadlock detection with its evidence and the locks it does not track. A change
   that adds a concurrent map, or changes how often one is reached or what disposes of it, updates
@@ -535,7 +539,7 @@ choose a backend.
 `just validate-execution-mode-conflicts` enforce these rules in `just validate` and
 `just validate-ci`. Clippy's type lints resolve a re-export to its definition, so they cannot
 enforce where an item is imported from; the boundary check owns that, and Clippy keeps only
-genuinely forbidden types and operations. [Data-Plane Concurrency](docs/src/data-plane-concurrency.md)
+genuinely forbidden types and operations. [Execution Primitives](docs/src/execution-primitives.md)
 documents the surface, what each mode observes of it, and the permitted real primitives.
 
 ### Migration discipline
@@ -978,6 +982,13 @@ build and the existing tests, and nothing in it changes behavior.
   Do not use `trybuild` or add its dependencies, harnesses, fixtures, or diagnostic snapshots.
   Pair rejection examples with compiling examples of the current imports and supported signatures,
   and run the doctests in the normal test commands and CI.
+- Keep verification claims with their evidence. Paired API doctests check one API in the build's
+  selected configuration; Cargo graph, feature-conflict and target probes check the configurations
+  they actually build; compiler fixtures qualify resolved diagnostics; primitive conformance checks
+  compare backend semantics. None executes a production-owner concurrency model by itself. Record
+  the invariant, selected inventory, completed exploration, weakening and replay evidence when
+  claiming model verification. Use the matching toolchain's declared `llvm-tools` for coverage and
+  preserve the configured kache wrapper in every build and probe.
 - Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
   test fixture, including to assert that loading it fails. See
   [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
@@ -1355,8 +1366,8 @@ build and the existing tests, and nothing in it changes behavior.
   Model producers also retain `models.json` with canonical discovery, selection, execution and
   completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
   bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
-  instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
-  CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
+  instrumented build directory; model and diagnostic reports never enter ordinary coverage or its
+  CRAP report. Coverage bookkeeping stays outside model processes and supplies no synchronization
   to the invariant.
 - `just coverage-patch [base] [report]` measures added executable lines from ordinary LCOV reports
   and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
@@ -1365,9 +1376,18 @@ build and the existing tests, and nothing in it changes behavior.
   percentages and reporting failures never fail a build; the complexity verdict is the
   `just ratchet` count of functions above cyclomatic complexity 30, which reads no coverage.
   The Turmoil job publishes its current-source report with `--scope turmoil` under a separate
-  comment marker; those counters remain outside the ordinary coverage and CRAP gate.
+  comment marker; those counters remain outside ordinary coverage and its CRAP report.
   `just test-patch-coverage` exercises accounting and publication, and
   `just coverage-patch-runner` collects its Python line coverage.
+- `just check-coverage [report] [record]` publishes the advisory CRAP report of the merged ordinary
+  report as `target/crap-report/crap.json` and `crap.md`: the pinned cargo-crap scores the
+  repository's Rust sources, with each record bound to its own file, and the coverage comment
+  carries its section for the changed files. No CRAP score fails a build, and no text calls CRAP a
+  gate. The check fails only when its analysis is vacuous: a merge record that is missing,
+  incomplete or of another revision, a report source this checkout does not track, a report Rust
+  file the analysis did not read or bind, or no matched file. A function in a file the report holds
+  no record of is listed as unmeasured, never scored as uncovered. `just test-crap-report`
+  exercises it, and `just coverage-crap-report-runner` collects its Python line coverage.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

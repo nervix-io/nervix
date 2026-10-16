@@ -665,7 +665,8 @@ TTL from that coordinate. Restoring or restarting the relay preserves the rows' 
 without turning those timestamps into activity or expiry. The physical scan only releases a
 branch once its domain-clock TTL has elapsed.
 
-Physical monotonic time is measured with the timers and instants of the primitive boundary,
+Physical monotonic time is measured with the timers and instants of the
+[primitive boundary](./execution-primitives.md),
 `nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
 permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
 deadline armed on its timer stays logical, as described above. Its timers follow the clock of the
