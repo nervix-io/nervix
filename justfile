@@ -506,6 +506,11 @@ check-package-lib package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
+# Run the vocabulary settings' compiling and class-rejection API examples.
+test-settings:
+    cargo test --package nervix-models --lib settings::
+    cargo test --package nervix-models --doc SettingDefinition
+
 # Run one integration test target of one workspace package whose tests need no server test
 # dependencies, such as the vocabulary's representation properties.
 test-package-test package test *args:
@@ -2315,6 +2320,7 @@ test-typed-ratchet-docs:
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
+    cargo +1.99 test --package nervix-models --doc SettingDefinition
     cargo +1.99 test --package nervix-primitives --doc expect_lint
     cargo +1.99 test --package nervix-vm --doc FunctionInjector
     cargo +1.99 test --package nervix-dns --doc DnsLookupReport

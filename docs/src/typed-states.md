@@ -18,6 +18,14 @@ revision.
 
 ## A State Has One Owner
 
+Settings use the same construction boundary. A `SettingDefinition` declares its sealed class,
+semantic value, name, one default, optional derivation and validation against typed context.
+`Setting<D>` validates explicit and default values before construction, retains the complete
+typed validation report on failure, and provides no mutable access around that boundary.
+`Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
+class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
+carriers, defaults, change procedures and source ratchet.
+
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
 what has already been established. Runtime code executes the plan; it does not reinterpret a Model

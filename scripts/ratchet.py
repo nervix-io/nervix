@@ -7,9 +7,9 @@ script prints each count next to its baseline and exits non-zero when any count 
 naming the offending counts. A count that has fallen is reported too, with the reminder that
 `--update` rewrites the baseline in the same change.
 
-Semantic rules are compiler-resolved through the pinned tooling workspace. The four disjoint
-counts cover physical file length, Rust cast expressions, testing-gated struct fields and
-functions above a cyclomatic complexity. A stable Rust syntax parser visits authored casts and
+Semantic rules are compiler-resolved through the pinned tooling workspace. The five disjoint
+counts cover physical file length, Rust cast expressions, testing-gated struct fields,
+functions above a cyclomatic complexity and hidden numeric policy. A stable Rust syntax parser visits authored casts and
 fields, including inactive configurations, while skipping test-only items. It parses the original
 source so Unicode token locations remain accurate; comments and embedded fixture text never become
 syntax findings. The pinned cargo-crap analyzer measures complexity over the same discovered files.
@@ -112,6 +112,7 @@ COUNTS: tuple[Count, ...] = (
         count_files_over_3000_lines,
     ),
     Count("as_casts", "Rust cast expressions", None),
+    Count("hidden_tunables", "numeric policy outside class-typed settings or fixed contracts", None),
     Count(
         "testing_feature_struct_fields",
         'struct fields gated on `feature = "testing"`',

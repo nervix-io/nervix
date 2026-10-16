@@ -1093,6 +1093,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "tools/nervix-lint/report/src/source/__fuzz__/source__tests__bolero_hidden_tunables_preserve_every_policy_site/corpus"
+domain_version = 1
+features = []
+id = "typed-hidden-tunables"
+invariant = "Bounded current Rust policy syntax retains the complete path, line, column and rule of every numeric policy site, including inactive and macro source, with exact input/site JSON round trips."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-lint-report"
+random_iterations = 256
+source = "tools/nervix-lint/report/src/source/tests.rs"
+test = "source::tests::bolero_hidden_tunables_preserve_every_policy_site"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__task_status__tests__bolero_status_sequences_publish_complete_transitions/corpus"
 domain_version = 1
 features = []

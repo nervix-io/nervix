@@ -7,18 +7,19 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The four structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The five structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
 ## Rule Contracts
 
-The fifteen rule families below have one implementation each. The family name remains useful
+The sixteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
 | Family | Purpose and owning fact | Allowed example | Rejected example | Enforcement and qualification |
 | --- | --- | --- | --- | --- |
+| `hidden_tunables` | Numeric policy belongs to a class-typed setting or an explicitly fixed constant. [Node Settings](node-settings.md) owns the classification. | One definition default; a constant with its fixed-format reason; a capacity derived from typed input. | A numeric constant or literal policy call outside that boundary. | Stable source parser; governed-type, alias, exclusion, tracked/new-source, inactive and macro controls; fixed-contract compiler fixtures and the registered bounded `typed-hidden-tunables` property. |
 | `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation. | A propagated failure or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`. | Compiler `discarded_outcome`; complete and partial-discard, borrowed, tuple and collection fixtures. |
@@ -60,7 +61,7 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The four
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The five
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
 file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
@@ -80,6 +81,43 @@ The parser requires no rustc internals or analysis driver. `just typed-ratchet-s
 builds it on the stable toolchain. Native compiler coverage builds it on that producer's pinned
 toolchain so LLVM profiles and exporters match. The tooling workspace stays outside product
 dependencies, including browser and ordinary release graphs.
+
+## Hidden Tunables
+
+`hidden_tunables` counts one site for each numeric `const` item typed as `Duration`, `usize`,
+`u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`, `NonZero*` or `ByteUnit`. Associated constants
+count too. A counted initializer contributes no further policy-call sites. Names are read from
+the source type, following explicit import renames and type aliases within their lexical scope.
+This syntax rule does not resolve custom types, glob imports or cross-file reexports; the
+eventual compiler rule owns those semantic facts.
+
+The count also includes a call with a numeric literal in its arguments when it constructs a
+Duration through `from_*`, chooses `with_capacity*`, a `channel` capacity (excluding a watch
+channel's initial value), `bounded` or `sync_channel`, constructs `Semaphore` or `ArrayQueue`,
+or calls `add_permits`. Numeric arithmetic inside an argument counts; a capacity supplied
+entirely by a named value does not add a call site. These names deliberately describe source
+syntax, including same-spelled custom calls; they do not claim resolved API recognition.
+
+The shared source discovery excludes test directories and in-crate test files. This count also
+excludes `tools/`, the `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates,
+test-only items and test functions. Other inactive configurations remain visible. Authored
+macro fragments use the same token substitution and parsing owner as the cast count.
+
+An exact `SettingDefinition::default_value` implementation owns its one default. A `Default`
+implementation of a nonempty struct whose fields are all `Setting<D>` owns its group defaults.
+Their bodies are outside the count; unrelated `Default` bodies and other definition methods
+remain counted. A fixed constant is excluded only with one valid
+`#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "..."))]` annotation. The source check
+refuses invalid contracts before measuring. The compiler independently checks exact placement,
+kind, reason and duplication on compiled constants. A reason is reviewed justification, not a
+proof that the literal is fixed. No filename or per-site allowance substitutes for it.
+
+The baseline is introduced at the measured repository count and may only decrease. The area
+owners classify the counted values while preserving their existing defaults. The settings
+compiler-rule cutover removes this detector and its numeric baseline entry in the same change.
+`scripts/tests/test_ratchet.py` pins eligibility and the gate; compiler fixtures qualify the
+constant contract; the registered `typed-hidden-tunables` property checks complete source/site
+representations and every generated location in ordinary and sanitizer execution.
 
 ## Function Complexity
 
