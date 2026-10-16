@@ -395,9 +395,14 @@ backup_fault_fresh_backup() {
     local case_dir="$1"
     local archive_dir="${case_dir}/archive"
     phase "backup fault: fresh backup after recovery"
+    local started_ms
+    started_ms="$(epoch_ms)"
     backup_archive_domain "${archive_dir}" chaos_baseline "${archive_dir}/fresh.nvxb" \
         "${case_dir}/fresh-backup.json" 2>"${case_dir}/fresh-backup.stderr" \
         || { recovery_finding "${case_dir}" 'a fresh backup after the recovered fault failed'; return 0; }
+    # The command covers the cut, assembly and the whole download into the client's destination.
+    backup_fault_fresh_command_ms=$(($(epoch_ms) - started_ms))
+    backup_fault_fresh_archive_bytes="$(stat -c %s "${archive_dir}/fresh.nvxb")"
     backup_require_quiesced_report "${case_dir}/fresh-backup.json"
     backup_cut_window "${case_dir}/fresh-backup.json"
     backup_fault_fresh_freeze_ms=$((backup_released_ms - backup_engaged_ms))
@@ -627,6 +632,8 @@ run_backup_fault() {
     backup_fault_isolation='null'
     backup_fault_recovery=none
     backup_fault_fresh_freeze_ms=null
+    backup_fault_fresh_command_ms=null
+    backup_fault_fresh_archive_bytes=null
     if [[ "${fault}" == rolling-restart ]]; then
         backup_fault_rolling_restart "${case_dir}"
     else
@@ -669,6 +676,8 @@ run_backup_fault() {
         --argjson settled "${backup_fault_settled_ms:-null}" \
         --argjson resumed "${backup_fault_resumed_ms:-null}" \
         --argjson fresh_freeze "${backup_fault_fresh_freeze_ms}" \
+        --argjson fresh_command "${backup_fault_fresh_command_ms}" \
+        --argjson fresh_bytes "${backup_fault_fresh_archive_bytes}" \
         --argjson source_at_fault "${backup_fault_source_at_fault}" \
         --argjson output_at_fault "${backup_fault_output_at_fault}" \
         --argjson isolation "${backup_fault_isolation}" \
@@ -680,7 +689,8 @@ run_backup_fault() {
                       gate_opened:$gate_opened, backup_ended:$ended, cut_engaged:$engaged,
                       cut_released:$released, settled_after_fault:$settled,
                       resumed_after_fault:$resumed, fresh_backup_freeze:$fresh_freeze,
-                      isolation:$isolation},
+                      fresh_backup_command:$fresh_command, isolation:$isolation},
+          fresh_archive_bytes:$fresh_bytes,
           evidence:{fault_backup:"backup-fault/fault-backup.json",
                     fresh_backup:"backup-fault/fresh-backup.json",
                     placement:"backup-fault/placement.json"}}' \

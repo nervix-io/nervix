@@ -105,6 +105,14 @@ expect malformed-output "${tmp_dir}/malformed.ndjson" "${tmp_dir}/windows.ndjson
     '.verdict == "error" and .category == "invalid_unique_output"'
 expect missing-file "${tmp_dir}/unique.ndjson" "${tmp_dir}/absent.ndjson" 2 \
     '.verdict == "error" and .category == "missing_output"'
+printf '{"branch_name":"alpha","records":"12"}\n' >"${tmp_dir}/malformed-window.ndjson"
+expect malformed-window "${tmp_dir}/unique.ndjson" "${tmp_dir}/malformed-window.ndjson" 2 \
+    '.verdict == "error" and .category == "invalid_window_output"'
+status=0
+"${verifier}" "${tmp_dir}/empty.ndjson" "${tmp_dir}/unique.ndjson" "${tmp_dir}/windows.ndjson" \
+    "${tmp_dir}/empty-ledger.json" >/dev/null 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] && jq -e '.category == "invalid_accepted_ledger"' "${tmp_dir}/empty-ledger.json" >/dev/null \
+    || fail 'an empty accepted ledger was not refused'
 cat "${tmp_dir}/accepted.ndjson" <(head -n 1 "${tmp_dir}/accepted.ndjson") >"${tmp_dir}/twice.ndjson"
 status=0
 "${verifier}" "${tmp_dir}/twice.ndjson" "${tmp_dir}/unique.ndjson" "${tmp_dir}/windows.ndjson" \

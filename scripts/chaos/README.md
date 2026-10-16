@@ -135,9 +135,12 @@ recovering by that reference must report that the restarted holder no longer ret
 In every case the cluster must settle, the source and the sink must move past the records the
 fault found, and a fresh backup must verify offline and restore and compare. A product violation is
 a recovery finding: the run still reaches the final exact ledger and then fails with every finding.
-`results/backup-fault-progress.json` records the placement, the outcome, any execution reference
-and failure code, and the timings of the backup's start, the observed cut, the fault, the gate's
-lifting, the backup's end and the cluster's recovery.
+`results/backup-fault-progress.json` records the placement, the outcome, the execution reference
+and any failure code, and the timings of the backup's start, the observed cut, the fault, the gate's
+lifting, the backup's end, an isolation's installation, verification and heal, and the cluster's
+recovery. It also records the fresh backup's freeze, the time its command took to cut, assemble and
+download the archive, and the archive's size, which for `rolling-restart` carries the 16 MiB
+resource and so measures the archive's throughput to the client.
 
 Restore a backup taken under load into a fresh three-node cluster:
 

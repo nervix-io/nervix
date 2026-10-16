@@ -324,9 +324,9 @@ fn window_sections_larger_than_the_bulk_budget_stream_across_a_partition() {
 fn backup_inventory_is_bounded_across_a_partition_and_a_held_link() {
     Scenario {
         name: "backup inventory faults",
-        fault_plan: "partition the link, then hold it, while the coordinator asks the capture owner \
-                     for its staged section inventory; each request fails at its deadline and the \
-                     repaired or released link lists the complete unchanged stage",
+        fault_plan: "partition the link, then hold it, while the coordinator asks the capture \
+                     owner for its staged section inventory; each request fails at its deadline \
+                     and the repaired or released link lists the complete unchanged stage",
         seeds: &[104],
     }
     .check(fault_config, exercise_backup_inventory_faults);
@@ -467,7 +467,10 @@ fn exercise_backup_inventory_faults(run: ScenarioRun) -> Result<(), SimulationEr
                         "inventory requests never consume or change the stage"
                     );
                     assert_eq!(*captures.lock(), 1, "the owner captured exactly once");
-                    trace.record("server", "one capture staged six sections, all still staged");
+                    trace.record(
+                        "server",
+                        "one capture staged six sections, all still staged",
+                    );
                     server.shutdown().await;
                     Ok::<(), io::Error>(())
                 })
