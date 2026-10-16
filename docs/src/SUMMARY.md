@@ -59,6 +59,7 @@
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)
   - [Architecture Rules And The Debt Ratchet](./architecture-enforcement.md)
+  - [Coverage Reports And The Complexity Gate](./coverage-reports.md)
   - [Errors And Diagnostics](./errors-and-diagnostics.md)
   - [Typed States And Validation Boundaries](./typed-states.md)
   - [Connector Crates And The Connector Contract](./connector-contract.md)
