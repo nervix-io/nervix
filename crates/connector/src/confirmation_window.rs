@@ -31,7 +31,10 @@ use std::{
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
-use nervix_primitives::time::{Instant, timeout_at};
+use nervix_primitives::{
+    task::unconstrained,
+    time::{Instant, timeout_at},
+};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 
@@ -100,11 +103,11 @@ pub enum ConfirmationWindowError {
 ///   deadline, or a deadline is past the clock's range.
 ///
 /// A failure ends the publish at once but never discards an answer the broker already gave. Every
-/// given answer still in the window is settled first, the oldest's included: a confirmed record is
-/// delivered and a refused one rejected, so the host's retry never sends either again. A record
-/// whose answer has not arrived, or whose answer itself failed, stays unresolved: its outcome is
-/// unknown, and the host's retry sends it again, which is the at-least-once delivery `MODE ACK`
-/// promises.
+/// given answer still in the window is settled first, the oldest's included, however many there
+/// are: a confirmed record is delivered and a refused one rejected, so the host's retry never
+/// sends either again. A record whose answer has not arrived, or whose answer itself failed, stays
+/// unresolved: its outcome is unknown, and the host's retry sends it again, which is the
+/// at-least-once delivery `MODE ACK` promises.
 #[must_use = "a confirmed publish reports its outcome only through `finish` or `fail`"]
 pub struct ConfirmationWindow<A> {
     /// The sink a failure of the window is reported for.
@@ -129,6 +132,13 @@ where
     A: Future<Output = BrokerAnswer> + Unpin,
 {
     /// The answer the broker already gave for this record, read without waiting for one.
+    ///
+    /// The read is made outside the runtime's cooperative budget. A driver answers through runtime
+    /// channels, and once a task has spent its budget such a channel reads as empty though its
+    /// answer has arrived: a failure that settles more answers than one budget allows would leave
+    /// the rest unresolved, and the host's retry would resend records the broker confirmed. The
+    /// read waits for nothing, and a failure reads each record in the window once, so it makes at
+    /// most `MAX` reads.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -138,7 +148,8 @@ where
     )]
     fn given_answer(&mut self) -> Option<BrokerAnswer> {
         let mut context = Context::from_waker(Waker::noop());
-        match Pin::new(&mut self.answer).poll(&mut context) {
+        let mut read = unconstrained(&mut self.answer);
+        match Pin::new(&mut read).poll(&mut context) {
             Poll::Ready(answer) => Some(answer),
             Poll::Pending => None,
         }

@@ -575,6 +575,62 @@ mod tests {
         let _connection = script.await.expect("the scripted server ran");
     }
 
+    /// JetStream answers every record but the oldest, then fails the oldest's `PubAck`: the
+    /// publish settles every `PubAck` it was given, more of them than one cooperative budget lets
+    /// a task read, so the host's retry resends none of the records the stream confirmed.
+    #[nervix_primitives::test]
+    async fn a_failure_settles_more_pub_acks_than_one_cooperative_budget() {
+        const RECORDS: usize = 300;
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let mut publishes = Vec::with_capacity(RECORDS);
+            for _ in 0..RECORDS {
+                nervix_primitives::task::consume_budget().await;
+                publishes.push(connection.expect_publish().await);
+            }
+            for publish in publishes.iter().skip(1) {
+                nervix_primitives::task::consume_budget().await;
+                connection.reply(publish, CONFIRMED).await;
+            }
+            let oldest = publishes
+                .first()
+                .expect("the client published every record");
+            connection
+                .reply(
+                    oldest,
+                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
+                )
+                .await;
+            connection
+        });
+        let mut sink = jetstream_sink(&addr, 1024).await;
+
+        let outcome = sink
+            .publish(
+                (0..RECORDS)
+                    .map(|index| record(index, b"event", &[]))
+                    .collect(),
+            )
+            .await
+            .into_parts();
+
+        let confirmed = (1..RECORDS).map(SinkRecordId::new).collect::<Vec<_>>();
+        assert_eq!(
+            outcome.delivered.len(),
+            confirmed.len(),
+            "every PubAck JetStream gave is settled"
+        );
+        assert_eq!(outcome.delivered, confirmed);
+        assert!(outcome.rejected.is_empty());
+        assert!(
+            outcome.infrastructure_error.is_some(),
+            "the oldest record's failed PubAck ends the publish"
+        );
+        let _connection = script.await.expect("the scripted server ran");
+    }
+
     #[test]
     fn only_core_max_payload_is_a_record_rejection() {
         let oversized = NatsPublishError::new(NatsPublishErrorKind::MaxPayloadExceeded);

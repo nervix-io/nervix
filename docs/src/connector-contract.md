@@ -649,9 +649,12 @@ which the emitter shows as its transient error; a failure the connector hands it
 connector's own description. The window holds the publish's outcome, and both ways of ending a
 publish go through it, so before it reports a failure it settles every answer the broker already
 gave, the oldest's included: a confirmed record is delivered and a refused one rejected, and the
-host's retry never resends a record the broker confirmed. A record without an answer, or whose
-answer failed, stays unresolved and is sent again, which is the at-least-once delivery `MODE ACK`
-promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+host's retry never resends a record the broker confirmed. It reads each of those answers once,
+without waiting, and outside the runtime's cooperative budget. Drivers answer through runtime
+channels, which read as empty once a task has spent its budget even though their answer has
+arrived, so a failure that found more given answers than one budget allows would otherwise leave
+the rest unresolved. A record without an answer, or whose answer failed, stays unresolved and is
+sent again, which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property `connector-confirmation-window` holds the window to a
 reference model of this rule over scripted answers given within, at, past or never by each deadline,
 failed answers and driver failures, and the Shuttle checks of the
 [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
