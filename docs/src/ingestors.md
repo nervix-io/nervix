@@ -140,6 +140,17 @@ Each entity accepts only the modes it can honor, and completion offers only thos
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
+In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and
+error delivery the message unfolded into has completed, and it reports that progress only once
+the transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
+broker's answer to its deletion, a `RABBITMQ QUEUE` for its acknowledgement to be written to the
+connection, and a `KAFKA TOPIC`, `PULSAR TOPIC` or `MQTT TOPIC` only for its client to queue the
+acknowledgement. An acknowledgement the transport fails to confirm is a source error that
+`DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
+messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
+confirmations before it closes them; see
+[Shutdown And Recovery](shutdown.md#connector-contracts).
+
 ## Altering Ingestors
 
 `ALTER` names the connector and entity of the stored ingestor in its head and applies one or more

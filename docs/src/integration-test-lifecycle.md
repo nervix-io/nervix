@@ -261,7 +261,7 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one; CRAP, the retained artifact and an advisory patch line coverage comment read that report. The CRAP step runs the pinned cargo-crap, which the job builds through kache |
+| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one. `just check-coverage` then scores the repository's Rust sources against that report with the pinned cargo-crap, which the job builds through kache, and fails only when the analysis is vacuous: no CRAP score fails the job. The retained artifact and an advisory patch line coverage comment, which carries the CRAP section for the changed files, read the same report |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -1450,13 +1450,15 @@ runs `just coverage-merge` over the `coverage-tests`, `coverage-scenarios` and
 revision, drops dependency, toolchain and generated records by class, leaves out the native
 collections of other modes, and fails rather than publish a report that misses an input or a
 workspace member. It passes that one report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. Patch coverage and comment
-publication are advisory and never change the build verdict. The complexity verdict is the
-`just ratchet` count of functions above cyclomatic complexity 30, which the `checks` job enforces
-and which reads no coverage.
+contribute to patch coverage alongside server and client tests. Patch coverage, CRAP scores and
+comment publication are advisory and never change the build verdict; the CRAP step fails only when
+its analysis cannot describe the merged report. The complexity verdict is the `just ratchet` count
+of functions above cyclomatic complexity 30, which the `checks` job enforces and which reads no
+coverage.
 The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
-artifact retains the report, its merge record `target/coverage-merge/record.json` and
-`target/patch-coverage.md`.
+artifact retains the report, its merge record `target/coverage-merge/record.json`,
+`target/patch-coverage.md` and the CRAP reports `target/crap-report/crap.json` and
+`target/crap-report/crap.md`.
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the

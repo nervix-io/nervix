@@ -84,7 +84,9 @@ session maps remain client-owned synchronization outside the server record-path 
 Server relay subscription fan-out remains recurring data-plane execution with its own source
 contracts and exact-operation repair expectations. The annotations change no session framing,
 recovery or delivery guarantee. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
-owns this compiler boundary.
+owns this compiler boundary. [Execution Primitives](./execution-primitives.md) owns the shared
+backend selection, portable reference types and declared unmodeled exceptions used by the Rust
+client, binding and browser; those build choices change no wire contract.
 
 ## Wire Format
 

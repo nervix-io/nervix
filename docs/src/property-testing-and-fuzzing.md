@@ -678,7 +678,7 @@ runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its 
 samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
 shards' line, function and branch counters because they ran disjoint campaigns, and
 `bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
-remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
+remain separate from ordinary workspace coverage and its CRAP report. A sanitizer skip publishes no
 fuzz coverage artifact.
 
 ## Adding A Target

@@ -232,6 +232,27 @@ pub enum PositionClass {
     None,
 }
 
+/// How far a source's transport has confirmed its positions once acknowledging them returns.
+///
+/// The host reports no progress for an acknowledged batch until acknowledging it returns, so this
+/// is what that progress means on the transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum AcknowledgementConfirmation {
+    /// The transport answers every acknowledgement or commit, and acknowledging returns once the
+    /// answer arrived, such as an SQS `DeleteMessage` response.
+    Answered,
+    /// The protocol does not answer an acknowledgement, and acknowledging returns once it is
+    /// written to the connection, such as a RabbitMQ `basic.ack`.
+    Written,
+    /// Acknowledging returns once the client queued the acknowledgement, before the transport
+    /// answered it and possibly before it reached the connection, such as a Kafka consumer-group
+    /// commit that is never awaited.
+    Queued,
+    /// The source acknowledges nothing on its transport.
+    None,
+}
+
 /// What every source of one entity declares, whatever its statement says.
 ///
 /// This lives in the vocabulary so the registry can validate an ingestor, and a host can prepare
@@ -249,6 +270,8 @@ pub struct IngestSourceCapabilities {
     pub reference: SourceReferenceKind,
     /// What its message positions mean once the connection that delivered them is gone.
     pub position_class: PositionClass,
+    /// How far its transport has confirmed its positions once acknowledging them returns.
+    pub acknowledgement_confirmation: AcknowledgementConfirmation,
 }
 
 /// The declaration one source entity's Model makes for every statement of that entity.
