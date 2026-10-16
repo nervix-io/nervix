@@ -1079,6 +1079,57 @@
           ]
         }
       ]
+    },
+    "backup07ttl": {
+      "description": "Backup 07: the three-node 1000-branch relay stall with the branch TTL raised past the run, beside the fixture's 5m TTL",
+      "entries": [
+        {
+          "id": "traffic-only-ttl60m-1000-n3",
+          "shard": 1,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "8",
+            "--scale-cycle-records",
+            "3000",
+            "--scale-cycle-mode",
+            "traffic-only",
+            "--records",
+            "75000",
+            "--scale-branch-ttl",
+            "60m"
+          ]
+        },
+        {
+          "id": "traffic-only-ttl5m-1000-n3",
+          "shard": 2,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "8",
+            "--scale-cycle-records",
+            "3000",
+            "--scale-cycle-mode",
+            "traffic-only",
+            "--records",
+            "90000"
+          ]
+        }
+      ]
     }
   }
 }

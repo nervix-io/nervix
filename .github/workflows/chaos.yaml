@@ -57,6 +57,7 @@ on:
           - backup07scale1000
           - backup07stall
           - backup07trigger
+          - backup07ttl
         default: smoke
 
 permissions:

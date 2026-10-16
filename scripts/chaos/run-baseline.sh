@@ -125,6 +125,7 @@ scale_cycles=8
 scale_cycle_records=2
 scale_wasm_bytes=""
 scale_cycle_mode=full
+scale_branch_ttl=""
 records_option_set=false
 timeout_option_set=false
 mixed_option_set=false
@@ -261,7 +262,7 @@ while [[ "$#" -gt 0 ]]; do
             keep_resources=true
             shift
             ;;
-        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records | --scale-wasm-bytes | --scale-cycle-mode)
+        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records | --scale-wasm-bytes | --scale-cycle-mode | --scale-branch-ttl)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
             case "$1" in
                 --scale-branches) scale_branches="$2" ;;
@@ -270,6 +271,7 @@ while [[ "$#" -gt 0 ]]; do
                 --scale-cycle-records) scale_cycle_records="$2" ;;
                 --scale-wasm-bytes) scale_wasm_bytes="$2" ;;
                 --scale-cycle-mode) scale_cycle_mode="$2" ;;
+                --scale-branch-ttl) scale_branch_ttl="$2" ;;
             esac
             shift 2
             ;;
@@ -2186,6 +2188,10 @@ if [[ "${backup_graph}" == true ]]; then
     nspl_fixture="$(backup_graph_fixture "${nspl_fixture}")" \
         || setup_error 'the backup fixture does not hold exactly one consumer-group Kafka offset clause to replace'
     nspl_fixture="${nspl_fixture/MAX INSTANCES 16/MAX INSTANCES $((scale_branches + 16))}"
+    if [[ -n "${scale_branch_ttl}" ]]; then
+        # Campaign control: the branch TTL the 1000-branch stall investigation varies.
+        nspl_fixture="${nspl_fixture/TTL 5m MAX INSTANCES/TTL ${scale_branch_ttl} MAX INSTANCES}"
+    fi
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
