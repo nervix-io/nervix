@@ -908,6 +908,15 @@ consumers on the same queue continue. Queue length, message TTL, overflow, and a
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
 re-provisions it; Nervix never creates it.
 
+A connection that closes while a delivery is still unacknowledged, because the broker restarted,
+closed it, or the network dropped it, also makes RabbitMQ requeue that delivery. The acknowledgement
+or the requeue the ingestor still owes it can only be sent on the connection it arrived on, so the
+instance reconnects on its `RETRY POLICY` cadence, discards what it owed, counts it in
+`nervix_ingestor_transport_redeliveries_total`, which `DESCRIBE INGESTOR` also prints, and consumes
+again. RabbitMQ then delivers the message again: a delivery that failed in the graph is retried,
+and one the graph had already acknowledged is ingested a second time, so delivery across a
+reconnect is at least once.
+
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
