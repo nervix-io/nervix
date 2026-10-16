@@ -1096,13 +1096,13 @@
             "--scale-interval-ms",
             "20",
             "--scale-cycles",
-            "8",
+            "3",
             "--scale-cycle-records",
             "3000",
             "--scale-cycle-mode",
             "traffic-only",
             "--records",
-            "75000",
+            "60000",
             "--scale-branch-ttl",
             "60m"
           ]
@@ -1120,13 +1120,13 @@
             "--scale-interval-ms",
             "20",
             "--scale-cycles",
-            "8",
+            "3",
             "--scale-cycle-records",
             "3000",
             "--scale-cycle-mode",
             "traffic-only",
             "--records",
-            "90000"
+            "60000"
           ]
         }
       ]
