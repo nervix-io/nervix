@@ -108,17 +108,17 @@ Feature: MQTT ingestion
       reconnect backoff: 250ms
       """
     When ingestor "mqtt_notifications" leaves fault mode
-    Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
-      """
-      transient error: -
-      """
-    When MQTT message is published to topic "notifications_reconnect_{{test_id}}"
+    And MQTT message is published to topic "notifications_reconnect_{{test_id}}"
       """
       {"user_id":43}
       """
     Then the relay subscription receives a payload
       """
       "user_id":43
+      """
+    And within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      transient error: -
       """
 
     Examples:

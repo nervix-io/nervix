@@ -998,6 +998,9 @@ until that node has ended.
   clusters are also dropped first. Dropping any server child kills it and returns its ports.
 - Broker and syslog observers, HTTP and gRPC receivers, the browser, and the session are closed
   before the cluster stops.
+- The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
+  a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
+  socket ownership stays in that task, so the same cancellation releases its active connection.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
   once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
