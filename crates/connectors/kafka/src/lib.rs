@@ -37,11 +37,11 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
-    PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    PerRecordOutcome, RecordSink, SinkFinish, SinkFinishError, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
 use nervix_models::{ClientConfigEntry, TopicName};
 use nervix_primitives::time::Instant;
@@ -338,6 +338,12 @@ impl KafkaSink {
             .attach_printable(description)
     }
 
+    /// How many records the producer holds that have no delivery report yet.
+    fn queued_records(&self) -> u64 {
+        u64::try_from(self.producer.in_flight_count())
+            .assured("librdkafka counts the messages a producer holds with a non-negative int")
+    }
+
     fn is_record_rejection(error: &KafkaError) -> bool {
         let KafkaError::MessageProduction(code) = error else {
             return false;
@@ -355,26 +361,35 @@ impl KafkaSink {
 
 #[async_trait]
 impl SinkLifecycle for KafkaSink {
-    async fn finish(&mut self, deadline: Instant) -> SinkPublishResult<()> {
+    /// Flushes the producer's queue, which holds the records a `NO ACK` publish delivered and
+    /// librdkafka has not sent yet, and any record a publish handed over and then gave up on. A
+    /// flush sends them at once, whatever `linger.ms` says.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        if self.queued_records() == 0 {
+            return Ok(SinkFinish::NothingHeld);
+        }
         let producer = self.producer.clone();
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .unwrap_or(Duration::ZERO);
-        if remaining.is_zero() {
-            return Err(Report::new(SinkPublishError::Finish { sink: KAFKA })
-                .attach_printable("kafka local producer queue drain deadline elapsed"));
-        }
-        nervix_primitives::task::spawn_blocking(move || producer.flush(remaining))
+        let flushed = nervix_primitives::task::spawn_blocking(move || producer.flush(remaining))
             .await
             .map_err(|source| {
-                Report::new(SinkPublishError::Finish { sink: KAFKA })
-                    .attach_printable(format!("kafka producer queue drain task failed: {source}"))
-            })?
-            .map_err(|source| {
-                Report::new(SinkPublishError::Finish { sink: KAFKA }).attach_printable(format!(
-                    "kafka local producer queue did not drain before shutdown: {source}"
-                ))
-            })
+                Report::new(source).change_context(SinkFinishError::Flush { sink: KAFKA })
+            })?;
+        match flushed {
+            Ok(()) => Ok(SinkFinish::Flushed),
+            Err(error @ KafkaError::Flush(RDKafkaErrorCode::OperationTimedOut)) => {
+                let records = self.queued_records();
+                Err(Report::new(error).change_context(SinkFinishError::Unsent {
+                    sink: KAFKA,
+                    records,
+                }))
+            }
+            Err(error) => {
+                Err(Report::new(error).change_context(SinkFinishError::Flush { sink: KAFKA }))
+            }
+        }
     }
 
     fn keeps_client_on_publish_failure(&self) -> bool {

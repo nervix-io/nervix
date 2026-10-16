@@ -41,9 +41,10 @@ use error_stack::Report;
 use futures_util::{FutureExt, SinkExt};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
-    SinkStartResult, client_config_value, client_tls_paths,
+    AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord,
+    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
+    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
+    client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
 use nervix_primitives::{
@@ -477,6 +478,12 @@ impl NatsSink {
 
 #[async_trait]
 impl SinkLifecycle for NatsSink {
+    /// A core publish flushes the connection before it reports its records, and JetStream
+    /// answers each record, so the client holds nothing a publish reported delivered.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+
     /// A publish failure leaves the client connected: it reconnects on its own schedule, and
     /// dropping it would discard the session the broker still holds.
     fn keeps_client_on_publish_failure(&self) -> bool {
