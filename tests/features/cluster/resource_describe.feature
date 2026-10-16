@@ -579,3 +579,12 @@ Feature: Resource lifecycle
       """
       DESCRIBE RESOURCE large_model VERSION 1;
       """
+    And the last command output contains
+      """
+      file_count: 1
+      total_bytes: 50331648
+      """
+    And the last command output contains
+      """
+      type=file path=model.bin size=50331648
+      """

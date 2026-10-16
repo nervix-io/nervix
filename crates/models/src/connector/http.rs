@@ -23,11 +23,12 @@ use super::{
     entity_union::{connector_sinks, connector_sources},
 };
 use crate::{
-    ClientName, ConnectorKind, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, EndpointIngestMode, EndpointName, EndpointType, Expression,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DomainClockPeriod,
+    EmitSinkCapabilities, EmitterBatchRequirement, EmitterPublishingMode, EndpointIngestMode,
+    EndpointName, EndpointType, Expression, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled CreateClientHttp => HttpConfigEntry);
@@ -50,6 +51,7 @@ impl SourceEntity for HttpRequestSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Http),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 
@@ -113,6 +115,7 @@ impl SourceEntity for HttpEndpointSource {
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
     };
 }
 

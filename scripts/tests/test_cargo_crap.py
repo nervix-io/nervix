@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -11,6 +12,12 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from scripts import cargo_crap
+
+ROOT = Path(cargo_crap.__file__).resolve().parents[1]
+
+# The ratchet's unit tests run the pinned analyzer: by module name, or as part of discovering
+# every script test.
+RATCHET_TESTS = ("scripts.tests.test_ratchet", "discover -s scripts/tests")
 
 
 def write_analyzer(path: Path, version: str) -> Path:
@@ -155,6 +162,115 @@ class RunTests(unittest.TestCase):
         self.assertIn("is cargo-crap 0.5.0, but this repository pins", completed.stderr)
 
 
+def two_phase_analyzer(directory: Path, alone: list[dict[str, object]], against: object, status: int = 0,
+                       skipped: str = "") -> Path:
+    """An analyzer that answers an analysis without coverage with `alone` and `skipped` on standard
+    error, and one against a report (`--lcov`) with `against` and `status`."""
+
+    path = directory / "cargo-crap"
+    alone_report = json.dumps({"version": cargo_crap.VERSION, "entries": alone})
+    against_report = against if isinstance(against, str) else json.dumps({"version": cargo_crap.VERSION, "entries": against})
+    path.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"if sys.argv[1:] == ['--version']:\n    print('cargo-crap {cargo_crap.VERSION}')\n    sys.exit(0)\n"
+        f"if '--lcov' in sys.argv:\n    sys.stdout.write({against_report!r})\n    sys.stderr.write('warning: scope\\n')\n    sys.exit({status})\n"
+        f"sys.stdout.write({alone_report!r})\nsys.stderr.write({skipped!r})\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def entry(file: str, coverage: float | None = None) -> dict[str, object]:
+    crap = None if coverage is None else 1.0
+    return {"file": file, "function": "measured", "line": 1, "cyclomatic": 1.0, "coverage": coverage, "crap": crap}
+
+
+class ScoreTests(unittest.TestCase):
+    """The analysis against a report: identity binding, and every way it cannot be trusted."""
+
+    def repository(self, directory: str, sources: dict[str, str], report: str) -> Path:
+        root = Path(directory)
+        for path, body in sources.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(body, encoding="utf-8")
+        (root / "lcov.info").write_text(report, encoding="utf-8")
+        return root
+
+    def test_each_record_binds_to_its_own_source_alone(self) -> None:
+        body = "fn covered() -> u32 {\n    1\n}\n"
+        with TemporaryDirectory() as directory:
+            root = self.repository(
+                directory,
+                {"src/lib.rs": body, "crates/other/src/lib.rs": body.replace("covered", "unrecorded")},
+                "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nend_of_record\n",
+            )
+            scores = cargo_crap.score(root, cargo_crap.default_target(), (), root / "lcov.info")
+
+        # By suffix, `src/lib.rs` would also have covered the other crate's `src/lib.rs`.
+        self.assertEqual(scores.scored, (cargo_crap.Scored(cargo_crap.Function("src/lib.rs", "covered", 1, 1.0), 100.0, 1.0),))
+        self.assertEqual(scores.unmeasured, (cargo_crap.Function("crates/other/src/lib.rs", "unrecorded", 1, 1.0),))
+
+    def score_with(self, analyzer: Path, report: str = "SF:src/lib.rs\nDA:1,1\nend_of_record\n") -> str:
+        with TemporaryDirectory() as directory:
+            root = self.repository(directory, {"src/lib.rs": "fn measured() {}\n"}, report)
+            with mock.patch("scripts.cargo_crap.executable", return_value=analyzer):
+                with self.assertRaises(cargo_crap.AnalyzerError) as raised:
+                    cargo_crap.score(root, root / "target", (), root / "lcov.info")
+        return str(raised.exception)
+
+    def test_an_absolute_report_source_is_refused(self) -> None:
+        with TemporaryDirectory() as directory:
+            analyzer = two_phase_analyzer(Path(directory), [entry("./src/lib.rs")], [entry("./src/lib.rs", 100.0)])
+            message = self.score_with(analyzer, "SF:/elsewhere/src/lib.rs\nDA:1,1\nend_of_record\n")
+        self.assertIn("names /elsewhere/src/lib.rs, not a source relative to", message)
+
+    def test_a_coverage_analysis_that_measured_other_functions_is_refused(self) -> None:
+        with TemporaryDirectory() as directory:
+            analyzer = two_phase_analyzer(Path(directory), [entry("./src/lib.rs")], [entry("./src/other.rs", 100.0)])
+            message = self.score_with(analyzer)
+        self.assertIn("measured other functions against", message)
+
+    def test_a_failed_or_unreadable_coverage_analysis_is_refused(self) -> None:
+        with TemporaryDirectory() as directory:
+            analyzer = two_phase_analyzer(Path(directory), [entry("./src/lib.rs")], [], status=2)
+            message = self.score_with(analyzer)
+        self.assertIn("failed with exit 2 against", message)
+        with TemporaryDirectory() as directory:
+            analyzer = two_phase_analyzer(Path(directory), [entry("./src/lib.rs")], "Function  CRAP\n")
+            message = self.score_with(analyzer)
+        self.assertIn("wrote no JSON report", message)
+
+    def test_a_source_the_walk_skipped_is_refused_although_the_coverage_analysis_would_pass(self) -> None:
+        skipped = "warning: could not analyze ./src/broken.rs: parsing ./src/broken.rs\n"
+        with TemporaryDirectory() as directory:
+            analyzer = two_phase_analyzer(
+                Path(directory), [entry("./src/lib.rs")], [entry("./src/lib.rs", 100.0)], skipped=skipped,
+            )
+            message = self.score_with(analyzer)
+        self.assertIn("skipped sources it could not analyze", message)
+        self.assertIn("./src/broken.rs", message)
+
+
+class ReachabilityTests(unittest.TestCase):
+    def test_hidden_linked_and_ignored_sources_are_out_of_the_walks_reach(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            (root / ".gitignore").write_text("/src/forced.rs\n", encoding="utf-8")
+            for path in ("src/lib.rs", "src/.hidden/inner.rs", "src/forced.rs"):
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text("fn f() {}\n", encoding="utf-8")
+            (root / "src/linked.rs").symlink_to("lib.rs")
+            subprocess.run(["git", "add", "--force", "."], cwd=root, check=True)
+
+            unreachable = cargo_crap.unreachable_sources(
+                root, ["src/lib.rs", "src/.hidden/inner.rs", "src/forced.rs", "src/linked.rs"],
+            )
+
+        self.assertEqual(unreachable, ["src/.hidden/inner.rs", "src/forced.rs", "src/linked.rs"])
+
+
 class MainTests(unittest.TestCase):
     """The command line in process: which binary it replaces itself with and what it refuses."""
 
@@ -181,6 +297,40 @@ class MainTests(unittest.TestCase):
                     mock.patch("scripts.cargo_crap.os.execv") as execv:
                 cargo_crap.main(["run", "--", "--lcov", "report.info"])
         execv.assert_called_once_with(path, [str(path), "--lcov", "report.info"])
+
+
+def dependencies(recipes: dict[str, dict], name: str) -> set[str]:
+    """Every recipe `name` depends on, directly or through another dependency."""
+
+    found: set[str] = set()
+    pending = [name]
+    while pending:
+        current = pending.pop()
+        for dependency in recipes[current]["dependencies"]:
+            recipe = dependency["recipe"]
+            if recipe not in found:
+                found.add(recipe)
+                pending.append(recipe)
+    return found
+
+
+class RecipeTests(unittest.TestCase):
+    """Every recipe that runs the ratchet's unit tests installs the analyzer they run first."""
+
+    def test_every_recipe_running_the_ratchet_tests_installs_the_pinned_analyzer(self) -> None:
+        dumped = subprocess.run(
+            ["just", "--dump", "--dump-format", "json"], cwd=ROOT, capture_output=True, text=True, check=True,
+        )
+        recipes = json.loads(dumped.stdout)["recipes"]
+        runners = []
+        for name, recipe in sorted(recipes.items()):
+            body = json.dumps(recipe["body"])
+            if any(marker in body for marker in RATCHET_TESTS):
+                runners.append(name)
+        # Both forms are found, so an empty selection cannot pass.
+        self.assertLessEqual({"test-ratchet-units", "test-docs"}, set(runners))
+        uninstalled = [name for name in runners if "install-cargo-crap" not in dependencies(recipes, name)]
+        self.assertEqual(uninstalled, [])
 
 
 if __name__ == "__main__":
