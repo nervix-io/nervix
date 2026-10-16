@@ -305,15 +305,15 @@ Feature: OTEL emission
         observed_at DATETIME,
         temperature F64,
         count U64,
-        bucket_counts VEC<U64>,
-        explicit_bounds VEC<F64>
+        bucket_counts <count_vector>,
+        explicit_bounds <bound_vector>
       );
       CREATE WIRE JSON SCHEMA latency_point_wire MODE STRICT (
         observed_at string,
         temperature number,
         count integer,
-        bucket_counts ARRAY,
-        explicit_bounds ARRAY
+        bucket_counts array,
+        explicit_bounds array
       );
       CREATE CODEC latency_point_codec
       FROM WIRE JSON SCHEMA latency_point_wire
@@ -387,6 +387,6 @@ Feature: OTEL emission
     And OpenTelemetry Collector eventually contains "nervix.test.histogram.{{test_id}}"
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | count_vector | bound_vector |
+      | 1            | VEC<U64>     | VEC<F64>     |
+      | 3            | VEC<U64>     | VEC<F64>     |
