@@ -122,6 +122,7 @@ tags = [
   "@shutdown_source_confirmation",
   "@shutdown_source_confirmation_handoff",
   "@metrics_checkpoint_handoff",
+  "@websocket_source_lifecycle",
 ]
 target = "test:scenarios"
 
@@ -2117,6 +2118,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.websocket-source-drop",
+  "scenario.websocket-source-reconnect",
+  "scenario.websocket-source-move",
+  "stress.websocket-source-drop",
+  "stress.websocket-source-reconnect",
+  "stress.websocket-source-move",
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.shutdown-source-confirmation",
@@ -2206,3 +2213,63 @@ workloads = [
   "stress.shutdown-source-confirmation-handoff",
   "stress.wasm-kafka-restore",
 ]
+
+[[workload]]
+coverage = "WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "scenario.websocket-source-drop"
+invariant = "Dropping a WebSocket source exchanges Close frames before releasing its transport on one and three nodes."
+invocation = "scenarios"
+scenario = "Dropping a WebSocket ingestor sends its peer a Close frame on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "scenario.websocket-source-reconnect"
+invariant = "Peer closes retain their code and reason through successful upgrades; reconnect delays grow until a batch is delivered."
+invocation = "scenarios"
+scenario = "A repeatedly closing WebSocket peer is reconnected with growing delays on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 1
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "scenario.websocket-source-move"
+invariant = "A planned ownership handoff closes the former WebSocket session gracefully and the new owner delivers a batch."
+invocation = "scenarios"
+scenario = "Moving a WebSocket ingestor closes its former session gracefully"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "stress.websocket-source-drop"
+invariant = "Dropping a WebSocket source exchanges Close frames before releasing its transport on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Dropping a WebSocket ingestor sends its peer a Close frame on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "stress.websocket-source-reconnect"
+invariant = "Peer closes retain their code and reason through successful upgrades; reconnect delays grow until a batch is delivered."
+invocation = "stress-scenarios"
+scenario = "A repeatedly closing WebSocket peer is reconnected with growing delays on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 1
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "stress.websocket-source-move"
+invariant = "A planned ownership handoff closes the former WebSocket session gracefully and the new owner delivers a batch."
+invocation = "stress-scenarios"
+scenario = "Moving a WebSocket ingestor closes its former session gracefully"
+selections = ["deloxide-stress"]

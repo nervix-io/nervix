@@ -602,6 +602,12 @@ stays an infrastructure failure of the attempt, which the emitter retries.
 
 ### Connector Status Observation
 
+An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
+an end without a status has its own typed state. Transport failures keep the WebSocket driver's
+error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
+budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
+failure and its growing retry delay across successful reconnects until a batch is accepted.
+
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
 operations read the retained status without writing it; a transition clears an active failure.
 Reporting a different error without selecting a new retry preserves the active retry. DESCRIBE

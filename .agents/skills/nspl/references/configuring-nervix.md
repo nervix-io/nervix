@@ -168,6 +168,9 @@ relay. Do not use them to scan across branches.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
+- For `WEBSOCKETS CONNECTION` recovery and graceful close, read `Ingestors` →
+  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  A successful upgrade does not establish data delivery or reset repeated-failure backoff.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER

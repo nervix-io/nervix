@@ -1790,6 +1790,13 @@ the lane's coverage report is evidence about it, not a proof of ownership. Forma
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 
+The WebSocket source lifecycle workloads drop an ingestor, move its owner and recover from repeated
+peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
+locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's
+observation; public peer observations measure the delays, and a paused-clock host regression checks
+that successful upgrades keep backoff until a delivered batch resets it. Direct connector tests
+exercise suspension and close without claiming those socket waits are tracked locks.
+
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-
 and three-node clusters in both selections and name the client request and exchange owners in

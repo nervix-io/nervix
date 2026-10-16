@@ -1189,11 +1189,19 @@ asynchronous resolver. It tries the returned addresses in order within one 30-se
 DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
-Resolution and connection failures are transient source failures handled by the host's existing
-retry lifecycle. Cancelling or stopping the source drops a pending connection attempt.
+Resolution, connection and read failures are transient source failures. A peer Close records its
+code and reason in `DESCRIBE INGESTOR`; EOF also triggers recovery. Reconnects wait 250 ms initially,
+doubling to at most 30 seconds while attempts keep failing. A successful upgrade alone does not
+reset the delay or clear the last failure: a delivered batch does. Cancelling or stopping the
+source drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
+
+Suspension and terminal close send a Close frame and wait up to one second for the peer's reply,
+including the time needed to send the frame, before releasing the connection. A peer that does
+not answer cannot hold shutdown indefinitely. Terminal close also clears queued signaling
+payloads; suspension retains them.
 
 A `WEBSOCKETS CONNECTION` ingestor is a single-owner ingestor. It keeps its existing primary and
 replica assignment through schedule recomputation while every assigned cluster node remains live,
