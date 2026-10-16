@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Sourced by run-baseline.sh before graph installation: the run installs the graph that
-# backup_graph_fixture prints, and run_backup_scenario starts once the packaged cluster and that
-# graph are ready.
+# backup_graph_fixture prints, and run_backup_scenario or run_backup_cycles starts once the
+# packaged cluster and that graph are ready. The backup fault and fresh-cluster restore scenarios
+# reuse its archive, verification, restore and traffic steps.
 
 backup_fail() {
     printf 'backup chaos failure: %s\n' "$*" >&2
@@ -170,6 +171,134 @@ backup_final_boundary() {
         2>"${artifact_dir}/traffic/source-consumer.stderr"
     [[ "$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")" -eq "${input_end}" ]] \
         || backup_fail 'accepted-input ledger did not cover the final source boundary'
+}
+
+# The accepted records' expected output counts of the backup state graph: the unique records below
+# sequence 30, and every branch's complete windows of twelve records.
+backup_state_expected_counts() {
+    jq -s '{unique: (map(select(.sequence < 30)) | length),
+            windows: (group_by(.branch_name) | map(length / 12 | floor) | add // 0)}' "$1"
+}
+
+# Judges the deduplicator and window outputs of the backup state graph against the accepted-input
+# ledger once both topics hold as many outputs as the accepted records produce, and writes the
+# verdict to results/backup-state.json. Returns the verifier's status.
+backup_state_verdict() {
+    local case_dir="$1"
+    local expected unique_count window_count
+    expected="$(backup_state_expected_counts "${artifact_dir}/traffic/accepted-input.ndjson")"
+    unique_count="$(jq -r '.unique' <<<"${expected}")"
+    window_count="$(jq -r '.windows' <<<"${expected}")"
+    # A topic that never reaches its count leaves the verifier to name the missing outputs.
+    wait_for 'every unique record on the deduplicator output' 120 \
+        topic_progressed chaos_unique_output "$((unique_count - 1))" || true
+    wait_for 'every closed window on the window output' 120 \
+        topic_progressed chaos_window_output "$((window_count - 1))" || true
+    local topic
+    for topic in chaos_unique_output chaos_window_output; do
+        local topic_end
+        topic_end="$(topic_end_offset "${topic}")"
+        if ((topic_end > 0)); then
+            kcat -q -b broker:9092 -C -t "${topic}" -p 0 -o beginning -c "${topic_end}" \
+                >"${case_dir}/${topic}.ndjson" 2>"${case_dir}/${topic}.stderr"
+        else
+            : >"${case_dir}/${topic}.ndjson"
+        fi
+    done
+    "${script_dir}/verify-backup-state.sh" "${artifact_dir}/traffic/accepted-input.ndjson" \
+        "${case_dir}/chaos_unique_output.ndjson" "${case_dir}/chaos_window_output.ndjson" \
+        "${artifact_dir}/results/backup-state.json" >"${case_dir}/backup-state.txt"
+}
+
+# The cycles a backup-cycles run alternates with its traffic: each backs the domain up, verifies
+# the archive offline, restores it as a new stopped domain and compares the restored generation.
+backup_cycle_count=8
+
+# The highest chaos_input offset the archive DESCRIPTION records for the domain.
+backup_archived_offset() {
+    jq -r '[.domains[0].runtime_state[] | select(.kind == "kafka_offsets") | .positions[] |
+        select(.topic == "chaos_input" and .partition == 0) | .next_offset] | max' "$1"
+}
+
+# The deduplicator keys and retained window rows the archive DESCRIPTION holds, as a JSON object.
+backup_archived_state() {
+    jq -c '[.domains[0].runtime_state[]] as $state
+        | {deduplicator_keys: ([$state[] | select(.kind == "deduplicator") | .keys] | add // 0),
+           window_rows: ([$state[] | select(.kind == "window_processor") | .rows] | add // 0)}' "$1"
+}
+
+run_backup_cycles() {
+    phase 'healthy acknowledged Kafka traffic'
+    local cycles_dir="${artifact_dir}/backup-cycles"
+    mkdir -p "${cycles_dir}"
+    backup_traffic_start
+    : >"${cycles_dir}/cycles.ndjson"
+    local previous_offset=9
+    local cycle
+    for cycle in $(seq 1 "${backup_cycle_count}"); do
+        local cycle_dir="${cycles_dir}/cycle-${cycle}"
+        mkdir -p "${cycle_dir}"
+        phase "backup cycle ${cycle} of ${backup_cycle_count}"
+        local output_before
+        output_before="$(topic_end_offset chaos_output)"
+        wait_for "new acknowledged traffic before cycle ${cycle}" 60 \
+            topic_progressed chaos_output "$((output_before + 2))"
+        local started_ms
+        started_ms="$(epoch_ms)"
+        backup_archive_domain "${cycle_dir}" chaos_baseline "${cycle_dir}/domain.nvxb" \
+            "${cycle_dir}/report.json" \
+            || backup_fail "cycle ${cycle}: the packaged CLI could not create the quiesced archive"
+        local backup_ms=$(($(epoch_ms) - started_ms))
+        [[ -s "${cycle_dir}/domain.nvxb" ]] \
+            || backup_fail "cycle ${cycle}: the backup archive was not retained"
+        backup_require_quiesced_report "${cycle_dir}/report.json"
+        backup_cut_window "${cycle_dir}/report.json"
+        # Every cycle's archive holds the acknowledged source offset at or past the previous one's.
+        backup_verify_archive "${cycle_dir}" "${cycle_dir}/domain.nvxb" \
+            "${cycle_dir}/description.json" "${previous_offset}"
+        local archived_offset
+        archived_offset="$(backup_archived_offset "${cycle_dir}/description.json")"
+        started_ms="$(epoch_ms)"
+        backup_verify_restore "${cycle_dir}" "${cycle_dir}/domain.nvxb" "${cycle_dir}/description.json" \
+            "chaos_cycle_${cycle}" "${cycle_dir}/restore-report.json" \
+            "${cycle_dir}/restored.nvxb" "${cycle_dir}/restored-backup-report.json" \
+            "${cycle_dir}/restored-description.json" \
+            "${cycle_dir}/expected-state.json" "${cycle_dir}/restored-state.json"
+        local restore_ms=$(($(epoch_ms) - started_ms))
+        jq -nc --argjson cycle "${cycle}" --argjson offset "${archived_offset}" \
+            --argjson freeze_ms "$((backup_released_ms - backup_engaged_ms))" \
+            --argjson backup_ms "${backup_ms}" --argjson restore_ms "${restore_ms}" \
+            --argjson archive_bytes "$(stat -c %s "${cycle_dir}/domain.nvxb")" \
+            --argjson state "$(backup_archived_state "${cycle_dir}/description.json")" \
+            --arg engaged_at "${backup_engaged_at}" --arg released_at "${backup_released_at}" \
+            '{cycle:$cycle, archived_offset:$offset, freeze_duration_ms:$freeze_ms,
+              backup_command_ms:$backup_ms, restore_and_compare_ms:$restore_ms,
+              archive_bytes:$archive_bytes, archived_state:$state,
+              engaged_at:$engaged_at, released_at:$released_at,
+              restored_domain:("chaos_cycle_\($cycle)")}' >>"${cycles_dir}/cycles.ndjson"
+        previous_offset="${archived_offset}"
+    done
+
+    phase 'post-cycle continuity'
+    check_support_containers
+    local source_after_cycles output_after_cycles
+    source_after_cycles="$(topic_end_offset chaos_input)"
+    output_after_cycles="$(topic_end_offset chaos_output)"
+    wait_for 'Kafka source advanced past the last cycle' 30 \
+        topic_progressed chaos_input "${source_after_cycles}"
+    wait_for 'Kafka sink advanced past the last cycle' 60 \
+        topic_progressed chaos_output "${output_after_cycles}"
+    jq -s '{cycles: ., freeze_duration_ms: ([.[].freeze_duration_ms] | {min: min, max: max,
+              median: (sort | .[(length / 2 | floor)])}),
+            archived_offsets: [.[].archived_offset],
+            evidence: "backup-cycles/cycles.ndjson"}' \
+        "${cycles_dir}/cycles.ndjson" >"${artifact_dir}/results/backup-cycles-progress.json"
+
+    phase 'backup traffic final boundary'
+    backup_final_boundary
+    phase 'deduplicator and window outputs'
+    backup_state_verdict "${cycles_dir}" \
+        || backup_fail 'the deduplicator or window outputs differ from what the accepted records produce'
 }
 
 run_backup_scenario() {

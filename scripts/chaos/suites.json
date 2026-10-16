@@ -305,6 +305,48 @@
           "shard": 9,
           "budget_minutes": 25,
           "run": ["domain-time", "--nodes", "3", "--fault", "voter-partition"]
+        },
+        {
+          "id": "backup-cycles-1",
+          "shard": 10,
+          "budget_minutes": 10,
+          "run": ["backup-cycles", "--nodes", "1"]
+        },
+        {
+          "id": "backup-cycles-3",
+          "shard": 10,
+          "budget_minutes": 12,
+          "run": ["backup-cycles", "--nodes", "3"]
+        },
+        {
+          "id": "restore-into-fresh-cluster",
+          "shard": 10,
+          "budget_minutes": 12,
+          "run": ["restore-fresh-cluster"]
+        },
+        {
+          "id": "backup-under-owner-crash",
+          "shard": 10,
+          "budget_minutes": 14,
+          "run": ["backup-fault", "--fault", "owner-crash"]
+        },
+        {
+          "id": "backup-under-leader-crash",
+          "shard": 11,
+          "budget_minutes": 14,
+          "run": ["backup-fault", "--fault", "leader-crash"]
+        },
+        {
+          "id": "backup-under-partition",
+          "shard": 11,
+          "budget_minutes": 15,
+          "run": ["backup-fault", "--fault", "owner-partition"]
+        },
+        {
+          "id": "rolling-restart-during-backup-stream",
+          "shard": 11,
+          "budget_minutes": 20,
+          "run": ["backup-fault", "--fault", "rolling-restart"]
         }
       ]
     }
