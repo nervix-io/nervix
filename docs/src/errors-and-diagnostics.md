@@ -1059,6 +1059,9 @@ it cannot bind or read its domain clock or routing snapshot, or cannot wait for 
 deadlines, reports a runtime event that names the task and its domain and renders the whole chain
 of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
 failure stays visible.
+The materialized relay reads that clock before rebuilding its branch activity registry. An
+unreadable activation time ends the task with this event; record event watermarks cannot supply
+the missing domain time.
 
 An owner-delivery admission failure logs the domain, relay, branch scope and target together with
 the transport report, including retained cancellation and rejection causes, before returning the
