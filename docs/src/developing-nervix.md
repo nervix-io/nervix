@@ -963,6 +963,58 @@ just coverage-patch origin/main
 `just test-coverage-merge` exercises the mapping, every integrity failure and the CI contract, and
 `just coverage-merge-runner` exports the merge's measured Python coverage for CI.
 
+### CRAP report
+
+`just check-coverage` publishes an advisory CRAP report over the merged ordinary workspace report.
+It runs the pinned cargo-crap, the version `scripts/cargo_crap.py` declares for the complexity count
+too, over the whole repository root. The root package's directory holds every workspace member,
+and the Cargo projects nested in it, such as the lint workspace, are walked as well, because some
+ordinary producers measure them. No default exclusion applies, so test, bench and example sources
+are scored like any other. The analyzer is handed each record of the report under its absolute
+path, which binds the record to its own file. A relative path would also bind every other file
+whose path ends with it, such as another crate's `src/lib.rs`, to that record's coverage.
+
+A function's CRAP score is `complexity² × (1 − coverage)³ + complexity`, from its cyclomatic
+complexity and the share of its executable lines the report covers, so at full coverage it equals
+the complexity. The report lists every function that scores above 30. A function in a file that
+the report holds no record of is unmeasured: mode-only sources such as primitive adapters and
+Shuttle checks, build scripts, benches, the lint workspace's fixtures and the WASM guests. The
+report lists unmeasured functions with their complexity and never scores them as uncovered. A
+report file in which the analyzer scores no function, such as a file of `#[test]` functions, is
+listed as read without a scored function.
+
+No CRAP score fails the check. Scores move from run to run with the coverage the suites happen to
+record, and the mandatory complexity verdict is the ratchet count above. The check fails only when
+the analysis is vacuous, that is when it cannot describe the merged report:
+
+- the merge record is missing, did not complete, or names another revision than the checkout's;
+- a record of the report names a source the checkout does not track, such as a path below another
+  checkout's root;
+- the analyzer's walk cannot read a Rust file the report holds: a hidden path, a symbolic link or
+  a file Git ignores;
+- the analyzer measured functions in a report file without binding its record to them;
+- the analysis matched no report file.
+
+Whatever the verdict, it writes `target/crap-report/crap.json` and `target/crap-report/crap.md`.
+The JSON report holds the verdict and its cause, the analysed revision, the scope counts, every
+measured function with its complexity, coverage and score, and every unmeasured function. The
+Markdown report lists the functions above 30, the unmeasured files and the files without a scored
+function. CI's coverage job runs the check after the merge and retains both reports in the
+`coverage-merged` artifact. The patch line coverage comment carries the CRAP section: the functions
+above 30 in the files the pull request changes, the project's total above 30 and the unmeasured
+count, or the cause of a vacuous analysis.
+
+The reports name the analysed report by its file name, so a retained `coverage-merged` artifact
+reproduces its reports byte for byte without the coverage binaries, in a checkout of the revision
+its merge record names:
+
+```bash
+just check-coverage <artifact>/lcov-workspace.info <artifact>/target/coverage-merge/record.json
+```
+
+`just test-crap-report` exercises the analysis, every vacuity failure and the CI contract, and
+`just coverage-crap-report-runner` exports the report's measured Python coverage for CI.
+
 ### Patch line coverage
 
 CI runs `just coverage-patch` against the merged ordinary workspace report and updates one PR
@@ -970,7 +1022,9 @@ comment with patch line coverage, project line coverage, per-file totals and unc
 numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
 Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
 publication does not fail CI. The complexity verdict is the `just ratchet` count of functions
-above cyclomatic complexity 30, which reads no coverage.
+above cyclomatic complexity 30, which reads no coverage. With `--crap target/crap-report/crap.json`,
+as CI passes it, the comment also carries the section of the [CRAP report](#crap-report) for the
+files the pull request changes, including the files it only shortens.
 
 The label-enabled Turmoil job publishes a separate **Turmoil patch coverage** comment using
 `--scope turmoil` after its canonical instrumented suite and independent replay qualification

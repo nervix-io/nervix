@@ -643,19 +643,30 @@ answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was h
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
 given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
-missed its deadline, or a deadline is past the monotonic clock's range. The window holds the
-publish's outcome, and both ways of ending a publish go through it, so before it reports a failure
-it settles every answer the broker already gave, the oldest's included: a confirmed record is
-delivered and a refused one rejected, and the host's retry never resends a record the broker
-confirmed. A record without an answer, or whose answer failed, stays unresolved and is sent again,
-which is the at-least-once delivery `MODE ACK` promises. The registered Bolero property
-`connector-confirmation-window` holds the window to a reference model of this rule over scripted
-answers given within, at, past or never by each deadline, failed answers and driver failures, and
-the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
-hold its settlement while answers arrive concurrently with the publish. The Kafka, Pulsar, NATS
-JetStream and MQTT sinks still await their answers through windows of their own, which drop their
-in-flight records when the driver refuses to take one, so a retry can resend records their broker
-already confirmed; RabbitMQ settles its records when it loses a channel instead.
+missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
+failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
+which the emitter shows as its transient error; a failure the connector hands it carries the
+connector's own description. The window holds the publish's outcome, and both ways of ending a
+publish go through it, so before it reports a failure it settles every answer the broker already
+gave, the oldest's included: a confirmed record is delivered and a refused one rejected, and the
+host's retry never resends a record the broker confirmed. A record without an answer, or whose
+answer failed, stays unresolved and is sent again, which is the at-least-once delivery `MODE ACK`
+promises. The registered Bolero property `connector-confirmation-window` holds the window to a
+reference model of this rule over scripted answers given within, at, past or never by each deadline,
+failed answers and driver failures, and the Shuttle checks of the
+[confirmation window](./data-plane-concurrency.md#protocols-and-their-checks) hold its settlement
+while answers arrive concurrently with the publish.
+
+The MQTT sink awaits its QoS 1 and QoS 2 answers through the window. A completed handshake confirms
+a record, a reason code about the record itself (not authorized, an invalid topic name or an
+invalid payload format) refuses it, and every other ending leaves it unresolved: the client, its
+connection or its session failed, or the reason code is not about the record. The client's request
+queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
+so the client can refuse a record only while the queue still holds an earlier failed attempt's
+requests, before the broker answered any record of the publish. The Kafka, Pulsar and NATS
+JetStream sinks still await their answers through windows of their own, which drop their in-flight
+records when the driver refuses to take one, so a retry can resend records their broker already
+confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one

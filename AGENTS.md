@@ -1366,8 +1366,8 @@ build and the existing tests, and nothing in it changes behavior.
   Model producers also retain `models.json` with canonical discovery, selection, execution and
   completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
   bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
-  instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
-  CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
+  instrumented build directory; model and diagnostic reports never enter ordinary coverage or its
+  CRAP report. Coverage bookkeeping stays outside model processes and supplies no synchronization
   to the invariant.
 - `just coverage-patch [base] [report]` measures added executable lines from ordinary LCOV reports
   and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
@@ -1376,9 +1376,18 @@ build and the existing tests, and nothing in it changes behavior.
   percentages and reporting failures never fail a build; the complexity verdict is the
   `just ratchet` count of functions above cyclomatic complexity 30, which reads no coverage.
   The Turmoil job publishes its current-source report with `--scope turmoil` under a separate
-  comment marker; those counters remain outside the ordinary coverage and CRAP gate.
+  comment marker; those counters remain outside ordinary coverage and its CRAP report.
   `just test-patch-coverage` exercises accounting and publication, and
   `just coverage-patch-runner` collects its Python line coverage.
+- `just check-coverage [report] [record]` publishes the advisory CRAP report of the merged ordinary
+  report as `target/crap-report/crap.json` and `crap.md`: the pinned cargo-crap scores the
+  repository's Rust sources, with each record bound to its own file, and the coverage comment
+  carries its section for the changed files. No CRAP score fails a build, and no text calls CRAP a
+  gate. The check fails only when its analysis is vacuous: a merge record that is missing,
+  incomplete or of another revision, a report source this checkout does not track, a report Rust
+  file the analysis did not read or bind, or no matched file. A function in a file the report holds
+  no record of is listed as unmeasured, never scored as uncovered. `just test-crap-report`
+  exercises it, and `just coverage-crap-report-runner` collects its Python line coverage.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
