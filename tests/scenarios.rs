@@ -116,9 +116,9 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
-        TestDependencies,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
+        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT,
+        SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -126,6 +126,7 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    nats_endpoint::NatsEndpoint,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
@@ -453,6 +454,9 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
+    /// that connect through it.
+    nats_endpoint: Option<NatsEndpoint>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
@@ -574,6 +578,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
@@ -887,6 +892,71 @@ async fn given_stallable_rabbitmq_endpoint(world: &mut ScenarioWorld) {
 #[given("a stallable MQTT endpoint is configured")]
 async fn given_stallable_mqtt_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "mqtt", MQTT_ADDR, "mqtt_stallable_addr").await;
+}
+
+/// Stands an endpoint the scenario controls in front of the NATS server, and names its address
+/// `{{nats_controlled_addr}}`.
+#[given("a NATS endpoint the scenario controls is configured")]
+async fn given_controlled_nats_endpoint(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(NATS_ADDR)
+        .unwrap_or_else(|error| panic!("NATS endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse NATS endpoint '{endpoint}': {error}"));
+    // `nats` is not a special URL scheme, so the URL keeps its host as opaque text.
+    let server_ip = match endpoint_url.host() {
+        Some(url::Host::Ipv4(address)) => std::net::IpAddr::V4(address),
+        Some(url::Host::Ipv6(address)) => std::net::IpAddr::V6(address),
+        Some(url::Host::Domain(host)) => host.parse().unwrap_or_else(|error| {
+            panic!("NATS endpoint '{endpoint}' does not name the server by its IP address: {error}")
+        }),
+        None => panic!("NATS endpoint '{endpoint}' has no host"),
+    };
+    let server_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("NATS endpoint '{endpoint}' has no explicit port"));
+    let controlled = NatsEndpoint::start(std::net::SocketAddr::new(server_ip, server_port))
+        .await
+        .unwrap_or_else(|error| panic!("failed to start the controlled NATS endpoint: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in NATS endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(controlled.local_port()))
+        .unwrap_or_else(|()| panic!("failed to replace port in NATS endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert("nats_controlled_addr".to_string(), endpoint_url.to_string());
+    world.nats_endpoint = Some(controlled);
+}
+
+fn controlled_nats_endpoint(world: &ScenarioWorld) -> &NatsEndpoint {
+    world
+        .nats_endpoint
+        .as_ref()
+        .expect("a NATS endpoint the scenario controls must be configured first")
+}
+
+/// The endpoint ends every connection it forwards and refuses new ones, as a NATS server that went
+/// down, while the server itself keeps running for the other scenarios that share it.
+#[when("the controlled NATS endpoint goes down")]
+fn when_controlled_nats_endpoint_goes_down(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).go_down();
+}
+
+/// The endpoint forwards everything clients send again and accepts new connections.
+#[when("the controlled NATS endpoint forwards everything")]
+fn when_controlled_nats_endpoint_forwards_everything(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).forward_everything();
+}
+
+/// Each connection forwards `publishes` more publishes and then stops reading what its client
+/// sends, while what the server sends still reaches the client.
+#[when(expr = "the controlled NATS endpoint holds what each client sends after {int} publishes")]
+fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishes: usize) {
+    controlled_nats_endpoint(world).hold_after(publishes);
 }
 
 #[given("a stallable Pulsar endpoint is configured")]
@@ -23018,19 +23088,35 @@ async fn when_nats_message_is_published(
         .expect("failed to publish nats message");
 }
 
+/// Provisions JetStream stream `stream` capturing `subject`, as an operator does.
+async fn provision_nats_jetstream_stream(world: &mut ScenarioWorld, stream: &str, subject: &str) {
+    let stream = expand_placeholders(world, stream);
+    let subject = expand_placeholders(world, subject);
+    world
+        .cluster()
+        .provision_nats_stream(&stream, &subject)
+        .await
+        .expect("failed to provision NATS JetStream stream");
+}
+
+/// The stream exists before the scenario's graph publishes to it.
+#[given(expr = "NATS JetStream stream {string} exists for subject {string}")]
+async fn given_nats_jetstream_stream_exists(
+    world: &mut ScenarioWorld,
+    stream: String,
+    subject: String,
+) {
+    provision_nats_jetstream_stream(world, &stream, &subject).await;
+}
+
+/// An operator provisions the stream while the scenario's graph already publishes to its subject.
 #[when(expr = "NATS JetStream stream {string} is provisioned for subject {string}")]
 async fn when_nats_jetstream_stream_is_provisioned(
     world: &mut ScenarioWorld,
     stream: String,
     subject: String,
 ) {
-    let stream = expand_placeholders(world, &stream);
-    let subject = expand_placeholders(world, &subject);
-    world
-        .cluster()
-        .provision_nats_stream(&stream, &subject)
-        .await
-        .expect("failed to provision NATS JetStream stream");
+    provision_nats_jetstream_stream(world, &stream, &subject).await;
 }
 
 #[then(expr = "NATS JetStream stream {string} eventually contains a payload on subject {string}")]
@@ -23048,6 +23134,112 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+/// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
+/// carries `n` in `field`.
+#[when(
+    expr = "a NATS message carrying records 1 to {int} by field {string} is published to subject \
+            {string}"
+)]
+async fn when_nats_message_carrying_records_is_published(
+    world: &mut ScenarioWorld,
+    count: i64,
+    field: String,
+    subject: String,
+) {
+    let subject = expand_placeholders(world, &subject);
+    let records = (1..=count)
+        .map(|value| serde_json::json!({ field.as_str(): value }))
+        .collect::<Vec<_>>();
+    let payload = serde_json::Value::Array(records).to_string();
+    world
+        .cluster()
+        .publish_nats(&subject, &payload)
+        .await
+        .expect("failed to publish a NATS message carrying records");
+}
+
+/// Waits until JetStream `stream` holds a message for every value from 1 to `last` of `field`,
+/// then requires that it holds exactly one message for each value from 1 to `once`.
+#[then(
+    expr = "within {string} NATS JetStream stream {string} holds every record from 1 to {int} by \
+            field {string}, and records 1 to {int} exactly once"
+)]
+async fn then_nats_jetstream_stream_holds_records(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stream: String,
+    last: i64,
+    field: String,
+    once: i64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let stream = expand_placeholders(world, &stream);
+    let deadline = Instant::now() + duration;
+    let least = u64::try_from(last).expect("a record count is not negative");
+    let counts = loop {
+        nervix_primitives::task::consume_budget().await;
+        // The stream cannot hold every record before it holds as many messages, and counting the
+        // messages is far cheaper than reading them.
+        let held = world
+            .cluster()
+            .nats_stream_message_count(&stream)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read NATS JetStream stream '{stream}': {error}")
+            });
+        if held < least {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for NATS JetStream stream '{stream}' to hold every record from \
+                 1 to {last} by '{field}'; it holds {held} messages"
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        let counts = world
+            .cluster()
+            .count_nats_stream_field_values(&stream, &field)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read NATS JetStream stream '{stream}': {error}")
+            });
+        let mut missing = Vec::new();
+        for value in 1..=last {
+            if !counts.contains_key(&value) {
+                missing.push(value);
+            }
+        }
+        if missing.is_empty() {
+            break counts;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for NATS JetStream stream '{stream}' to hold every record from 1 \
+             to {last} by '{field}'; {} are missing, the first of them {:?}",
+            missing.len(),
+            missing.iter().take(16).collect::<Vec<_>>(),
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+    };
+    let mut repeated = Vec::new();
+    for value in 1..=once {
+        let held = match counts.get(&value) {
+            Some(held) => *held,
+            None => 0,
+        };
+        if held != 1 {
+            repeated.push((value, held));
+        }
+    }
+    assert!(
+        repeated.is_empty(),
+        "NATS JetStream stream '{stream}' holds {} of the records 1 to {once} by '{field}' other \
+         than exactly once, as (record, messages): {:?}",
+        repeated.len(),
+        repeated.iter().take(16).collect::<Vec<_>>(),
+    );
 }
 
 #[when(expr = "{int} sequential NATS messages are published to subject {string}")]
@@ -29218,6 +29410,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes

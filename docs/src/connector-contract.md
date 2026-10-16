@@ -652,10 +652,15 @@ which is the at-least-once delivery `MODE ACK` promises. The registered Bolero p
 `connector-confirmation-window` holds the window to a reference model of this rule over scripted
 answers given within, at, past or never by each deadline, failed answers and driver failures, and
 the Shuttle checks of the [confirmation window](./data-plane-concurrency.md#protocols-and-their-checks)
-hold its settlement while answers arrive concurrently with the publish. The Kafka, Pulsar, NATS
-JetStream and MQTT sinks still await their answers through windows of their own, which drop their
-in-flight records when the driver refuses to take one, so a retry can resend records their broker
-already confirmed; RabbitMQ settles its records when it loses a channel instead.
+hold its settlement while answers arrive concurrently with the publish. The NATS JetStream sink
+awaits its `PubAck`s through the window: a `PubAck` confirms a record, a message above the server's
+`max_payload` is refused for good, and any other ending of the wait leaves the record unresolved
+with the driver's typed cause. A client that does not take a record within `ACK TIMEOUT`, because
+its connection stopped draining what it queued, ends the publish through the window, so the retry
+resends none of the records JetStream confirmed before it. The Kafka, Pulsar and MQTT sinks still
+await their answers through windows of their own, which drop their in-flight records when the
+driver refuses to take one, so a retry can resend records their broker already confirmed; RabbitMQ
+settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
@@ -947,6 +952,14 @@ sequenceDiagram
   `SendError` with that error's server code and reason. The broker itself only closes the
   connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
   other message in flight on it.
+- **NATS source.** Each source instance owns one client and its queue subscription. The client
+  reports a lost connection through its event callback, and the instance ends the subscription
+  with a read failure once it has handed over every message the client received before the loss,
+  so the host shows the loss as a transient error and resumes the instance on its reconnect
+  cadence, which connects and subscribes again. The client never reconnects in the background:
+  the driver cannot be told to make no attempt of its own, so it makes one, which only lets its
+  connection task end. Core NATS retains nothing for a subscription that is not connected, so
+  messages published while the instance reconnects never reach it.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
   buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
   frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its

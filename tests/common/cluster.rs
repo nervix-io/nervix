@@ -2075,6 +2075,21 @@ impl Cluster {
         wait_for_nats_stream_payload(&self.dependencies, stream, subject, expected).await
     }
 
+    /// How many messages JetStream `stream` holds.
+    pub(crate) async fn nats_stream_message_count(&self, stream: &str) -> io::Result<u64> {
+        nats_stream_message_count(&self.dependencies, stream).await
+    }
+
+    /// How many messages of JetStream `stream` carry each value of the integer `field` of their
+    /// JSON payload.
+    pub(crate) async fn count_nats_stream_field_values(
+        &self,
+        stream: &str,
+        field: &str,
+    ) -> io::Result<BTreeMap<i64, usize>> {
+        count_nats_stream_field_values(&self.dependencies, stream, field).await
+    }
+
     pub(crate) async fn publish_nats_payloads(
         &self,
         subject: &str,
@@ -5856,6 +5871,78 @@ async fn wait_for_nats_stream_payload(
         }
         sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn nats_stream_message_count(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+) -> io::Result<u64> {
+    let client = nats_client(dependencies).await?;
+    let mut stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let info = stream_handle.info().await.map_err(io::Error::other)?;
+    Ok(info.state.messages)
+}
+
+/// Reads every message JetStream `stream` holds when the read begins, through an ordered consumer
+/// of its own, and counts the messages that carry each value of the integer `field` of their JSON
+/// payload.
+async fn count_nats_stream_field_values(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    field: &str,
+) -> io::Result<BTreeMap<i64, usize>> {
+    let client = nats_client(dependencies).await?;
+    let mut stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let held = stream_handle
+        .info()
+        .await
+        .map_err(io::Error::other)?
+        .state
+        .messages;
+    let mut counts = BTreeMap::new();
+    if held == 0 {
+        return Ok(counts);
+    }
+    let consumer = stream_handle
+        .create_consumer(async_nats::jetstream::consumer::pull::OrderedConfig::default())
+        .await
+        .map_err(io::Error::other)?;
+    let mut messages = consumer.messages().await.map_err(io::Error::other)?;
+    for read in 0..held {
+        nervix_primitives::task::consume_budget().await;
+        let Ok(next) = timeout(BROKER_TIMEOUT, messages.next()).await else {
+            return Err(io::Error::other(format!(
+                "timed out reading message {read} of the {held} NATS JetStream stream '{stream}' \
+                 held"
+            )));
+        };
+        let Some(message) = next else {
+            return Err(io::Error::other(format!(
+                "the ordered consumer of NATS JetStream stream '{stream}' ended after {read} of \
+                 its {held} messages"
+            )));
+        };
+        let message = message.map_err(io::Error::other)?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&message.payload).map_err(io::Error::other)?;
+        let Some(value) = payload.get(field).and_then(serde_json::Value::as_i64) else {
+            return Err(io::Error::other(format!(
+                "a message of NATS JetStream stream '{stream}' carries no integer '{field}': \
+                 {payload}"
+            )));
+        };
+        let count = counts.entry(value).or_insert(0_usize);
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("a stream holds more messages than usize counts"))?;
+    }
+    Ok(counts)
 }
 
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

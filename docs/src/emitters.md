@@ -1050,6 +1050,14 @@ TO NATS <client> SUBJECT <subject>
 waits for one `PubAck` per record. The stream must already exist and capture the subject; a missing
 stream is an infrastructure error that remains under backpressure until an operator provisions it.
 
+`JETSTREAM` hands records to the client one after another, with at most `MAX <n>` of them awaiting
+their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
+hand-over. A publish that fails, because a `PubAck` failed or did not arrive in time, or because the
+client did not take a record within `ACK TIMEOUT` while its connection stopped draining, first
+settles every `PubAck` JetStream already returned: a confirmed record is delivered and never sent
+again. The retry sends the records whose `PubAck` never arrived, which JetStream may already hold,
+so delivery is at least once.
+
 ### ZeroMQ
 
 ```nspl,ignore
