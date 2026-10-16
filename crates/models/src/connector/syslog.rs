@@ -21,14 +21,14 @@ use super::{
     entity_union::{connector_sinks, connector_sources},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
-configured_client!(Syslog: unpooled CreateClientSyslog => SyslogConfigEntry);
+configured_client!(Syslog: unpooled, config Nervix, CreateClientSyslog => SyslogConfigEntry);
 
 /// The listener a syslog client's configuration binds, which every node of the cluster serves.
 #[derive(
@@ -48,6 +48,14 @@ impl SourceEntity for SyslogListenerSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[
+            DeclaredQuiesce::SUSPEND,
+            DeclaredQuiesce::BUFFER,
+            DeclaredQuiesce::DROP,
+        ],
+        locator: None,
+        options: &[],
     };
 }
 
@@ -62,13 +70,6 @@ impl SourceBody for SyslogListenerSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -116,15 +117,15 @@ pub struct SyslogCollectorSink {
 impl SinkEntity for SyslogCollectorSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        locator: None,
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::NoAck { .. })
-    }
 }
 
 impl SinkBody for SyslogCollectorSink {

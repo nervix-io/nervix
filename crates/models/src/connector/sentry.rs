@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, SinkBody, SinkClientReference, SinkEntity, SinkReference,
 };
 
-configured_client!(Sentry: unpooled CreateClientSentry => SentryConfigEntry);
+configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => SentryConfigEntry);
 
 /// The events of the Sentry project a client's configuration addresses.
 #[derive(
@@ -36,15 +36,15 @@ impl SinkEntity for SentryEventSink {
     /// codec's batch transformation can say where in that event the members go.
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: true,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: None,
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for SentryEventSink {

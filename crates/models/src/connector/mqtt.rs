@@ -26,14 +26,15 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, RetryPolicy, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
-configured_client!(Mqtt: unpooled CreateClientMqtt => MqttConfigEntry);
+configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
 
 /// The longest topic filter MQTT carries, in bytes.
 const MQTT_TOPIC_FILTER_MAX: usize = 65_535;
@@ -42,7 +43,8 @@ external_names! {
     /// An MQTT topic filter: 1 to 65,535 bytes without the NUL character, whose levels are joined by
     /// `/` and may be empty. `+` stands for one level and `#` for every remaining level, each only as
     /// a whole level, and `#` only as the last one, as MQTT itself requires.
-    pub struct MqttTopicFilter => mqtt_topic_filter_rule;
+    pub struct MqttTopicFilter => mqtt_topic_filter_rule, label "mqtt_topic_filter",
+        example "devices/+/orders";
 }
 
 fn mqtt_topic_filter_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -63,6 +65,25 @@ fn mqtt_topic_filter_rule(text: &str) -> Result<(), ExternalNameError> {
     }
     Ok(())
 }
+
+/// The keywords of the option that chooses a subscriber's session.
+const SESSION_OPTION: &str = "SESSION";
+/// The keywords of the option that chooses the quality of service a subscriber receives at.
+const QOS_OPTION: &str = "QOS";
+
+/// The session a broker keeps a subscriber's messages for while the subscriber is away: a
+/// persistent one, whose messages are delivered at least once. Suspending a subscriber and
+/// acknowledging its messages both rely on it.
+const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
+    ChoiceRequirement {
+        option: SESSION_OPTION,
+        choice: MqttSession::Persistent.keyword(),
+    },
+    ChoiceRequirement {
+        option: QOS_OPTION,
+        choice: MqttQos::AtLeastOnce.spelling(),
+    },
+];
 
 /// One topic filter an MQTT client subscribes to, kept exactly as written: MQTT topics are
 /// case-sensitive and routinely hold `/`, `.`, `+` or `#`.
@@ -85,6 +106,59 @@ impl SourceEntity for MqttTopicSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        delivery: &[
+            DeclaredDelivery::NO_ACK,
+            DeclaredDelivery::ACK_SEQUENTIAL.requiring(BROKER_KEPT_SESSION),
+            DeclaredDelivery::ACK_PARALLEL.requiring(BROKER_KEPT_SESSION),
+        ],
+        quiesce: &[
+            DeclaredQuiesce::SUSPEND.requiring(BROKER_KEPT_SESSION),
+            DeclaredQuiesce::BUFFER,
+            DeclaredQuiesce::DROP,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::External(MqttTopicFilter::DECLARATION),
+        }),
+        options: &[
+            OptionDeclaration::INSTANCES,
+            OptionDeclaration {
+                keywords: SESSION_OPTION,
+                presence: OptionPresence::Optional {
+                    default: Some(MqttSession::Clean.keyword()),
+                },
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: MqttSession::Clean.keyword(),
+                        value: None,
+                        example: "SESSION CLEAN",
+                    },
+                    OptionChoice {
+                        name: MqttSession::Persistent.keyword(),
+                        value: None,
+                        example: "SESSION PERSISTENT",
+                    },
+                ]),
+            },
+            OptionDeclaration {
+                keywords: QOS_OPTION,
+                presence: OptionPresence::Optional {
+                    default: Some(MqttQos::AtMostOnce.spelling()),
+                },
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: MqttQos::AtMostOnce.spelling(),
+                        value: None,
+                        example: "QOS 0",
+                    },
+                    OptionChoice {
+                        name: MqttQos::AtLeastOnce.spelling(),
+                        value: None,
+                        example: "QOS 1",
+                    },
+                ]),
+            },
+        ],
     };
 }
 
@@ -101,21 +175,18 @@ impl SourceBody for MqttTopicSource {
         &mut self.quiesce
     }
 
-    /// The broker holds messages for a suspended subscriber only when its session is persistent
-    /// and its messages are delivered at least once.
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        match quiesce {
-            IngestQuiesceMode::Suspend => {
-                self.mode.session() == MqttSession::Persistent
-                    && self.mode.qos() == MqttQos::AtLeastOnce
-            }
-            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop => true,
-            IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. } => false,
-        }
-    }
-
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         self.mode.acknowledgement()
+    }
+
+    /// The session and the quality of service this source subscribes with, which suspending it
+    /// and acknowledging its messages require.
+    fn chosen(&self, option: &str) -> Option<&'static str> {
+        match option {
+            SESSION_OPTION => Some(self.mode.session().keyword()),
+            QOS_OPTION => Some(self.mode.qos().spelling()),
+            _ => None,
+        }
     }
 }
 
@@ -136,6 +207,16 @@ impl SourceBody for MqttTopicSource {
 pub enum MqttSession {
     Clean,
     Persistent,
+}
+
+impl MqttSession {
+    /// The keyword a statement chooses this session with after `SESSION`.
+    pub const fn keyword(self) -> &'static str {
+        match self {
+            Self::Clean => "CLEAN",
+            Self::Persistent => "PERSISTENT",
+        }
+    }
 }
 
 #[derive(
@@ -160,6 +241,14 @@ impl MqttQos {
         match self {
             Self::AtMostOnce => 0,
             Self::AtLeastOnce => 1,
+        }
+    }
+
+    /// The literal a statement chooses this quality of service with after `QOS`.
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Self::AtMostOnce => "0",
+            Self::AtLeastOnce => "1",
         }
     }
 }
@@ -255,20 +344,24 @@ pub struct MqttTopicSink {
 impl SinkEntity for MqttTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::MqttQos0,
+            EmitterPublishingModeKind::MqttQos1,
+            EmitterPublishingModeKind::MqttQos2,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::Unquoted {
+                label: "topic_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::MqttQos0 { .. }
-                | EmitterPublishingMode::MqttQos1 { .. }
-                | EmitterPublishingMode::MqttQos2 { .. }
-        )
-    }
 }
 
 impl SinkBody for MqttTopicSink {

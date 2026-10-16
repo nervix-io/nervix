@@ -19,12 +19,13 @@ use strum::AsRefStr;
 
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkValueMapping,
+    SinkValueMappings,
 };
 
-configured_client!(Otel: unpooled CreateClientOtel => OtelConfigEntry);
+configured_client!(Otel: unpooled, config Nervix, CreateClientOtel => OtelConfigEntry);
 
 pub type OtelValueMapping = SinkValueMapping;
 
@@ -129,25 +130,85 @@ pub enum OtelAggregationTemporality {
     Cumulative,
 }
 
+/// `ATTRIBUTES { … }`: the attributes every exported item carries beside its values.
+const ATTRIBUTES: OptionDeclaration = OptionDeclaration {
+    keywords: "ATTRIBUTES",
+    presence: OptionPresence::Optional { default: None },
+    form: OptionForm::Value {
+        value: OptionValue::Mapping,
+        example: "ATTRIBUTES {'tenant' = 'eu'}",
+    },
+};
+
+/// `RESOURCE { … }`: the literal attributes of the resource every export describes.
+const RESOURCE: OptionDeclaration = OptionDeclaration {
+    keywords: "RESOURCE",
+    presence: OptionPresence::Optional { default: None },
+    form: OptionForm::Value {
+        value: OptionValue::Mapping,
+        example: "RESOURCE {'service.name' = 'nervix'}",
+    },
+};
+
+/// `SCOPE '<name>' [VERSION '<version>']`: the instrumentation scope every export names.
+const SCOPE: OptionDeclaration = OptionDeclaration {
+    keywords: "SCOPE",
+    presence: OptionPresence::Optional { default: None },
+    form: OptionForm::Value {
+        value: OptionValue::Clause,
+        example: "SCOPE 'nervix' VERSION '1.0'",
+    },
+};
+
+/// `METRIC '<name>' UNIT '<unit>' [DESCRIPTION '<description>'] <kind>`: the one metric a metrics
+/// sink exports, chosen by its kind.
+const METRIC: OptionDeclaration = OptionDeclaration {
+    keywords: "METRIC",
+    presence: OptionPresence::Required,
+    form: OptionForm::Choice(&[
+        OptionChoice {
+            name: "GAUGE",
+            value: Some(OptionValue::Clause),
+            example: "METRIC 'temperature' UNIT 'Cel' GAUGE",
+        },
+        OptionChoice {
+            name: "SUM",
+            value: Some(OptionValue::Clause),
+            example: "METRIC 'requests' UNIT '1' SUM MONOTONIC DELTA",
+        },
+        OptionChoice {
+            name: "HISTOGRAM",
+            value: Some(OptionValue::Clause),
+            example: "METRIC 'latency' UNIT 'ms' HISTOGRAM CUMULATIVE",
+        },
+    ]),
+};
+
 /// What every OTEL sink declares: an export is one request the collector answers, and its fields
 /// are mapped directly rather than encoded by a codec.
 const OTEL_SINK_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
     writes_headers: false,
-    requires_codec: false,
-    batch_requirement: EmitterBatchRequirement::Optional,
+    body: EmitterBodyForm::Values,
+    batch: EmitterBatchLegality::Optional { maximum: None },
     requires_batch_transformation: false,
-    batch_size_maximum: None,
+    publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+    locator: None,
+    options: &[ATTRIBUTES, RESOURCE, SCOPE],
+    envelope: &[],
+    properties: &[],
+};
+
+/// What a metrics sink declares beside every OTEL sink's declaration: the metric it exports.
+const OTEL_METRICS_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+    options: &[METRIC, ATTRIBUTES, RESOURCE, SCOPE],
+    ..OTEL_SINK_CAPABILITIES
 };
 
 macro_rules! otel_sink_declarations {
-    ($($Sink:ident),+ $(,)?) => {
+    ($($Sink:ident => $capabilities:ident),+ $(,)?) => {
         $(
             impl SinkEntity for $Sink {
-                const CAPABILITIES: EmitSinkCapabilities = OTEL_SINK_CAPABILITIES;
-
-                fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-                    matches!(mode, EmitterPublishingMode::RequestAck { .. })
-                }
+                const CAPABILITIES: EmitSinkCapabilities = $capabilities;
             }
 
             impl SinkBody for $Sink {
@@ -170,7 +231,11 @@ macro_rules! otel_sink_declarations {
     };
 }
 
-otel_sink_declarations!(OtelLogsSink, OtelTracesSink, OtelMetricsSink);
+otel_sink_declarations!(
+    OtelLogsSink => OTEL_SINK_CAPABILITIES,
+    OtelTracesSink => OTEL_SINK_CAPABILITIES,
+    OtelMetricsSink => OTEL_METRICS_CAPABILITIES,
+);
 
 connector_sinks! {
     connector Otel = "OTEL";

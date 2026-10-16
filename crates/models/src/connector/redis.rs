@@ -23,14 +23,15 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    AcknowledgementConfirmation, ChannelName, ClientName, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, PositionClass, SinkBody, SinkClientReference, SinkEntity,
     SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
     SourceReferenceKind,
 };
 
-configured_client!(Redis: pooled CreateClientRedis => RedisConfigEntry);
+configured_client!(Redis: pooled, config NervixWithAddressQuery, CreateClientRedis => RedisConfigEntry);
 
 /// The longest channel Nervix subscribes to, in bytes.
 const REDIS_CHANNEL_MAX: usize = 1024;
@@ -38,7 +39,7 @@ const REDIS_CHANNEL_MAX: usize = 1024;
 external_names! {
     /// A Redis Pub/Sub channel: 1 to 1,024 bytes. A Redis channel is binary-safe, so any text is a
     /// channel, and a `*` is the character itself: a pattern subscription is another entity.
-    pub struct RedisChannelName => redis_channel_rule;
+    pub struct RedisChannelName => redis_channel_rule, label "redis_channel", example "orders";
 }
 
 fn redis_channel_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -64,6 +65,13 @@ impl SourceEntity for RedisPubSubSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Redis),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        locator: Some(LocatorDeclaration {
+            keywords: "CHANNEL",
+            name: LocatorName::External(RedisChannelName::DECLARATION),
+        }),
+        options: &[],
     };
 }
 
@@ -78,13 +86,6 @@ impl SourceBody for RedisPubSubSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -131,15 +132,20 @@ pub struct RedisPubSubSink {
 impl SinkEntity for RedisPubSubSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "CHANNEL",
+            name: LocatorName::Unquoted {
+                label: "channel_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::NoAck { .. })
-    }
 }
 
 impl SinkBody for RedisPubSubSink {

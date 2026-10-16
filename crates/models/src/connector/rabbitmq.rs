@@ -25,21 +25,22 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, QueueName, RetryPolicy, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionDeclaration, PositionClass, QueueName, RetryPolicy, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
-configured_client!(RabbitMq: unpooled CreateClientRabbitMq => RabbitMqConfigEntry);
+configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
 
 /// The longest queue name AMQP 0-9-1 carries, in bytes.
 const RABBITMQ_QUEUE_MAX: usize = 255;
 
 external_names! {
     /// A RabbitMQ queue: 1 to 255 bytes, the length AMQP 0-9-1 carries a queue name in.
-    pub struct RabbitMqQueueName => rabbitmq_queue_rule;
+    pub struct RabbitMqQueueName => rabbitmq_queue_rule, label "rabbitmq_queue", example "orders";
 }
 
 fn rabbitmq_queue_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -66,6 +67,13 @@ impl SourceEntity for RabbitMqQueueSource {
         reference: SourceReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Written,
+        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: Some(LocatorDeclaration {
+            keywords: "QUEUE",
+            name: LocatorName::External(RabbitMqQueueName::DECLARATION),
+        }),
+        options: &[OptionDeclaration::INSTANCES],
     };
 }
 
@@ -80,10 +88,6 @@ impl SourceBody for RabbitMqQueueSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(quiesce, IngestQuiesceMode::Suspend)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -139,18 +143,23 @@ pub struct RabbitMqQueueSink {
 impl SinkEntity for RabbitMqQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::NoAck,
+            EmitterPublishingModeKind::BrokerAck,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "QUEUE",
+            name: LocatorName::Unquoted {
+                label: "queue_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
-        )
-    }
 }
 
 impl SinkBody for RabbitMqQueueSink {

@@ -26,14 +26,16 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, Expression, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSourceCapabilities, PayloadSizeLimit, PositionClass, RetryPolicy,
+    AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, Expression, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
     SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody, SourceEntity,
     SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
-configured_client!(Sqs: unpooled CreateClientSqs => SqsConfigEntry);
+configured_client!(Sqs: unpooled, config Nervix, CreateClientSqs => SqsConfigEntry);
 
 /// The longest queue name SQS admits, its `.fifo` suffix included.
 const SQS_QUEUE_MAX: usize = 80;
@@ -43,7 +45,7 @@ const SQS_FIFO_SUFFIX: &str = ".fifo";
 external_names! {
     /// An SQS queue: 1 to 80 ASCII letters, digits, `-` and `_`, where the name of a FIFO queue
     /// ends in `.fifo`, as SQS itself requires.
-    pub struct SqsQueueName => sqs_queue_rule;
+    pub struct SqsQueueName => sqs_queue_rule, label "sqs_queue", example "orders";
 }
 
 fn sqs_queue_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -83,6 +85,13 @@ impl SourceEntity for SqsQueueSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
+        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: Some(LocatorDeclaration {
+            keywords: "QUEUE",
+            name: LocatorName::External(SqsQueueName::DECLARATION),
+        }),
+        options: &[OptionDeclaration::INSTANCES],
     };
 }
 
@@ -97,10 +106,6 @@ impl SourceBody for SqsQueueSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(quiesce, IngestQuiesceMode::Suspend)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -173,18 +178,40 @@ pub enum SqsFifoGroup {
 impl SinkEntity for SqsQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional {
+            maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),
+        },
         requires_batch_transformation: false,
-        batch_size_maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),
+        publishing_modes: &[
+            EmitterPublishingModeKind::SqsSingle,
+            EmitterPublishingModeKind::SqsBatch,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "QUEUE",
+            name: LocatorName::Unquoted {
+                label: "queue_name",
+            },
+        }),
+        options: &[OptionDeclaration {
+            keywords: "FIFO GROUP",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Choice(&[
+                OptionChoice {
+                    name: "<expression>",
+                    value: Some(OptionValue::Expression),
+                    example: "FIFO GROUP tenant",
+                },
+                OptionChoice {
+                    name: "FROM BRANCH",
+                    value: None,
+                    example: "FIFO GROUP FROM BRANCH",
+                },
+            ]),
+        }],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::SqsSingle { .. } | EmitterPublishingMode::SqsBatch { .. }
-        )
-    }
 }
 
 impl SinkBody for SqsQueueSink {

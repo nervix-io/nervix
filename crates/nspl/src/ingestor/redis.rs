@@ -26,7 +26,7 @@ pub(super) fn pubsub_body<'src>()
 -> impl Parser<'src, &'src [Token], RedisPubSubSource, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Channel))
-        .then(external_name("redis_channel", RedisChannelName::parse))
+        .then(external_name::<RedisChannelName>())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(RedisPubSubIngestMode::NoAck))
         .then(push_quiesce_clause())

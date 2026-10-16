@@ -12,8 +12,8 @@ use nervix_models::{
     NatsIngestMode, NatsSourceEntity, NatsSubjectSource, PrometheusIngestMode,
     PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarTopicSource,
     RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSourceEntity, RedisPubSubIngestMode,
-    RedisPubSubSource, RedisSourceEntity, RetryPolicy, SourceBody, SqsIngestMode, SqsQueueSource,
-    SqsSourceEntity, SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity,
+    RedisPubSubSource, RedisSourceEntity, RetryPolicy, SourceBody, SourceEntity, SqsIngestMode,
+    SqsQueueSource, SqsSourceEntity, SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity,
     TransportIngestorInput, WebsocketsConnectionSource, WebsocketsEndpointSource,
     WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode, ZeroMqPullSource,
     ZeroMqSourceEntity,
@@ -306,7 +306,10 @@ impl Arbitrary<'_> {
     }
 
     /// `source` quiescing in one of the modes it supports.
-    fn quiescing_as_supported<Source: SourceBody>(&mut self, mut source: Source) -> Source {
+    fn quiescing_as_supported<Source: SourceBody + SourceEntity>(
+        &mut self,
+        mut source: Source,
+    ) -> Source {
         let quiesce = self.supported_quiesce(&source);
         *source.quiesce_mut() = quiesce;
         source
@@ -320,8 +323,11 @@ impl Arbitrary<'_> {
         candidates[chosen].clone()
     }
 
-    /// One of the quiesce modes `source` supports, as its vocabulary states them.
-    fn supported_quiesce<Source: SourceBody>(&mut self, source: &Source) -> IngestQuiesceMode {
+    /// One of the quiesce modes `source` supports, as its entity declares them.
+    fn supported_quiesce<Source: SourceBody + SourceEntity>(
+        &mut self,
+        source: &Source,
+    ) -> IngestQuiesceMode {
         let candidates = self.quiesce_candidates();
         let mut supported = Vec::with_capacity(candidates.len());
         for candidate in candidates {

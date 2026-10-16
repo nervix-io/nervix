@@ -17,12 +17,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
     SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(Postgres: pooled CreateClientPostgres => PostgresConfigEntry);
+configured_client!(Postgres: pooled, config NervixWithAddressQuery, CreateClientPostgres => PostgresConfigEntry);
 
 pub type PostgresValueMapping = SinkValueMapping;
 
@@ -49,15 +50,35 @@ pub enum PostgresConflictAction {
 impl SinkEntity for PostgresTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "INSERT TO TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[OptionDeclaration {
+            keywords: "ON CONFLICT",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Choice(&[
+                OptionChoice {
+                    name: "DO NOTHING",
+                    value: None,
+                    example: "ON CONFLICT DO NOTHING",
+                },
+                OptionChoice {
+                    name: "DO UPDATE",
+                    value: None,
+                    example: "ON CONFLICT ('id') DO UPDATE",
+                },
+            ]),
+        }],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for PostgresTableSink {

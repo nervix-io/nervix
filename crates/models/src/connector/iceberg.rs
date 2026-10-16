@@ -20,15 +20,16 @@ use strum::AsRefStr;
 
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(S3: unpooled CreateClientS3 => S3ConfigEntry);
-configured_client!(Gcs: unpooled CreateClientGcs => GcsConfigEntry);
-configured_client!(AzureBlob: unpooled CreateClientAzureBlob => AzureBlobConfigEntry);
-configured_client!(IcebergRest: unpooled CreateClientIcebergRest => IcebergRestConfigEntry);
+configured_client!(S3: unpooled, config NervixWithPropertyNamespaces, CreateClientS3 => S3ConfigEntry);
+configured_client!(Gcs: unpooled, config NervixWithPropertyNamespaces, CreateClientGcs => GcsConfigEntry);
+configured_client!(AzureBlob: unpooled, config NervixWithPropertyNamespaces, CreateClientAzureBlob => AzureBlobConfigEntry);
+configured_client!(IcebergRest: unpooled, config NervixWithPropertyNamespaces, CreateClientIcebergRest => IcebergRestConfigEntry);
 
 pub type IcebergValueMapping = SinkValueMapping;
 
@@ -111,15 +112,66 @@ impl IcebergStorageBackend {
 impl SinkEntity for IcebergTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[
+            OptionDeclaration {
+                keywords: "ON",
+                presence: OptionPresence::Required,
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "S3",
+                        value: Some(OptionValue::Client(ConnectorKind::S3)),
+                        example: "ON S3",
+                    },
+                    OptionChoice {
+                        name: "GCS",
+                        value: Some(OptionValue::Client(ConnectorKind::Gcs)),
+                        example: "ON GCS",
+                    },
+                    OptionChoice {
+                        name: "AZURE_BLOB",
+                        value: Some(OptionValue::Client(ConnectorKind::AzureBlob)),
+                        example: "ON AZURE_BLOB",
+                    },
+                ]),
+            },
+            OptionDeclaration {
+                keywords: "LOCATION",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Text,
+                    example: "LOCATION 's3://warehouse/orders'",
+                },
+            },
+            OptionDeclaration {
+                keywords: "CATALOG",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Client(ConnectorKind::IcebergRest),
+                    example: "CATALOG catalog",
+                },
+            },
+            OptionDeclaration {
+                keywords: "COMMIT EACH",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Clause,
+                    example: "COMMIT EACH 10s MAX SIZE 64MiB",
+                },
+            },
+        ],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for IcebergTableSink {

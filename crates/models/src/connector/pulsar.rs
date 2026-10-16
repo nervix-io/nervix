@@ -25,14 +25,15 @@ use super::{
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, KafkaIngestMode, PositionClass, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, KafkaIngestMode,
+    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
 };
 
-configured_client!(Pulsar: unpooled CreateClientPulsar => PulsarConfigEntry);
+configured_client!(Pulsar: unpooled, config Nervix, CreateClientPulsar => PulsarConfigEntry);
 
 /// The longest topic Nervix consumes, in bytes.
 const PULSAR_TOPIC_MAX: usize = 1024;
@@ -47,9 +48,10 @@ external_names! {
     /// A Pulsar topic: a local name, which the connector places in its client's namespace, or a
     /// qualified `persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`;
     /// at most 1,024 bytes without whitespace or control characters, and with no empty level.
-    pub struct PulsarTopicName => pulsar_topic_rule;
+    pub struct PulsarTopicName => pulsar_topic_rule, label "pulsar_topic", example "orders";
     /// A Pulsar subscription: 1 to 255 bytes without control characters.
-    pub struct PulsarSubscriptionName => pulsar_subscription_rule;
+    pub struct PulsarSubscriptionName => pulsar_subscription_rule, label "pulsar_subscription",
+        example "readers";
 }
 
 fn pulsar_topic_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -120,6 +122,27 @@ impl SourceEntity for PulsarTopicSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,
         acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        delivery: &[
+            DeclaredDelivery::NO_ACK,
+            DeclaredDelivery::ACK_SEQUENTIAL,
+            DeclaredDelivery::ACK_PARALLEL,
+        ],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::External(PulsarTopicName::DECLARATION),
+        }),
+        options: &[
+            OptionDeclaration {
+                keywords: "SUBSCRIPTION",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Name(PulsarSubscriptionName::DECLARATION),
+                    example: "SUBSCRIPTION 'readers'",
+                },
+            },
+            OptionDeclaration::INSTANCES,
+        ],
     };
 }
 
@@ -134,10 +157,6 @@ impl SourceBody for PulsarTopicSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(quiesce, IngestQuiesceMode::Suspend)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -169,18 +188,23 @@ pub struct PulsarTopicSink {
 impl SinkEntity for PulsarTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::NoAck,
+            EmitterPublishingModeKind::BrokerAck,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::Unquoted {
+                label: "topic_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
-        )
-    }
 }
 
 impl SinkBody for PulsarTopicSink {
