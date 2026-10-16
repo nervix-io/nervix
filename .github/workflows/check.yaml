@@ -320,7 +320,7 @@ jobs:
   # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
   # its own budget, so the stressed restore scenarios, which share the stress selection's build,
   # run beside it rather than after it. Diagnostic coverage stays in this job's artifact, apart
-  # from ordinary coverage and the CRAP gate.
+  # from ordinary coverage and its CRAP report.
   deloxide:
     name: deloxide (${{ matrix.selection }})
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
@@ -902,7 +902,7 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
-      # The CRAP step runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
       - name: Install the pinned complexity analyzer
         run: just install-cargo-crap
 
@@ -930,6 +930,14 @@ jobs:
       - name: Merge coverage
         run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
 
+      # The pinned cargo-crap scores the repository's Rust sources against the merged report. No score
+      # fails the step: it fails only when the analysis cannot describe the report, and it writes its
+      # JSON and Markdown reports either way.
+      - name: Report CRAP
+        run: just check-coverage
+
+      # The comment carries the CRAP section for the files the pull request changes, or the CRAP
+      # step's failure, or that its report is missing.
       - name: Report patch line coverage
         if: always()
         continue-on-error: true
@@ -941,10 +949,8 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           just coverage-patch "$BASE_SHA" lcov-workspace.info \
+            --crap target/crap-report/crap.json \
             --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA"
-
-      - name: Check CRAP
-        run: just check-coverage
 
       - name: Upload merged coverage
         if: always()
@@ -956,6 +962,8 @@ jobs:
             lcov-workspace.info
             target/coverage-merge/record.json
             target/patch-coverage.md
+            target/crap-report/crap.json
+            target/crap-report/crap.md
           if-no-files-found: warn
 
       - name: Publish kache cache
@@ -1273,6 +1281,9 @@ jobs:
       - name: Ordinary coverage merge
         run: just coverage-merge-runner
 
+      - name: CRAP report
+        run: just coverage-crap-report-runner
+
       - name: Paced simulation Python open policy
         run: just coverage-paced-simulation-python
 
@@ -1334,6 +1345,7 @@ jobs:
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
             target/coverage-merge/python.lcov
+            target/crap-report/python.lcov
             target/paced-simulation/python.lcov
             target/release-evidence-coverage/python.lcov
             target/kache-ci/python.lcov

@@ -1,12 +1,12 @@
-"""The pinned cargo-crap analyzer: its one declared version, its installation and one analysis.
+"""The pinned cargo-crap analyzer: its one declared version, its installation and its analyses.
 
-Owns: which cargo-crap build this repository runs, where that build lives and how a complexity
-analysis is run and read.
+Owns: which cargo-crap build this repository runs, where that build lives, which sources its walk
+reads, and how an analysis, alone or against a coverage report, is run and read.
 May depend on: Cargo, which builds the analyzer through the compiler wrapper the host configures,
 and the analyzer's versioned JSON report.
 Must not know: which functions a count governs, what threshold a count applies or what a
 coverage score means. The complexity count of `scripts/ratchet.py` and the CRAP report of
-`just check-coverage` decide those.
+`scripts/crap_report.py` decide those.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
@@ -30,7 +31,7 @@ class AnalyzerError(Exception):
     """The pinned analyzer is missing or another version, or its analysis did not complete."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class Function:
     """One function the analyzer measured, addressed by its repository-relative file."""
 
@@ -38,6 +39,11 @@ class Function:
     name: str
     line: int
     complexity: float
+
+    @classmethod
+    def read(cls, entry: dict[str, object]) -> Function:
+        """The function one entry of the analyzer's JSON report describes."""
+        return cls(PurePosixPath(entry["file"]).as_posix(), entry["function"], entry["line"], entry["cyclomatic"])
 
 
 def default_target() -> Path:
@@ -142,17 +148,13 @@ def unreachable_sources(root: Path, paths: Iterable[str]) -> list[str]:
     return unreachable
 
 
-def analyze(root: Path, target: Path, excludes: Sequence[str]) -> list[Function]:
-    """Measure every function of the Rust sources below `root` that the analyzer's walk reaches.
+def analysis_command(root: Path, target: Path, excludes: Sequence[str]) -> list[str]:
+    """The pinned analyzer's JSON analysis of the sources below `root`, started in `root`.
 
-    The walk skips Git-ignored, hidden and symbolic-link paths and every path that one of the
-    `excludes` globs matches relative to `root`. An analysis that skipped a source, read a
-    configuration, used another `?` weight or measured nothing is refused rather than read as an
-    empty result.
+    A missing or other build is refused, and so is a configuration file in the analyzer's reach.
     """
 
     path = verified_executable(target)
-    root = root.resolve()
     configuration = configuration_in_reach(root)
     if configuration is not None:
         raise AnalyzerError(
@@ -163,15 +165,14 @@ def analyze(root: Path, target: Path, excludes: Sequence[str]) -> list[Function]
     for pattern in excludes:
         command.extend(["--exclude", pattern])
     command.extend(["--format", "json", "--sort", "file"])
-    completed = subprocess.run(command, cwd=root, capture_output=True, text=True)
-    if completed.returncode:
-        raise AnalyzerError(f"{CRATE} failed with exit {completed.returncode}:\n{completed.stderr}")
-    # Without coverage input the analyzer writes to standard error only for a source it could not
-    # read or parse, and it then continues without that source's functions.
-    if completed.stderr:
-        raise AnalyzerError(f"{CRATE} skipped sources it could not analyze:\n{completed.stderr}")
+    return command
+
+
+def report_entries(output: str) -> list[dict[str, object]]:
+    """The entries of the analyzer's JSON report, refusing a report of another version or weight."""
+
     try:
-        report = json.loads(completed.stdout)
+        report = json.loads(output)
     except ValueError as error:
         raise AnalyzerError(f"{CRATE} wrote no JSON report: {error}") from error
     if report.get("version") != VERSION:
@@ -179,13 +180,94 @@ def analyze(root: Path, target: Path, excludes: Sequence[str]) -> list[Function]
     # The report names a `?` weight only when it is not the classical weight of 1.
     if "try_weight" in report:
         raise AnalyzerError(f"{CRATE} weighted `?` at {report['try_weight']}, not the classical 1")
-    functions = [
-        Function(PurePosixPath(entry["file"]).as_posix(), entry["function"], entry["line"], entry["cyclomatic"])
-        for entry in report["entries"]
-    ]
+    return report["entries"]
+
+
+def analyze(root: Path, target: Path, excludes: Sequence[str]) -> list[Function]:
+    """Measure every function of the Rust sources below `root` that the analyzer's walk reaches.
+
+    The walk skips Git-ignored, hidden and symbolic-link paths and every path that one of the
+    `excludes` globs matches relative to `root`. An analysis that skipped a source, read a
+    configuration, used another `?` weight or measured nothing is refused rather than read as an
+    empty result.
+    """
+
+    root = root.resolve()
+    command = analysis_command(root, target, excludes)
+    completed = subprocess.run(command, cwd=root, capture_output=True, text=True)
+    if completed.returncode:
+        raise AnalyzerError(f"{CRATE} failed with exit {completed.returncode}:\n{completed.stderr}")
+    # Without coverage input the analyzer writes to standard error only for a source it could not
+    # read or parse, and it then continues without that source's functions.
+    if completed.stderr:
+        raise AnalyzerError(f"{CRATE} skipped sources it could not analyze:\n{completed.stderr}")
+    functions = [Function.read(entry) for entry in report_entries(completed.stdout)]
     if not functions:
         raise AnalyzerError(f"{CRATE} measured no function below {root}")
     return functions
+
+
+@dataclass(frozen=True)
+class Scored:
+    """A function the analyzer measured against a coverage report, with what the report covers of it."""
+
+    function: Function
+    # The percentage of the function's executable lines that the report covers.
+    coverage: float
+    crap: float
+
+
+@dataclass(frozen=True)
+class Scores:
+    """One analysis against a coverage report."""
+
+    scored: tuple[Scored, ...]
+    # Functions in the files that the report holds no record of: unmeasured, not uncovered.
+    unmeasured: tuple[Function, ...]
+
+
+def score(root: Path, target: Path, excludes: Sequence[str], report: Path) -> Scores:
+    """Measure the functions that `analyze` measures against `report`, an LCOV report whose sources
+    are paths relative to `root`.
+
+    The analyzer binds a relative record to every source whose path ends with it, so a file that
+    the report holds no record of would take the coverage of another file of the same name, such
+    as another crate's `src/lib.rs`. The analyzer is therefore handed each record under its
+    absolute path, which binds it to its own source alone. `analyze` first proves that the walk read
+    every source, and the analysis against the report must measure exactly the functions it did.
+    """
+
+    functions = analyze(root, target, excludes)
+    root = root.resolve()
+    command = analysis_command(root, target, excludes)
+    with tempfile.TemporaryDirectory(prefix="cargo-crap-") as scratch:
+        located = Path(scratch) / "lcov.info"
+        with report.open(encoding="utf-8") as content, located.open("w", encoding="utf-8") as rewritten:
+            for line in content:
+                if line.startswith("SF:"):
+                    source = line[3:].rstrip("\n")
+                    if PurePosixPath(source).is_absolute():
+                        raise AnalyzerError(f"{report} names {source}, not a source relative to {root}")
+                    line = f"SF:{root / source}\n"
+                rewritten.write(line)
+        completed = subprocess.run([*command, "--lcov", str(located)], cwd=root, capture_output=True, text=True)
+    if completed.returncode:
+        raise AnalyzerError(f"{CRATE} failed with exit {completed.returncode} against {report}:\n{completed.stderr}")
+    # Against a report the analyzer also writes to standard error how the report and the sources
+    # overlap; `analyze` has already refused a source the walk skipped.
+    scored = []
+    unmeasured = []
+    for entry in report_entries(completed.stdout):
+        function = Function.read(entry)
+        if entry["coverage"] is None:
+            unmeasured.append(function)
+        else:
+            scored.append(Scored(function, entry["coverage"], entry["crap"]))
+    alone = sorted(functions)
+    against = sorted([*(item.function for item in scored), *unmeasured])
+    if alone != against:
+        raise AnalyzerError(f"{CRATE} measured other functions against {report} than without it")
+    return Scores(tuple(scored), tuple(unmeasured))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

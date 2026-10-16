@@ -225,6 +225,68 @@ class PatchCoverageTests(unittest.TestCase):
         self.assertIn("0.00%", output.read_text())
         self.assertEqual(summary.read_text(), output.read_text())
 
+    def test_a_file_the_patch_only_shortens_is_changed_without_added_lines(self) -> None:
+        shortened = self.root / "src" / "shortened.py"
+        shortened.write_text("def first():\n    return 1\n\ndef second():\n    return 2\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD").strip()
+        shortened.write_text("def first():\n    return 1\n")
+        self.source.write_text("def answer():\n    return 2\n")
+        (self.root / "src" / "added.py").write_text("value = 1\n")
+        self.commit()
+        patch = patch_coverage.Patch.load(self.root, base, "HEAD")
+        self.assertEqual(sorted(patch.lines), ["src/added.py", "src/sample.py"])
+        self.assertEqual(patch.removals, frozenset({"src/shortened.py"}))
+        self.assertEqual(patch.files, frozenset({"src/added.py", "src/sample.py", "src/shortened.py"}))
+        # A deleted file is not held by the tested commit, so the patch changes nothing there.
+        shortened.unlink()
+        self.commit()
+        self.assertNotIn("src/shortened.py", patch_coverage.Patch.load(self.root, base, "HEAD").files)
+
+    def test_the_crap_section_for_the_changed_files_follows_the_patch_section(self) -> None:
+        self.source.write_text("def answer():\n    return 2\n")
+        self.commit()
+        report = self.report("coverage.lcov", "src/sample.py", {1: 1, 2: 1})
+        crap = self.root / "target" / "crap.json"
+        crap.parent.mkdir()
+        crap.write_text(json.dumps({
+            "verdict": "complete", "report": "lcov-workspace.info", "revision": "r", "analyzer": "cargo-crap 0.6.1",
+            "threshold": 30,
+            "scope": {"report_files": 2, "report_rust_files": 2, "matched_files": 2, "unscored_files": [], "unmeasured_files": []},
+            "totals": {"measured": 2, "above_threshold": 2, "unmeasured": 0},
+            "functions": [
+                {"file": "src/sample.py", "function": "answer", "line": 1, "complexity": 31.0, "coverage": 0.0, "crap": 992.0},
+                {"file": "src/unchanged.rs", "function": "elsewhere", "line": 1, "complexity": 40.0, "coverage": 0.0, "crap": 1640.0},
+            ],
+            "unmeasured": [],
+        }))
+        output = self.root / "target" / "patch.md"
+        with redirect_stdout(io.StringIO()):
+            status = patch_coverage.main(
+                ["--base", self.base, "--report", str(report), "--output", str(output), "--crap", "target/crap.json"],
+                root=self.root,
+            )
+        body = output.read_text()
+        self.assertEqual(status, 0)
+        self.assertLess(body.index("## Patch coverage"), body.index("## CRAP"))
+        self.assertIn("| <code>answer</code> | <code>src/sample.py:1</code> | 992.0 | 31 | 0.0% |", body)
+        self.assertNotIn("elsewhere", body)
+        self.assertIn("Project: 2 of 2 measured functions above 30.", body)
+
+    def test_a_missing_crap_report_is_stated_and_the_comment_is_still_written(self) -> None:
+        self.source.write_text("def answer():\n    return 2\n")
+        self.commit()
+        report = self.report("coverage.lcov", "src/sample.py", {1: 1, 2: 1})
+        output = self.root / "target" / "patch.md"
+        with redirect_stdout(io.StringIO()):
+            status = patch_coverage.main(
+                ["--base", self.base, "--report", str(report), "--output", str(output), "--crap", "target/missing.json"],
+                root=self.root,
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("100.00%", output.read_text())
+        self.assertIn("**The CRAP report is unavailable**", output.read_text())
+
 
 class PublicationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -237,7 +299,7 @@ class PublicationTests(unittest.TestCase):
             {"id": index, "body": scope.marker(), "user": {"login": "github-actions[bot]"}}
             for index, scope in enumerate(scopes, start=1)
         ]]
-        measured = patch_coverage.Coverage({}).measure(patch_coverage.Patch("base", "head", {}))
+        measured = patch_coverage.Coverage({}).measure(patch_coverage.Patch("base", "head", {}, frozenset()))
         for index, scope in enumerate(scopes, start=1):
             with self.subTest(scope=scope):
                 body = measured.markdown(scope=scope)
@@ -254,7 +316,7 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "turmoil.md"
-            patch = patch_coverage.Patch("base", "tested-merge", {})
+            patch = patch_coverage.Patch("base", "tested-merge", {}, frozenset())
             with mock.patch.object(patch_coverage.Patch, "load", return_value=patch):
                 with mock.patch.object(patch_coverage.Coverage, "load", return_value=patch_coverage.Coverage({})):
                     with mock.patch.object(patch_coverage.Publication, "publish") as publish, redirect_stdout(io.StringIO()):
@@ -308,7 +370,7 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "report.md"
-            patch = patch_coverage.Patch("base", "head", {})
+            patch = patch_coverage.Patch("base", "head", {}, frozenset())
             coverage = patch_coverage.Coverage({})
             with mock.patch.object(patch_coverage.Patch, "load", return_value=patch):
                 with mock.patch.object(patch_coverage.Coverage, "load", return_value=coverage):
@@ -326,7 +388,7 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "report.md"
-            patch = patch_coverage.Patch("base", "head", {})
+            patch = patch_coverage.Patch("base", "head", {}, frozenset())
             with mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": ""}):
                 with mock.patch.object(patch_coverage.Patch, "load", return_value=patch):
                     with mock.patch.object(patch_coverage.Coverage, "load", return_value=patch_coverage.Coverage({})):
@@ -347,6 +409,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", report)
         self.assertIn("if: always()", report)
         self.assertIn('just coverage-patch "$BASE_SHA" lcov-workspace.info', report)
+        self.assertIn("--crap target/crap-report/crap.json", report)
         self.assertIn('--pr-head "$PR_HEAD_SHA"', report)
         self.assertIn("pull-requests: write", coverage)
         self.assertIn("fetch-depth: 0", coverage)
