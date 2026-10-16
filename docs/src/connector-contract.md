@@ -725,10 +725,27 @@ invalid payload format) refuses it, and every other ending leaves it unresolved:
 connection or its session failed, or the reason code is not about the record. The client's request
 queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
 so the client can refuse a record only while the queue still holds an earlier failed attempt's
-requests, before the broker answered any record of the publish. The Kafka, Pulsar and NATS
-JetStream sinks still await their answers through windows of their own, which drop their in-flight
-records when the driver refuses to take one, so a retry can resend records their broker already
-confirmed; RabbitMQ settles its records when it loses a channel instead.
+requests, before the broker answered any record of the publish.
+
+The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
+hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
+invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
+unresolved, including a producer that drops the record without one. When the producer refuses to
+take a record for a reason that is not the record's own, such as a full producer queue, the publish
+ends through the window, so every record the broker already confirmed is delivered first and is not
+sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
+own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
+producer left at librdkafka's five-minute default would keep retrying a record after the publish
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
+librdkafka checks message timeouts about once a second, so the producer gives a record up within
+about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
+holds refuses the sink when it starts. In `MODE NO ACK` the producer taking a record into its queue
+delivers it, and the client's own delivery bound applies.
+
+The Pulsar and NATS JetStream sinks still await their answers through windows of their own, which
+drop their in-flight records when the driver refuses to take one, so a retry can resend records
+their broker already confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one

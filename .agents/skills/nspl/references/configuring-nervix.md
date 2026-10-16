@@ -310,8 +310,11 @@ relay. Do not use them to scan across branches.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
-- Treat Kafka emitter success as local librdkafka producer-queue admission. Even in `ATTACHED`
-  mode, Nervix does not wait for a broker delivery receipt before completing its ACK share.
+- Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
+  `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
+  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
+  `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
+  bound.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
