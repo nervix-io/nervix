@@ -61,6 +61,7 @@ if [[ -s "${window_path}" ]] && ! jq -e "${window_contract}" "${window_path}" >/
 fi
 
 jq -n \
+    --argjson modulus "${CHAOS_SCALE_MODULUS:-30}" \
     --slurpfile accepted "${accepted_path}" \
     --slurpfile unique "${unique_path}" \
     --slurpfile windows "${window_path}" '
@@ -90,7 +91,7 @@ jq -n \
                      | {expected: $wanted, observed: $copy}]};
 
     ($accepted | sort_by(.sequence)) as $source
-    | ($source | map(select(.sequence < 30))) as $expected_unique
+    | ($source | map(select(.sequence < $modulus))) as $expected_unique
     | ($source | group_by(.branch_name) | map(sort_by(.sequence) | complete_windows(.)) | add // [])
         as $expected_windows
     | judge($expected_unique; $unique; .event_id) as $deduplicator

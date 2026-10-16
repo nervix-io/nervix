@@ -51,6 +51,8 @@ on:
         options:
           - smoke
           - soak
+          - backup07
+          - backup07scale
         default: smoke
 
 permissions:

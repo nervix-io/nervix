@@ -8,19 +8,31 @@
           "id": "baseline-3",
           "shard": 1,
           "budget_minutes": 14,
-          "run": ["baseline", "--nodes", "3"]
+          "run": [
+            "baseline",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "leader-crash-3",
           "shard": 1,
           "budget_minutes": 7,
-          "run": ["leader-crash", "--nodes", "3"]
+          "run": [
+            "leader-crash",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "partition-follower",
           "shard": 1,
           "budget_minutes": 9,
-          "run": ["partition-recovery", "--case", "follower"]
+          "run": [
+            "partition-recovery",
+            "--case",
+            "follower"
+          ]
         }
       ]
     },
@@ -31,322 +43,756 @@
           "id": "mixed-seed-42",
           "shard": 1,
           "budget_minutes": 60,
-          "run": ["mixed-instability", "--seed", "42", "--duration", "30m", "--policy", "preserve-quorum"]
+          "run": [
+            "mixed-instability",
+            "--seed",
+            "42",
+            "--duration",
+            "30m",
+            "--policy",
+            "preserve-quorum"
+          ]
         },
         {
           "id": "baseline-1",
           "shard": 1,
           "budget_minutes": 13,
-          "run": ["baseline", "--nodes", "1"]
+          "run": [
+            "baseline",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "baseline-3",
           "shard": 1,
           "budget_minutes": 14,
-          "run": ["baseline", "--nodes", "3"]
+          "run": [
+            "baseline",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "cluster-restart-1",
           "shard": 1,
           "budget_minutes": 6,
-          "run": ["cluster-restart", "--nodes", "1"]
+          "run": [
+            "cluster-restart",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "cluster-restart-3",
           "shard": 1,
           "budget_minutes": 7,
-          "run": ["cluster-restart", "--nodes", "3"]
+          "run": [
+            "cluster-restart",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "mixed-seed-45",
           "shard": 2,
           "budget_minutes": 60,
-          "run": ["mixed-instability", "--seed", "45", "--duration", "30m", "--policy", "temporary-quorum-loss"]
+          "run": [
+            "mixed-instability",
+            "--seed",
+            "45",
+            "--duration",
+            "30m",
+            "--policy",
+            "temporary-quorum-loss"
+          ]
         },
         {
           "id": "leader-crash-1",
           "shard": 2,
           "budget_minutes": 6,
-          "run": ["leader-crash", "--nodes", "1"]
+          "run": [
+            "leader-crash",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "leader-crash-3",
           "shard": 2,
           "budget_minutes": 7,
-          "run": ["leader-crash", "--nodes", "3"]
+          "run": [
+            "leader-crash",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "follower-crash",
           "shard": 2,
           "budget_minutes": 5,
-          "run": ["follower-crash"]
+          "run": [
+            "follower-crash"
+          ]
         },
         {
           "id": "mixed-seed-136",
           "shard": 3,
           "budget_minutes": 60,
           "note": "Crashes a voter inside the bootstrap node's crash to verify rejoin through recovered Raft peers",
-          "run": ["mixed-instability", "--seed", "136", "--duration", "30m", "--policy", "temporary-quorum-loss"]
+          "run": [
+            "mixed-instability",
+            "--seed",
+            "136",
+            "--duration",
+            "30m",
+            "--policy",
+            "temporary-quorum-loss"
+          ]
         },
         {
           "id": "ingestor-owner-crash",
           "shard": 3,
           "budget_minutes": 6,
-          "run": ["ingestor-owner-crash"]
+          "run": [
+            "ingestor-owner-crash"
+          ]
         },
         {
           "id": "emitter-owner-crash",
           "shard": 3,
           "budget_minutes": 5,
-          "run": ["emitter-owner-crash"]
+          "run": [
+            "emitter-owner-crash"
+          ]
         },
         {
           "id": "stale-follower",
           "shard": 3,
           "budget_minutes": 4,
-          "run": ["stale-follower"]
+          "run": [
+            "stale-follower"
+          ]
         },
         {
           "id": "former-owner-restart",
           "shard": 3,
           "budget_minutes": 10,
-          "run": ["former-owner-restart"]
+          "run": [
+            "former-owner-restart"
+          ]
         },
         {
           "id": "mixed-rotating-preserve",
           "shard": 4,
           "budget_minutes": 60,
           "note": "Draws a new seed for every run and records it",
-          "run": ["mixed-instability", "--duration", "30m", "--policy", "preserve-quorum"]
+          "run": [
+            "mixed-instability",
+            "--duration",
+            "30m",
+            "--policy",
+            "preserve-quorum"
+          ]
         },
         {
           "id": "rolling-restart-1",
           "shard": 4,
           "budget_minutes": 5,
-          "run": ["rolling-restart", "--nodes", "1"]
+          "run": [
+            "rolling-restart",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "rolling-restart-3",
           "shard": 4,
           "budget_minutes": 7,
-          "run": ["rolling-restart", "--nodes", "3"]
+          "run": [
+            "rolling-restart",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "backup-1",
           "shard": 4,
           "budget_minutes": 4,
-          "run": ["backup", "--nodes", "1"]
+          "run": [
+            "backup",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "backup-3",
           "shard": 4,
           "budget_minutes": 4,
-          "run": ["backup", "--nodes", "3"]
+          "run": [
+            "backup",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "mixed-rotating-temporary",
           "shard": 5,
           "budget_minutes": 60,
           "note": "Draws a new seed for every run and records it",
-          "run": ["mixed-instability", "--duration", "30m", "--policy", "temporary-quorum-loss"]
+          "run": [
+            "mixed-instability",
+            "--duration",
+            "30m",
+            "--policy",
+            "temporary-quorum-loss"
+          ]
         },
         {
           "id": "pause-resume",
           "shard": 5,
           "budget_minutes": 14,
-          "run": ["pause-resume"]
+          "run": [
+            "pause-resume"
+          ]
         },
         {
           "id": "partition-follower",
           "shard": 6,
           "budget_minutes": 9,
-          "run": ["partition-recovery", "--case", "follower"]
+          "run": [
+            "partition-recovery",
+            "--case",
+            "follower"
+          ]
         },
         {
           "id": "partition-asymmetric",
           "shard": 6,
           "budget_minutes": 7,
-          "run": ["partition-recovery", "--case", "asymmetric"]
+          "run": [
+            "partition-recovery",
+            "--case",
+            "asymmetric"
+          ]
         },
         {
           "id": "partition-leader",
           "shard": 6,
           "budget_minutes": 7,
-          "run": ["partition-recovery", "--case", "leader"]
+          "run": [
+            "partition-recovery",
+            "--case",
+            "leader"
+          ]
         },
         {
           "id": "partition-quorum-loss",
           "shard": 6,
           "budget_minutes": 8,
-          "run": ["partition-recovery", "--case", "quorum-loss"]
+          "run": [
+            "partition-recovery",
+            "--case",
+            "quorum-loss"
+          ]
         },
         {
           "id": "degraded-delay",
           "shard": 6,
           "budget_minutes": 10,
-          "run": ["degraded-links", "--profile", "delay"]
+          "run": [
+            "degraded-links",
+            "--profile",
+            "delay"
+          ]
         },
         {
           "id": "degraded-jitter",
           "shard": 6,
           "budget_minutes": 10,
-          "run": ["degraded-links", "--profile", "jitter"]
+          "run": [
+            "degraded-links",
+            "--profile",
+            "jitter"
+          ]
         },
         {
           "id": "degraded-random-loss",
           "shard": 6,
           "budget_minutes": 10,
-          "run": ["degraded-links", "--profile", "random-loss"]
+          "run": [
+            "degraded-links",
+            "--profile",
+            "random-loss"
+          ]
         },
         {
           "id": "degraded-burst-loss",
           "shard": 6,
           "budget_minutes": 10,
-          "run": ["degraded-links", "--profile", "burst-loss"]
+          "run": [
+            "degraded-links",
+            "--profile",
+            "burst-loss"
+          ]
         },
         {
           "id": "degraded-rate-limit",
           "shard": 6,
           "budget_minutes": 10,
-          "run": ["degraded-links", "--profile", "rate-limit"]
+          "run": [
+            "degraded-links",
+            "--profile",
+            "rate-limit"
+          ]
         },
         {
           "id": "degraded-combined",
           "shard": 6,
           "budget_minutes": 10,
-          "run": ["degraded-links", "--profile", "combined"]
+          "run": [
+            "degraded-links",
+            "--profile",
+            "combined"
+          ]
         },
         {
           "id": "domain-time-1",
           "shard": 7,
           "budget_minutes": 7,
-          "run": ["domain-time", "--nodes", "1"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "domain-time-1-cluster-restart",
           "shard": 7,
           "budget_minutes": 8,
-          "run": ["domain-time", "--nodes", "1", "--fault", "cluster-restart"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "1",
+            "--fault",
+            "cluster-restart"
+          ]
         },
         {
           "id": "domain-time-3",
           "shard": 7,
           "budget_minutes": 7,
-          "run": ["domain-time", "--nodes", "3"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "domain-time-3-cluster-restart",
           "shard": 7,
           "budget_minutes": 10,
-          "run": ["domain-time", "--nodes", "3", "--fault", "cluster-restart"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "3",
+            "--fault",
+            "cluster-restart"
+          ]
         },
         {
           "id": "domain-time-3-voter-crash",
           "shard": 7,
           "budget_minutes": 12,
-          "run": ["domain-time", "--nodes", "3", "--fault", "voter-crash"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "3",
+            "--fault",
+            "voter-crash"
+          ]
         },
         {
           "id": "domain-time-3-voter-pause",
           "shard": 7,
           "budget_minutes": 20,
-          "run": ["domain-time", "--nodes", "3", "--fault", "voter-pause"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "3",
+            "--fault",
+            "voter-pause"
+          ]
         },
         {
           "id": "domain-time-3-voter-stop",
           "shard": 7,
           "budget_minutes": 15,
-          "run": ["domain-time", "--nodes", "3", "--fault", "voter-stop"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "3",
+            "--fault",
+            "voter-stop"
+          ]
         },
         {
           "id": "stateful-1",
           "shard": 8,
           "budget_minutes": 20,
-          "run": ["stateful", "--nodes", "1"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "stateful-1-cluster-restart",
           "shard": 8,
           "budget_minutes": 22,
-          "run": ["stateful", "--nodes", "1", "--fault", "cluster-restart"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "1",
+            "--fault",
+            "cluster-restart"
+          ]
         },
         {
           "id": "stateful-3",
           "shard": 8,
           "budget_minutes": 20,
-          "run": ["stateful", "--nodes", "3"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "stateful-3-owner-crash",
           "shard": 8,
           "budget_minutes": 20,
-          "run": ["stateful", "--nodes", "3", "--fault", "owner-crash"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "3",
+            "--fault",
+            "owner-crash"
+          ]
         },
         {
           "id": "stateful-3-owner-pause",
           "shard": 9,
           "budget_minutes": 20,
-          "run": ["stateful", "--nodes", "3", "--fault", "owner-pause"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "3",
+            "--fault",
+            "owner-pause"
+          ]
         },
         {
           "id": "stateful-3-owner-partition",
           "shard": 9,
           "budget_minutes": 25,
-          "run": ["stateful", "--nodes", "3", "--fault", "owner-partition"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "3",
+            "--fault",
+            "owner-partition"
+          ]
         },
         {
           "id": "stateful-3-cluster-restart",
           "shard": 9,
           "budget_minutes": 22,
-          "run": ["stateful", "--nodes", "3", "--fault", "cluster-restart"]
+          "run": [
+            "stateful",
+            "--nodes",
+            "3",
+            "--fault",
+            "cluster-restart"
+          ]
         },
         {
           "id": "domain-time-3-voter-partition",
           "shard": 9,
           "budget_minutes": 25,
-          "run": ["domain-time", "--nodes", "3", "--fault", "voter-partition"]
+          "run": [
+            "domain-time",
+            "--nodes",
+            "3",
+            "--fault",
+            "voter-partition"
+          ]
         },
         {
           "id": "backup-cycles-1",
           "shard": 10,
           "budget_minutes": 10,
-          "run": ["backup-cycles", "--nodes", "1"]
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1"
+          ]
         },
         {
           "id": "backup-cycles-3",
           "shard": 10,
           "budget_minutes": 12,
-          "run": ["backup-cycles", "--nodes", "3"]
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3"
+          ]
         },
         {
           "id": "restore-into-fresh-cluster",
           "shard": 10,
           "budget_minutes": 12,
-          "run": ["restore-fresh-cluster"]
+          "run": [
+            "restore-fresh-cluster"
+          ]
         },
         {
           "id": "backup-under-owner-crash",
           "shard": 10,
           "budget_minutes": 14,
-          "run": ["backup-fault", "--fault", "owner-crash"]
+          "run": [
+            "backup-fault",
+            "--fault",
+            "owner-crash"
+          ]
         },
         {
           "id": "backup-under-leader-crash",
           "shard": 11,
           "budget_minutes": 14,
-          "run": ["backup-fault", "--fault", "leader-crash"]
+          "run": [
+            "backup-fault",
+            "--fault",
+            "leader-crash"
+          ]
         },
         {
           "id": "backup-under-partition",
           "shard": 11,
           "budget_minutes": 15,
-          "run": ["backup-fault", "--fault", "owner-partition"]
+          "run": [
+            "backup-fault",
+            "--fault",
+            "owner-partition"
+          ]
         },
         {
           "id": "rolling-restart-during-backup-stream",
           "shard": 11,
           "budget_minutes": 20,
-          "run": ["backup-fault", "--fault", "rolling-restart"]
+          "run": [
+            "backup-fault",
+            "--fault",
+            "rolling-restart"
+          ]
+        }
+      ]
+    },
+    "backup07": {
+      "description": "Backup 07 qualification campaign: every new backup and restore entry on a worker of its own",
+      "entries": [
+        {
+          "id": "backup-cycles-1",
+          "shard": 1,
+          "budget_minutes": 15,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1"
+          ]
+        },
+        {
+          "id": "backup-cycles-3",
+          "shard": 2,
+          "budget_minutes": 20,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3"
+          ]
+        },
+        {
+          "id": "restore-into-fresh-cluster",
+          "shard": 3,
+          "budget_minutes": 20,
+          "run": [
+            "restore-fresh-cluster"
+          ]
+        },
+        {
+          "id": "backup-under-owner-crash",
+          "shard": 4,
+          "budget_minutes": 20,
+          "run": [
+            "backup-fault",
+            "--fault",
+            "owner-crash"
+          ]
+        },
+        {
+          "id": "backup-under-leader-crash",
+          "shard": 5,
+          "budget_minutes": 20,
+          "run": [
+            "backup-fault",
+            "--fault",
+            "leader-crash"
+          ]
+        },
+        {
+          "id": "backup-under-partition",
+          "shard": 6,
+          "budget_minutes": 20,
+          "run": [
+            "backup-fault",
+            "--fault",
+            "owner-partition"
+          ]
+        },
+        {
+          "id": "rolling-restart-during-backup-stream",
+          "shard": 7,
+          "budget_minutes": 30,
+          "run": [
+            "backup-fault",
+            "--fault",
+            "rolling-restart"
+          ]
+        }
+      ]
+    },
+    "backup07scale": {
+      "description": "Backup 07 freeze scaling: backup cycles over 3, 300 and 1000 branches on one and three nodes",
+      "entries": [
+        {
+          "id": "scale-3-n1",
+          "shard": 1,
+          "budget_minutes": 30,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "3000",
+            "--scale-branches",
+            "3",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "400"
+          ]
+        },
+        {
+          "id": "scale-300-n1",
+          "shard": 2,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "12000",
+            "--scale-branches",
+            "300",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "1800"
+          ]
+        },
+        {
+          "id": "scale-1000-n1",
+          "shard": 3,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "1",
+            "--records",
+            "20000",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "3000"
+          ]
+        },
+        {
+          "id": "scale-3-n3",
+          "shard": 4,
+          "budget_minutes": 30,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "3000",
+            "--scale-branches",
+            "3",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "400"
+          ]
+        },
+        {
+          "id": "scale-300-n3",
+          "shard": 5,
+          "budget_minutes": 45,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "12000",
+            "--scale-branches",
+            "300",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "1800"
+          ]
+        },
+        {
+          "id": "scale-1000-n3",
+          "shard": 6,
+          "budget_minutes": 60,
+          "run": [
+            "backup-cycles",
+            "--nodes",
+            "3",
+            "--records",
+            "20000",
+            "--scale-branches",
+            "1000",
+            "--scale-interval-ms",
+            "20",
+            "--scale-cycles",
+            "6",
+            "--scale-cycle-records",
+            "3000"
+          ]
         }
       ]
     }

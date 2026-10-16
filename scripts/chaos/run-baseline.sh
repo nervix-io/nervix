@@ -118,6 +118,11 @@ mixed_plan_file=""
 # No mixed-instability run, its default bound included, lasts longer than six hours.
 mixed_max_timeout=21600
 replay_dir=""
+# Campaign-only scaling of the backup-cycles state.
+scale_branches=3
+scale_interval_ms=""
+scale_cycles=8
+scale_cycle_records=2
 records_option_set=false
 timeout_option_set=false
 mixed_option_set=false
@@ -253,6 +258,16 @@ while [[ "$#" -gt 0 ]]; do
         --keep)
             keep_resources=true
             shift
+            ;;
+        --scale-branches | --scale-interval-ms | --scale-cycles | --scale-cycle-records)
+            [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
+            case "$1" in
+                --scale-branches) scale_branches="$2" ;;
+                --scale-interval-ms) scale_interval_ms="$2" ;;
+                --scale-cycles) scale_cycles="$2" ;;
+                --scale-cycle-records) scale_cycle_records="$2" ;;
+            esac
+            shift 2
             ;;
         -h | --help)
             usage
@@ -534,6 +549,9 @@ esac
 ((partition_seconds >= 20 && partition_seconds <= 600)) \
     || setup_error '--partition-seconds must be an integer from 20 through 600'
 max_records=1000
+if [[ "${scenario}" == backup-cycles ]]; then
+    max_records=60000
+fi
 min_timeout=120
 max_timeout=3600
 if [[ "${scenario}" == mixed-instability ]]; then
@@ -650,6 +668,9 @@ case "${scenario}" in
         # One record a second keeps the fixture flowing through a long timeline of disturbances; a
         # replay produces at the interval its run recorded.
         load_interval_ms="${replay_load_interval_ms:-1000}"
+        ;;
+    backup-cycles)
+        load_interval_ms="${scale_interval_ms:-500}"
         ;;
     *)
         load_interval_ms=500
@@ -2153,6 +2174,7 @@ if [[ "${backup_graph}" == true ]]; then
     source "${script_dir}/backup-scenario.sh"
     nspl_fixture="$(backup_graph_fixture "${nspl_fixture}")" \
         || setup_error 'the backup fixture does not hold exactly one consumer-group Kafka offset clause to replace'
+    nspl_fixture="${nspl_fixture/MAX INSTANCES 16/MAX INSTANCES $((scale_branches + 16))}"
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
@@ -2192,7 +2214,11 @@ if [[ "${scenario}" == stateful ]]; then
         >"${artifact_dir}/public/configure-stateful-nspl.txt" 2>&1
 fi
 if [[ "${backup_state_graph}" == true ]]; then
-    domain_cli_command "$(<"${script_dir}/fixtures/backup-state.nspl")" \
+    backup_state_nspl="$(<"${script_dir}/fixtures/backup-state.nspl")"
+    backup_state_nspl="${backup_state_nspl/input.sequence % 30/input.sequence % $((scale_branches * 10))}"
+    backup_state_nspl="${backup_state_nspl/CREATE RELAY chaos_unique SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;/CREATE RELAY chaos_unique SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;}"
+    printf '%s\n' "${backup_state_nspl}" >"${artifact_dir}/fixtures/backup-state.nspl"
+    domain_cli_command "${backup_state_nspl}" \
         >"${artifact_dir}/public/configure-backup-state-nspl.txt" 2>&1
 fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
