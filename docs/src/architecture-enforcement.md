@@ -97,6 +97,7 @@ channel's initial value), `bounded` or `sync_channel`, constructs `Semaphore` or
 or calls `add_permits`. Numeric arithmetic inside an argument counts; a capacity supplied
 entirely by a named value does not add a call site. These names deliberately describe source
 syntax, including same-spelled custom calls; they do not claim resolved API recognition.
+Raw identifier spellings retain the same recognized type, policy call and definition owner.
 
 The shared source discovery excludes test directories and in-crate test files. This count also
 excludes `tools/`, the `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates,

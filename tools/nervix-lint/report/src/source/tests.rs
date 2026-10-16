@@ -197,22 +197,27 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
         let mut expected = Vec::new();
         let count = usize::from(seed[1] % 8);
         for index in 0..count {
-            let line = match seed[index + 2] % 4 {
+            let line = match seed[index + 2] % 6 {
                 0 => format!("#[cfg(any())] const P_{index}: Budget = Budget::from_secs(5);\n"),
                 1 => format!("macro_rules! p_{index} {{ () => {{ const P: usize = 7; }}; }}\n"),
                 2 => format!("fn p_{index}() {{ mpsc::channel(8); }}\n"),
-                _ => format!("fn p_{index}() {{ Vec::with_capacity(16); }}\n"),
+                3 => format!("fn p_{index}() {{ Vec::with_capacity(16); }}\n"),
+                4 => format!("const P_{index}: std::time::r#Duration = make();\n"),
+                _ => format!("fn p_{index}() {{ std::time::r#Duration::r#from_secs(5); }}\n"),
             };
-            let column = match seed[index + 2] % 4 {
-                0 | 1 => line
+            let column = match seed[index + 2] % 6 {
+                0 | 1 | 4 => line
                     .find("const")
                     .assured("the generated constant has a const token"),
                 2 => line
                     .find("mpsc")
                     .assured("the generated call starts with mpsc"),
-                _ => line
+                3 => line
                     .find("Vec")
                     .assured("the generated call starts with Vec"),
+                _ => line
+                    .find("std")
+                    .assured("the generated call starts with std"),
             };
             expected.push(SourceSite {
                 path: path.clone(),
@@ -246,6 +251,31 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
             serde_json::from_slice(&encoded).assured("the complete sites were just serialized");
         assert_eq!(decoded, result);
     });
+}
+
+#[test]
+fn raw_policy_spellings_keep_current_types_and_defaults() {
+    let result = sites(
+        r#"
+use std::time::r#Duration as r#Budget;
+const DIRECT: std::time::r#Duration = make();
+const RENAMED: r#Budget = make();
+fn policy() {
+    std::time::r#Duration::r#from_secs(3);
+    Vec::r#with_capacity(4);
+    queue.r#add_permits(5);
+}
+struct Group { budget: r#Setting<Spec> }
+impl r#Default for Group { fn default() -> Self { r#Budget::from_secs(6); make() } }
+impl r#SettingDefinition for Spec {
+    fn r#default_value() -> r#Budget { r#Budget::from_secs(7) }
+}
+"#,
+    );
+    assert_eq!(
+        result.iter().map(|site| site.line).collect::<Vec<_>>(),
+        [3, 4, 6, 7, 8]
+    );
 }
 
 #[test]

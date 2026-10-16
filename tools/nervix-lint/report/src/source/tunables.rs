@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::{
     Attribute, Expr, Item, Meta, Type, UseTree,
+    ext::IdentExt as _,
     spanned::Spanned as _,
     visit::{self, Visit},
 };
@@ -60,7 +61,7 @@ fn type_name(value: &Type) -> Option<String> {
             .path
             .segments
             .last()
-            .map(|segment| segment.ident.to_string());
+            .map(|segment| segment.ident.unraw().to_string());
     }
     None
 }
@@ -70,8 +71,10 @@ impl Declarations {
         match tree {
             UseTree::Path(value) => self.import(&value.tree),
             UseTree::Rename(value) => {
-                self.aliases
-                    .insert(value.rename.to_string(), value.ident.to_string());
+                self.aliases.insert(
+                    value.rename.unraw().to_string(),
+                    value.ident.unraw().to_string(),
+                );
             }
             UseTree::Group(value) => {
                 for item in &value.items {
@@ -130,7 +133,7 @@ impl<'ast> Visit<'ast> for Declarations {
     }
     fn visit_item_type(&mut self, value: &'ast syn::ItemType) {
         if let Some(name) = type_name(&value.ty) {
-            self.aliases.insert(value.ident.to_string(), name);
+            self.aliases.insert(value.ident.unraw().to_string(), name);
         }
     }
     fn visit_item_struct(&mut self, value: &'ast syn::ItemStruct) {
@@ -140,7 +143,7 @@ impl<'ast> Visit<'ast> for Declarations {
                     .is_some_and(|name| self.canonical(&name).as_deref() == Some("Setting"))
             })
         {
-            self.settings.insert(value.ident.to_string());
+            self.settings.insert(value.ident.unraw().to_string());
         }
         visit::visit_item_struct(self, value);
     }
@@ -158,7 +161,7 @@ fn constant(meta: &Meta) -> bool {
         .path()
         .segments
         .iter()
-        .map(|segment| segment.ident.to_string())
+        .map(|segment| segment.ident.unraw().to_string())
         .collect();
     names == ["nervix", "constant"]
 }
@@ -263,7 +266,10 @@ impl Tunables<'_> {
     fn policy(&self, path: &syn::Path) -> bool {
         let mut parts = Vec::new();
         for segment in &path.segments {
-            let Some(name) = self.declarations.canonical(&segment.ident.to_string()) else {
+            let Some(name) = self
+                .declarations
+                .canonical(&segment.ident.unraw().to_string())
+            else {
                 return false;
             };
             parts.push(name);
@@ -351,7 +357,7 @@ impl<'ast> Visit<'ast> for Tunables<'_> {
         let trait_name = if let Some((_, path, _)) = &value.trait_
             && let Some(part) = path.segments.last()
         {
-            self.declarations.canonical(&part.ident.to_string())
+            self.declarations.canonical(&part.ident.unraw().to_string())
         } else {
             None
         };
@@ -367,7 +373,7 @@ impl<'ast> Visit<'ast> for Tunables<'_> {
                     continue;
                 }
                 if trait_name.as_deref() == Some("SettingDefinition")
-                    && method.sig.ident == "default_value"
+                    && method.sig.ident.unraw() == "default_value"
                 {
                     continue;
                 }
@@ -386,8 +392,8 @@ impl<'ast> Visit<'ast> for Tunables<'_> {
         visit::visit_expr_call(self, value);
     }
     fn visit_expr_method_call(&mut self, value: &'ast syn::ExprMethodCall) {
-        if (value.method.to_string().starts_with("with_capacity") || value.method == "add_permits")
-            && literal(&value.args)
+        let method = value.method.unraw().to_string();
+        if (method.starts_with("with_capacity") || method == "add_permits") && literal(&value.args)
         {
             self.site(value.span());
         }
