@@ -458,7 +458,7 @@ Native coverage collection records source-line execution only after its canonica
 completed, beside its completion and model or lane records. Keep ordinary coverage, model coverage,
 diagnostic coverage and sanitizer campaign evidence distinct. A source line being covered does not
 prove all interleavings, sufficient memory orderings, or absence of an unobserved deadlock.
-The [CRAP report](./developing-nervix.md#crap-report) has advisory scores; its input validity and
+The [CRAP report](./coverage-reports.md#advisory-crap-report) has advisory scores; its input validity and
 the independent `just ratchet` complexity verdict remain mandatory checks.
 [Integrated primitive qualification](./developing-nervix.md#integrated-primitive-qualification)
 binds ordinary costs and public/model/fault results to their actual revision and immutable images.

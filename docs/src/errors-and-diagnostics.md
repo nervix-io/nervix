@@ -569,6 +569,17 @@ leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the c
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
+A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
+refuses to take a record for a reason that is not the record's own, a full producer queue included,
+and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
+drops without a delivery report keeps the report channel's cancellation the same way. Each carries
+the connector's description of the failure for the emitter's transient error, and a missed `ACK
+TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
+record itself, an invalid or oversized message, timestamp or record, rejects that record through
+`ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
+`SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
+hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -611,6 +622,12 @@ server's `max_payload` becomes a record rejection with code `external` and opera
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
 ### Connector Status Observation
+
+An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
+an end without a status has its own typed state. Transport failures keep the WebSocket driver's
+error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
+budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
+failure and its growing retry delay across successful reconnects until a batch is accepted.
 
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
 operations read the retained status without writing it; a transition clears an active failure.
@@ -1069,6 +1086,9 @@ it cannot bind or read its domain clock or routing snapshot, or cannot wait for 
 deadlines, reports a runtime event that names the task and its domain and renders the whole chain
 of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
 failure stays visible.
+The materialized relay reads that clock before rebuilding its branch activity registry. An
+unreadable activation time ends the task with this event; record event watermarks cannot supply
+the missing domain time.
 
 An owner-delivery admission failure logs the domain, relay, branch scope and target together with
 the transport report, including retained cancellation and rejection causes, before returning the

@@ -524,6 +524,20 @@ class once:
 | `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
 
+The broker host applies the same retry backoff to a failed resume, a failed read and a requested
+reconnect. A successful connection alone does not reset it: the next accepted batch resets the
+backoff and clears the transient failure. This prevents a peer that accepts and immediately closes
+from keeping every reconnect at the floor delay. A source with no declared retry policy uses the
+host's 250 ms initial delay, doubling to at most 30 seconds. Stop and quiesce changes interrupt the
+wait.
+
+The outbound WebSocket source sends a Close frame on suspension or close and waits for the peer's
+Close within a one-second budget covering both the send and the reply. The transport is detached
+before waiting, so cancellation also drops that exact connection. Suspension retains accepted
+signaling payloads; terminal close clears them even if the handshake fails. A peer-initiated Close
+is answered before releasing the transport and becomes a typed transient read failure carrying
+its status code and reason. An EOF or transport failure also reaches the host's retry path.
+
 A transport acknowledgement that fails because the connection died is handled the same way: the
 host rejects the positions, that rejection fails on the same lost connection, and the class decides.
 A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
@@ -716,14 +730,31 @@ queue holds `MAX` requests, as many as the window awaits, and the event loop tak
 so the client can refuse a record only while the queue still holds an earlier failed attempt's
 requests, before the broker answered any record of the publish.
 
+The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
+hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
+invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
+unresolved, including a producer that drops the record without one. When the producer refuses to
+take a record for a reason that is not the record's own, such as a full producer queue, the publish
+ends through the window, so every record the broker already confirmed is delivered first and is not
+sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
+own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
+producer left at librdkafka's five-minute default would keep retrying a record after the publish
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
+librdkafka checks message timeouts about once a second, so the producer gives a record up within
+about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
+holds refuses the sink when it starts. In `MODE NO ACK` the producer taking a record into its queue
+delivers it, and the client's own delivery bound applies.
+
 The NATS JetStream sink awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
 message above the server's `max_payload` is refused for good, and any other ending of the wait
 leaves the record unresolved with the driver's typed cause. A client that does not take a record
 within `ACK TIMEOUT`, because its connection stopped draining what it queued, ends the publish
-through the window, so the retry resends none of the records JetStream confirmed before it. The
-Kafka and Pulsar sinks still await their answers through windows of their own, which drop their
-in-flight records when the driver refuses to take one, so a retry can resend records their broker
-already confirmed; RabbitMQ settles its records when it loses a channel instead.
+through the window, so the retry resends none of the records JetStream confirmed before it.
+
+The Pulsar sink still awaits its answers through a window of its own, which drops its in-flight
+records when the driver refuses to take one, so a retry can resend records its broker already
+confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
