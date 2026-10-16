@@ -73,6 +73,10 @@ Uploads are leader operations. A client-protocol upload declares the exact size 
 streams, and a follower redirects it to the leader. A web-console upload streams the selected files
 to the leader, which builds the archive itself; a follower refuses it.
 
+The native client's directory archive is completed and flushed locally before its upload call
+opens. A failed or cancelled construction discards its partial temporary archive and assigns no
+version. Once built, that exact archive is retained for every retry within the upload call.
+
 A number is assigned when the leader admits an upload. Once the complete body has arrived, the
 leader holds the archive's digest and records the upload under its identity in one consensus
 command, which takes the next number of the sequence. A body that ends early or exceeds its
