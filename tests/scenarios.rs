@@ -110,7 +110,7 @@ use crate::common::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain,
+        WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
@@ -127,6 +127,8 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    kafka_mock_broker::KafkaMockBroker,
+    mqtt_publish_filter::MqttPublishFilter,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
@@ -168,6 +170,7 @@ mod paced_simulation;
 mod process_cluster;
 mod restarted_voter;
 mod session_protocol;
+mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -305,6 +308,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -457,6 +461,11 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
+    /// shared test broker.
+    kafka_mock_broker: Option<KafkaMockBroker>,
+    /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
+    mqtt_publish_filter: Option<MqttPublishFilter>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
@@ -578,6 +587,8 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("kafka_mock_broker", &self.kafka_mock_broker)
+            .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
@@ -893,6 +904,65 @@ async fn given_stallable_mqtt_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "mqtt", MQTT_ADDR, "mqtt_stallable_addr").await;
 }
 
+/// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
+/// its address `{{mqtt_filtered_addr}}`.
+#[given("an MQTT endpoint that drops chosen publishes is configured")]
+async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(MQTT_ADDR)
+        .unwrap_or_else(|error| panic!("MQTT endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse MQTT endpoint '{endpoint}': {error}"));
+    // `mqtt` is not a special URL scheme, so the URL keeps its host as opaque text.
+    let broker_ip = match endpoint_url.host() {
+        Some(url::Host::Ipv4(address)) => std::net::IpAddr::V4(address),
+        Some(url::Host::Ipv6(address)) => std::net::IpAddr::V6(address),
+        Some(url::Host::Domain(host)) => host.parse().unwrap_or_else(|error| {
+            panic!("MQTT endpoint '{endpoint}' does not name the broker by its IP address: {error}")
+        }),
+        None => panic!("MQTT endpoint '{endpoint}' has no host"),
+    };
+    let broker_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("MQTT endpoint '{endpoint}' has no explicit port"));
+    let filter = MqttPublishFilter::start(std::net::SocketAddr::new(broker_ip, broker_port))
+        .await
+        .unwrap_or_else(|error| panic!("failed to start the MQTT publish filter: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in MQTT endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(filter.local_port()))
+        .unwrap_or_else(|()| panic!("failed to replace port in MQTT endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert("mqtt_filtered_addr".to_string(), endpoint_url.to_string());
+    world.mqtt_publish_filter = Some(filter);
+}
+
+/// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
+/// broker never sees, delivers or answers it.
+#[when("the MQTT endpoint drops every publish carrying")]
+fn when_mqtt_endpoint_drops_publishes_carrying(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let payload = expand_placeholders(world, docstring(step).trim());
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .drop_publishes_carrying(payload.into_bytes());
+}
+
+#[when("the MQTT endpoint forwards every publish")]
+fn when_mqtt_endpoint_forwards_every_publish(world: &mut ScenarioWorld) {
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .forward_every_publish();
+}
+
 #[given("a stallable Pulsar endpoint is configured")]
 async fn given_stallable_pulsar_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "pulsar", PULSAR_ADDR, "pulsar_stallable_addr").await;
@@ -914,6 +984,17 @@ fn when_stallable_endpoint_is_resumed(world: &mut ScenarioWorld, name: String) {
         .get(&name)
         .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
         .set_paused(false);
+}
+
+/// Every connection the endpoint forwards is reset, as by a dependency that drops its clients,
+/// while the dependency itself keeps running for the other scenarios that share it.
+#[when(expr = "the stallable endpoint {string} resets its connections")]
+fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, name: String) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .reset_connections();
 }
 
 #[given("ClickHouse is running")]
@@ -6013,18 +6094,30 @@ async fn when_domains_are_created_in_a_burst(
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
     let mut retention_peak = observer.raft_log_retention();
-    let mut session = world
+    let leader_uri = world
         .cluster()
-        .open_session(&leader, &world.domain)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve burst leader '{leader}': {error}"));
+    let connect_options = client_connect_options(&leader_uri)
+        .unwrap_or_else(|error| panic!("failed to configure burst client: {error}"));
+    let client =
+        Client::connect_with_options(&leader_uri, client_domain(&world.domain), connect_options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to open burst client session: {error:#}"));
     for index in 0..count {
         nervix_primitives::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
-        session
-            .run_command(&format!("CREATE DOMAIN {name};"))
+        let outcome = client
+            .execute(format!("CREATE DOMAIN {name};"))
             .await
-            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
+            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error:#}"));
+        assert!(
+            outcome.succeeded(),
+            "creating domain '{name}' failed with {:?}: {}; diagnostics: {:?}",
+            outcome.disposition,
+            outcome.message,
+            outcome.diagnostics,
+        );
         let retention = observer.raft_log_retention();
         if retention.retained_bytes > retention_peak.retained_bytes {
             retention_peak = retention;
@@ -10647,6 +10740,19 @@ async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
         .delay_shutdown_cordon_release_of(crate::common::cluster::node_name(&node_id), delay);
 }
 
+#[given(expr = "the transport of ingestor {string} takes {string} to confirm its acknowledgements")]
+async fn given_source_confirmation_delay(
+    world: &mut ScenarioWorld,
+    ingestor: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    world
+        .fault_injection
+        .delay_source_confirmation(ingestor, delay);
+}
+
 #[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
 async fn then_last_shutdown_reports_drain_support_phase(
     world: &mut ScenarioWorld,
@@ -15109,6 +15215,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
 }
 
 #[when("these NSPL commands are executed on the leader node")]
+#[when("these Plexus statements are executed on the leader node")]
 async fn when_these_nspl_commands_are_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16582,6 +16689,7 @@ async fn then_nspl_commands_complete_on_leader_within(
 }
 
 #[given("the leader node is configured with these NSPL commands")]
+#[given("the leader node is configured with these Plexus statements")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -21319,6 +21427,96 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     }
 }
 
+/// What DESCRIBE EMITTER reports about an emitter's failed attempt and its next one.
+struct DescribedEmitterRetry {
+    /// The failure DESCRIBE reports, absent while there is none.
+    transient_error: Option<String>,
+    /// How long the emitter waits before its next attempt, absent while none is scheduled.
+    reconnect_wait: Option<Duration>,
+}
+
+impl DescribedEmitterRetry {
+    fn from_describe_output(output: &str) -> Self {
+        let mut described = Self {
+            transient_error: None,
+            reconnect_wait: None,
+        };
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(error) = line.strip_prefix("transient error: ") {
+                if error != "-" {
+                    described.transient_error = Some(error.to_string());
+                }
+                continue;
+            }
+            let Some(wait) = line.strip_prefix("reconnect wait: ") else {
+                continue;
+            };
+            let Some(millis) = wait.strip_suffix("ms") else {
+                continue;
+            };
+            let millis = millis
+                .parse::<u64>()
+                .expect("DESCRIBE EMITTER reports the reconnect wait in whole milliseconds");
+            described.reconnect_wait = Some(Duration::from_millis(millis));
+        }
+        described
+    }
+
+    /// Whether the emitter failed and its next attempt, which has not started yet, is at most
+    /// `wait` away.
+    ///
+    /// DESCRIBE keeps reporting a failure until a publish succeeds, so once the next attempt is
+    /// due it reports a wait of zero while that attempt runs.
+    fn retries_within(&self, wait: Duration) -> bool {
+        if self.transient_error.is_none() {
+            return false;
+        }
+        match self.reconnect_wait {
+            Some(reconnect_wait) => !reconnect_wait.is_zero() && reconnect_wait <= wait,
+            None => false,
+        }
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports a transient error with the emitter's next attempt at most
+/// `wait` away, so a scenario acts at a known point between a failed attempt and the next one.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports a transient \
+            error with its next attempt at most {string} away"
+)]
+async fn then_within_duration_describe_emitter_reports_transient_error_with_next_attempt_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    wait: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let wait =
+        parse_duration_text(&wait).expect("the next attempt's wait must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let deadline = Instant::now() + duration;
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if DescribedEmitterRetry::from_describe_output(&output).retries_within(wait) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report a transient error with \
+             its next attempt at most {wait:?} away. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "node {string} eventually reports status containing {string}")]
 async fn then_node_eventually_reports_status_containing(
     world: &mut ScenarioWorld,
@@ -21934,6 +22132,58 @@ async fn given_kafka_topic_exists_with_partitions(
         .ensure_kafka_topic_partitions(&topic, partitions)
         .await
         .expect("failed to create kafka topic");
+}
+
+/// Starts the scenario's own mock Kafka broker with `topic` and names its address
+/// `{{mock_kafka_addr}}`.
+#[given(expr = "a mock Kafka broker serves topic {string}")]
+fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let broker =
+        KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
+    broker
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+    world.placeholders.insert(
+        "mock_kafka_addr".to_string(),
+        broker.bootstrap_servers().to_string(),
+    );
+    world.kafka_mock_broker = Some(broker);
+}
+
+#[given(expr = "mock Kafka topic {string} is observed")]
+async fn given_mock_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before it is observed")
+        .client_config();
+    world.broker_observer = Some(
+        observe_kafka_through(client_config, &topic)
+            .await
+            .expect("failed to observe the mock kafka topic"),
+    );
+}
+
+#[given("the mock Kafka broker refuses every write")]
+fn given_mock_kafka_broker_refuses_every_write(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses writes")
+        .refuse_writes()
+        .expect("the mock Kafka broker refuses writes");
+}
+
+#[when("the mock Kafka broker accepts writes again")]
+fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts writes again")
+        .accept_writes()
+        .expect("the mock Kafka broker accepts writes again");
 }
 
 #[given(expr = "SQS queue {string} exists")]
@@ -28751,23 +29001,28 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     );
 
     let deadline = Instant::now() + duration;
+    let observer = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion");
     for expected_sequence in 1..=count {
         nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out after receiving {} of {count} sequential broker messages",
-            expected_sequence - 1
+            "timed out after receiving {} of {count} sequential broker messages; {}",
+            expected_sequence - 1,
+            observer.describe_client_receipts()
         );
-        let message = world
-            .broker_observer
-            .as_mut()
-            .expect("a broker observer must exist before assertion")
+        let message = observer
             .try_next_message(deadline.saturating_duration_since(now))
             .await
             .expect("failed while waiting for sequential broker message")
             .unwrap_or_else(|| {
-                panic!("timed out waiting for broker message {expected_sequence} of {count}")
+                panic!(
+                    "timed out waiting for broker message {expected_sequence} of {count}; {}",
+                    observer.describe_client_receipts()
+                )
             });
         let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
             .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
@@ -28799,10 +29054,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
         world.last_broker_headers = message.headers;
     }
 
-    let duplicate = world
-        .broker_observer
-        .as_mut()
-        .expect("a broker observer must exist before assertion")
+    let duplicate = observer
         .try_next_message(Duration::from_millis(500))
         .await
         .expect("failed while checking for a duplicate broker message");
@@ -29082,6 +29334,9 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
 /// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
 /// end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
+    if let Some(peer) = world.websocket_peer.take() {
+        peer.stop().await;
+    }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
     world.otlp_receivers.clear();
@@ -29237,14 +29492,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                world.active_scenario = Some(ActiveScenarioRegistration::start(
-                    &feature_name,
-                    &scenario_name,
-                    scenario_line,
-                ));
+                let registration =
+                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let attempt = registration.attempt();
+                world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, |reason| {
+                    .admit_with(limit, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
@@ -29351,6 +29605,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.mqtt_publish_filter = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes

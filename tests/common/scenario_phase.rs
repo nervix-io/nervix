@@ -17,7 +17,7 @@ use nervix_primitives::{
     time::Instant,
 };
 
-use super::scenario_schedule::AdmissionWait;
+use super::scenario_schedule::{AdmissionWait, ScenarioAttempt};
 
 /// Where one scenario is between its first step and the end of its cleanup.
 ///
@@ -300,6 +300,7 @@ pub(crate) fn suite_summary() -> String {
 pub(crate) struct ActiveScenarioRegistration {
     registration: u64,
     identity: ScenarioIdentity,
+    attempt: ScenarioAttempt,
 }
 
 impl ActiveScenarioRegistration {
@@ -326,9 +327,15 @@ impl ActiveScenarioRegistration {
             slot_started_at: None,
         };
         let registration = ACTIVE_SCENARIOS.lock().register(active);
+        let attempt = if attempt == 1 {
+            ScenarioAttempt::First
+        } else {
+            ScenarioAttempt::Retry
+        };
         Self {
             registration,
             identity,
+            attempt,
         }
     }
 
@@ -344,6 +351,10 @@ impl ActiveScenarioRegistration {
 
     pub(crate) fn identity(&self) -> &ScenarioIdentity {
         &self.identity
+    }
+
+    pub(crate) fn attempt(&self) -> ScenarioAttempt {
+        self.attempt
     }
 
     /// Publishes `phase` as the work now in flight and returns what a reader of the registry sees.

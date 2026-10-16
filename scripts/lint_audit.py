@@ -62,6 +62,8 @@ RULES = {
         Rule("model_matches_in_data_plane", re.compile(r"\bModel\s*::")),
         Rule("parser_imports_outside_edges", re.compile(r"\bnervix_nspl\s*::")),
         Rule("files_over_3000_lines", None),
+        # The analyzer's complexity has no spelling; splitting a function lowers it.
+        Rule("functions_over_complexity_30", None),
     )
 }
 
@@ -72,8 +74,9 @@ OWNERS: dict[str, tuple[str, ...]] = {
     "key_allocation": ("data_plane_lock_acquisitions",),
     "borrowed_copy": ("data_plane_lock_acquisitions", "bare_unwrap_and_expect", "combinator_control_flow"),
     "duplicated_branch": ("data_plane_lock_acquisitions", "combinator_control_flow", "bare_unwrap_and_expect"),
-    "forwarding_wrapper": ("files_over_3000_lines", "data_plane_lock_acquisitions",
-                           "model_matches_in_data_plane", "parser_imports_outside_edges"),
+    "forwarding_wrapper": ("files_over_3000_lines", "functions_over_complexity_30",
+                           "data_plane_lock_acquisitions", "model_matches_in_data_plane",
+                           "parser_imports_outside_edges"),
     "discarded_error": ("bare_unwrap_and_expect", "discarded_results", "result_string_errors",
                         "bare_error_signatures", "as_casts"),
     "disguised_clamp": ("clamped_arithmetic", "as_casts"),

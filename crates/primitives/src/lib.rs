@@ -287,6 +287,13 @@ pub use std::thread_local;
 pub use nervix_primitives_macros::main;
 /// Run an async test on the runtime of the build's execution mode.
 ///
+/// ```test_harness
+/// #[nervix_primitives::test]
+/// async fn uses_the_selected_runtime() {
+///     nervix_primitives::task::yield_now().await;
+/// }
+/// ```
+///
 /// The arguments are Tokio's test attribute's, except `crate`: the execution mode decides the
 /// runtime, so naming one fails to compile.
 ///

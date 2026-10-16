@@ -2044,7 +2044,6 @@ impl Runtime {
                 "the registry validated this input, and a non-empty input list builds an \
                  interaction",
             );
-            let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
             let relay_model_name = ModelName::from(&relay);
             let ownership_entity =
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
@@ -2061,11 +2060,19 @@ impl Runtime {
                     return;
                 }
             };
-            let mut restored_branches = state.read().restored_branch_watermarks();
-            restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
-            for (key, last_ingestion) in restored_branches {
-                branch_instances.insert_changed(key, last_ingestion, ());
-            }
+            let activated_at = match clock.snapshot() {
+                Ok(snapshot) => snapshot.now(),
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "materialized relay '{}' in domain '{}' could not read its activation \
+                         time: {error:#}",
+                        relay.as_str(),
+                        domain.as_str(),
+                    ));
+                    return;
+                }
+            };
+            let mut branch_instances = state.read().restored_branch_instances(activated_at);
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
                 nervix_primitives::task::consume_budget().await;
