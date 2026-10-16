@@ -10577,6 +10577,41 @@ async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: 
         .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[when(
+    expr = "node {string} resumes its runtime installation when forced recovery finds no schedule"
+)]
+async fn when_runtime_installation_resumes_after_missing_recovery_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .resume_installation_after_missing_recovery_schedule(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+#[then(expr = "forced recovery on node {string} observes its missing schedule")]
+async fn then_forced_recovery_observes_missing_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observation = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_missing_recovery_schedule(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await;
+    assert!(
+        observation.is_ok(),
+        "forced recovery did not observe node '{node_id}' before its initial schedule \
+         installation: {observation:?}"
+    );
+}
+
 #[then(expr = "node {string} reaches its runtime preparation pause")]
 async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
