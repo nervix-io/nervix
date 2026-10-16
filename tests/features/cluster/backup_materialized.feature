@@ -183,6 +183,66 @@ Feature: Materialized backup and archived lifecycle resumption
       | 1            | 0             |
       | 3            | 1             |
 
+  @restore_installation @deloxide_stress
+  Scenario Outline: Restarted materialized branches measure idle lifetime from activation time
+    Given branched relay expiration scan interval is configured as "1ms"
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When a materialized restore workload with 2 relays is created
+    And round 2 of 1 KiB materialized rows is submitted for 2 tenants
+    Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
+    When the cluster is restarted
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_retention TO summaries;
+      """
+    Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @restore_installation @deloxide_stress_restore
+  Scenario Outline: Restored materialized branches measure idle lifetime from activation time
+    Given branched relay expiration scan interval is configured as "1ms"
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When a materialized restore workload with 2 relays is created
+    And round 2 of 1 KiB materialized rows is submitted for 2 tenants
+    Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
+    When the materialized summary subscription "summary_subscription" is closed
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "retention.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    Then the current leader node is saved as placeholder "leader"
+    Given the restore coordinator uses remote placement in a multi-node cluster
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "retention.nvxb" is streamed to node "{{leader}}" under execution reference "retention-resume"
+    Then the restore stream's outcome is "completed" as "executed"
+    And every node reports the resumed lifecycle archived in "retention.nvxb"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restored_retention TO summaries;
+      """
+    Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
+    When the cluster is restarted
+    Then every node reports the resumed lifecycle archived in "retention.nvxb"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION reopened_retention TO summaries;
+      """
+    Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   @restore_installation @deloxide_stress_restore
   Scenario Outline: Materialized generations larger than the bulk budget resume on every assigned owner and replica
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
