@@ -677,9 +677,9 @@ it did not get:
 
 | Acknowledgement confirmation | Entities | When acknowledging returns |
 | --- | --- | --- |
-| `answered` | SQS, Kafka | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. |
+| `answered` | SQS, Kafka, Pulsar | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
-| `queued` | Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `queued` | MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
 
 A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
@@ -688,6 +688,18 @@ confirms nothing. Suspending or closing that source commits what the cadence has
 and waits for the coordinator's answer before the consumer leaves its group. A source in an `ACK`
 mode has nothing outstanding at that point, because each acknowledged batch's commit was answered
 before acknowledging it returned.
+
+A Pulsar subscription in `MODE NO ACK` acknowledges each message without waiting for the broker's
+answer: that mode reads one message at a time, and waiting would add a broker round trip to every
+read, so acknowledging such a batch confirms only that the client queued it. In an `ACK` mode the
+broker either confirms the acknowledgement or refuses it, and a refusal fails with the broker's
+server error and reason. An acknowledgement the broker does not answer within the client's
+operation timeout, or whose connection closes first, fails as unconfirmed, because the broker may
+or may not have applied it; the host then rejects the positions, so the message may be ingested
+again. A Pulsar rejection is a redelivery request, which the broker does not answer, so rejecting
+returns once the consumer sent the request. It fails when the consumer could not send it within the
+operation timeout, such as while it reconnects to a broker it cannot reach, or when its connection
+closed first, and the broker redelivers the message once the consumer's connection is replaced.
 
 The host reports progress for a batch only once acknowledging it returns. Until then the
 ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
@@ -701,13 +713,16 @@ the drain, and neither do the resolved roots of the batch it belongs to, because
 be acknowledged until it resolves.
 
 A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
-a later acknowledgement is confirmed, and the host rejects the positions for their position class
-to handle. A stop that reaches the source loop once a batch's acknowledgement roots have resolved
-does not abandon the batch: the loop takes the resolved outcome before the stop and confirms the
-batch first. A batch whose roots had not all resolved when its source stopped is left unconfirmed;
-the source instance logs `source instance stopped before its transport confirmed positions it
-read; the transport presents them again` with the count, and its transport's own redelivery
-contract applies.
+a later acknowledgement is confirmed, and the host rejects the positions for their position class to
+handle. A rejection that fails is the ingestor's transient status as well, whether the host rejects
+a batch whose confirmation or acknowledgement roots failed or retries a rejection it holds, so a
+source whose transport can neither confirm a batch nor take it back shows why it holds the batch
+until a later acknowledgement is confirmed. A stop that reaches the source loop once a batch's
+acknowledgement roots have resolved does not abandon the batch: the loop takes the resolved outcome
+before the stop and confirms the batch first. A batch whose roots had not all resolved when its
+source stopped is left unconfirmed; the source instance logs `source instance stopped before its
+transport confirmed positions it read; the transport presents them again` with the count, and its
+transport's own redelivery contract applies.
 
 ## Sink boundary
 
@@ -1230,12 +1245,18 @@ sequenceDiagram
   acknowledgement boundary remains the state's highest durable replica progress.
 
 - **Pulsar client.** The Pulsar source and sink build on Nervix's fork of `pulsar-rs`,
-  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected`. The fork keeps each
-  connection's announced `maxMessageSize`, refuses a message whose serialized metadata and payload
-  exceed it before writing it, as the Java client does, and resolves a send the broker answers with
-  `SendError` with that error's server code and reason. The broker itself only closes the
-  connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
-  other message in flight on it.
+  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected` and returns from an
+  acknowledgement before the broker answers it. The fork keeps each connection's announced
+  `maxMessageSize`, refuses a message whose serialized metadata and payload exceed it before
+  writing it, as the Java client does, and resolves a send the broker answers with `SendError` with
+  that error's server code and reason. The broker itself only closes the connection on a frame
+  larger than the maximum plus 10 KiB of framing, which would fail every other message in flight on
+  it. For a consumer that enables ack receipts, as the source does in an `ACK` mode, the fork sends
+  each acknowledgement with a request id, acknowledges several messages of one topic in one
+  command, and resolves the acknowledgement with the broker's `CommandAckResponse`, its server
+  error, or the client's operation timeout. A negative acknowledgement returns whether the consumer
+  sent its redelivery request, with the connection error that kept it from being sent, where the
+  released crate only logs that error.
 - **NATS source.** Each source instance owns one client and its queue subscription. The client
   reports a lost connection through its event callback, and the instance ends the subscription
   with a read failure once it has handed over every message the client received before the loss,
