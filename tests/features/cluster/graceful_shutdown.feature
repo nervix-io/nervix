@@ -795,6 +795,78 @@ Feature: Graceful shutdown
     And within "10s" Kafka consumer group "shutdown_confirm_handoff_group_{{test_id}}" next offset for topic "shutdown_confirm_handoff_in_{{test_id}}" partition 0 is "at least 1"
     And the observed broker does not receive a payload within "10s"
 
+  @shutdown_kafka_refused_commit @deloxide_stress
+  Scenario Outline: A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "40s"
+    And the production sticky scheduler is configured
+    And a mock Kafka broker serves topic "refused_stop_in_{{test_id}}"
+    And the mock Kafka broker also serves topic "refused_stop_out_{{test_id}}"
+    And the mock Kafka broker refuses the next offset commit
+    And a <cluster_size> node nervix cluster is started
+    And mock Kafka topic "refused_stop_out_{{test_id}}" is observed
+    # After a group's last member leaves, the mock coordinator answers the next join only once
+    # the leaving member's session timeout has nearly passed, so the client keeps it short.
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA refused_stop_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA refused_stop_wire MODE STRICT ( event_id integer );
+      CREATE CODEC refused_stop_codec
+        FROM WIRE JSON SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
+      CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
+      CREATE CLIENT refused_stop_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest',
+        'session.timeout.ms' = '10000'
+      };
+      CREATE KAFKA TOPIC INGESTOR refused_stop_source
+        FROM refused_stop_kafka TOPIC 'refused_stop_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_stop_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING refused_stop_codec
+        TO refused_stop_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE EMITTER refused_stop_output FROM refused_stop_records
+        TO KAFKA refused_stop_kafka TOPIC refused_stop_out_{{test_id}}
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING refused_stop_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And mock Kafka message is published to topic "refused_stop_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" mock Kafka consumer group "refused_stop_group_{{test_id}}" next offset for topic "refused_stop_in_{{test_id}}" partition 0 is "at least 1"
+    And within "10s" the observed broker receives exactly these payloads
+      """
+      {"event_id":1}
+      {"event_id":1}
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE INGESTOR refused_stop_source;
+      """
+    Then the last command output owner is saved as placeholder "refused_stop_owner"
+    When node "{{refused_stop_owner}}" is gracefully stopped
+    And node "{{refused_stop_owner}}" is started
+    And mock Kafka message is published to topic "refused_stop_in_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "60s" the observed broker receives exactly these payloads
+      """
+      {"event_id":2}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: A node whose only uncordoned peer is terminating completes its admitted work in place
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
