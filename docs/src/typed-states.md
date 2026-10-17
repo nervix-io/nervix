@@ -107,6 +107,16 @@ identifier access and verifies offsets and counts before constructing owned valu
 
 ## Absence And Distinct States
 
+**MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
+replacement plan. Absence means the declaration is removed; stopping an execution whose input
+is unchanged creates no retirement. A connector session catalog has a private constructor that
+validates each configured endpoint and effective client identity once and borrows its immutable
+plan. It represents each broker session once even if an invalid explicit identity is repeated.
+Cleanup failure at a preceding endpoint is reported separately from failure to prepare the
+replacement. A failed preceding configuration supplies no preservation proof: the explicit
+replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
+default, with an instance suffix when needed.
+
 **Consensus append input.** `None` from the caller's request stream means that input has ended;
 the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed
 append request, retained exactly once while setup runs. A membership, admission or transport error

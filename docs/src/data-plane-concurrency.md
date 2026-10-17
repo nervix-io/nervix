@@ -36,6 +36,15 @@ it resolved when its task, branch, channel, or attempt was created. A shared reg
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
 
+MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
+plans from the installed execution, releases the registry guard, stops the source tasks, and
+then performs network cleanup and replacement preparation. Each connection has one mutable
+owner; simultaneous attempts are bounded by the declared source instance count. Matching session
+identities keep their broker state across instance-count changes. The public drop, topic-change
+and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
+diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
+tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
@@ -466,6 +475,9 @@ at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or sourc
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
 `MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
 
+A record sink prepares its external bytes once before retention, including when a payload carries
+one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
+across retries and connector replacement; preparation adds no shared owner or synchronization.
 A payload offered to the sink stays in the same task's buffer until the sink answers for it. The
 task marks each member row prepared, and the one answer for the payload resolves every member: a
 row resolves once, so neither a repeated answer nor a later attempt resolves its acknowledgement

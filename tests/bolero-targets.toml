@@ -2950,6 +2950,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/sentry/src/__fuzz__/envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
+domain_version = 1
+features = []
+id = "sentry-prepared-envelopes"
+invariant = "One prepared Sentry envelope preserves every supplied event field, event-id spelling, timestamp and platform, fills only absent defaults, frames the complete event with its exact byte length, and every HTTP attempt sends those identical prepared bytes."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-sentry"
+random_iterations = 128
+source = "crates/connectors/sentry/src/envelope_properties.rs"
+test = "envelope_properties::bolero_prepared_envelopes_preserve_complete_events_across_attempts"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
 domain_version = 1
 features = []

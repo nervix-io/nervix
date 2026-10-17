@@ -289,6 +289,10 @@ relay. Do not use them to scan across branches.
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
   PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+- MQTT source client identities default to the domain and ingestor, with an instance suffix for
+  multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
+  retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
+  session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The

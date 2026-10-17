@@ -163,6 +163,7 @@ mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
 mod mqtt_fixtures;
+mod mqtt_sessions;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
@@ -1665,6 +1666,23 @@ async fn then_http_receiver_request_has_no_header(
     assert!(
         request.header_values(&header).is_empty(),
         "HTTP receiver '{name}' request {position} unexpectedly carries '{header}':\n{request}"
+    );
+}
+
+/// Compares envelope bytes across attempts independently of transport authentication that a
+/// reopened client may refresh.
+#[then(expr = "HTTP receiver {string} request {int} repeats the body of request {int}")]
+async fn then_http_receiver_request_repeats_body(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    let repeated_request = captured_http_request(world, &name, repeated);
+    let original_request = captured_http_request(world, &name, original);
+    assert_eq!(
+        repeated_request.body, original_request.body,
+        "HTTP receiver '{name}' request {repeated} body differs from request {original} body"
     );
 }
 
@@ -27252,6 +27270,63 @@ async fn then_last_observed_broker_message_has_headers(
             world.last_broker_headers
         );
     }
+}
+
+/// A Sentry recorder deduplicates complete envelopes by event id, including requests whose
+/// success response was lost. Keep the raw attempts to compare retries independently of that
+/// deduplication, and check both the envelope header and the event's complete supplied fields.
+#[then(expr = "Sentry receiver {string} recorded {int} distinct event(s) across {int} attempt(s)")]
+async fn then_sentry_receiver_recorded_events(
+    world: &mut ScenarioWorld,
+    name: String,
+    events: usize,
+    attempts: usize,
+    #[step] step: &Step,
+) {
+    let expected: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&expand_placeholders(world, docstring(step)))
+            .assured("the scenario supplies a valid expected event object");
+    let captured = http_receiver(world, &name).captured();
+    assert_eq!(captured.len(), attempts, "Sentry envelope attempt count");
+    let mut recorded = BTreeMap::new();
+    for request in captured {
+        assert_eq!(request.request_line(), "POST /api/1/envelope/");
+        assert_eq!(
+            request.header_values("content-type"),
+            vec![b"application/x-sentry-envelope".as_slice()]
+        );
+        assert_eq!(request.header_values("x-sentry-auth").len(), 1);
+        let mut lines = request.body.split(|byte| *byte == b'\n');
+        let header: serde_json::Value = serde_json::from_slice(
+            lines
+                .next()
+                .assured("a captured envelope has a header line"),
+        )
+        .assured("the envelope header is valid JSON");
+        let item: serde_json::Value =
+            serde_json::from_slice(lines.next().assured("a captured envelope has an item line"))
+                .assured("the envelope item header is valid JSON");
+        let bytes = lines
+            .next()
+            .assured("a captured envelope has an event line");
+        let event: serde_json::Value =
+            serde_json::from_slice(bytes).assured("the envelope event is valid JSON");
+        let id = header["event_id"]
+            .as_str()
+            .assured("a captured envelope has an event id");
+        uuid::Uuid::parse_str(id).assured("the envelope id is a valid UUID");
+        assert_eq!(event["event_id"], id);
+        assert_eq!(item["type"], "event");
+        assert_eq!(item["length"], bytes.len());
+        assert_eq!(item["content_type"], "application/json");
+        for (field, value) in &expected {
+            assert_eq!(&event[field], value, "Sentry event field {field}");
+        }
+        if let Some(previous) = recorded.insert(id.to_owned(), event.clone()) {
+            assert_eq!(previous, event, "one Sentry event id has one event");
+        }
+    }
+    assert_eq!(recorded.len(), events, "Sentry deduplicated event count");
 }
 
 #[then("Sentry eventually receives an event")]
