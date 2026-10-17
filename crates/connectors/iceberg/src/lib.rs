@@ -45,7 +45,7 @@ use ::iceberg::{
         S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA, S3_ENDPOINT,
         S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
     },
-    spec::{DataFile, DataFileFormat, Snapshot, TableProperties},
+    spec::{DataFile, DataFileFormat, Snapshot, TableProperties, Type},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -61,7 +61,8 @@ use ::iceberg::{
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
+    Array, ArrayRef, BooleanArray, FixedSizeListArray, LargeListArray, ListArray, MapArray,
+    RecordBatch, RecordBatchOptions, StructArray, TimestampMicrosecondArray,
     TimestampNanosecondArray,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
@@ -349,6 +350,7 @@ impl IcebergSink {
                     )),
             );
         }
+        Self::validate_table_schema(&staged_schema, loaded.metadata().current_schema())?;
         Ok(Self {
             client: IcebergSinkClient {
                 catalog,
@@ -397,12 +399,121 @@ impl IcebergSink {
     }
 
     fn staged_arrow_data_type(data_type: &DataType) -> DataType {
-        if let DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone)) = data_type
-            && (timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC")
-        {
-            return DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()));
+        match data_type {
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone))
+                if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" =>
+            {
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
+            }
+            DataType::List(field) => DataType::List(StdArc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(Self::staged_arrow_data_type(field.data_type())),
+            )),
+            DataType::LargeList(field) => DataType::LargeList(StdArc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(Self::staged_arrow_data_type(field.data_type())),
+            )),
+            DataType::FixedSizeList(field, size) => DataType::FixedSizeList(
+                StdArc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(Self::staged_arrow_data_type(field.data_type())),
+                ),
+                *size,
+            ),
+            DataType::Struct(fields) => DataType::Struct(
+                fields
+                    .iter()
+                    .map(|field| {
+                        StdArc::new(
+                            field
+                                .as_ref()
+                                .clone()
+                                .with_data_type(Self::staged_arrow_data_type(field.data_type())),
+                        )
+                    })
+                    .collect(),
+            ),
+            DataType::Map(entries, ordered) => DataType::Map(
+                StdArc::new(
+                    entries
+                        .as_ref()
+                        .clone()
+                        .with_data_type(Self::staged_arrow_data_type(entries.data_type())),
+                ),
+                *ordered,
+            ),
+            _ => data_type.clone(),
         }
-        data_type.clone()
+    }
+
+    /// Match the staged columns to the table by name. The generated field IDs describe the
+    /// staged file, not the table, so nested types are compared without those IDs.
+    fn validate_table_schema(
+        staged: &arrow_schema::Schema,
+        table: &::iceberg::spec::Schema,
+    ) -> SinkStartResult<()> {
+        let mapped = ::iceberg::arrow::arrow_schema_to_schema_auto_assign_ids(staged)
+            .change_context(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+            .attach_printable("mapped Iceberg schema cannot be written")?;
+        for column in mapped.as_struct().fields() {
+            let Some(target) = table.as_struct().field_by_name(&column.name) else {
+                return Err(
+                    Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+                        .attach_printable(format!(
+                            "mapped column '{}' does not exist in the Iceberg table",
+                            column.name
+                        )),
+                );
+            };
+            if !Self::iceberg_types_match(&column.field_type, &target.field_type) {
+                return Err(
+                    Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+                        .attach_printable(format!(
+                            "mapped column '{}' has Iceberg type {}, but the table requires {}",
+                            column.name, column.field_type, target.field_type
+                        )),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn iceberg_types_match(mapped: &Type, table: &Type) -> bool {
+        match (mapped, table) {
+            (Type::Primitive(mapped), Type::Primitive(table)) => mapped == table,
+            (Type::List(mapped), Type::List(table)) => Self::iceberg_types_match(
+                &mapped.element_field.field_type,
+                &table.element_field.field_type,
+            ),
+            (Type::Struct(mapped), Type::Struct(table)) => {
+                if mapped.fields().len() != table.fields().len() {
+                    return false;
+                }
+                for field in mapped.fields() {
+                    let Some(target) = table.field_by_name(&field.name) else {
+                        return false;
+                    };
+                    if !Self::iceberg_types_match(&field.field_type, &target.field_type) {
+                        return false;
+                    }
+                }
+                true
+            }
+            (Type::Map(mapped), Type::Map(table)) => {
+                Self::iceberg_types_match(&mapped.key_field.field_type, &table.key_field.field_type)
+                    && Self::iceberg_types_match(
+                        &mapped.value_field.field_type,
+                        &table.value_field.field_type,
+                    )
+            }
+            _ => false,
+        }
     }
 
     fn create_staging_dir(host: &SinkHost) -> SinkStartResult<TempDir> {
@@ -514,23 +625,118 @@ impl IcebergSink {
 
     /// One mapped column in the exact type its staged file carries.
     fn staged_column(column: &ArrayRef, data_type: &DataType) -> SinkPublishResult<ArrayRef> {
-        let DataType::Timestamp(TimeUnit::Microsecond, Some(timezone)) = data_type else {
+        if column.data_type() == data_type {
             return Ok(column.clone());
+        }
+        let invalid_type = || {
+            Report::new(SinkPublishError::Publish { sink: ICEBERG }).attach_printable(format!(
+                "Iceberg column arrived as {} instead of staged type {data_type}",
+                column.data_type()
+            ))
         };
-        let Some(values) = column.as_any().downcast_ref::<TimestampNanosecondArray>() else {
-            return Err(
-                Report::new(SinkPublishError::Publish { sink: ICEBERG }).attach_printable(format!(
-                    "Iceberg datetime column arrived as {} instead of a nanosecond timestamp",
-                    column.data_type()
-                )),
-            );
-        };
-        let microseconds = values
-            .iter()
-            .map(|value| value.map(|nanos| nanos.div_euclid(1_000)))
-            .collect::<TimestampMicrosecondArray>()
-            .with_timezone(timezone.clone());
-        Ok(StdArc::new(microseconds))
+        match (column.data_type(), data_type) {
+            (
+                DataType::Timestamp(TimeUnit::Nanosecond, _),
+                DataType::Timestamp(TimeUnit::Microsecond, Some(timezone)),
+            ) => {
+                let values = column
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(invalid_type)?;
+                let microseconds = values
+                    .iter()
+                    .map(|value| value.map(|nanos| nanos.div_euclid(1_000)))
+                    .collect::<TimestampMicrosecondArray>()
+                    .with_timezone(timezone.clone());
+                Ok(StdArc::new(microseconds))
+            }
+            (DataType::List(_), DataType::List(field)) => {
+                let list = column
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or_else(invalid_type)?;
+                let values = Self::staged_column(list.values(), field.data_type())?;
+                Ok(StdArc::new(
+                    ListArray::try_new(
+                        field.clone(),
+                        list.offsets().clone(),
+                        values,
+                        list.nulls().cloned(),
+                    )
+                    .change_context(SinkPublishError::Publish { sink: ICEBERG })?,
+                ))
+            }
+            (DataType::LargeList(_), DataType::LargeList(field)) => {
+                let list = column
+                    .as_any()
+                    .downcast_ref::<LargeListArray>()
+                    .ok_or_else(invalid_type)?;
+                let values = Self::staged_column(list.values(), field.data_type())?;
+                Ok(StdArc::new(
+                    LargeListArray::try_new(
+                        field.clone(),
+                        list.offsets().clone(),
+                        values,
+                        list.nulls().cloned(),
+                    )
+                    .change_context(SinkPublishError::Publish { sink: ICEBERG })?,
+                ))
+            }
+            (DataType::FixedSizeList(_, _), DataType::FixedSizeList(field, size)) => {
+                let list = column
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .ok_or_else(invalid_type)?;
+                let values = Self::staged_column(list.values(), field.data_type())?;
+                Ok(StdArc::new(
+                    FixedSizeListArray::try_new(
+                        field.clone(),
+                        *size,
+                        values,
+                        list.nulls().cloned(),
+                    )
+                    .change_context(SinkPublishError::Publish { sink: ICEBERG })?,
+                ))
+            }
+            (DataType::Struct(_), DataType::Struct(fields)) => {
+                let row = column
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .ok_or_else(invalid_type)?;
+                let columns = fields
+                    .iter()
+                    .zip(row.columns())
+                    .map(|(field, column)| Self::staged_column(column, field.data_type()))
+                    .collect::<SinkPublishResult<Vec<_>>>()?;
+                Ok(StdArc::new(
+                    StructArray::try_new(fields.clone(), columns, row.nulls().cloned())
+                        .change_context(SinkPublishError::Publish { sink: ICEBERG })?,
+                ))
+            }
+            (DataType::Map(_, _), DataType::Map(field, ordered)) => {
+                let map = column
+                    .as_any()
+                    .downcast_ref::<MapArray>()
+                    .ok_or_else(invalid_type)?;
+                let entries: ArrayRef = StdArc::new(map.entries().clone());
+                let entries = Self::staged_column(&entries, field.data_type())?;
+                let entries = entries
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .ok_or_else(invalid_type)?;
+                Ok(StdArc::new(
+                    MapArray::try_new(
+                        field.clone(),
+                        map.offsets().clone(),
+                        entries.clone(),
+                        map.nulls().cloned(),
+                        *ordered,
+                    )
+                    .change_context(SinkPublishError::Publish { sink: ICEBERG })?,
+                ))
+            }
+            _ => Err(invalid_type()),
+        }
     }
 
     fn next_staged_path(&mut self) -> PathBuf {
@@ -1164,6 +1370,10 @@ mod tests {
             SortOrder, Struct, Summary, TableMetadataBuilder,
         },
     };
+    use arrow_array::builder::{
+        FixedSizeListBuilder, LargeListBuilder, ListBuilder, MapBuilder, StringBuilder,
+        TimestampNanosecondBuilder,
+    };
     use arrow_schema::Field;
     use meticulous::ResultExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
@@ -1502,6 +1712,154 @@ mod tests {
     }
 
     #[test]
+    fn iceberg_open_checks_mapped_column_names_and_types() {
+        let table = arrow_schema_to_schema_auto_assign_ids(&arrow_schema::Schema::new(vec![
+            Field::new(
+                "observed",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+                true,
+            ),
+            Field::new("user_id", DataType::Int64, true),
+        ]))
+        .assured("table schema converts to Iceberg");
+        let compatible = arrow_schema::Schema::new(vec![
+            Field::new("user_id", DataType::Int64, true),
+            Field::new(
+                "observed",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+                true,
+            ),
+        ]);
+        IcebergSink::validate_table_schema(&compatible, &table)
+            .assured("column order and field IDs do not change the schema contract");
+
+        let wrong_type =
+            arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Utf8, true)]);
+        let error = IcebergSink::validate_table_schema(&wrong_type, &table)
+            .expect_err("a mapped type the table cannot write fails at open");
+        assert_eq!(
+            *error.current_context(),
+            SinkStartError::InvalidConfiguration { sink: ICEBERG }
+        );
+        assert!(format!("{error:?}").contains(
+            "mapped column 'user_id' has Iceberg type string, but the table requires long"
+        ));
+
+        let missing = arrow_schema::Schema::new(vec![Field::new("unknown", DataType::Int64, true)]);
+        let error = IcebergSink::validate_table_schema(&missing, &table)
+            .expect_err("a column absent from the table fails at open");
+        assert_eq!(
+            *error.current_context(),
+            SinkStartError::InvalidConfiguration { sink: ICEBERG }
+        );
+    }
+
+    #[test]
+    fn iceberg_open_checks_nested_column_names_and_types() {
+        let datetime = DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()));
+        let list = |element| DataType::List(StdArc::new(Field::new("item", element, true)));
+        let structure = |fields: Vec<Field>| DataType::Struct(fields.into());
+        let map = |key, value| {
+            let entries = structure(vec![
+                Field::new("key", key, false),
+                Field::new("value", value, true),
+            ]);
+            DataType::Map(StdArc::new(Field::new("entries", entries, false)), false)
+        };
+        let observed = Field::new("observed", list(datetime.clone()), true);
+        let dimension = Field::new(
+            "dimension",
+            structure(vec![
+                Field::new("tag", DataType::Utf8, true),
+                Field::new("score", DataType::Int64, true),
+            ]),
+            true,
+        );
+        let labels = Field::new("labels", map(DataType::Utf8, datetime.clone()), true);
+        let table = arrow_schema_to_schema_auto_assign_ids(&arrow_schema::Schema::new(vec![
+            observed.clone(),
+            dimension,
+            labels.clone(),
+        ]))
+        .assured("the fixture uses Iceberg-supported list, struct, map and UTC timestamp types");
+        let reordered = arrow_schema::Schema::new(vec![
+            labels,
+            Field::new(
+                "dimension",
+                structure(vec![
+                    Field::new("score", DataType::Int64, true),
+                    Field::new("tag", DataType::Utf8, true),
+                ]),
+                true,
+            ),
+            observed,
+        ]);
+        IcebergSink::validate_table_schema(&reordered, &table)
+            .assured("matching nested names and types are independent of generated field IDs");
+
+        let mismatches = [
+            Field::new("observed", list(DataType::Int64), true),
+            Field::new("observed", DataType::Utf8, true),
+            Field::new(
+                "dimension",
+                structure(vec![Field::new("tag", DataType::Utf8, true)]),
+                true,
+            ),
+            Field::new(
+                "dimension",
+                structure(vec![
+                    Field::new("category", DataType::Utf8, true),
+                    Field::new("score", DataType::Int64, true),
+                ]),
+                true,
+            ),
+            Field::new(
+                "dimension",
+                structure(vec![
+                    Field::new("tag", DataType::Utf8, true),
+                    Field::new("score", DataType::Utf8, true),
+                ]),
+                true,
+            ),
+            Field::new("labels", map(DataType::Int64, datetime), true),
+            Field::new("labels", map(DataType::Utf8, DataType::Int64), true),
+        ];
+        for field in mismatches {
+            let name = field.name().clone();
+            let mapped = arrow_schema::Schema::new(vec![field]);
+            let error = IcebergSink::validate_table_schema(&mapped, &table)
+                .expect_err("an incompatible nested column must fail before staging");
+            assert_eq!(
+                *error.current_context(),
+                SinkStartError::InvalidConfiguration { sink: ICEBERG }
+            );
+            assert!(format!("{error:?}").contains(&format!("mapped column '{name}'")));
+        }
+    }
+
+    #[test]
+    fn iceberg_open_retains_the_schema_conversion_cause() {
+        let table =
+            arrow_schema_to_schema_auto_assign_ids(&arrow_schema::Schema::new(vec![Field::new(
+                "user_id",
+                DataType::Int64,
+                true,
+            )]))
+            .assured("table schema converts to Iceberg");
+        let unsupported =
+            arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Null, true)]);
+
+        let error = IcebergSink::validate_table_schema(&unsupported, &table)
+            .expect_err("an unsupported mapped type fails at open");
+
+        assert_eq!(
+            *error.current_context(),
+            SinkStartError::InvalidConfiguration { sink: ICEBERG }
+        );
+        assert!(error.contains::<::iceberg::Error>());
+    }
+
+    #[test]
     fn iceberg_datetime_columns_are_staged_as_microseconds() {
         let values: ArrayRef = StdArc::new(
             TimestampNanosecondArray::from(vec![Some(1_234_567), None, Some(-1)])
@@ -1525,6 +1883,209 @@ mod tests {
         assert_eq!(staged.value(0), 1_234);
         assert!(staged.is_null(1));
         assert_eq!(staged.value(2), -1);
+    }
+
+    #[test]
+    fn iceberg_struct_datetime_is_staged_as_microseconds() {
+        let field = StdArc::new(Field::new(
+            "observed",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            true,
+        ));
+        let values: ArrayRef = StdArc::new(
+            TimestampNanosecondArray::from(vec![Some(-1), None, Some(1_234_567)])
+                .with_timezone_utc(),
+        );
+        let source: ArrayRef = StdArc::new(
+            StructArray::try_new(vec![field].into(), vec![values], None)
+                .assured("source struct is valid"),
+        );
+        let mapped =
+            arrow_schema::Schema::new(vec![Field::new("event", source.data_type().clone(), true)]);
+        let staged_schema = IcebergSink::staged_arrow_schema(&mapped)
+            .assured("datetime in a struct narrows in staged schema");
+        let staged = IcebergSink::staged_column(&source, staged_schema.field(0).data_type())
+            .assured("datetime in a struct narrows in staged values");
+        assert_eq!(staged.data_type(), staged_schema.field(0).data_type());
+        let observed = staged
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .assured("struct is retained")
+            .column(0);
+        let observed = observed
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .assured("struct member is a microsecond datetime");
+        assert_eq!(observed.value(0), -1);
+        assert!(observed.is_null(1));
+        assert_eq!(observed.value(2), 1_234);
+    }
+
+    #[test]
+    fn iceberg_nested_container_shapes_keep_values_offsets_and_nulls() {
+        let timestamp_field = StdArc::new(Field::new(
+            "item",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            true,
+        ));
+        let stage = |source: &ArrayRef| {
+            let mapped = arrow_schema::Schema::new(vec![Field::new(
+                "observed",
+                source.data_type().clone(),
+                true,
+            )]);
+            let schema = IcebergSink::staged_arrow_schema(&mapped)
+                .assured("nested datetime schema stages as microseconds");
+            let staged = IcebergSink::staged_column(source, schema.field(0).data_type())
+                .assured("nested datetime values stage as microseconds");
+            assert_eq!(staged.data_type(), schema.field(0).data_type());
+            staged
+        };
+
+        let mut large =
+            LargeListBuilder::new(TimestampNanosecondBuilder::new().with_timezone("+00:00"))
+                .with_field(timestamp_field.clone());
+        large.values().append_value(-1);
+        large.values().append_value(1_999);
+        large.append(true);
+        large.append(false);
+        let source: ArrayRef = StdArc::new(large.finish());
+        let staged = stage(&source);
+        let large = staged
+            .as_any()
+            .downcast_ref::<LargeListArray>()
+            .assured("large list remains a large list");
+        assert_eq!(large.value_offsets(), &[0, 2, 2]);
+        assert!(large.is_null(1));
+        let values = large
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .assured("large list members are microsecond datetimes");
+        assert_eq!(values.values().as_ref(), &[-1, 1]);
+
+        let mut fixed =
+            FixedSizeListBuilder::new(TimestampNanosecondBuilder::new().with_timezone("+00:00"), 2)
+                .with_field(timestamp_field);
+        fixed.values().append_value(1_999);
+        fixed.values().append_null();
+        fixed.append(true);
+        fixed.values().append_value(0);
+        fixed.values().append_value(0);
+        fixed.append(false);
+        let source: ArrayRef = StdArc::new(fixed.finish());
+        let staged = stage(&source);
+        let fixed = staged
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .assured("fixed list remains a fixed list");
+        assert_eq!(fixed.value_length(), 2);
+        assert!(fixed.is_null(1));
+        let values = fixed
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .assured("fixed list members are microsecond datetimes");
+        assert_eq!(values.value(0), 1);
+        assert!(values.is_null(1));
+
+        let mut map = MapBuilder::new(
+            None,
+            StringBuilder::new(),
+            TimestampNanosecondBuilder::new().with_timezone("+00:00"),
+        );
+        map.keys().append_value("first");
+        map.values().append_value(-1);
+        map.append(true).assured("map entry is valid");
+        let source: ArrayRef = StdArc::new(map.finish());
+        let staged = stage(&source);
+        let map = staged
+            .as_any()
+            .downcast_ref::<MapArray>()
+            .assured("map remains a map");
+        assert_eq!(map.value_offsets(), &[0, 1]);
+        let values = map
+            .entries()
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .assured("map values are microsecond datetimes");
+        assert_eq!(values.value(0), -1);
+
+        let error = IcebergSink::staged_column(&source, &DataType::Utf8)
+            .expect_err("an unplanned staged type must fail publication");
+        assert_eq!(
+            *error.current_context(),
+            SinkPublishError::Publish { sink: ICEBERG }
+        );
+    }
+
+    /// The staged schema and the staged values follow every list level, retaining each list
+    /// boundary and rounding negative nanoseconds down to the containing microsecond.
+    #[test]
+    fn bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth() {
+        let values = bolero::generator::produce_with::<Vec<i64>>().len(0_usize..=16);
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(160)
+            .with_generator(values)
+            .for_each(|nanoseconds| {
+                let timestamp_field = StdArc::new(Field::new(
+                    "item",
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    false,
+                ));
+                let inner =
+                    ListBuilder::new(TimestampNanosecondBuilder::new().with_timezone("+00:00"))
+                        .with_field(timestamp_field.clone());
+                let inner_field =
+                    StdArc::new(Field::new("item", DataType::List(timestamp_field), false));
+                let mut outer = ListBuilder::new(inner).with_field(inner_field);
+                for group in nanoseconds.chunks(3) {
+                    for &nanosecond in group {
+                        outer.values().values().append_value(nanosecond);
+                    }
+                    outer.values().append(true);
+                }
+                outer.append(true);
+                let source: ArrayRef = StdArc::new(outer.finish());
+                let mapped = arrow_schema::Schema::new(vec![Field::new(
+                    "observed",
+                    source.data_type().clone(),
+                    true,
+                )]);
+
+                let staged_schema = IcebergSink::staged_arrow_schema(&mapped)
+                    .assured("nested datetime schema stages as microseconds");
+                let staged =
+                    IcebergSink::staged_column(&source, staged_schema.field(0).data_type())
+                        .assured("nested datetime values stage as microseconds");
+                assert_eq!(staged.data_type(), staged_schema.field(0).data_type());
+                let staged_outer = staged
+                    .as_any()
+                    .downcast_ref::<arrow_array::ListArray>()
+                    .assured("outer list is retained");
+                let staged_inner = staged_outer
+                    .values()
+                    .as_any()
+                    .downcast_ref::<arrow_array::ListArray>()
+                    .assured("inner lists are retained");
+                let staged_values = staged_inner
+                    .values()
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .assured("the nested datetime is narrowed");
+                let expected = nanoseconds
+                    .iter()
+                    .map(|value| value.div_euclid(1_000))
+                    .collect::<Vec<_>>();
+                assert_eq!(staged_values.values().as_ref(), expected.as_slice());
+                assert_eq!(staged_inner.len(), nanoseconds.chunks(3).len());
+                assert_eq!(staged_outer.len(), 1);
+                for (index, group) in nanoseconds.chunks(3).enumerate() {
+                    assert_eq!(staged_inner.value(index).len(), group.len());
+                }
+            });
     }
 
     #[test]

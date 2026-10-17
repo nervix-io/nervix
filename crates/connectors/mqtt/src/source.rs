@@ -5,10 +5,10 @@
 //! - **Owns.** The MQTT client and event loop each source instance subscribes through, its
 //!   session and quality-of-service settings, the shared subscription every instance joins, the
 //!   client identity each instance connects with, manual acknowledgement of publishes, and the
-//!   local replay of publishes the host rejected.
+//!   local replay of publishes the host rejected, and retirement of obsolete broker sessions.
 //! - **Depends on.** The connector contract, the crate's broker connection through the node DNS
 //!   resolver, typed client configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -23,8 +23,9 @@
 )]
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
 };
 
 use arch_into::ArchInto as _;
@@ -36,11 +37,12 @@ use nervix_connector::{
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, MqttQos, MqttSession};
-use nervix_primitives::time::{Instant, sleep_until};
+use nervix_models::{ClientConfigEntry, ConnectorKind, MqttQos, MqttSession};
+use nervix_primitives::time::{Instant, sleep_until, timeout};
 use rumqttc::{
-    AckMode, AsyncClient, BrokerSessionResumePolicy, Event, EventLoop, Incoming, MqttOptions,
-    Publish, QoS, SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
+    AckMode, AsyncClient, BrokerSessionResumePolicy, DisconnectProperties, DisconnectReasonCode,
+    Event, EventLoop, Incoming, MqttOptions, Outgoing, Publish, QoS, SessionMode,
+    SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport, UnsubAckReason,
 };
 use thiserror::Error;
 use url::{Host, Url};
@@ -87,6 +89,16 @@ pub enum MqttSourceError {
     Acknowledge,
     #[error("MQTT batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
+    #[error("failed to unsubscribe the retired {connector} input", connector = ConnectorKind::Mqtt)]
+    Unsubscribe,
+    #[error("the {connector} broker refused to unsubscribe the retired input: {reasons:?}", connector = ConnectorKind::Mqtt)]
+    UnsubscribeRefused { reasons: Vec<UnsubAckReason> },
+    #[error("failed to disconnect the retired {connector} session", connector = ConnectorKind::Mqtt)]
+    Disconnect,
+    #[error("{connector} session cleanup exceeded its connection budget of {budget:?}", connector = ConnectorKind::Mqtt)]
+    RetirementDeadline { budget: Duration },
+    #[error("failed to retire {connector} source instance {instance}", connector = ConnectorKind::Mqtt)]
+    RetireInstance { instance: u64 },
 }
 
 type MqttSourceResult<T> = Result<T, Report<MqttSourceError>>;
@@ -98,10 +110,6 @@ type MqttSourceResult<T> = Result<T, Report<MqttSourceError>>;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MqttClientIdError {
     #[error(
-        "MQTT client_id is required for {instances} instances and must contain '{{{{instance}}}}'"
-    )]
-    MissingTemplate { instances: NonZeroU64 },
-    #[error(
         "MQTT client_id '{client_id}' is shared by {instances} instances; use {{{{instance}}}} in \
          client_id for multi-instance MQTT ingestors"
     )]
@@ -111,11 +119,52 @@ pub enum MqttClientIdError {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct MqttSourceAddr {
     host: String,
     port: u16,
     tls: bool,
+}
+
+/// A broker's session namespace and the client identity within it.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MqttSessionIdentity {
+    broker: MqttSourceAddr,
+    client_id: String,
+}
+
+/// The validated broker identities of a source plan, with one representative per broker session.
+pub struct MqttSourceSessions<'a> {
+    plan: &'a MqttSourcePlan,
+    identities: BTreeMap<MqttSessionIdentity, u64>,
+}
+
+impl MqttSourceSessions<'_> {
+    /// The sessions this plan uses that the other plan does not keep with the same subscription.
+    /// The instance indices are unique and ordered, including when a conflicting declaration
+    /// repeats an explicit client identity.
+    pub fn retiring_instances(&self, replacement: Option<&Self>) -> Vec<u64> {
+        let retained = match replacement {
+            Some(replacement)
+                if self.plan.subscribe_filter == replacement.plan.subscribe_filter
+                    && self.plan.session == replacement.plan.session
+                    && self.plan.qos == replacement.plan.qos =>
+            {
+                Some(&replacement.identities)
+            }
+            Some(_) | None => None,
+        };
+        let mut instances = BTreeSet::new();
+        for (identity, instance) in &self.identities {
+            if let Some(retained) = retained
+                && retained.contains_key(identity)
+            {
+                continue;
+            }
+            instances.insert(*instance);
+        }
+        instances.into_iter().collect()
+    }
 }
 
 /// What one MQTT source subscribes with.
@@ -124,7 +173,7 @@ pub struct MqttSourceSettings {
     pub instances: Vec<Vec<ClientConfigEntry>>,
     /// Why the declared client identity cannot serve every instance, if it cannot.
     pub client_id_conflict: Option<MqttClientIdError>,
-    /// The client identity an instance connects with when its entries declare none.
+    /// The default identity for one instance; multiple instances append their instance index.
     pub default_client_id: String,
     /// The shared subscription group every instance joins, so instances never duplicate messages.
     pub share_group: String,
@@ -186,9 +235,8 @@ impl MqttSourcePlan {
         }
     }
 
-    /// Several instances must each connect under their own identity, so a declaration shared by
-    /// `instances` has to carry the instance template; one instance may use any identity or the
-    /// default.
+    /// Several instances need distinct identities. An explicit shared identity contains the
+    /// instance template; an absent identity uses the instance-qualified default.
     pub fn client_id_conflict(
         declared: &[ClientConfigEntry],
         instances: NonZeroU64,
@@ -196,9 +244,7 @@ impl MqttSourcePlan {
         if instances == NonZeroU64::MIN {
             return None;
         }
-        let Some(client_id) = optional_client_config_value(declared, "client_id") else {
-            return Some(MqttClientIdError::MissingTemplate { instances });
-        };
+        let client_id = optional_client_config_value(declared, "client_id")?;
         if client_id.contains(MQTT_INSTANCE_PLACEHOLDER) {
             return None;
         }
@@ -214,14 +260,148 @@ impl MqttSourcePlan {
                 instance: instance_index,
             }));
         };
+        let default_client_id = self.default_instance_client_id(instance_index);
         let (client, eventloop) = Self::client_from_config(
             instance,
-            &self.default_client_id,
+            &default_client_id,
             self.session,
             self.manual_acks,
             self.dns.clone(),
         )?;
         Ok(MqttConnection { client, eventloop })
+    }
+
+    fn default_instance_client_id(&self, instance_index: u64) -> String {
+        if self.instances.len() == 1 {
+            self.default_client_id.clone()
+        } else {
+            format!("{}~{instance_index}", self.default_client_id)
+        }
+    }
+
+    fn session_identity(&self, instance_index: u64) -> MqttSourceResult<MqttSessionIdentity> {
+        let Some(instance) = self.instances.get(instance_index.arch_into()) else {
+            return Err(Report::new(MqttSourceError::MissingInstance {
+                instance: instance_index,
+            }));
+        };
+        let address = client_config_value(instance, "addr", ConnectorKind::Mqtt.into())
+            .change_context(MqttSourceError::ClientConfig)?;
+        let client_id = match optional_client_config_value(instance, "client_id") {
+            Some(client_id) => client_id.to_owned(),
+            None => self.default_instance_client_id(instance_index),
+        };
+        Ok(MqttSessionIdentity {
+            broker: Self::parse_addr(&address)?,
+            client_id,
+        })
+    }
+
+    /// Validates the external identity of every configured instance once before comparing inputs.
+    pub fn sessions(&self) -> error_stack::Result<MqttSourceSessions<'_>, MqttSourceError> {
+        let mut identities = BTreeMap::new();
+        for (instance_index, _) in (0_u64..).zip(&self.instances) {
+            let identity = self.session_identity(instance_index)?;
+            identities.entry(identity).or_insert(instance_index);
+        }
+        Ok(MqttSourceSessions {
+            plan: self,
+            identities,
+        })
+    }
+
+    /// Releases one retired input after the host stopped its execution. A clean connection also
+    /// clears a session left by an already-stopped or suspended source, without restoring any
+    /// in-memory protocol state. Its ordinary connection budget bounds the entire cleanup.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the host retires an obsolete input after its execution stopped"
+        )
+    )]
+    pub async fn retire(&self, instance_index: u64) -> error_stack::Result<(), MqttSourceError> {
+        let retirement = async {
+            let mut connection = self.client(instance_index)?;
+            connection
+                .eventloop
+                .options
+                .set_session_mode(SessionMode::Clean);
+            let budget = connection.eventloop.options.connect_timeout();
+            match timeout(budget, self.retire_connection(&mut connection)).await {
+                Ok(result) => result,
+                Err(_) => Err(Report::new(MqttSourceError::RetirementDeadline { budget })),
+            }
+        };
+        retirement
+            .await
+            .change_context(MqttSourceError::RetireInstance {
+                instance: instance_index,
+            })
+    }
+
+    async fn retire_connection(&self, connection: &mut MqttConnection) -> MqttSourceResult<()> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let event = connection.eventloop.poll().await.map_err(|error| {
+                MqttConnectionError::report(error).change_context(MqttSourceError::Connect)
+            })?;
+            if let Event::Incoming(Incoming::ConnAck(_)) = event {
+                break;
+            }
+        }
+        connection
+            .client
+            .unsubscribe(self.subscribe_filter.as_str())
+            .await
+            .map_err(|error| Report::new(error).change_context(MqttSourceError::Unsubscribe))?;
+        let unsubscribe = Self::confirm_unsubscribe(connection).await;
+        // Even a refused unsubscribe must not keep this session alive. The clean connection's
+        // zero expiry already makes dropping it terminal if the peer stops answering.
+        connection
+            .client
+            .disconnect_now_with_properties(
+                DisconnectReasonCode::NormalDisconnection,
+                DisconnectProperties {
+                    session_expiry_interval: Some(0),
+                    reason_string: None,
+                    user_properties: Vec::new(),
+                    server_reference: None,
+                },
+            )
+            .await
+            .map_err(|error| Report::new(error).change_context(MqttSourceError::Disconnect))?;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let event = connection.eventloop.poll().await.map_err(|error| {
+                MqttConnectionError::report(error).change_context(MqttSourceError::Disconnect)
+            })?;
+            if let Event::Outgoing(Outgoing::Disconnect) = event {
+                return unsubscribe;
+            }
+        }
+    }
+
+    async fn confirm_unsubscribe(connection: &mut MqttConnection) -> MqttSourceResult<()> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let event = connection.eventloop.poll().await.map_err(|error| {
+                MqttConnectionError::report(error).change_context(MqttSourceError::Unsubscribe)
+            })?;
+            if let Event::Incoming(Incoming::UnsubAck(answer)) = event {
+                if answer.reasons.iter().all(|reason| {
+                    matches!(
+                        reason,
+                        UnsubAckReason::Success | UnsubAckReason::NoSubscriptionExisted
+                    )
+                }) {
+                    return Ok(());
+                }
+                return Err(Report::new(MqttSourceError::UnsubscribeRefused {
+                    reasons: answer.reasons,
+                }));
+            }
+        }
     }
 
     fn client_from_config(
@@ -231,7 +411,7 @@ impl MqttSourcePlan {
         manual_acks: bool,
         dns: DnsResolver,
     ) -> MqttSourceResult<(AsyncClient, EventLoop)> {
-        let addr = client_config_value(config, "addr", "MQTT")
+        let addr = client_config_value(config, "addr", ConnectorKind::Mqtt.into())
             .change_context(MqttSourceError::ClientConfig)?;
         let client_id = match optional_client_config_value(config, "client_id") {
             Some(client_id) => client_id.to_owned(),
@@ -285,14 +465,12 @@ impl MqttSourcePlan {
         AsyncClient::builder(options)
             .capacity(1024)
             .try_build()
-            .map_err(|error| {
-                Report::new(MqttSourceError::BuildClient).attach_printable(error.to_string())
-            })
+            .map_err(|error| Report::new(error).change_context(MqttSourceError::BuildClient))
     }
 
     fn parse_addr(addr: &str) -> MqttSourceResult<MqttSourceAddr> {
         let url = Url::parse(addr).map_err(|source| {
-            Report::new(MqttSourceError::InvalidAddress).attach_printable(source.to_string())
+            Report::new(source).change_context(MqttSourceError::InvalidAddress)
         })?;
         let tls = if url.scheme() == "mqtt" {
             false
@@ -602,7 +780,7 @@ impl BrokerSourceConnector for MqttSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
@@ -618,6 +796,18 @@ mod tests {
 
     fn config_with_client_id(client_id: &str) -> Vec<ClientConfigEntry> {
         vec![entry("client_id", client_id)]
+    }
+
+    fn retiring_instances(plan: &MqttSourcePlan, replacement: Option<&MqttSourcePlan>) -> Vec<u64> {
+        let sessions = plan
+            .sessions()
+            .assured("the source fixture has valid session identities");
+        let replacement = replacement.map(|replacement| {
+            replacement
+                .sessions()
+                .assured("the replacement fixture has valid session identities")
+        });
+        sessions.retiring_instances(replacement.as_ref())
     }
 
     async fn build_client(
@@ -681,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_instance_client_id_requires_instance_template() {
+    fn explicit_multi_instance_client_id_uses_instance_template() {
         assert_eq!(
             MqttSourcePlan::client_id_conflict(
                 &config_with_client_id("fixed-client"),
@@ -694,9 +884,7 @@ mod tests {
         );
         assert_eq!(
             MqttSourcePlan::client_id_conflict(&[], nonzero!(2u64)),
-            Some(MqttClientIdError::MissingTemplate {
-                instances: nonzero!(2u64),
-            })
+            None
         );
         assert_eq!(
             MqttSourcePlan::client_id_conflict(
@@ -708,6 +896,187 @@ mod tests {
         assert_eq!(
             MqttSourcePlan::client_id_conflict(&[], nonzero!(1u64)),
             None
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn retirement_keeps_matching_session_identities_and_releases_obsolete_ones() {
+        let fixture = DnsFixture::start().await;
+        let mut declared = settings(
+            "mqtt://127.0.0.1:1883",
+            MqttSession::Persistent,
+            fixture.dns.clone(),
+        );
+        declared.default_client_id = "domain~events".to_string();
+        let singleton = MqttSourcePlan::new(declared);
+        assert_eq!(
+            singleton
+                .client(0)
+                .assured("the source plan is valid")
+                .eventloop
+                .options
+                .client_id(),
+            "domain~events"
+        );
+        assert_eq!(retiring_instances(&singleton, None), vec![0]);
+        assert!(retiring_instances(&singleton, Some(&singleton)).is_empty());
+
+        let mut parallel = singleton.clone();
+        parallel.instances.push(parallel.instances[0].clone());
+        assert_eq!(
+            parallel
+                .client(0)
+                .assured("the source plan is valid")
+                .eventloop
+                .options
+                .client_id(),
+            "domain~events~0"
+        );
+        assert_eq!(
+            parallel
+                .client(1)
+                .assured("the source plan is valid")
+                .eventloop
+                .options
+                .client_id(),
+            "domain~events~1"
+        );
+        assert_eq!(retiring_instances(&singleton, Some(&parallel)), vec![0]);
+
+        let mut expanded = parallel.clone();
+        expanded.instances.push(expanded.instances[0].clone());
+        assert!(retiring_instances(&parallel, Some(&expanded)).is_empty());
+        assert_eq!(retiring_instances(&expanded, Some(&parallel)), vec![2]);
+
+        let mut different_topic = parallel.clone();
+        different_topic.subscribe_filter = "$share/domain~events/replacement".to_string();
+        assert_eq!(
+            retiring_instances(&parallel, Some(&different_topic)),
+            vec![0, 1]
+        );
+
+        let mut explicit = singleton.clone();
+        explicit.instances[0].push(entry("client_id", "provided-0"));
+        let mut explicit_expanded = explicit.clone();
+        explicit_expanded.instances.push(vec![
+            entry("addr", "mqtt://127.0.0.1:1883"),
+            entry("client_id", "provided-1"),
+        ]);
+        assert!(retiring_instances(&explicit, Some(&explicit_expanded)).is_empty());
+        assert_eq!(
+            retiring_instances(&explicit_expanded, Some(&explicit)),
+            vec![1]
+        );
+        let mut repeated_identity = explicit.clone();
+        repeated_identity
+            .instances
+            .push(repeated_identity.instances[0].clone());
+        assert_eq!(retiring_instances(&repeated_identity, None), vec![0]);
+    }
+
+    #[nervix_primitives::test]
+    async fn retirement_unsubscribes_and_sends_expiry_zero_even_when_unsubscribe_is_refused() {
+        use crate::scripted_broker::ScriptedBroker;
+
+        let fixture = DnsFixture::start().await;
+        for reason in [0x00, 0x11, 0x87] {
+            nervix_primitives::task::consume_budget().await;
+            let broker = ScriptedBroker::start().await;
+            let plan = MqttSourcePlan::new(settings(
+                &broker.addr(),
+                MqttSession::Persistent,
+                fixture.dns.clone(),
+            ));
+            let observe = async {
+                let mut connection = broker.accept().await;
+                let (packet_type, body) = connection.read_packet().await;
+                assert_eq!(packet_type, 10, "retirement sends UNSUBSCRIBE");
+                assert_eq!(body[2], 0, "the unsubscribe carries no properties");
+                let filter_length = usize::from(u16::from_be_bytes([body[3], body[4]]));
+                assert_eq!(filter_length, plan.subscribe_filter.len());
+                assert_eq!(&body[5..], plan.subscribe_filter.as_bytes());
+                connection
+                    .write(&[0xb0, 4, body[0], body[1], 0, reason])
+                    .await;
+                let (packet_type, body) = connection.read_packet().await;
+                assert_eq!(packet_type, 14, "retirement sends DISCONNECT");
+                assert_eq!(
+                    body,
+                    [0, 5, 0x11, 0, 0, 0, 0],
+                    "DISCONNECT declares session expiry zero"
+                );
+            };
+            let (result, ()) = timeout(Duration::from_secs(30), async {
+                tokio::join!(plan.retire(0), observe)
+            })
+            .await
+            .assured("the scripted exchange completes within its observation budget");
+            if reason == 0x87 {
+                let Err(error) = result else {
+                    panic!("the broker's refusal must be reported");
+                };
+                assert!(matches!(
+                    error.current_context(),
+                    MqttSourceError::RetireInstance { instance: 0 }
+                ));
+                assert!(error.frames().any(|frame| matches!(frame.downcast_ref::<MqttSourceError>(), Some(MqttSourceError::UnsubscribeRefused { reasons }) if reasons == &[UnsubAckReason::NotAuthorized])));
+            } else {
+                result.assured("the broker released the subscription");
+            }
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn retirement_of_a_silent_broker_ends_at_its_connection_budget() {
+        use nervix_primitives::sync::CancellationToken;
+
+        use crate::scripted_broker::ScriptedBroker;
+
+        let fixture = DnsFixture::start().await;
+        let broker = ScriptedBroker::start().await;
+        let plan = MqttSourcePlan::new(settings(
+            &broker.addr(),
+            MqttSession::Persistent,
+            fixture.dns.clone(),
+        ));
+        let budget = plan
+            .client(0)
+            .assured("the source plan is valid")
+            .eventloop
+            .options
+            .connect_timeout();
+        let finished = CancellationToken::new();
+        let observe = async {
+            let _connection = broker.accept_without_reply().await;
+            finished.cancelled().await;
+        };
+        let retire = async {
+            let result = plan.retire(0).await;
+            finished.cancel();
+            result
+        };
+        let started = Instant::now();
+        let (result, ()) = timeout(Duration::from_secs(30), async {
+            tokio::join!(retire, observe)
+        })
+        .await
+        .assured("the cleanup finishes within its observation budget");
+        let Err(error) = result else {
+            panic!("a broker that never answers cannot complete session cleanup");
+        };
+        assert!(started.elapsed() >= budget);
+        let cleanup_timeout = error.frames().any(|frame| matches!(frame.downcast_ref::<MqttSourceError>(), Some(MqttSourceError::RetirementDeadline { budget: actual }) if *actual == budget));
+        let connect_timeout = error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<MqttConnectionError>(),
+                Some(MqttConnectionError::Driver(
+                    rumqttc::ConnectionError::Timeout(_)
+                ))
+            )
+        });
+        assert!(
+            cleanup_timeout || connect_timeout,
+            "the report preserves its timeout owner: {error:#}"
         );
     }
 

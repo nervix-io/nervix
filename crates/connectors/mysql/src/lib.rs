@@ -85,10 +85,30 @@ impl Drop for PoolMaintenance {
 /// One connection borrowed from the shared pool, returned to it when this is dropped.
 pub struct MySqlConnection(Conn);
 
+impl MySqlConnection {
+    /// Execute an insert on this borrow, retaining it for any record-error isolation that follows.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the external MySQL driver owns statement execution")
+    )]
+    async fn insert(
+        &mut self,
+        statement: &MultiRowInsert,
+        rows: usize,
+        params: Vec<Value>,
+    ) -> error_stack::Result<u64, MySqlWriteError> {
+        self.0
+            .exec_drop(statement.sql(rows), Params::Positional(params))
+            .await
+            .map_err(MySqlWriteError::report_execute)?;
+        Ok(self.0.affected_rows())
+    }
+}
+
 /// The node-owned pool this sink borrows connections from while its host holds the lease.
 #[async_trait]
 pub trait MySqlConnections: Send + Sync + 'static {
-    /// Borrow one connection for one insert, with the host's pool wait recorded around it.
+    /// Borrow for one insert and its row isolation, with the host's pool wait recorded around it.
     async fn connection(&self) -> SinkPublishResult<MySqlConnection>;
 }
 
@@ -348,35 +368,21 @@ impl MySqlSink {
         })
     }
 
-    /// One insert of `rows` rows binding `params`, on a connection borrowed for that insert and
-    /// returned after it.
+    /// Borrow once for a bounded insert and the isolation of any rows the database refuses.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
-            reason = "external Arrow access and MySQL driver insertion own their effects"
+            reason = "the host owns external driver-pool acquisition and its wait publication"
         )
     )]
-    async fn insert(
-        &self,
-        statement: &MultiRowInsert,
-        rows: usize,
-        params: Vec<Value>,
-    ) -> error_stack::Result<u64, MySqlWriteError> {
-        let mut conn = {
-            let mapping_input = self.connections.connection().await;
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let reason = format!("{error:?}");
-                    error.change_context(MySqlWriteError::Pool { reason })
-                }),
+    async fn connection(&self) -> error_stack::Result<MySqlConnection, MySqlWriteError> {
+        match self.connections.connection().await {
+            Ok(connection) => Ok(connection),
+            Err(error) => {
+                let reason = format!("{error:?}");
+                Err(error.change_context(MySqlWriteError::Pool { reason }))
             }
-        }?;
-        conn.0
-            .exec_drop(statement.sql(rows), Params::Positional(params))
-            .await
-            .map_err(MySqlWriteError::report_execute)?;
-        Ok(conn.0.affected_rows())
+        }
     }
 
     fn conflict_clause(
@@ -484,7 +490,14 @@ impl RowSink for MySqlSink {
                 }
             };
             let params = values.take(written.clone());
-            match self.insert(&statement, written.len(), params).await {
+            let mut connection = match self.connection().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    outcome.fail(MySqlWriteError::into_report(error));
+                    return outcome;
+                }
+            };
+            match connection.insert(&statement, written.len(), params).await {
                 Ok(_) => {
                     for index in written {
                         outcome.deliver(rows.position(members[index]));
@@ -492,7 +505,8 @@ impl RowSink for MySqlSink {
                 }
                 // A record-specific failure of a multi-row insert is isolated by inserting each of
                 // its rows alone, so healthy rows land and only the rejected ones follow the error
-                // policy. The values the failed insert took are bound again from the row's columns.
+                // policy. Retain this insert's connection so isolation does not queue behind a
+                // different writer. Bind the failed insert's values again from the row's columns.
                 Err(error) if error.current_context().is_record_error() && written.len() > 1 => {
                     for index in written {
                         nervix_primitives::task::consume_budget().await;
@@ -501,7 +515,7 @@ impl RowSink for MySqlSink {
                             .get(member.carrier)
                             .assured("every carrier of the write was mapped before it was bound")
                             .row_values(member.row);
-                        match self.insert(&statement, 1, params).await {
+                        match connection.insert(&statement, 1, params).await {
                             Ok(_) => outcome.deliver(rows.position(member)),
                             Err(error) if error.current_context().is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
@@ -1110,15 +1124,12 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn insert_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
+    async fn connection_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
         let sink = test_sink(MySqlConflictAction::None);
-        let statement = sink
-            .insert_statement(&["seq".to_string()])
-            .expect("the statement is valid before connection acquisition");
-        let error = sink
-            .insert(&statement, 1, Vec::new())
-            .await
-            .expect_err("the test pool has no connection");
+        let error = match sink.connection().await {
+            Ok(_) => panic!("the test pool has no connection"),
+            Err(error) => error,
+        };
         assert!(matches!(
             error.current_context(),
             MySqlWriteError::Pool { .. }

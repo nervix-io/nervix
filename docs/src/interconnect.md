@@ -872,6 +872,15 @@ Removing or evicting a concrete branch cancels its unadmitted channel generation
 reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
 keeps a previous branch lifetime from being confused with the new runtime instance.
 
+A committed forced ownership change also retires changing relay routes' preceding channel
+generation before the local graph installer waits for dispatch quiescence. The sender interrupts
+its admission wait and uses the same cancellation operation and five-second reconciliation budget.
+It need not wait for the fenced former owner to resume. An admitted result keeps the receiver's
+record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for source
+retry, with possible replay duplicates. No transport message or automatic replay contract changes.
+The installer publishes successor routes only after completing the local swap, so another dispatch
+cannot open a fresh channel toward a preceding consumer while that fence is held.
+
 ### Consumers That Leave The Receiver
 
 The relay owner also fences the start of each buffered batch's fan-out against its local schedule

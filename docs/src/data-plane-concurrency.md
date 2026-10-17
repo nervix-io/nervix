@@ -36,6 +36,15 @@ it resolved when its task, branch, channel, or attempt was created. A shared reg
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
 
+MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
+plans from the installed execution, releases the registry guard, stops the source tasks, and
+then performs network cleanup and replacement preparation. Each connection has one mutable
+owner; simultaneous attempts are bounded by the declared source instance count. Matching session
+identities keep their broker state across instance-count changes. The public drop, topic-change
+and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
+diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
+tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
@@ -340,6 +349,12 @@ borrows. A ready borrow writes nothing; the first Pending poll publishes its wai
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
 slot, so a replacement sink's slot survives an earlier sink's teardown.
 
+Postgres and MySQL borrow once per bounded insert and retain that connection through any
+record-error isolation. Isolation therefore takes no second pool wait behind another writer.
+The connection returns before the next insert or retry backoff. The MySQL public contention
+scenario exercises the real driver and database; these external asynchronous waits are outside
+Deloxide's tracked locks and the model checkers' coverage.
+
 Generators retain the domain acknowledgement tracker. Ingest executions, groups and endpoint
 bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
 exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
@@ -466,6 +481,9 @@ at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or sourc
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
 `MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
 
+A record sink prepares its external bytes once before retention, including when a payload carries
+one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
+across retries and connector replacement; preparation adds no shared owner or synchronization.
 A payload offered to the sink stays in the same task's buffer until the sink answers for it. The
 task marks each member row prepared, and the one answer for the payload resolves every member: a
 row resolves once, so neither a repeated answer nor a later attempt resolves its acknowledgement
@@ -868,6 +886,20 @@ finds no entry. A terminal outcome, the delivery's own failure, and the sweep ea
 out of the registry with one removal, so exactly one of them resolves it. The atomics establish no
 ordering across locations; the shard lock orders the recheck against every earlier report.
 
+Brokered sinks keep each publish's pending answers in the shared `ConfirmationWindow`. When a
+publish fails, the window polls every remaining answer once without waiting and settles the
+confirmed and rejected records before returning the failure. Unanswered or failed answers keep
+their records unresolved for the host's retry. The read uses
+`nervix_primitives::task::unconstrained`: Tokio's exhausted cooperative budget can otherwise make an
+already delivered channel answer appear pending. This pass is bounded by the configured `MAX`
+window size.
+
+The window's Shuttle checks exercise settlement racing broker answers, window admission and
+deadline expiry through the production owner. Shuttle does not model Tokio's cooperative budget;
+ordinary primitive and window tests deliver more answers than one budget permits and verify that
+every given answer is settled. [Execution Primitives](execution-primitives.md) owns the adapter's
+behavior in each mode, and [Connector Contract](connector-contract.md) owns the publish outcomes.
+
 ### Client ingestor endpoints
 
 Each client ingestor a node executes has one endpoint task that owns every producer attached to it:
@@ -1070,6 +1102,27 @@ The engagement state is consulted only while the gate is closed. Once all earlie
 the engagement owns a lease and the protected mutation can proceed. The acquisition deadline bounds
 waiting for that fence; a successfully acquired lease remains engaged until its owner releases or
 drops it.
+
+Forced ownership recovery closes the affected dispatch gates, then cancels changing routes'
+preceding channel generations before waiting for their permits. Retirement retains that cancelled
+generation until the swap publishes its new owner and consumer routes. Retained channels and
+first-use bindings therefore both reject further deliveries through the preceding routes; cancelling
+and immediately publishing a fresh generation would let an existing fan-out acquire a new channel
+for a consumer it selected before the fence. Only relays selected by the typed forced-recovery plan
+and whose routing actually changes are retired. Completed planned handoffs keep their ordinary
+quiescence path. Remote admission uses its existing cancellation/reconciliation budget of five
+seconds per interrupted attempt, rather than retaining a permit until the former owner resumes or
+the entity gate deadline passes. Unconfirmed deliveries fail their record ACKs for source retry;
+already admitted work retains its existing ACK and silence contracts.
+
+The production channel-owner Shuttle check
+`shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication` races first-use
+binding against retirement and requires every preceding slot to remain cancelled across successor
+publication. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
+admission and runtime preparation, checks delivery and a later revision before releasing it, and
+runs in the active, order and lifecycle-stress Deloxide selections. Those selections observe the
+tracked gate, channel-ordering and ACK-owner locks; asynchronous cancellation, admission waits and
+network behavior retain the complementary Shuttle, public-scenario and external Chaos evidence.
 
 An owner buffer admits a batch before its fan-out begins. Fan-out therefore takes a nonwaiting
 dispatch permit before it reads any local or remote runtime-consumer route and holds the permit
@@ -1914,10 +1967,10 @@ report tool qualifies every file before cleanup. A run fails unless each node ho
 qualifying evidence file of the declared selection for every process start the recording shows,
 and no node ended with status `3` or `4`; an unreviewed potential cycle fails it as in the lane.
 The suite refuses an image whose labels name another kind or revision than its caller asks for.
-`scripts/chaos/README.md` owns the runner's contract and artifacts. The evidence observes each
-process up to its kill, pause, stop or the freeze, without an upstream flush barrier, and only its
-tracked thread-blocking locks; recovery, ledger and timing verdicts stay the scenarios' own, with
-the product's deadlines and the suite's budgets unchanged.
+[External Cluster Chaos](./cluster-chaos.md#diagnostic-images) owns the runner's contract and
+artifacts. The evidence observes each process up to its kill, pause, stop or the freeze, without an
+upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
+verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
 
 ## Deterministic Concurrency Verification
 

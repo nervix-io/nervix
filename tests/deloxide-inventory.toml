@@ -127,6 +127,8 @@ tags = [
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
+  "@mqtt_source_retirement",
+  "@forced_failover_delivery",
 ]
 target = "test:scenarios"
 
@@ -1792,6 +1794,86 @@ invocation = "stress-restore-scenarios"
 scenario = "Relocating a window owner preserves incomplete branch-local exact aggregates"
 selections = ["deloxide-stress-restore"]
 
+[[workload]]
+coverage = "Typed input retirement during domain rebuild and entity swap after source tasks stop. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "scenario.mqtt-session-drop"
+invariant = "DROP while running or stopped retires each locally owned MQTT input before its typed execution plan is withdrawn, on one and three nodes."
+invocation = "scenarios"
+scenario = "Dropping an MQTT ingestor releases its persistent broker session"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during domain rebuild and entity swap after source tasks stop. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "stress.mqtt-session-drop"
+invariant = "DROP while running or stopped retires each locally owned MQTT input before its typed execution plan is withdrawn, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Dropping an MQTT ingestor releases its persistent broker session"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Typed input retirement during domain rebuild and entity swap after source tasks stop. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "scenario.mqtt-topic-replacement"
+invariant = "Changing a persistent MQTT input releases its preceding filter and prepares its new session before delivery, on one and three nodes."
+invocation = "scenarios"
+scenario = "An altered MQTT topic replaces the persistent session subscription"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during domain rebuild and entity swap after source tasks stop. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "stress.mqtt-topic-replacement"
+invariant = "Changing a persistent MQTT input releases its preceding filter and prepares its new session before delivery, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An altered MQTT topic replaces the persistent session subscription"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Typed input retirement during domain rebuild and entity swap after source tasks stop. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "scenario.mqtt-endpoint-replacement"
+invariant = "Cleanup at an unavailable preceding MQTT endpoint is reported while the reachable replacement starts with its declared topic, on one and three nodes."
+invocation = "scenarios"
+scenario = "An MQTT input moves away from an unavailable endpoint without retaining its topic"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during domain rebuild and entity swap after source tasks stop. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "stress.mqtt-endpoint-replacement"
+invariant = "Cleanup at an unavailable preceding MQTT endpoint is reported while the reachable replacement starts with its declared topic, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An MQTT input moves away from an unavailable endpoint without retaining its topic"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Forced emitter recovery while the former owner's relay admission and runtime preparation remain held. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/forced_failover_delivery.feature"
+id = "scenario.forced-failover-delivery"
+invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
+invocation = "scenarios"
+scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: forced emitter recovery with held former-owner admission and runtime preparation, including dispatch gate, relay channel and ACK ownership locks. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/forced_failover_delivery.feature"
+id = "stress.forced-failover-delivery"
+invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
+invocation = "stress-scenarios"
+scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2221,6 +2303,8 @@ workloads = [
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
   "stress.shutdown-leader-change",
+  "scenario.forced-failover-delivery",
+  "stress.forced-failover-delivery",
 ]
 
 [[owner]]
@@ -2242,6 +2326,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.mqtt-session-drop",
+  "scenario.mqtt-topic-replacement",
+  "scenario.mqtt-endpoint-replacement",
+  "stress.mqtt-session-drop",
+  "stress.mqtt-topic-replacement",
+  "stress.mqtt-endpoint-replacement",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",
@@ -2297,16 +2387,23 @@ workloads = [
 path = "src/runtime/relay_boundary.rs"
 workloads = [
   "scenario.diagnostic-nodes",
+  "scenario.forced-failover-delivery",
   "scenario.materialized-retention-activation",
   "scenario.materialized-restart-retention",
   "stress.diagnostic-nodes",
+  "stress.forced-failover-delivery",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
 ]
 
 [[owner]]
 path = "src/runtime/relay_channel.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.forced-failover-delivery",
+  "stress.forced-failover-delivery",
+]
 
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"

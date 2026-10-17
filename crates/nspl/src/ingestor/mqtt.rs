@@ -146,7 +146,7 @@ pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], MqttTopicSource, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Topic))
-        .then(external_name("mqtt_topic_filter", MqttTopicFilter::parse))
+        .then(external_name::<MqttTopicFilter>())
         .then(optional_instances())
         .then(mode().then_with_ctx(quiesce_clause()))
         .map(

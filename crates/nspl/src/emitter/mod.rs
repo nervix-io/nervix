@@ -1439,6 +1439,9 @@ pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use nervix_models::{
         ClickHouseSink, ClickHouseTableSink, FlushPolicy, HttpRequestSink, HttpSink, IcebergSink,
