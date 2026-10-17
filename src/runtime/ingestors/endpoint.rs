@@ -361,7 +361,7 @@ pub(super) mod tests {
                 "request routing must borrow the prepared routes without cloning the intake"
             );
         }
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[cfg(feature = "benchmarks")]
@@ -414,7 +414,7 @@ pub(super) mod tests {
                     / 10_000
             );
         }
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -441,7 +441,7 @@ pub(super) mod tests {
             "failed to decode http message for ingestor 'event_source' in domain 'default': codec \
              'event_json' failed to parse field 'user_id': expected Integer, found a JSON string"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -473,7 +473,7 @@ pub(super) mod tests {
             format!("{report:#}"),
             "ingestor 'event_source' in domain 'default' is already running"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -578,7 +578,7 @@ pub(super) mod tests {
                 retry_after: None,
             }
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     /// A body its codec rejects as it drains after resume is reported and leaves the buffer, as any
@@ -624,7 +624,7 @@ pub(super) mod tests {
             IngestorQuiesceCounters::default(),
             "the rejected body leaves the buffer"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     /// A body `BUFFER` retained was already answered 202, so when the extension workers cannot
@@ -738,6 +738,6 @@ pub(super) mod tests {
         );
         assert_eq!(quiesce.counters().buffered_records, 0);
         assert_eq!(quiesce.counters().buffered_bytes, 0);
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 }

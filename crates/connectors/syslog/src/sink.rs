@@ -29,14 +29,14 @@ use std::{
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
 use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
     net::{TcpStream, UdpSocket},
-    time::timeout,
+    time::{Instant, timeout},
 };
 use rustls_pki_types::ServerName;
 use thiserror::Error;
@@ -301,7 +301,13 @@ impl SyslogSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for SyslogSink {}
+impl SinkLifecycle for SyslogSink {
+    /// Each frame is written and flushed to the socket before the publish returns, so the
+    /// sender holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SyslogSink {

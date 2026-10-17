@@ -169,6 +169,38 @@ class CompilerContractTests(unittest.TestCase):
             self.assertIn("nervix::model_in_data_plane", result.stderr.replace("-", "_"))
             self.assertIn("nervix::parser_dependency", result.stderr.replace("-", "_"))
 
+    def test_foreign_items_take_contracts_from_the_module_holding_their_block(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        result = self.compile("architecture_foreign", crate_name="callee")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = target / "typed-ratchet/contracts/architecture_foreign/libcallee.rmeta"
+        result = self.compile("architecture_foreign_use", "--extern=callee=" + str(metadata),
+                              "--error-format=json")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        # The wrapper reports denied diagnostics and an internal compiler error with one status.
+        self.assertNotIn("panicked at", result.stderr)
+        source =(ROOT / "tools/nervix-lint/fixtures/tests/semantics/architecture_foreign_use.rs").read_bytes()
+        findings: dict[str, list[str]] = {}
+        for line in result.stderr.splitlines():
+            if not line.startswith("{"):
+                continue
+            diagnostic = json.loads(line)
+            code = (diagnostic.get("code") or {}).get("code") or ""
+            if not code.startswith("nervix::"):
+                continue
+            primary = [span for span in diagnostic["spans"] if span["is_primary"]]
+            self.assertEqual(len(primary), 1, diagnostic)
+            snippet = source[primary[0]["byte_start"]:primary[0]["byte_end"]].decode()
+            findings.setdefault(code, []).append(snippet)
+        # The language module's foreign function is a parser dependency, by its path and by the
+        # type of its call, and the lifecycle module's one is a lifecycle call. The foreign function
+        # of the uncontracted module is neither.
+        self.assertEqual({code: sorted(snippets) for code, snippets in findings.items()}, {
+            "nervix::parser_dependency": ["callee::language::parse_foreign",
+                                          "callee::language::parse_foreign()"],
+            "nervix::lifecycle_call": ["callee::installation::install_foreign()"],
+        }, result.stderr)
+
     def test_typed_error_and_outcome_diagnostics(self) -> None:
         for name, diagnostic in (
             ("error_nested_alias", "nervix::bare_error_signature"),
