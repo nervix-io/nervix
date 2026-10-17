@@ -162,6 +162,7 @@ mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
 mod mqtt_fixtures;
+mod mqtt_sessions;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
