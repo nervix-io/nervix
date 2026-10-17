@@ -245,14 +245,14 @@ Feature: Interconnect relay admission
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       CREATE UNPACED DOMAIN expiry_{{test_id}};
       """
     Given the active domain is "expiry_{{test_id}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         tenant STRING,
@@ -299,7 +299,7 @@ Feature: Interconnect relay admission
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
