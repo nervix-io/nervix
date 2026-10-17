@@ -19,9 +19,11 @@ use serde::{Deserialize, Serialize};
 
 use super::entity_union::connector_sources;
 use crate::{
-    AcknowledgementConfirmation, ClientConfigEntry, ClientName, ClientResourceMount, ConnectorKind,
-    EndpointIngestMode, EndpointName, EndpointType, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, SignalingProtocolName, SourceBody, SourceEntity,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientConfigOwner, ClientDeclaration,
+    ClientName, ClientPooling, ClientResourceMount, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, EndpointIngestMode, EndpointName, EndpointType, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSourceCapabilities, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PositionClass, SignalingProtocolName, SourceBody, SourceEntity,
     SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
@@ -40,6 +42,20 @@ pub type WebsocketsConfigEntry = ClientConfigEntry;
 impl<Version> CreateClientWebsockets<Version> {
     /// The connector this client configures.
     pub const CONNECTOR: ConnectorKind = ConnectorKind::Websockets;
+
+    /// What every WebSockets client declares: the signaling protocol its connection may speak.
+    pub const DECLARATION: ClientDeclaration = ClientDeclaration {
+        pooling: ClientPooling::Unpooled,
+        config: ClientConfigOwner::Nervix,
+        options: &[OptionDeclaration {
+            keywords: "WITH SIGNALING PROTOCOL",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Value {
+                value: OptionValue::Clause,
+                example: "WITH SIGNALING PROTOCOL signaling",
+            },
+        }],
+    };
 }
 
 /// The connection a WebSockets client opens to the server its configuration addresses.
@@ -60,6 +76,10 @@ impl SourceEntity for WebsocketsConnectionSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        locator: None,
+        options: &[],
     };
 }
 
@@ -74,13 +94,6 @@ impl SourceBody for WebsocketsConnectionSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -122,6 +135,10 @@ impl SourceEntity for WebsocketsEndpointSource {
         reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        locator: None,
+        options: &[],
     };
 }
 
@@ -136,10 +153,6 @@ impl SourceBody for WebsocketsEndpointSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        self.mode.supports_quiesce(quiesce)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

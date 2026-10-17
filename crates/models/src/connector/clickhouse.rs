@@ -16,12 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{configured_client::configured_client, entity_union::connector_sinks};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(ClickHouse: unpooled CreateClientClickHouse => ClickHouseConfigEntry);
+configured_client!(ClickHouse: unpooled, config Nervix, CreateClientClickHouse => ClickHouseConfigEntry);
 
 pub type ClickHouseValueMapping = SinkValueMapping;
 
@@ -38,15 +38,21 @@ pub struct ClickHouseTableSink {
 impl SinkEntity for ClickHouseTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        reference: SinkReferenceKind::Client(ConnectorKind::ClickHouse),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "INSERT TO TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for ClickHouseTableSink {

@@ -73,14 +73,14 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkCommitReport, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError, SinkStartResult,
-    physical_time::actual_utc_now,
+    SinkAcknowledgements, SinkCommitReport, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError,
+    SinkStartResult, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
-use nervix_primitives::sync::StdArc;
+use nervix_primitives::{sync::StdArc, time::Instant};
 use parquet::file::properties::WriterProperties;
 use storage::DnsStorageFactory;
 use tempfile::TempDir;
@@ -492,12 +492,18 @@ impl IcebergSink {
                 &table.element_field.field_type,
             ),
             (Type::Struct(mapped), Type::Struct(table)) => {
-                mapped.fields().len() == table.fields().len()
-                    && mapped.fields().iter().all(|field| {
-                        table.field_by_name(&field.name).is_some_and(|target| {
-                            Self::iceberg_types_match(&field.field_type, &target.field_type)
-                        })
-                    })
+                if mapped.fields().len() != table.fields().len() {
+                    return false;
+                }
+                for field in mapped.fields() {
+                    let Some(target) = table.field_by_name(&field.name) else {
+                        return false;
+                    };
+                    if !Self::iceberg_types_match(&field.field_type, &target.field_type) {
+                        return false;
+                    }
+                }
+                true
             }
             (Type::Map(mapped), Type::Map(table)) => {
                 Self::iceberg_types_match(&mapped.key_field.field_type, &table.key_field.field_type)
@@ -906,6 +912,12 @@ impl Drop for IcebergSink {
 
 #[async_trait::async_trait]
 impl SinkLifecycle for IcebergSink {
+    /// The catalog and object-store clients hold nothing between writes. Rows wait staged for
+    /// the commit, which a stop asks for before it finishes the sink.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+
     /// A staged batch outlives its catalog client, so a publish failure keeps the client rather
     /// than reopening it and losing what is already on disk.
     fn keeps_client_on_publish_failure(&self) -> bool {
@@ -1709,7 +1721,7 @@ mod tests {
             ),
             Field::new("user_id", DataType::Int64, true),
         ]))
-        .expect("table schema converts to Iceberg");
+        .assured("table schema converts to Iceberg");
         let compatible = arrow_schema::Schema::new(vec![
             Field::new("user_id", DataType::Int64, true),
             Field::new(
@@ -1719,7 +1731,7 @@ mod tests {
             ),
         ]);
         IcebergSink::validate_table_schema(&compatible, &table)
-            .expect("column order and field IDs do not change the schema contract");
+            .assured("column order and field IDs do not change the schema contract");
 
         let wrong_type =
             arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Utf8, true)]);
@@ -1743,6 +1755,89 @@ mod tests {
     }
 
     #[test]
+    fn iceberg_open_checks_nested_column_names_and_types() {
+        let datetime = DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()));
+        let list = |element| DataType::List(StdArc::new(Field::new("item", element, true)));
+        let structure = |fields: Vec<Field>| DataType::Struct(fields.into());
+        let map = |key, value| {
+            let entries = structure(vec![
+                Field::new("key", key, false),
+                Field::new("value", value, true),
+            ]);
+            DataType::Map(StdArc::new(Field::new("entries", entries, false)), false)
+        };
+        let observed = Field::new("observed", list(datetime.clone()), true);
+        let dimension = Field::new(
+            "dimension",
+            structure(vec![
+                Field::new("tag", DataType::Utf8, true),
+                Field::new("score", DataType::Int64, true),
+            ]),
+            true,
+        );
+        let labels = Field::new("labels", map(DataType::Utf8, datetime.clone()), true);
+        let table = arrow_schema_to_schema_auto_assign_ids(&arrow_schema::Schema::new(vec![
+            observed.clone(),
+            dimension,
+            labels.clone(),
+        ]))
+        .assured("the fixture uses Iceberg-supported list, struct, map and UTC timestamp types");
+        let reordered = arrow_schema::Schema::new(vec![
+            labels,
+            Field::new(
+                "dimension",
+                structure(vec![
+                    Field::new("score", DataType::Int64, true),
+                    Field::new("tag", DataType::Utf8, true),
+                ]),
+                true,
+            ),
+            observed,
+        ]);
+        IcebergSink::validate_table_schema(&reordered, &table)
+            .assured("matching nested names and types are independent of generated field IDs");
+
+        let mismatches = [
+            Field::new("observed", list(DataType::Int64), true),
+            Field::new("observed", DataType::Utf8, true),
+            Field::new(
+                "dimension",
+                structure(vec![Field::new("tag", DataType::Utf8, true)]),
+                true,
+            ),
+            Field::new(
+                "dimension",
+                structure(vec![
+                    Field::new("category", DataType::Utf8, true),
+                    Field::new("score", DataType::Int64, true),
+                ]),
+                true,
+            ),
+            Field::new(
+                "dimension",
+                structure(vec![
+                    Field::new("tag", DataType::Utf8, true),
+                    Field::new("score", DataType::Utf8, true),
+                ]),
+                true,
+            ),
+            Field::new("labels", map(DataType::Int64, datetime), true),
+            Field::new("labels", map(DataType::Utf8, DataType::Int64), true),
+        ];
+        for field in mismatches {
+            let name = field.name().clone();
+            let mapped = arrow_schema::Schema::new(vec![field]);
+            let error = IcebergSink::validate_table_schema(&mapped, &table)
+                .expect_err("an incompatible nested column must fail before staging");
+            assert_eq!(
+                *error.current_context(),
+                SinkStartError::InvalidConfiguration { sink: ICEBERG }
+            );
+            assert!(format!("{error:?}").contains(&format!("mapped column '{name}'")));
+        }
+    }
+
+    #[test]
     fn iceberg_open_retains_the_schema_conversion_cause() {
         let table =
             arrow_schema_to_schema_auto_assign_ids(&arrow_schema::Schema::new(vec![Field::new(
@@ -1750,7 +1845,7 @@ mod tests {
                 DataType::Int64,
                 true,
             )]))
-            .expect("table schema converts to Iceberg");
+            .assured("table schema converts to Iceberg");
         let unsupported =
             arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Null, true)]);
 
@@ -1803,24 +1898,24 @@ mod tests {
         );
         let source: ArrayRef = StdArc::new(
             StructArray::try_new(vec![field].into(), vec![values], None)
-                .expect("source struct is valid"),
+                .assured("source struct is valid"),
         );
         let mapped =
             arrow_schema::Schema::new(vec![Field::new("event", source.data_type().clone(), true)]);
         let staged_schema = IcebergSink::staged_arrow_schema(&mapped)
-            .expect("datetime in a struct narrows in staged schema");
+            .assured("datetime in a struct narrows in staged schema");
         let staged = IcebergSink::staged_column(&source, staged_schema.field(0).data_type())
-            .expect("datetime in a struct narrows in staged values");
+            .assured("datetime in a struct narrows in staged values");
         assert_eq!(staged.data_type(), staged_schema.field(0).data_type());
         let observed = staged
             .as_any()
             .downcast_ref::<StructArray>()
-            .expect("struct is retained")
+            .assured("struct is retained")
             .column(0);
         let observed = observed
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("struct member is a microsecond datetime");
+            .assured("struct member is a microsecond datetime");
         assert_eq!(observed.value(0), -1);
         assert!(observed.is_null(1));
         assert_eq!(observed.value(2), 1_234);
@@ -1840,9 +1935,9 @@ mod tests {
                 true,
             )]);
             let schema = IcebergSink::staged_arrow_schema(&mapped)
-                .expect("nested datetime schema stages as microseconds");
+                .assured("nested datetime schema stages as microseconds");
             let staged = IcebergSink::staged_column(source, schema.field(0).data_type())
-                .expect("nested datetime values stage as microseconds");
+                .assured("nested datetime values stage as microseconds");
             assert_eq!(staged.data_type(), schema.field(0).data_type());
             staged
         };
@@ -1859,14 +1954,14 @@ mod tests {
         let large = staged
             .as_any()
             .downcast_ref::<LargeListArray>()
-            .expect("large list remains a large list");
+            .assured("large list remains a large list");
         assert_eq!(large.value_offsets(), &[0, 2, 2]);
         assert!(large.is_null(1));
         let values = large
             .values()
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("large list members are microsecond datetimes");
+            .assured("large list members are microsecond datetimes");
         assert_eq!(values.values().as_ref(), &[-1, 1]);
 
         let mut fixed =
@@ -1883,14 +1978,14 @@ mod tests {
         let fixed = staged
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
-            .expect("fixed list remains a fixed list");
+            .assured("fixed list remains a fixed list");
         assert_eq!(fixed.value_length(), 2);
         assert!(fixed.is_null(1));
         let values = fixed
             .values()
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("fixed list members are microsecond datetimes");
+            .assured("fixed list members are microsecond datetimes");
         assert_eq!(values.value(0), 1);
         assert!(values.is_null(1));
 
@@ -1901,20 +1996,20 @@ mod tests {
         );
         map.keys().append_value("first");
         map.values().append_value(-1);
-        map.append(true).expect("map entry is valid");
+        map.append(true).assured("map entry is valid");
         let source: ArrayRef = StdArc::new(map.finish());
         let staged = stage(&source);
         let map = staged
             .as_any()
             .downcast_ref::<MapArray>()
-            .expect("map remains a map");
+            .assured("map remains a map");
         assert_eq!(map.value_offsets(), &[0, 1]);
         let values = map
             .entries()
             .column(1)
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("map values are microsecond datetimes");
+            .assured("map values are microsecond datetimes");
         assert_eq!(values.value(0), -1);
 
         let error = IcebergSink::staged_column(&source, &DataType::Utf8)
@@ -1961,25 +2056,25 @@ mod tests {
                 )]);
 
                 let staged_schema = IcebergSink::staged_arrow_schema(&mapped)
-                    .expect("nested datetime schema stages as microseconds");
+                    .assured("nested datetime schema stages as microseconds");
                 let staged =
                     IcebergSink::staged_column(&source, staged_schema.field(0).data_type())
-                        .expect("nested datetime values stage as microseconds");
+                        .assured("nested datetime values stage as microseconds");
                 assert_eq!(staged.data_type(), staged_schema.field(0).data_type());
                 let staged_outer = staged
                     .as_any()
                     .downcast_ref::<arrow_array::ListArray>()
-                    .expect("outer list is retained");
+                    .assured("outer list is retained");
                 let staged_inner = staged_outer
                     .values()
                     .as_any()
                     .downcast_ref::<arrow_array::ListArray>()
-                    .expect("inner lists are retained");
+                    .assured("inner lists are retained");
                 let staged_values = staged_inner
                     .values()
                     .as_any()
                     .downcast_ref::<TimestampMicrosecondArray>()
-                    .expect("the nested datetime is narrowed");
+                    .assured("the nested datetime is narrowed");
                 let expected = nanoseconds
                     .iter()
                     .map(|value| value.div_euclid(1_000))

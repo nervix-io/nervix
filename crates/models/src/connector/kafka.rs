@@ -25,14 +25,16 @@ use super::{
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, RetryPolicy, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
     SourceReferenceKind, TopicName,
 };
 
-configured_client!(Kafka: unpooled CreateClientKafka => KafkaConfigEntry);
+configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
 
 /// The longest topic Kafka admits, in bytes.
 const KAFKA_TOPIC_MAX: usize = 249;
@@ -43,9 +45,10 @@ const KAFKA_CONSUMER_GROUP_MAX: usize = 255;
 external_names! {
     /// A Kafka topic: 1 to 249 ASCII letters, digits, `.`, `_` and `-`, and neither `.` nor `..`,
     /// as the broker itself requires.
-    pub struct KafkaTopicName => kafka_topic_rule;
+    pub struct KafkaTopicName => kafka_topic_rule, label "kafka_topic", example "orders";
     /// A Kafka consumer group: 1 to 255 bytes without control characters.
-    pub struct KafkaConsumerGroupName => kafka_consumer_group_rule;
+    pub struct KafkaConsumerGroupName => kafka_consumer_group_rule, label "kafka_consumer_group",
+        example "readers";
 }
 
 fn kafka_topic_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -88,7 +91,36 @@ impl SourceEntity for KafkaTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
-        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
+        delivery: &[
+            DeclaredDelivery::NO_ACK,
+            DeclaredDelivery::ACK_SEQUENTIAL,
+            DeclaredDelivery::ACK_PARALLEL,
+        ],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::External(KafkaTopicName::DECLARATION),
+        }),
+        options: &[
+            OptionDeclaration {
+                keywords: "OFFSET BY",
+                presence: OptionPresence::Required,
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "DOMAIN",
+                        value: None,
+                        example: "OFFSET BY DOMAIN",
+                    },
+                    OptionChoice {
+                        name: "CONSUMER GROUP",
+                        value: Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION)),
+                        example: "OFFSET BY CONSUMER GROUP 'readers'",
+                    },
+                ]),
+            },
+            OptionDeclaration::INSTANCES,
+        ],
     };
 }
 
@@ -103,10 +135,6 @@ impl SourceBody for KafkaTopicSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(quiesce, IngestQuiesceMode::Suspend)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -189,18 +217,24 @@ pub struct KafkaTopicSink {
 impl SinkEntity for KafkaTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        reference: SinkReferenceKind::Client(ConnectorKind::Kafka),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::NoAck,
+            EmitterPublishingModeKind::BrokerAck,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::Unquoted {
+                label: "topic_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
-        )
-    }
 }
 
 impl SinkBody for KafkaTopicSink {

@@ -830,10 +830,20 @@ its assignment, and retries that seek. It cannot commit a later offset while the
 position remains unresolved. Replays after a crash or assignment change may repeat records whose
 output was already written.
 
+Under `OFFSET BY CONSUMER GROUP` in an ACK mode, the ingestor commits each acknowledged batch's
+positions and reports progress for the batch only once the group's coordinator answered the commit.
+That costs one commit round trip per batch, which `ACK PARALLEL` spreads over every message of a
+batch. A commit the broker refuses, or does not answer within thirty seconds, is the ingestor's
+transient status in `DESCRIBE INGESTOR`, and the ingestor reads the batch again, so its output can
+repeat; the status clears once a later commit is answered. A graceful stop or an ownership move
+waits for the answer to every commit of the work it drains, within the drain timeout.
+
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
-commits the positions it has read on its own schedule, without waiting for downstream
-acknowledgement, so a failure can lose records whose positions were committed before their
-downstream work completed.
+commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
+for downstream acknowledgement, so a failure can lose records whose positions were committed before
+their downstream work completed. Suspending or stopping the ingestor commits the positions it has
+read since the last of those commits, and waits for the broker's answer before the consumer leaves
+its group.
 
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 

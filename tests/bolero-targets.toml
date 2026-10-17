@@ -506,6 +506,21 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
+domain_version = 1
+features = []
+id = "models-connector-declarations"
+invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits and a client of a declared connector."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/connectors/surface.rs"
+test = "surface::bolero_generated_entities_state_only_what_their_entity_declares"
+test_target = "test:connectors"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/timestamps__bolero_timestamps_round_trip_through_every_representation/corpus"
 domain_version = 1
 features = []

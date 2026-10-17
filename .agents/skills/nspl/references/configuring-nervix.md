@@ -276,6 +276,10 @@ relay. Do not use them to scan across branches.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.
+- A Kafka `OFFSET BY CONSUMER GROUP` ingestor in an `ACK` mode waits for the broker to answer each
+  batch's commit before it reports progress, one round trip per batch, so prefer `ACK PARALLEL`
+  where throughput matters. A refused or unanswered commit is the ingestor's transient status and
+  its batch is read again, so downstream output can repeat.
 - Every ingestor head names its connector and entity, such as `CREATE KAFKA TOPIC INGESTOR`, and
   its body after `FROM` names no connector. Its client belongs to the head's connector, and an
   `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint of `TYPE HTTP` or `TYPE WEBSOCKETS`.
