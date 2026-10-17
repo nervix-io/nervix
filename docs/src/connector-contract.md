@@ -1049,10 +1049,11 @@ prepends, or each upsert's filter and update documents, and rejects a row whose 
 the server's 16 MiB document limit before any write, because the driver would refuse the whole write
 for it. A record-specific failure of a multi-row SQL write is isolated by writing its rows one at a
 time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` refuses one insert that
-carries a key twice, is isolated the same way. Postgres writes the isolated rows on the connection
-the refused insert borrowed, and runs a write's metadata lookup on its first insert's connection, so
-an insert borrows once and its per-record outcome never waits for the shared pool again. MongoDB
-answers per document, so it needs no isolation pass.
+carries a key twice, is isolated the same way. Postgres and MySQL write the isolated rows on the
+connection the refused insert borrowed, so an insert borrows once and its per-record outcome never
+waits for the shared pool again during isolation. Postgres also runs a write's metadata lookup on
+its first insert's connection. Both release the connection before the next bounded insert or retry
+backoff. MongoDB answers per document, so it needs no isolation pass.
 
 Registered Bolero properties hold these rules against their owners, with measures that grow and
 shrink with a candidate: `connector-row-request-division` the division rule and both limits,
@@ -1272,7 +1273,10 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
   prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
-  host measures from staging, ends or its staged files reach the maximum commit size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
+  host measures from staging, ends or its staged files reach the maximum commit size. Open checks
+  mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
+  nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
+  successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
   limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`

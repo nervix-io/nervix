@@ -6842,6 +6842,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "async-trait",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",

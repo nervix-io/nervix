@@ -349,6 +349,12 @@ borrows. A ready borrow writes nothing; the first Pending poll publishes its wai
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
 slot, so a replacement sink's slot survives an earlier sink's teardown.
 
+Postgres and MySQL borrow once per bounded insert and retain that connection through any
+record-error isolation. Isolation therefore takes no second pool wait behind another writer.
+The connection returns before the next insert or retry backoff. The MySQL public contention
+scenario exercises the real driver and database; these external asynchronous waits are outside
+Deloxide's tracked locks and the model checkers' coverage.
+
 Generators retain the domain acknowledgement tracker. Ingest executions, groups and endpoint
 bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
 exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
@@ -1958,10 +1964,10 @@ report tool qualifies every file before cleanup. A run fails unless each node ho
 qualifying evidence file of the declared selection for every process start the recording shows,
 and no node ended with status `3` or `4`; an unreviewed potential cycle fails it as in the lane.
 The suite refuses an image whose labels name another kind or revision than its caller asks for.
-`scripts/chaos/README.md` owns the runner's contract and artifacts. The evidence observes each
-process up to its kill, pause, stop or the freeze, without an upstream flush barrier, and only its
-tracked thread-blocking locks; recovery, ledger and timing verdicts stay the scenarios' own, with
-the product's deadlines and the suite's budgets unchanged.
+[External Cluster Chaos](./cluster-chaos.md#diagnostic-images) owns the runner's contract and
+artifacts. The evidence observes each process up to its kill, pause, stop or the freeze, without an
+upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
+verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
 
 ## Deterministic Concurrency Verification
 
