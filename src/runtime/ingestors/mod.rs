@@ -21,7 +21,7 @@
     )
 )]
 
-use super::*;
+use super::{ingestor_start::RetiringIngestorInput, *};
 
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
@@ -73,10 +73,13 @@ pub(crate) enum IngestorStartError {
     },
 }
 
-/// Why an ingestor's source could not be composed or opened on this node. It is the cause beneath
-/// [`IngestorStartError::Initialize`].
+/// Why an ingestor's client configuration could not resolve or its source could not be composed
+/// or opened on this node. Startup wraps it in [`IngestorStartError::Initialize`]; retirement
+/// wraps it in [`RuntimeError::RetireIngestorSource`].
 #[derive(Debug, Error)]
 pub(crate) enum SourceStartError {
+    #[error("failed to resolve the source's client configuration")]
+    ClientConfiguration,
     #[error("the node DNS resolver is not installed")]
     NodeDnsUnavailable,
     #[error("missing signaling protocol '{protocol}'")]
@@ -108,6 +111,36 @@ pub(crate) enum DeliverySetting {
 }
 
 impl Runtime {
+    /// Applies external retirement after the previous execution stopped. Cleanup is best-effort;
+    /// a replacement prepares its own changed sessions before its new input can become ready.
+    pub(super) async fn retire_ingestor_input(
+        &self,
+        retirement: RetiringIngestorInput,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let IngestorInputPlan::Transport(input) = &retirement.previous.input else {
+            return Ok(());
+        };
+        let SourceStartPlan::Mqtt(source) = &input.source else {
+            return Ok(());
+        };
+        let replacement = match retirement.replacement.as_deref() {
+            Some(IngestorStartPlan {
+                input: IngestorInputPlan::Transport(input),
+                ..
+            }) => {
+                if let SourceStartPlan::Mqtt(source) = &input.source {
+                    Some(source)
+                } else {
+                    None
+                }
+            }
+            Some(_) | None => None,
+        };
+        source
+            .retire_before(self, &retirement.previous.ingestor, replacement)
+            .await
+    }
+
     /// Starts one ingestor. Every source takes this path.
     ///
     /// Everything that can fail comes first: the ingestor's dependencies compile and its source

@@ -70,15 +70,16 @@ and other applications using the same database.
 A borrower holds a connection only while it performs an external operation or its necessary
 metadata work. For Postgres the unit is one bounded insert: the metadata lookup of a write runs on
 its first insert's connection, and an insert the database refuses for one of its rows writes those
-rows one at a time on the same connection before returning it. For MySQL the unit is a bounded
-insert or its metadata lookup, and for Redis it is one publish and its response. A flush
-containing several inserts releases capacity between them so other emitters can make progress. An
-emitter waiting out a flush interval or a retry backoff holds no connection at all.
+rows one at a time on the same connection before returning it. MySQL likewise keeps one connection
+for a bounded insert and the isolation of any rows it refuses. For Redis the unit is one publish
+and its response. A flush containing several inserts releases capacity between them so other
+emitters can make progress. An emitter waiting out a flush interval or a retry backoff holds no
+connection at all.
 
-Because a Postgres insert keeps its connection until it has an answer for every row it carries,
-the rejection of a row reaches the emitter's `ON MESSAGE ERROR` route without the insert waiting
-for the pool a second time, whether other emitters of the client queue for the same connections
-or the pool would have to open a new one.
+Because a Postgres or MySQL insert keeps its connection until it has an answer for every row it
+carries, isolating a rejected row never waits for the pool a second time, whether other emitters
+of the client queue for the same connections or the pool would have to open a new one. The host
+handles the per-record outcomes when the write completes, including any later inserts in it.
 
 When capacity is exhausted the operation waits, and that wait applies backpressure through the
 emitter's existing bounded input and flush buffers. A full pool is a waiting state rather than a

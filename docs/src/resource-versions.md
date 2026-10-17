@@ -281,6 +281,13 @@ client. Changing that client's definition or rebinding its mounted resource take
 configuration-entity domain pause. If the drain cannot complete, the candidate definition and
 its resource binding are not installed.
 
+MQTT input retirement resolves the preceding and replacement clients through their own pinned
+mounts and keeps both mount leases until network cleanup and replacement preparation finish.
+It can resolve the preceding client from a stopped domain's typed plan. A missing preceding
+mount is a reported best-effort cleanup failure; preparing the explicitly selected replacement
+still requires that replacement's complete binding. Retirement never changes a binding or
+selects a newer resource version.
+
 ### The Pinning Invariant
 
 Three rules together guarantee that a consumer uses exactly the version its model names:

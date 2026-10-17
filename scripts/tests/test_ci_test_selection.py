@@ -31,14 +31,23 @@ class MergeFixture:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.root = directory / "source"
-        self.root.mkdir()
-        self.git("init", "--initial-branch=main")
+        self.initialize_repository(self.root)
         self.write("README.md", "Nervix\n")
         self.write("src/runtime.rs", "fn run() {}\n")
         self.git("add", ".")
         self.git("commit", "-m", "base")
         self.base = self.git("rev-parse", "HEAD")
         self.git("switch", "-c", "change")
+
+    def initialize_repository(self, root: Path, *, bare: bool = False) -> None:
+        arguments = ["init", "--quiet", "--initial-branch=main"]
+        if bare:
+            arguments.append("--bare")
+        self.git(*arguments, str(root), cwd=self.directory)
+        # Persist this in every repository: selection's own fetch and receive-pack on the bare
+        # origin also run maintenance. Waiting for their callers must wait for every writer.
+        for setting in ("maintenance.autoDetach", "gc.autoDetach"):
+            self.git("config", setting, "false", cwd=root)
 
     def git(self, *args: str, cwd: Path | None = None) -> str:
         return subprocess.check_output([
@@ -91,7 +100,7 @@ class MergeFixture:
         """Serve the branches and the tested merge's pull ref from a remote that filters, as GitHub does."""
         origin = self.directory / "origin.git"
         if not origin.exists():
-            self.git("init", "--quiet", "--bare", str(origin), cwd=self.directory)
+            self.initialize_repository(origin, bare=True)
             self.git("config", "uploadpack.allowFilter", "true", cwd=origin)
         self.git("push", "--quiet", "--force", origin.as_uri(), "refs/heads/main:refs/heads/main",
                  "refs/heads/change:refs/heads/change", f"{tested}:refs/pull/1/merge")
@@ -101,12 +110,49 @@ class MergeFixture:
         """Check the tested merge out exactly as actions/checkout does with fetch-depth 2."""
         origin = self.publish(tested)
         checkout = self.directory / name
-        self.git("init", "--quiet", str(checkout), cwd=self.directory)
+        self.initialize_repository(checkout)
         self.git("remote", "add", "origin", origin.as_uri(), cwd=checkout)
         self.git("-c", "protocol.version=2", "fetch", "--no-tags", "--prune", "--no-recurse-submodules",
                  "--depth=2", "origin", f"+{tested}:refs/remotes/pull/1/merge", cwd=checkout)
         self.git("checkout", "--quiet", "--force", "refs/remotes/pull/1/merge", cwd=checkout)
         return checkout
+
+
+class MergeFixtureLifetimeTests(unittest.TestCase):
+    def test_repository_writers_finish_before_temporary_directory_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = root / "git-trace.jsonl"
+            configuration = root / "gitconfig"
+            configuration.write_text(
+                "[maintenance]\n\tauto = true\n\tautoDetach = true\n"
+                "[maintenance \"gc\"]\n\tenabled = false\n"
+                "[maintenance \"commit-graph\"]\n\tenabled = true\n\tauto = -1\n"
+                "[gc]\n\tautoDetach = true\n"
+            )
+            with mock.patch.dict(os.environ, {
+                "GIT_TRACE2_EVENT": str(trace), "GIT_CONFIG_GLOBAL": str(configuration),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }):
+                fixture = MergeFixture(root)
+                fixture.write("README.md", "Updated prose\n")
+                payload, tested = fixture.merge(advanced_base=BASE_ADVANCE)
+                checkout = fixture.shallow_checkout(tested)
+                first = selection.TestSelection.read("pull_request", payload, tested, checkout)
+                rerun = fixture.shallow_checkout(tested, "rerun")
+                self.assertEqual(selection.TestSelection.read("pull_request", payload, tested, rerun), first)
+
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            maintenance = [event for event in events if event["event"] == "start"
+                           and "maintenance" in event["argv"]]
+            self.assertTrue(maintenance, "the regression must exercise real Git maintenance")
+            # Git traces this region before forking, so the check does not race a detached child.
+            detached = [event for event in events if event["event"] == "region_enter"
+                        and event.get("label") == "detach"]
+            self.assertEqual(detached, [], "a repository writer can outlive its fixture command")
+            for repository in (fixture.root / ".git", root / "origin.git", checkout / ".git", rerun / ".git"):
+                graphs = repository / "objects/info/commit-graphs"
+                self.assertTrue(list(graphs.glob("graph-*.graph")), f"maintenance did not write in {repository}")
 
 
 class AdvancedBaseSelectionTests(unittest.TestCase):

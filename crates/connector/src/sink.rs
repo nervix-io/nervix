@@ -586,7 +586,28 @@ pub trait SinkLifecycle: Send {
     )
 )]
 pub trait RecordSink: SinkLifecycle {
+    /// Prepares the external bytes of one newly encoded payload. The host retains the result
+    /// until delivery or rejection, and never prepares a retained payload again on a retry or
+    /// through a reopened connector. Most connectors send the codec's bytes unchanged.
+    ///
+    /// A refusal is the payload's definitive message error, shared by all its source members.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            outcome,
+            reason = "a connector's definitive payload refusal is a fixed public message outcome"
+        )
+    )]
+    fn prepare_payload(
+        &mut self,
+        payload: Vec<u8>,
+        _occurred_at: Timestamp,
+    ) -> Result<Vec<u8>, StructuredMessageError> {
+        Ok(payload)
+    }
+
     /// Writes `records` and answers for each of them by its identity.
+    /// Payloads are the retained bytes returned by `prepare_payload`.
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId>;
 }
 

@@ -46,6 +46,16 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
+write locks. It observes a pending metadata lock on the server before queuing the next writer,
+and observes each emitter's public pool-wait state to establish the borrowing order. Releasing
+the first table leaves the second locked while the scenario checks the poison write's rejection,
+all mapped rows and the insert log's connection identity. This is a one-node scenario because all
+three emitters must share one node's pool of exactly one connection. Each table lock is explicitly
+released and its session disconnected; the scenario's cleanup releases remaining locks before
+cluster shutdown, including when an assertion fails. These are external database locks, outside
+Deloxide's tracked thread-blocking locks.
+
 Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
 path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
 validation and title checks remain enabled. This exclusion records a source decision rather than
@@ -73,6 +83,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
+| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, and the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
@@ -1052,8 +1063,8 @@ until that node has ended.
 - The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
   a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
   socket ownership stays in that task, so the same cancellation releases its active connection.
-- The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
-  once those nodes have ended.
+- The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
+  endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
   observers have ended. The scenario publishes `finished` and then releases its feature permit and
   run slot, so admission includes all teardown work.
