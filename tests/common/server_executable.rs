@@ -302,7 +302,8 @@ impl ServerExecutable {
         // Each range's end by its offset, in offset order. Where two segments start at one offset
         // the longer one is kept.
         let mut segment_ends = BTreeMap::new();
-        for entry in table.chunks_exact(PROGRAM_HEADER_BYTES) {
+        let (entries, _) = table.as_chunks::<PROGRAM_HEADER_BYTES>();
+        for entry in entries {
             let entry = LittleEndianFields { bytes: entry };
             let Some(segment_type) = entry.u32(SEGMENT_TYPE_FIELD) else {
                 return Err(self.program_headers());

@@ -15,7 +15,7 @@
 //! one, and the run-queue wait says how long the threads waited for a CPU they were ready to use.
 //! A major fault is a page fault that had to read storage.
 
-use std::{collections::BTreeMap, fmt, io, time::Duration};
+use std::{cmp::Reverse, collections::BTreeMap, fmt, io, time::Duration};
 
 use meticulous::OptionExt as _;
 
@@ -291,7 +291,7 @@ impl fmt::Display for ThreadWaits {
         )?;
         // The largest groups first, so the bound drops the rarest waits.
         let mut groups: Vec<(&ThreadWait, &ThreadNames)> = self.groups.iter().collect();
-        groups.sort_by(|left, right| right.1.threads.cmp(&left.1.threads));
+        groups.sort_by_key(|(_, names)| Reverse(names.threads));
         for (wait, names) in groups.iter().take(MAX_THREAD_GROUPS) {
             write!(
                 formatter,
@@ -299,7 +299,7 @@ impl fmt::Display for ThreadWaits {
                 names.threads, wait.state, wait.channel
             )?;
             let mut listed: Vec<(&ThreadName, &u64)> = names.names.iter().collect();
-            listed.sort_by(|left, right| right.1.cmp(left.1));
+            listed.sort_by_key(|(_, threads)| Reverse(**threads));
             let mut separator = " ";
             for (name, threads) in listed.iter().take(MAX_NAMES_PER_GROUP) {
                 write!(formatter, "{separator}{name} ×{threads}")?;
