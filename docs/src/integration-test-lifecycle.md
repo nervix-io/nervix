@@ -68,6 +68,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Command outcome recovery | On the task of the step, or of its background execution, whose raw wire command left its outcome to the current leader: one session at a time, opened to each node in turn and dropped once that node answers | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -183,6 +184,37 @@ but cannot bind its randomly selected host port, that owner removes the failed c
 up to three more times with a new port selection. It also removes the failed container when those
 attempts are exhausted, so a scenario retry does not collide with its name. Other startup failures
 reach the scenario directly.
+
+The Postgres image starts a temporary Unix-socket server to initialize its database, then starts
+the final TCP/TLS server. The fixture waits for both readiness messages before publishing either
+endpoint. Its plaintext and certificate-verified TLS observation clients belong to that same
+suite environment. Each transport shares one SQLx pool with a maximum of two connections for short
+setup and observation queries across all scenarios. A deliberate table-lock controller detaches
+its physical SQLx connection before waiting for release, returning the observation permit. Its
+scenario release handle owns that connection's lifetime, so concurrent lock holders cannot consume
+the permits their own observation queries need. The environment closes both observation pools before
+stopping their container, including when scenarios still retain client handles. The existing suite
+teardown budget bounds that cleanup.
+
+The Postgres fixture scenarios exercise 48 concurrent observers retaining three client handles
+each over plaintext and TLS, and compare every returned text, byte sequence and observer number.
+Every query also checks its actual transport through Postgres's connection statistics. Two further
+examples hold locks through the existing fixture controller while another observer queries, once
+over each transport.
+The database batch scenarios retain their one- and three-node row, field, write-size, conflict,
+rejection and ambiguous-write assertions. Fixture concurrency adds no scenario admission limit.
+
+MQTT fixture publishers keep their event loop alive through the driver's tracked
+publication completion: a socket write for QoS 0 and the broker acknowledgement for QoS 1. The
+existing broker-operation timeout bounds that wait, and cancellation drops the driver. Retained
+scenario inputs still use unique topics. Bursts queue all their messages before waiting for
+completion. The fixture regression pauses a real broker connection for 500 ms and compares every
+complete delivered payload for QoS 0 and QoS 1, as individual messages and bursts of five.
+
+The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
+admission and exact retry. Its reclamation wait includes the configured validity followed by
+60 seconds for reclamation. The assertions still require the identity to remain expired after a
+durable restart, with the schema and committed transaction report preserved.
 
 The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions through
 one follower that the suite-owned environment starts with the container. The follower streams both
@@ -421,12 +453,26 @@ The boundary between them is kept in four places.
   after failover. The large materialized backup workload submits
   each graph statement through the production client so a leadership change during its many relay
   definitions recovers that statement by reference; its Row subscription opens on a raw session
-  after the graph is ready. A leader setup step whose other commands need one session, because
-  they create a subscription or open a transaction, runs them over a raw wire session; when
-  leadership moves before one of them reached the leader, or after the leader admitted it and
-  before its outcome was known, the step sends that command again with the same execution
-  reference to the current leader, as a client must, and goes on there, within 60 seconds per
-  command and only while the session holds no subscription or transaction yet.
+  after the graph is ready. A step that sends commands to the leader over a raw wire session,
+  because they create a subscription or open a transaction, learns a command's outcome the way a
+  client must when leadership moves before the command reached the leader, or after the leader
+  admitted it and before its outcome was known. It sends the command again with the same
+  execution reference, on a session of the same user and domain, to each node in turn until the
+  node that leads answers with an outcome only a leader knows. A follower refuses the command
+  before admitting anything, a stopped node refuses the connection, and a node that still believes
+  it leads answers with another unknown outcome, so recovery reads no status to find the leader,
+  and a step's background execution recovers the same way. No new round starts once 60 seconds
+  have passed for one command, and a repeated command that joins an execution still applying waits
+  for its reply. While the step's session holds no subscription and no transaction, it moves to the
+  node that answered and the step goes on there. A session that holds one stays where it is, so
+  its subscriptions keep delivering. For the active session a later step reuses, for a background
+  execution's session, and for a setup session once it opened a subscription, another session of
+  the same user learns the outcome of a command that leaves what the session holds alone. A
+  command sent while the session is bound to a transaction keeps its unknown outcome and fails the
+  step, and so does a command that begins or ends a transaction, opens or deletes a subscription,
+  attaches a clock or changes the domain on a session that cannot move. A request a step sends once
+  under a scenario-chosen execution reference learns its outcome the same way before the step
+  records its disposition.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   retain the protocol's received dispositions. A paced-driver file fixture writes only the
@@ -1134,6 +1180,14 @@ first time a scenario needs one and shared by every scenario of the run. The run
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
+
+A scenario that needs a Kafka broker to refuse what the shared broker accepts for every other
+scenario starts a broker of its own: librdkafka's in-process mock cluster of one broker, which the
+scenario keeps until it ends, across its cluster's restarts. While the scenario asks it to, that
+broker refuses produce requests with `NOT_ENOUGH_REPLICAS`, which a producer retries, or offset
+commits with `GROUP_AUTHORIZATION_FAILED`, which a consumer does not retry; a scenario can also
+refuse only the next commit. The scenario publishes to it, observes its topics and reads a consumer
+group's committed offset through clients of its own, so no refusal reaches the shared broker.
 
 The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
 `START` and observe the consumer group's membership and the ingestor's readiness before injecting

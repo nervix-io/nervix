@@ -247,6 +247,17 @@ measured a file are summed. The report holds line and function counters. Branch 
 out: the Rust producers export none, and coverage.py names Python branches in words that LCOV readers
 such as `cargo crap` refuse.
 
+A counter at or above 2^63 counts no executions. llvm-cov derives some line and function counts as
+differences of counters, and an instrumented executable updates its counters without atomics, so
+threads that run the same code concurrently can lose increments and leave such a difference below
+zero. The export writes it as its unsigned wrap, such as 18,446,744,073,709,551,615 for −1. The merge
+leaves every such counter out of the sum and lists it in the merge record under its report, with its
+file and its line or function. The merged report never invents a count for it. A line that only
+wrapped counters count is not measured, rather than measured as zero. A function that only a wrapped
+counter counts counts no hits. Summing a wrapped counter would publish a count above the 64-bit
+range, which the CRAP analysis cannot read, and the same race appears in some runs and not in
+others.
+
 The merge fails with a message naming what to fix when:
 
 - an input is missing, or holds neither a workspace export nor a complete ordinary collection;
@@ -258,9 +269,10 @@ The merge fails with a message naming what to fix when:
 - a workspace member that `cargo metadata` lists has no Rust record in the merged report.
 
 Either way it writes its merge record, `target/coverage-merge/record.json`: the verdict and the
-tested revision, every input with its checkout root, each report it read with its record counts and
-its dropped records by class, the collections it left out, the dropped files by class, and the
-workspace members the report measures. CI retains the report and its record as the
+tested revision, every input with its checkout root, each report it read with its record counts, its
+dropped records by class and its counters that wrapped below zero, the collections it left out, the
+dropped files by class, the number of wrapped counters left out, and the workspace members the
+report measures. CI retains the report and its record as the
 `coverage-merged` artifact.
 
 Without inputs, the merge rewrites in place the `lcov-workspace.info` that `just test-coverage`
@@ -523,6 +535,7 @@ revision. The CRAP report's revision check does not make mismatched counters cur
 | `none of its … records lies below … the checkout path its producer recorded` | Check the report/root pair and the producing checkout. Use the original root when remapping a retained focused report. |
 | A producer `has more than one ordinary collection` | Select the attempt of the tested run. Preserve failed attempts as evidence outside the merge input. |
 | `the merged report has no record of the workspace members …` | Restore the missing producer or its workspace export; a focused package report cannot establish whole-workspace completeness. |
+| `Counters that wrapped below zero, left out of the sum: N` | Nothing in the report to repair: concurrent threads of an instrumented executable lost counter increments. The merge record names each counter. A line it leaves unmeasured is counted by no other report; collect owner evidence for that line if it matters. |
 | A CRAP merge record names another revision | Reproduce in the revision the record identifies, or collect and merge current-source coverage. Editing the record's revision does not repair it. |
 | A changed file is `unavailable` in patch coverage | Its executable lines were not measured by the supplied reports. Collect the applicable owner/scenario evidence; missing counters are not a measured zero. |
 
