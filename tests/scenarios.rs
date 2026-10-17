@@ -15,8 +15,8 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, BooleanArray, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
-    TimestampMicrosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Int64Array, LargeListArray, LargeStringArray,
+    ListArray, RecordBatch, StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
@@ -11192,6 +11192,51 @@ async fn when_command_durable_admission_pause_is_released(
         .release_command_durable_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "command finalization on node {string} pauses before its outcome is recorded")]
+async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_finalization_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command finalization pause on node {string} is reached")]
+async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let task = world.background_command_result.as_mut();
+    // A leader resumes an applying execution on its own, so the finalization a scenario holds may
+    // belong to no request of the scenario. A loaded node takes long to get there, and the wait
+    // ends once the pause is reached, so its bound is generous.
+    nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        let Some(task) = task else {
+            fault_injection
+                .wait_for_command_finalization_pause(&node_name)
+                .await;
+            return;
+        };
+        nervix_primitives::select! {
+            () = fault_injection.wait_for_command_finalization_pause(&node_name) => {},
+            result = task => panic!(
+                "command on '{node_id}' returned before its finalization pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("command finalization pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the command finalization pause on node {string} is released")]
+async fn when_command_finalization_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_finalization_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "relocation publication for domain {string} pauses after planning")]
 async fn given_relocation_publication_pauses_after_planning(
     world: &mut ScenarioWorld,
@@ -13711,6 +13756,27 @@ async fn then_background_command_request_reports_conflict_or_unknown_leadership(
             nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
         )
     ));
+}
+
+#[then("the background command request reports an unknown outcome because leadership moved")]
+async fn then_background_command_request_reports_leadership_lost(world: &mut ScenarioWorld) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        ),
+        "background command request did not report that leadership moved: {}",
+        result.message
+    );
 }
 
 #[then("the last command request reports an execution reference content conflict")]
@@ -22800,6 +22866,53 @@ async fn given_pulsar_topic_accepts_messages_of_at_most(
         });
 }
 
+/// What the broker holds for the subscription now: messages no acknowledgement reached it for.
+#[then(
+    expr = "Pulsar subscription {string} of topic {string} holds {int} unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    let backlog = world
+        .cluster()
+        .pulsar_subscription_backlog(&topic, &subscription)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the backlog of Pulsar subscription '{subscription}': {error}")
+        });
+    assert_eq!(
+        backlog, expected,
+        "Pulsar subscription '{subscription}' of topic '{topic}' holds {backlog} unacknowledged \
+         messages"
+    );
+}
+
+#[then(
+    expr = "within {string} Pulsar subscription {string} of topic {string} holds {int} \
+            unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_eventually_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .wait_for_pulsar_subscription_backlog(&topic, &subscription, expected, duration)
+        .await
+        .expect("Pulsar subscription backlog assertion failed");
+}
+
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
 async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     initialize_scenario_identity(world);
@@ -29021,6 +29134,15 @@ impl IcebergTableFixture {
     }
 
     fn parse_data_type(column_type: &str) -> ArrowDataType {
+        if let Some(nested) = column_type.strip_prefix("LIST<")
+            && let Some(element) = nested.strip_suffix('>')
+        {
+            return ArrowDataType::List(StdArc::new(ArrowField::new(
+                "item",
+                Self::parse_data_type(element),
+                false,
+            )));
+        }
         match column_type {
             "STRING" => ArrowDataType::Utf8,
             "I64" => ArrowDataType::Int64,
@@ -29058,52 +29180,76 @@ fn iceberg_cell_value(
 ) -> Result<serde_json::Value, String> {
     let schema = batch.schema();
     let field = schema.field(column_index);
-    let array = batch.column(column_index);
+    iceberg_array_value(batch.column(column_index).as_ref(), row_index, field.name())
+}
+
+fn iceberg_array_value(
+    array: &dyn Array,
+    row_index: usize,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
     if array.is_null(row_index) {
         return Ok(serde_json::Value::Null);
     }
-    match field.data_type() {
+    match array.data_type() {
         ArrowDataType::Int64 => Ok(serde_json::Value::from(
-            iceberg_column::<Int64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<Int64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::UInt64 => Ok(serde_json::Value::from(
-            iceberg_column::<UInt64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<UInt64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Boolean => Ok(serde_json::Value::from(
-            iceberg_column::<BooleanArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<BooleanArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8 => Ok(serde_json::Value::from(
-            iceberg_column::<StringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::LargeUtf8 => Ok(serde_json::Value::from(
-            iceberg_column::<LargeStringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<LargeStringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8View => Ok(serde_json::Value::from(
-            iceberg_column::<StringViewArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringViewArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => Ok(serde_json::Value::from(
-            iceberg_column::<TimestampMicrosecondArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<TimestampMicrosecondArray>(array, field_name)?.value(row_index),
         )),
+        ArrowDataType::List(_) => iceberg_list_values(
+            iceberg_array::<ListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::LargeList(_) => iceberg_list_values(
+            iceberg_array::<LargeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::FixedSizeList(_, _) => iceberg_list_values(
+            iceberg_array::<FixedSizeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
         unsupported => Err(format!(
             "unsupported Iceberg assertion field '{}' Arrow type {unsupported:?}",
-            field.name()
+            field_name
         )),
     }
 }
 
-fn iceberg_column<T: 'static>(batch: &RecordBatch, column_index: usize) -> Result<&T, String> {
-    let schema = batch.schema();
-    batch
-        .column(column_index)
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| {
-            format!(
-                "Iceberg assertion column '{}' did not contain expected Arrow array {}",
-                schema.field(column_index).name(),
-                std::any::type_name::<T>()
-            )
-        })
+fn iceberg_list_values(
+    values: StdArc<dyn Array>,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
+    let values = (0..values.len())
+        .map(|index| iceberg_array_value(values.as_ref(), index, field_name))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::Value::Array(values))
+}
+
+fn iceberg_array<'a, T: 'static>(array: &'a dyn Array, field_name: &str) -> Result<&'a T, String> {
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        format!(
+            "Iceberg assertion column '{}' did not contain expected Arrow array {}",
+            field_name,
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 fn iceberg_row_matches_expected(row: &serde_json::Value, expected: &serde_json::Value) -> bool {

@@ -20,11 +20,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::RuntimeState;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{DomainName, ModelKind, ModelName, ParseAsType, SchemaFingerprint, Timestamp};
-use nervix_primitives::sync::{
-    Arc, StdArc,
-    atomic::{AtomicUsize, Ordering},
-    mpsc, oneshot,
-};
+use nervix_primitives::sync::{Arc, StdArc, mpsc, oneshot, watch};
 
 use crate::{
     runtime::{
@@ -42,6 +38,19 @@ const MODEL_TASK_JOINS: &str =
 const MAX_TIME: Duration = Duration::from_secs(600);
 /// The changes the source applies, one at a time, while the cut may ask for a publication.
 const CHANGES: usize = 2;
+/// The acknowledged changes the cut waits for before it reads their count and asks for a
+/// publication.
+///
+/// A cut that reads before the first acknowledgement bounds no change, and an unwaited cut reads
+/// there in almost every explored schedule, because the source takes many scheduling points to have
+/// one change acknowledged. Waiting for the first leaves the cut racing the second change, so every
+/// schedule asserts that the capture holds at least one acknowledged change.
+const CUT_AFTER: usize = 1;
+
+const _: () = assert!(
+    CUT_AFTER >= 1 && CUT_AFTER < CHANGES,
+    "the cut must bound an acknowledged change and still race a later one"
+);
 
 fn placement(kind: ModelKind, state: RuntimeState) -> RuntimeStatePlacement {
     RuntimeStatePlacement {
@@ -53,10 +62,10 @@ fn placement(kind: ModelKind, state: RuntimeState) -> RuntimeStatePlacement {
     }
 }
 
-/// A source that sends every change after the previous one was acknowledged, and counts the
-/// changes the branch task acknowledged.
-async fn source(changes: mpsc::Sender<oneshot::Sender<()>>, acknowledged: Arc<AtomicUsize>) {
-    for _ in 0..CHANGES {
+/// A source that sends every change after the previous one was acknowledged, and publishes how
+/// many changes the branch task acknowledged.
+async fn source(changes: mpsc::Sender<oneshot::Sender<()>>, acknowledged: watch::Sender<usize>) {
+    for change in 1..=CHANGES {
         let (applied, application) = oneshot::channel();
         changes
             .send(applied)
@@ -65,15 +74,23 @@ async fn source(changes: mpsc::Sender<oneshot::Sender<()>>, acknowledged: Arc<At
         application
             .await
             .assured("the branch task acknowledges every change it receives");
-        acknowledged.fetch_add(1, Ordering::SeqCst);
+        acknowledged.send_replace(change);
     }
 }
 
-/// The cut: it reads how many changes were acknowledged, asks the branch task to publish, and
-/// returns that count once the task answered, as a quiesced capture reads only after its
-/// lifecycle checkpoint returned.
-async fn cut(checkpoints: &mpsc::Sender<oneshot::Sender<()>>, acknowledged: &AtomicUsize) -> usize {
-    let before_cut = acknowledged.load(Ordering::SeqCst);
+/// The cut: once `CUT_AFTER` changes were acknowledged, it reads how many were, asks the branch
+/// task to publish, and returns that count once the task answered, as a quiesced capture reads
+/// only after its lifecycle checkpoint returned.
+async fn cut(
+    checkpoints: &mpsc::Sender<oneshot::Sender<()>>,
+    acknowledged: &mut watch::Receiver<usize>,
+) -> usize {
+    let acknowledged_before_cut = acknowledged
+        .wait_for(|count| *count >= CUT_AFTER)
+        .await
+        .assured("the source publishes all of its acknowledgements before it drops its sender");
+    let before_cut = *acknowledged_before_cut;
+    drop(acknowledged_before_cut);
     let (published, publication) = oneshot::channel();
     checkpoints
         .send(published)
@@ -126,8 +143,9 @@ async fn deduplicator_branch(
     }
 }
 
-/// Keys reserved while the cut asks for a publication: the keyspace the capture reads after the
-/// answer holds every key acknowledged before the cut asked.
+/// Keys reserved while the cut asks for a publication: once the first key was acknowledged, the
+/// cut races the second reservation, and the keyspace the capture reads after the answer holds
+/// every key acknowledged before the cut asked.
 fn a_forced_deduplicator_publication_racing_reservations() {
     shuttle::future::block_on(async {
         let state = Arc::new(
@@ -144,14 +162,14 @@ fn a_forced_deduplicator_publication_racing_reservations() {
         );
         let (changes, change_requests) = mpsc::channel(1);
         let (checkpoints, checkpoint_requests) = mpsc::channel(1);
-        let acknowledged = Arc::new(AtomicUsize::new(0));
+        let (acknowledgements, mut acknowledged) = watch::channel(0);
         let branch = nervix_primitives::task::spawn(deduplicator_branch(
             state.clone(),
             change_requests,
             checkpoint_requests,
         ));
-        let changing = nervix_primitives::task::spawn(source(changes, acknowledged.clone()));
-        let before_cut = cut(&checkpoints, &acknowledged).await;
+        let changing = nervix_primitives::task::spawn(source(changes, acknowledgements));
+        let before_cut = cut(&checkpoints, &mut acknowledged).await;
         let captured = CapturedDeduplicatorKeyspace::published(&state);
         assert!(
             captured.key_count() >= before_cut,
@@ -268,8 +286,9 @@ async fn window_branch(
     }
 }
 
-/// Rows stepped past while the cut asks for a publication: the window the capture reads after the
-/// answer no longer retains any row stepped past before the cut asked.
+/// Rows stepped past while the cut asks for a publication: once the first step was acknowledged,
+/// the cut races the second, and the window the capture reads after the answer no longer retains
+/// any row stepped past before the cut asked.
 fn a_forced_window_publication_racing_steps() {
     shuttle::future::block_on(async {
         let (_window, state) = retained_window();
@@ -284,15 +303,15 @@ fn a_forced_window_publication_racing_steps() {
         ));
         let (changes, change_requests) = mpsc::channel(1);
         let (checkpoints, checkpoint_requests) = mpsc::channel(1);
-        let acknowledged = Arc::new(AtomicUsize::new(0));
+        let (acknowledgements, mut acknowledged) = watch::channel(0);
         let branch = nervix_primitives::task::spawn(window_branch(
             replicated.clone(),
             state,
             change_requests,
             checkpoint_requests,
         ));
-        let changing = nervix_primitives::task::spawn(source(changes, acknowledged.clone()));
-        let before_cut = cut(&checkpoints, &acknowledged).await;
+        let changing = nervix_primitives::task::spawn(source(changes, acknowledgements));
+        let before_cut = cut(&checkpoints, &mut acknowledged).await;
         let generation = replicated.generations.load();
         let captured = CapturedWindow::published(&generation);
         assert!(

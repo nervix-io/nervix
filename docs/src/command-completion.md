@@ -39,7 +39,11 @@ has expired, and a report that inspection no longer knows does not make its refe
 Finalization accepts a terminal command result. An `OutcomeUnknown`, leader redirect, or detached
 transaction leaves the execution applying and preserves the disposition and diagnostics for its
 current waiter. Reconciliation and repetition under the same reference resume that execution;
-an interrupted attempt never supplies a definitive failure for the execution ledger.
+an interrupted attempt never supplies a definitive failure for the execution ledger. A resumed
+transaction request whose transaction already finished answers each of its operations from what
+the finished transaction recorded: the same transaction for its opening, each append's recorded
+admission, and the transaction's terminal outcome for its commit or revert. The result it finalizes
+therefore describes the effects the interrupted attempt applied, and none of them applies again.
 
 The retained history is bounded. Once it holds as many applying, finished, and expired executions as
 its capacity allows, a new reference is refused with an explicit capacity error. Admitted work is
@@ -215,7 +219,10 @@ identified preview revision. The plan uses one captured set of relevant control-
 exact execution-step segmentation used at commit. Queue success means validation and staging only.
 It does not replace a live graph, start or stop a domain, install a resource, or engage a runtime
 gate. Other sessions continue to see the committed configuration. Retrying the exact append returns
-the retained admitted result and preview without touching the transaction.
+the retained admitted result and preview without touching the transaction. Finishing the
+transaction keeps the request identity and admitted result of every statement it accepted with its
+tombstone, so the exact append is still answered with its admitted result after the transaction
+committed, failed, reverted, or expired, while an append it never accepted is refused.
 
 `COMMIT` first computes a side-effect-free complete preview from replicated content and a new
 coherent snapshot. Its admission validates the identified basis and atomically freezes the report,

@@ -648,6 +648,18 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
+A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
+`PulsarSourceError`, beneath `SourceError::Acknowledge` or `SourceError::Reject`. An
+acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
+`PulsarRefusal` keeps the server error, absent for a code the client does not know, and the reason
+the broker gave. An acknowledgement nothing answered is `AcknowledgementUnconfirmed`, and a
+redelivery request the consumer could not send is `RedeliveryRequestUnsent`; both carry a typed
+`PulsarUnresolvedRequest` naming whether the client's operation timeout passed, the connection
+closed or the consumer stopped first, because the broker may or may not have applied the request. A
+client failure the source does not classify keeps the driver's error as the typed cause beneath
+`Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
+shows.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
@@ -664,7 +676,10 @@ An outbound WebSocket peer's Close is a typed read failure preserving its status
 an end without a status has its own typed state. Transport failures keep the WebSocket driver's
 error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
-failure and its growing retry delay across successful reconnects until a batch is accepted.
+failure and its growing retry delay across successful reconnects until a batch is accepted. A
+broker source's acknowledgement that its transport fails to confirm, and a rejection it fails to
+take back, become the ingestor's transient status with the innermost context of the source's
+report as the reason, and only a later confirmed acknowledgement clears it.
 
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
 operations read the retained status without writing it; a transition clears an active failure.
@@ -870,6 +885,12 @@ attributes, and invalid Iceberg commit settings. Each report names the emitter a
 predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
+
+The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
+absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
+before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
+conversion error beneath that context. The check compares names and nested types after narrowing
+UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
 
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
@@ -2010,8 +2031,8 @@ consume the sample's bound. The probe record keeps each stage's outcome and the 
 times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
 Docker's state and events for it before its removal. A failed required attempt remains evidence
 even after a subsequent successful qualification. The controller's measurement budget does not extend the
-product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
-commands, measurement interpretation and retained artifact paths.
+product's recovery budget. [External Cluster Chaos](./cluster-chaos.md#link-degradation) owns
+the commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact
 arguments and bound, elapsed time, helper identities and both raw streams. The operation record
 exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the

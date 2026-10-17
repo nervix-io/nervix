@@ -1901,7 +1901,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -1916,7 +1916,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2841,6 +2841,21 @@ package = "nervix-connector-sqs"
 random_iterations = 256
 source = "crates/connectors/sqs/src/lib.rs"
 test = "tests::bolero_batch_requests_hold_their_records_within_every_sqs_limit"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/__fuzz__/tests__bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth/corpus"
+domain_version = 1
+features = []
+id = "iceberg-nested-datetime-staging"
+invariant = "Every nested list boundary is retained and every UTC nanosecond datetime at any list depth becomes the containing Iceberg microsecond, including negative and boundary values."
+manifest = "Cargo.toml"
+max_input_bytes = 160
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/lib.rs"
+test = "tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
 test_target = "lib"
 
 [[target]]

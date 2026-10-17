@@ -2,7 +2,7 @@
 #
 # `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
 # `just test-deloxide-stress-restore` build every invocation below that their selection runs, and
-# run it supervised: each process in a session of its own, within its bound and the lane's budget,
+# run it supervised: each process in a session of its own, within its bound and its stage's budget,
 # with its output, evidence and exit kept in a fresh attempt directory. A selection runs every
 # workload that lists it. The lane fails when a registered workload is missing, ignored
 # or did not complete; when a discovered test or tagged scenario is not registered; when an
@@ -18,9 +18,13 @@
 # longer acquires one is removed.
 
 [lane]
-# The real-time budget of one selection's diagnostic compilation and execution, after its
-# prerequisites. Expiry ends the lane with status 124. CI bounds the prerequisites, this budget and
-# the coverage export together at 95 minutes.
+# All diagnostic test and driver executables build before any workload starts, under their own
+# real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
+# minutes also leaves room for the selection's other builds and variation without borrowing time
+# from its workloads. Expiry ends the lane with status 124 and identifies the build stage.
+build_budget_seconds = 4800
+# The unchanged real-time budget of one selection's workloads, started after every build completes.
+# CI bounds prerequisites, both stages and the coverage export together at 175 minutes.
 budget_seconds = 4800
 # How long a process gets to end on SIGTERM before the lane kills it.
 stop_grace_seconds = 30
@@ -530,6 +534,14 @@ invariant = "One fresh diagnostic process ends overrunning silence sweeps throug
 invocation = "owner-tests"
 selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
+
+[[workload]]
+coverage = "Processor and entrypoint branch expiry and LRU eviction, which end the channels their lanes publish through and stop each processor branch task under its tracked task guard."
+id = "owner.branch-lane-channel-retirement"
+invariant = "One fresh diagnostic process expires and evicts processor and entrypoint branches, ends only the channels each lane publishes through, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "runtime::processor_template::branch_lane_channel_tests::deloxide_branch_lane_channel_retirement"
 
 [[workload]]
 coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
@@ -2377,6 +2389,7 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/processor_branch_task.rs"
 workloads = [
+  "owner.branch-lane-channel-retirement",
   "scenario.wasm-kafka-restore",
   "scenario.client-alter-drain",
   "stress.wasm-kafka-restore",

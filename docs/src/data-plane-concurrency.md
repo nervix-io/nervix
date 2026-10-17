@@ -154,9 +154,12 @@ A concrete producer retains its branch channel handle. The relay publishes branc
 persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
 publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
 outbound slots, including candidates created during replacement. Eviction cancels the exact branch
-before withdrawing its allocation. An independently expiring receiver branch permits a still-live
-producer to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended`
-and prevents rebinding. Domain terminal teardown cancels the relay publication itself.
+before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
+invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
+branches of the relays it publishes through for its key. Another relay's branch for the same key
+keeps its channels. An independently expiring receiver branch permits a still-live producer to
+bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
+prevents rebinding. Domain terminal teardown cancels the relay publication itself.
 
 Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
 select cancellation, and transport admission retains its existing physical deadline. They do not
@@ -1721,9 +1724,9 @@ Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The
 state while a stopping follower repeats the remaining handoff through a new leader. Its leadership
 observation, transport waits and shared shutdown deadline remain outside the detector's observation.
 Both scenarios carry `@deloxide_stress`, with separate stress workload registrations that reach
-their owners under bounded scheduling disturbance. The inventory also bounds the lane: one real-time
-budget for a selection's
-diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
+their owners under bounded scheduling disturbance. The inventory also bounds the lane: separate
+real-time budgets for a selection's diagnostic builds and workloads after its prerequisites, a bound
+for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.
 
@@ -1736,7 +1739,8 @@ at their applicable boundaries.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
-For each invocation the lane builds the selection's executable, lists what the build holds or reads
+The lane builds all selected executables and diagnostic drivers before starting its workload clock.
+For each prepared invocation it lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no
 longer holds or holds ignored, a discovered probe, conformance check, owner test or tagged scenario
 that is not registered, a scenario whose example runs changed, and an invocation that selects
@@ -1810,7 +1814,11 @@ description of every finding with its source sites, and `lane.json`. The record 
 and whether the tree was modified, the toolchain, Cargo and Deloxide's locked version and source, the
 inventory's digest, the selection, the features of every build and the bounds, and for every launch
 its exact command, working directory, environment additions, bound, ending, duration, discovery and
-accounting, with the qualification of every evidence file. `just test-deloxide-replay <lane.json>
+accounting, with the qualification of every evidence file. All selected test executables and
+diagnostic drivers build in a bounded stage before the workload stage starts its own clock. Each
+stage records its budget, start, verdict and duration; a failed build starts no workload. A
+`just build-deloxide-lane <selection>` measurement records `built` and cannot qualify as a completed
+lane. `just test-deloxide-replay <lane.json>
 <launch>` runs one recorded launch again, exactly, in a fresh attempt. OS schedules and stress timing
 are not recorded, so a replay can take another interleaving; deterministic reproduction belongs to
 Shuttle and Loom.
@@ -1828,7 +1836,9 @@ Under `just coverage-native-extras test-deloxide`, `test-deloxide-order`, `test-
 feature its selection compiles, with instrumentation on workspace crates only, so dependencies such
 as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
 and shared client binding from the target its prerequisites built, starts every test executable
-through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
+through Cargo's configured runner, and measures initial and warm passes of every selected build
+under the same build budget and compiler context before any workload starts. It hands `lane.json`
+to the collector, which exports nothing
 unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
@@ -1964,10 +1974,10 @@ report tool qualifies every file before cleanup. A run fails unless each node ho
 qualifying evidence file of the declared selection for every process start the recording shows,
 and no node ended with status `3` or `4`; an unreviewed potential cycle fails it as in the lane.
 The suite refuses an image whose labels name another kind or revision than its caller asks for.
-`scripts/chaos/README.md` owns the runner's contract and artifacts. The evidence observes each
-process up to its kill, pause, stop or the freeze, without an upstream flush barrier, and only its
-tracked thread-blocking locks; recovery, ledger and timing verdicts stay the scenarios' own, with
-the product's deadlines and the suite's budgets unchanged.
+[External Cluster Chaos](./cluster-chaos.md#diagnostic-images) owns the runner's contract and
+artifacts. The evidence observes each process up to its kill, pause, stop or the freeze, without an
+upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
+verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
 
 ## Deterministic Concurrency Verification
 
@@ -2048,7 +2058,11 @@ probabilistic concurrency testing (PCT) for larger ones.
 
 Every check runs through the one Shuttle runner, `nervix_model_harness::shuttle`: 100 random and
 100 PCT schedules of depth three, 1,000 of each with a depth-first search bounded at 1,000
-schedules, or one scheduler with the check's own bounds. Every schedule may take 10,000 steps; one
+schedules, or one scheduler with the check's own bounds. A model in which either of two threads
+can spin until the other moves takes 1,000 random and 1,000 PCT schedules without the depth-first
+search: that search ignores yields and tries the lowest-numbered runnable thread first, so it
+lengthens such a spin by a step per schedule until a schedule exceeds the step limit, while a
+random or PCT schedule leaves the spin. Every schedule may take 10,000 steps; one
 that needs more fails its check, because a step cap is an exploration bound, not a product timeout.
 A random or PCT search that ran fewer schedules than it declares fails too, and a search that
 finishes prints a record naming what it explored. `SHUTTLE_REPORT_STEPS=1` reports the highest
@@ -2125,7 +2139,7 @@ A family of names means each member runs independently through the recipe.
 | Branch snapshot task ownership (`src/runtime/state_replication/tasks_shuttle_tests.rs`) | `shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_written` races a runtime closing the production task owner against three branches: one that stops in time, one ended at its stop grace that drops what it held, and one that never tells its snapshot task anything. The wait returns only once every task has made its last write, and a task that waited for its branch alone would hang it, which Shuttle reports as a deadlock. The task body stands in for the write; the tracker and token are opaque dependencies. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
-| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `src/runtime/branch_state_capture_shuttle_tests.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut` and `shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut` race a branch task's admissions or window steps against the cut's checkpoint request over the branch task's own command and input channels: once the task answers, the keyspace or window the capture reads holds every change acknowledged before the cut asked. Restored deduplicator and window checkpoints install through the same staged publisher and domain handle clear as the other kinds, so the restore checks below hold their installation order too. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
+| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `src/runtime/branch_state_capture_shuttle_tests.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut` and `shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut` race a branch task's admissions or window steps against the cut's checkpoint request over the branch task's own command and input channels: once the task answers, the keyspace or window the capture reads holds every change acknowledged before the cut asked. The cut waits for the first acknowledged change and then races the second, because an unwaited cut reads before any acknowledgement in almost every schedule and bounds nothing. `shuttle_backup_cut_includes_pre_cut_branch_publication` explores random and PCT schedules only, since its publisher and its cut each spin while waiting for the other. Restored deduplicator and window checkpoints install through the same staged publisher and domain handle clear as the other kinds, so the restore checks below hold their installation order too; the unit test `a_restored_domain_drops_its_deduplicator_and_window_handles` requires that clear to drop both kinds' handles of the restored domain and only its own. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
@@ -2265,8 +2279,8 @@ against reports and announcements.
 | `runtime.local-drain.handed-on-batch` | A batch a relay's owner hands on to its consumer while a drain observes the domain is never missing from the observation: the consumer admits the batch before the owner hands it on, the observation reads the relay's transit before its consumers' queues, and handing on releases the consumer's admission to the observation that acquires it | `loom_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it` (`src/runtime/local_drain_loom_models.rs`); fails when `self.handed_on.fetch_add(1, Ordering::Release);` weakened to `self.handed_on.fetch_add(1, Ordering::Relaxed);` |
 | `runtime.local-drain.flush-completion` | A message a force flush resumed is admitted work to a drain observation that sees the flush complete: the participant resumes the message before it completes its obligation, the observation reads the obligations before the node's work, and acquiring the completion makes the resumed message visible | `loom_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete` (`src/runtime/local_drain_loom_models.rs`); fails when `self.force_flushes.load(Ordering::Acquire)` weakened to `self.force_flushes.load(Ordering::Relaxed)` |
 | `runtime.kafka-offset-state.snapshot-revision` | A Kafka offset snapshot stamped with a commit's revision encodes that commit's offset: the commit stores the partition's offset before it advances the revision, the snapshot reads the revision before the offsets, and advancing releases what reading the revision acquires | `loom_a_snapshot_carrying_a_commits_revision_carries_its_offset` (`src/runtime/kafka_offset_state.rs`); fails when `LsmSequence::advance` is weakened from `SeqCst` to `Relaxed` |
-| `server.backup.cut-includes-publication` | A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads every write those publications completed: closing and registering are read-modify-writes of one word, a publication leaves with a release and the cut's wait acquires | `loom_a_cut_includes_every_registered_publication` (`src/runtime/backup_capture_fence.rs`); fails when a publication's leaving is weakened from `Release` to `Relaxed` |
-| `server.backup.cut-generation` | A branch state publisher that enters after a backup cut acquires the cut generation and sees the coordinator's writes before it: reopening extends the closing release sequence, and a publisher's registration acquires it | `loom_a_publisher_acquires_the_cut_generation` (`src/runtime/backup_capture_fence.rs`); fails when the registration is weakened from `AcqRel` to `Release` |
+| `server.backup.cut-includes-publication` | A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads every write those publications completed: closing and registering are read-modify-writes of one word, a publication leaves with a release and the cut's wait acquires | `loom_a_cut_includes_every_registered_publication` (`src/runtime/backup_capture_fence.rs`); fails when a publication's leaving is weakened from `Release` to `Relaxed`, or the cut's wait from `Acquire` to `Relaxed` |
+| `server.backup.cut-generation` | A branch state publisher that enters after a backup cut acquires the cut generation and sees the coordinator's writes before it: reopening extends the closing release sequence, and a publisher's registration acquires it | `loom_a_publisher_acquires_the_cut_generation` (`src/runtime/backup_capture_fence.rs`); fails when the registration is weakened from `AcqRel` to `Release`, or the closing from `Release` to `Relaxed` |
 | `harness.loom.coroutine-stack` | A model body and the participants it spawns run debug frames with allocation instrumentation on the coroutine stacks they request, while Loom's coordinator only starts and joins the body | `loom_model_coroutines_support_instrumented_debug_frames` (`crates/model-harness/src/loom.rs`); fails when the stack request is cut to `4_096` |
 
 The cancellation protocol these models check is the bounded executor's. `Cancellation::armed`

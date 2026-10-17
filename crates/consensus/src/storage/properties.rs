@@ -642,3 +642,61 @@ fn recovery_refuses_a_failing_step_outside_the_queued_statements() {
 
     assert!(is_invalid_storage(&error), "{error:?}");
 }
+
+#[test]
+fn recovery_refuses_a_finished_transaction_that_keeps_other_than_its_accepted_statements() {
+    let mut state = StateMachineData::default();
+    let domain: DomainName = fixture_name("stored");
+    let owner: nervix_models::UserName = fixture_name("operator");
+    let activity = crate::TransactionActivity::from_timeout(
+        nervix_models::Timestamp::from_unix_nanos(1),
+        std::time::Duration::from_secs(60),
+    );
+    let mut reverted = crate::ReplicatedTransaction::open(
+        "transaction".to_string(),
+        domain.clone(),
+        owner.clone(),
+        activity,
+    );
+    let request = crate::TransactionStatementRequest {
+        request_reference: nervix_models::CommandExecutionReference::parse("request")
+            .assured("the fixture reference follows the reference rule"),
+        expected_position: 0,
+        source: "SHOW TRANSACTIONS;".to_string(),
+        statement: nervix_models::Statement::ShowTransactions(nervix_models::ShowTransactions),
+    };
+    reverted
+        .queue(
+            &owner,
+            &domain,
+            activity,
+            2,
+            crate::TransactionStatement::test_admitted(request),
+            crate::TransactionQueueLimits {
+                max_statements: 1,
+                max_source_bytes: 1024,
+            },
+        )
+        .assured("the one fixture statement is within every queue limit");
+    reverted
+        .revert(&owner, activity, 3)
+        .assured("the owner reverts its open fixture transaction");
+    // Finishing kept what an exact repetition of its one append needs; a damaged record that lost
+    // it would refuse that repetition as an append the transaction never accepted.
+    let mut damaged = reverted.clone();
+    let crate::TransactionState::Finished(finished) = &mut damaged.state else {
+        panic!("the fixture transaction finished above");
+    };
+    finished.accepted.clear();
+    let damaged = DurableBatch::encode(&damaged, 64 * 1024)
+        .assured("a small fixed transaction fits the storage codec budget");
+    state.transactions.insert(reverted.id.clone(), reverted);
+
+    let error = recover_damaged(&state, |records| {
+        let key = only_key_under(records, b't');
+        records.insert(key, damaged);
+    })
+    .expect_err("a finished transaction keeps one accepted statement for each it accepted");
+
+    assert!(is_invalid_storage(&error), "{error:?}");
+}
