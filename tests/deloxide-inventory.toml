@@ -127,6 +127,7 @@ tags = [
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
+  "@forced_failover_delivery",
 ]
 target = "test:scenarios"
 
@@ -1792,6 +1793,26 @@ invocation = "stress-restore-scenarios"
 scenario = "Relocating a window owner preserves incomplete branch-local exact aggregates"
 selections = ["deloxide-stress-restore"]
 
+[[workload]]
+coverage = "Forced emitter recovery while the former owner's relay admission and runtime preparation remain held. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/forced_failover_delivery.feature"
+id = "scenario.forced-failover-delivery"
+invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
+invocation = "scenarios"
+scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: forced emitter recovery with held former-owner admission and runtime preparation, including dispatch gate, relay channel and ACK ownership locks. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/forced_failover_delivery.feature"
+id = "stress.forced-failover-delivery"
+invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
+invocation = "stress-scenarios"
+scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2221,6 +2242,8 @@ workloads = [
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
   "stress.shutdown-leader-change",
+  "scenario.forced-failover-delivery",
+  "stress.forced-failover-delivery",
 ]
 
 [[owner]]
@@ -2297,16 +2320,23 @@ workloads = [
 path = "src/runtime/relay_boundary.rs"
 workloads = [
   "scenario.diagnostic-nodes",
+  "scenario.forced-failover-delivery",
   "scenario.materialized-retention-activation",
   "scenario.materialized-restart-retention",
   "stress.diagnostic-nodes",
+  "stress.forced-failover-delivery",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
 ]
 
 [[owner]]
 path = "src/runtime/relay_channel.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "stress.diagnostic-nodes",
+  "scenario.forced-failover-delivery",
+  "stress.forced-failover-delivery",
+]
 
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
