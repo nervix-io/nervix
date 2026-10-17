@@ -450,6 +450,13 @@ changes, renames, label events, reruns and strict gates; `just coverage-ci-selec
 Python contract without launching product campaigns. Selection does not claim a model-checker or
 public Cucumber result.
 
+The selection tests keep Git maintenance in the foreground in every temporary repository,
+including the bare origin and shallow checkouts. Those repository-local settings also cover
+selection's history fetches and the origin's receive process, so waiting for each Git command
+finishes its writers before temporary-directory cleanup. A regression forces commit-graph
+maintenance and uses Git's process trace to check that it never detaches; cleanup errors remain
+test failures.
+
 ### Sanitizer Shards
 
 A single job running every sanitizer campaign outgrew its limit as the inventory grew. With all

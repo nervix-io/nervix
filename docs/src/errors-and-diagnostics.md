@@ -969,8 +969,12 @@ or leaves a handed-over row unanswered. Either fails the attempt without a retry
 emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
 rows then follow `ON MESSAGE ERROR` as a failed publish.
 
-The Sentry sink rejects a final serialized event above its decompressed event limit before sending
-the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+The Sentry sink prepares its envelope before the host retains the payload. Invalid event JSON,
+invalid event fields and a final serialized event above its decompressed limit become definitive
+payload rejections at that boundary. The full typed preparation report is projected into the
+external message error once; all source members share its reference while keeping their own
+execution times. No refused envelope is sent or retained for a transport retry. The Syslog sink
+rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
 A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
 its requests from mapped rows, measure each request they would send. If halving still leaves one
