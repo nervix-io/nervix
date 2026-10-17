@@ -56,6 +56,13 @@ class Configuration:
         return args
 
 
+def target_kind(kinds: list[str]) -> str:
+    """Cargo's target kinds as the analysis names them: every library form is one `lib`."""
+    if set(kinds) & {"lib", "rlib", "cdylib", "staticlib", "proc-macro"}:
+        return "lib"
+    return kinds[0]
+
+
 def digest(path: pathlib.Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -186,7 +193,7 @@ class Runner:
             if required:
                 selected.add(package["name"])
             for target in package["targets"]:
-                kind = "lib" if set(target["kind"]) & {"lib", "rlib", "cdylib", "staticlib", "proc-macro"} else target["kind"][0]
+                kind = target_kind(target["kind"])
                 if kind not in configuration.kinds:
                     continue
                 if not required and kind != "lib":
@@ -251,7 +258,7 @@ class Runner:
             if message.get("reason") != "compiler-artifact":
                 continue
             target = message["target"]
-            kind = "lib" if set(target["kind"]) & {"lib", "rlib", "cdylib", "staticlib", "proc-macro"} else target["kind"][0]
+            kind = target_kind(target["kind"])
             key = message["package_id"] + "::" + target["name"] + "::" + kind
             if key not in expected:
                 continue
