@@ -575,7 +575,8 @@ test-primitives-compile:
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
 # tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The
-# lane builds each invocation for the selection under target/deloxide, so the diagnostic server
+# lane builds every selected executable first under its build budget, then starts the workload
+# budget. Builds use target/deloxide, so the diagnostic server
 # binary never replaces the ordinary one, and refuses a registered workload that is missing or
 # ignored and a probe, conformance check, owner test or tagged scenario that is not registered. The
 # probes of nervix-deadlock run every workload in a disposable child that must report its cycle,
@@ -588,7 +589,7 @@ test-primitives-compile:
 # scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
-# in a session of its own within its bound and the inventory's budget, and the lane fails on an
+# in a session of its own within its bound and its stage's budget, and the lane fails on an
 # active deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget
 # (124), a leftover process, incomplete accounting, and missing, partly written or nonqualifying
 # evidence. A fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact,
@@ -618,6 +619,11 @@ test-deloxide-stress: tests-deps test-deloxide-stress-workloads
 # with a budget of its own, because the stressed scenarios of both selections together would take
 # most of one lane's budget.
 test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
+
+# Measure a selection's diagnostic builds without running workloads. The retained record has the
+# verdict `built`, so it cannot qualify as completed workload or native coverage evidence.
+build-deloxide-lane selection="deloxide": tests-deps
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build {{ quote(selection) }}
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
@@ -888,16 +894,21 @@ test-turmoil-replay-check:
 
 # Explore every interconnect scenario over `count` consecutive seeds from `first` instead of its
 # committed regression seeds, running each seed twice, inside a real-time budget of
-# `budget_seconds`; the recipe ends with status 124 when the budget expires. A failure leaves a
+# `budget_seconds`; the recipe ends with status 124 when the budget expires. A nonempty `filter`
+# selects the scenario tests whose names contain it, as a libtest filter does. A failure leaves a
 # record like any other run. A seed that exposes a defect joins its scenario's committed seeds
 # with the fix. A sweep that executes no scenario fails.
-test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
+test-turmoil-sweep first="1000" count="64" budget_seconds="1500" filter="":
     #!/usr/bin/env bash
     set -euo pipefail
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
     first={{ quote(first) }}
     end=$((first + {{ count }}))
+    filter_args=()
+    if [[ -n {{ quote(filter) }} ]]; then
+        filter_args=({{ quote(filter) }})
+    fi
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-interconnect --features turmoil --test simulation
     logs="$(mktemp -d)"
@@ -906,7 +917,7 @@ test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
     NERVIX_TURMOIL_SWEEP="${first}..${end}" RUSTFLAGS="${turmoil_rustflags}" \
         timeout --kill-after=30 {{ budget_seconds }} \
         cargo test --package nervix-interconnect --features turmoil --test simulation -- \
-            --test-threads=1 2>&1 | tee "${logs}/sweep.log"
+            "${filter_args[@]}" --test-threads=1 2>&1 | tee "${logs}/sweep.log"
     status="${PIPESTATUS[0]}"
     set -e
     if ((status == 124)); then
@@ -2818,6 +2829,38 @@ test-chaos-startup-status:
 # Derive the backup run's graph from the checked-in baseline fixture, as every verifier self-check does.
 test-chaos-backup-fixture:
     exec bash scripts/chaos/tests/backup-fixture-self-test.sh
+
+# Check the backup fault and fresh-restore options and every outcome the backup fault verdict
+# assigns, as every verifier self-check does.
+test-chaos-backup-fault:
+    exec bash scripts/chaos/tests/backup-fault-self-test.sh
+
+# Measure the backup fault verdict's outcome checks and the backup scenarios' option checks.
+coverage-chaos-backup-fault:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/backup-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fault-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-fault-coverage") }} scripts/chaos/tests/backup-fault-self-test.sh
+
+# Check the deduplicator and window outputs the backup state verdict accepts and each lost or
+# doubled state it refuses, as every verifier self-check does.
+test-chaos-backup-state:
+    exec bash scripts/chaos/tests/backup-state-self-test.sh
+
+# Measure the backup state verdict's acceptances and refusals.
+coverage-chaos-backup-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-backup-state.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-state-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-state-coverage") }} scripts/chaos/tests/backup-state-self-test.sh
 
 # Measure the backup graph substitution and its refusals of a graph without exactly one clause.
 coverage-chaos-backup-fixture:

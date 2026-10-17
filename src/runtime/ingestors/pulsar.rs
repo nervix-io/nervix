@@ -15,7 +15,10 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_pulsar::{PulsarSource, PulsarSourcePlan, PulsarSourceSettings};
+use nervix_connector_pulsar::{
+    PulsarAckReceipts, PulsarSource, PulsarSourcePlan, PulsarSourceSettings,
+};
+use nervix_models::IngestAcknowledgement;
 
 use super::{
     super::*,
@@ -39,18 +42,28 @@ impl PulsarIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
+        let acknowledgement = mode.acknowledgement();
+        // A mode without an acknowledgement tree reads one message at a time, so only an
+        // acknowledged mode waits for the broker to answer what it acknowledges.
+        let ack_receipts = match acknowledgement {
+            IngestAcknowledgement::Unacknowledged => PulsarAckReceipts::Unawaited,
+            IngestAcknowledgement::Sequential { .. } | IngestAcknowledgement::Parallel { .. } => {
+                PulsarAckReceipts::Awaited
+            }
+        };
         let connector = PulsarSourcePlan::connect(PulsarSourceSettings {
             config: &resolved.entries,
             topic: &topic,
             subscription,
             consumer_name: ingestor.name.as_str().to_string(),
+            ack_receipts,
         })
         .await
         .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
             instances,
-            acknowledgement: mode.acknowledgement(),
+            acknowledgement,
             buffered_intake: false,
             flush_each_intake: false,
             // A consumer whose receive queue fills while the loop is held cannot complete its close,

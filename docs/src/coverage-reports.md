@@ -87,7 +87,13 @@ an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and 
 `deloxide-order` build; the local report command uses the ordinary build; each diagnostic lane
 builds in the instrumented build of the feature its selection compiles, the two stress lanes in one,
 and exports only after its
-`lane.json` records a complete run. `test-primitives`
+`lane.json` records a complete run, including successful build and workload stages with their
+separate budgets and measured durations. The builds stay in that same instrumented target and
+preserve kache; moving them before the workload clock does not move them outside instrumentation.
+The build stage measures an initial and a warm pass over the selected builds with identical
+features and compiler context; both fit inside the same build budget, before workloads start.
+An instrumented record missing either measurement fails completion. A build-only measurement's
+`built` verdict cannot produce coverage completion. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash
