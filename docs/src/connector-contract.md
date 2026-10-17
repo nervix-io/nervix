@@ -928,8 +928,10 @@ prepends, or each upsert's filter and update documents, and rejects a row whose 
 the server's 16 MiB document limit before any write, because the driver would refuse the whole write
 for it. A record-specific failure of a multi-row SQL write is isolated by writing its rows one at a
 time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` refuses one insert that
-carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
-isolation pass.
+carries a key twice, is isolated the same way. Postgres writes the isolated rows on the connection
+the refused insert borrowed, and runs a write's metadata lookup on its first insert's connection, so
+an insert borrows once and its per-record outcome never waits for the shared pool again. MongoDB
+answers per document, so it needs no isolation pass.
 
 Registered Bolero properties hold these rules against their owners, with measures that grow and
 shrink with a candidate: `connector-row-request-division` the division rule and both limits,

@@ -402,6 +402,8 @@ struct ScenarioWorld {
     /// Releases the Postgres table lock a contention scenario is holding, if one is held. The
     /// lock lives in a spawned task because it must outlive the step that took it.
     postgres_lock_release: Option<nervix_primitives::sync::oneshot::Sender<()>>,
+    /// Releases each lock a scenario holds on a Postgres table it names, by table.
+    postgres_named_lock_releases: BTreeMap<String, nervix_primitives::sync::oneshot::Sender<()>>,
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
@@ -541,6 +543,10 @@ impl fmt::Debug for ScenarioWorld {
             .field("postgres_table", &self.postgres_table)
             .field("postgres_tls", &self.postgres_tls)
             .field("postgres_lock_held", &self.postgres_lock_release.is_some())
+            .field(
+                "postgres_named_locks_held",
+                &self.postgres_named_lock_releases.keys().collect::<Vec<_>>(),
+            )
             .field("mysql_table", &self.mysql_table)
             .field("mysql_tls", &self.mysql_tls)
             .field(
@@ -27310,13 +27316,15 @@ async fn then_postgres_eventually_reports_connections(
     }
 }
 
-#[given(expr = "the Postgres table is locked against inserts")]
-async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
-    let table = world
-        .postgres_table
-        .as_ref()
-        .expect("a Postgres table must be prepared before locking it")
-        .clone();
+/// Holds `table` locked against inserts in a transaction of its own until the returned sender
+/// fires or is dropped. Reads still proceed, so a scenario observes the inserts that queue behind
+/// the lock while each holds the pooled connection it borrowed.
+///
+/// The lock lives in a spawned task because it must outlive the step that took it.
+async fn hold_postgres_table_lock(
+    world: &ScenarioWorld,
+    table: String,
+) -> nervix_primitives::sync::oneshot::Sender<()> {
     let mut client = world
         .dependencies
         .postgres_lock_connection(world.postgres_tls)
@@ -27351,7 +27359,18 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
     locked_rx
         .await
         .expect("the Postgres locking task must acquire its lock");
-    world.postgres_lock_release = Some(release_tx);
+    release_tx
+}
+
+#[given(expr = "the Postgres table is locked against inserts")]
+async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before locking it")
+        .clone();
+    let release = hold_postgres_table_lock(world, table).await;
+    world.postgres_lock_release = Some(release);
 }
 
 #[when("the Postgres table lock is released")]
@@ -27363,6 +27382,170 @@ async fn when_postgres_table_lock_is_released(world: &mut ScenarioWorld) {
     release
         .send(())
         .expect("the Postgres locking task must still be holding its lock");
+}
+
+#[given(expr = "Postgres table {string} is locked against inserts")]
+async fn given_named_postgres_table_is_locked(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let release = hold_postgres_table_lock(world, table.clone()).await;
+    let replaced = world
+        .postgres_named_lock_releases
+        .insert(table.clone(), release);
+    assert!(
+        replaced.is_none(),
+        "this scenario already holds a lock on Postgres table {table}"
+    );
+}
+
+#[when(expr = "the lock on Postgres table {string} is released")]
+async fn when_named_postgres_table_lock_is_released(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let release = world
+        .postgres_named_lock_releases
+        .remove(&table)
+        .unwrap_or_else(|| panic!("Postgres table {table} must be locked before releasing it"));
+    release
+        .send(())
+        .expect("the Postgres locking task must still be holding its lock");
+}
+
+/// Waits until an insert into `table` queues behind a lock. The writer of that insert has borrowed
+/// its pooled connection and holds it while it waits, which is how a scenario knows who holds a
+/// connection without reading Nervix's own state.
+#[then(expr = "Postgres eventually reports an insert into table {string} waiting for its lock")]
+async fn then_postgres_reports_insert_waiting_for_lock(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let waiting: i64 = sqlx::query(
+            "SELECT count(*) FROM pg_locks AS lock JOIN pg_class AS class ON class.oid = \
+             lock.relation WHERE class.relname = $1 AND NOT lock.granted",
+        )
+        .bind(&table)
+        .fetch_one(&client)
+        .await
+        .expect("failed to read Postgres lock waits")
+        .get(0);
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an insert into Postgres table {table} to wait for its lock"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then("the Postgres table eventually holds exactly these rows")]
+async fn then_postgres_table_eventually_holds_exactly_rows(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before assertion")
+        .clone();
+    let expected = expand_placeholders(world, docstring(step));
+    wait_for_exact_postgres_rows(world, &table, &expected).await;
+}
+
+#[then(expr = "the Postgres table {string} eventually holds exactly these rows")]
+async fn then_named_postgres_table_eventually_holds_exactly_rows(
+    world: &mut ScenarioWorld,
+    table: String,
+    #[step] step: &Step,
+) {
+    let table = expand_placeholders(world, &table);
+    let expected = expand_placeholders(world, docstring(step));
+    wait_for_exact_postgres_rows(world, &table, &expected).await;
+}
+
+/// One row of a Postgres emitter table, by every column the emitter maps.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PostgresEmittedRow {
+    user_id: i32,
+    action: String,
+}
+
+/// Waits until `table` holds exactly the rows `expected` lists, one JSON object per line naming
+/// its `postgres_user_id` and `postgres_action`, and every row also carries the RFC 3339 instant
+/// its emitter mapped into `postgres_now`. Every column is compared, so a row written with a
+/// missing or wrong value does not count as the expected one.
+async fn wait_for_exact_postgres_rows(world: &ScenarioWorld, table: &str, expected: &str) {
+    let mut expected_rows = Vec::new();
+    for line in expected
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let row: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("expected Postgres row {line:?} is not JSON: {error}"));
+        let Some(user_id) = row
+            .get("postgres_user_id")
+            .and_then(serde_json::Value::as_i64)
+        else {
+            panic!("expected Postgres row {line} names no postgres_user_id");
+        };
+        let Some(action) = row
+            .get("postgres_action")
+            .and_then(serde_json::Value::as_str)
+        else {
+            panic!("expected Postgres row {line} names no postgres_action");
+        };
+        let user_id = i32::try_from(user_id)
+            .unwrap_or_else(|_| panic!("expected Postgres user id {user_id} exceeds integer"));
+        expected_rows.push(PostgresEmittedRow {
+            user_id,
+            action: action.to_string(),
+        });
+    }
+    expected_rows.sort();
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let rows = sqlx::query(SqlxAssertSqlSafe(format!(
+            "SELECT postgres_user_id, postgres_now, postgres_action FROM {table}"
+        )))
+        .fetch_all(&client)
+        .await
+        .expect("failed to query Postgres table");
+        let mut observed_rows = Vec::with_capacity(rows.len());
+        let mut incomplete = Vec::new();
+        for row in &rows {
+            let user_id: Option<i32> = row.get(0);
+            let now: Option<String> = row.get(1);
+            let action: Option<String> = row.get(2);
+            let mapped_instant = match now.as_deref() {
+                Some(now) => chrono::DateTime::parse_from_rfc3339(now).is_ok(),
+                None => false,
+            };
+            match (user_id, action) {
+                (Some(user_id), Some(action)) if mapped_instant => {
+                    observed_rows.push(PostgresEmittedRow { user_id, action });
+                }
+                (user_id, action) => incomplete.push(format!("{user_id:?}/{now:?}/{action:?}")),
+            }
+        }
+        observed_rows.sort();
+        if incomplete.is_empty() && observed_rows == expected_rows {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Postgres table {table} to hold exactly {expected_rows:?}; \
+             observed {observed_rows:?}, incomplete rows {incomplete:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[then("the Postgres table eventually contains a row")]
