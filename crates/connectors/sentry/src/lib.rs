@@ -27,14 +27,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
-    HttpClientConfig, PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
-    physical_time::actual_utc_now,
+    HttpClientConfig, PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkRetryDelay, SinkStartError,
+    SinkStartResult, client_config_value, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
     ClientConfigEntry, MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp,
 };
+use nervix_primitives::time::Instant;
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER},
@@ -273,7 +274,12 @@ impl SentrySink {
 }
 
 #[async_trait]
-impl SinkLifecycle for SentrySink {}
+impl SinkLifecycle for SentrySink {
+    /// Each envelope is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SentrySink {

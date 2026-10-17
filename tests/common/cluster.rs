@@ -109,6 +109,7 @@ use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 pub(crate) use super::raw_session::{TestSession, open_raw_session};
 use super::{
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
+    command_recovery::LeaderRoutes,
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
         PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
@@ -1750,53 +1751,16 @@ impl Cluster {
         should_reach: bool,
         duration: Duration,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + duration;
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let dependencies = self.dependencies.clone();
-            let query_group = group.to_string();
-            let query_topic = topic.to_string();
-            let observation = nervix_primitives::task::spawn_blocking(move || {
-                kafka_consumer_group_next_offset(
-                    &dependencies,
-                    &query_group,
-                    &query_topic,
-                    partition,
-                )
-            })
-            .await
-            .map_err(io::Error::other)?;
-            let actual = match observation {
-                Ok(actual) => actual,
-                Err(error) if Instant::now() >= deadline => return Err(error),
-                Err(_) => {
-                    sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let reached = actual.is_some_and(|offset| offset >= threshold);
-            if should_reach && reached {
-                return Ok(());
-            }
-            if !should_reach && reached {
-                return Err(io::Error::other(format!(
-                    "Kafka consumer group '{group}' unexpectedly committed next offset {actual:?} \
-                     for topic '{topic}' partition {partition}; expected it to remain below \
-                     {threshold}"
-                )));
-            }
-            if Instant::now() >= deadline {
-                if should_reach {
-                    return Err(io::Error::other(format!(
-                        "timed out waiting for Kafka consumer group '{group}' to commit next \
-                         offset at least {threshold} for topic '{topic}' partition {partition}; \
-                         observed {actual:?}"
-                    )));
-                }
-                return Ok(());
-            }
-            sleep(POLL_INTERVAL).await;
-        }
+        assert_kafka_consumer_group_next_offset_through(
+            kafka_client_config(&self.dependencies)?,
+            group,
+            topic,
+            partition,
+            threshold,
+            should_reach,
+            duration,
+        )
+        .await
     }
 
     pub(crate) async fn wait_for_rabbitmq_queue_consumers(
@@ -1842,6 +1806,19 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         open_raw_session(&handle.spec.grpc_uri(handle.config.grpc_mode), domain).await
+    }
+
+    /// The gRPC endpoint of every node, by node id, which a command whose leader moved is sent to
+    /// again until the node that leads now answers it.
+    pub(crate) fn leader_routes(&self) -> LeaderRoutes {
+        let mut endpoints = BTreeMap::new();
+        for (node_id, handle) in &self.nodes {
+            endpoints.insert(
+                node_id.clone(),
+                handle.spec.grpc_uri(handle.config.grpc_mode),
+            );
+        }
+        LeaderRoutes::new(endpoints)
     }
 
     pub(crate) fn grpc_uri(&self, node_id: &str) -> io::Result<String> {
@@ -4535,52 +4512,47 @@ async fn publish_mqtt_with_qos(
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
-    let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    publish_mqtt_to_address(host, port, topic, payload, qos, retain).await
+}
+
+pub(crate) async fn publish_mqtt_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    qos: QoS,
+    retain: bool,
+) -> io::Result<()> {
+    let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
-    let driver = nervix_primitives::task::spawn(async move {
+    let driver = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
-    let mut last_error = None;
-    for attempt in 0..5 {
-        nervix_primitives::task::consume_budget().await;
-        // Runtime ingestors can still be attaching to the broker immediately after START.
-        // Retaining the per-test input payload makes MQTT publishes deterministic without
-        // changing application-level topic reuse, because scenario topics are unique.
-        match client
-            .publish(topic, payload, PublishOptions::new(qos).retain(retain))
+    let published = timeout(BROKER_TIMEOUT, async {
+        // Runtime ingestors can still be attaching immediately after START. Retain the input on
+        // its unique scenario topic, and keep driving until it is sent (QoS 0) or answered (QoS 1).
+        let notice = client
+            .publish_tracked(topic, payload, PublishOptions::new(qos).retain(retain))
             .await
-        {
-            Ok(()) => {
-                sleep(POLL_INTERVAL).await;
-                driver.abort();
-                let _ = driver.await;
-                return Ok(());
-            }
-            Err(error) => {
-                last_error = Some(io::Error::other(format!(
-                    "failed to publish mqtt message to topic '{topic}': {error}"
-                )));
-                if attempt < 4 {
-                    sleep(POLL_INTERVAL).await;
-                }
-            }
-        }
-    }
+            .map_err(io::Error::other)?;
+        notice
+            .wait_completion_async()
+            .await
+            .map_err(io::Error::other)
+    })
+    .await;
 
-    sleep(POLL_INTERVAL).await;
     driver.abort();
     let _ = driver.await;
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::other(format!("failed to publish mqtt message to topic '{topic}'"))
-    }))
+    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
 }
 
 async fn publish_mqtt_burst(
@@ -4599,36 +4571,56 @@ async fn publish_mqtt_burst_with_qos(
     count: usize,
     qos: QoS,
 ) -> io::Result<()> {
-    let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    publish_mqtt_burst_to_address(host, port, topic, payload, count, qos).await
+}
+
+pub(crate) async fn publish_mqtt_burst_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    count: usize,
+    qos: QoS,
+) -> io::Result<()> {
+    let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options)
         .capacity(count.max(16))
         .build();
-    let driver = nervix_primitives::task::spawn(async move {
+    let driver = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
-    for _ in 0..count {
-        nervix_primitives::task::consume_budget().await;
-        client
-            .publish(topic, payload, PublishOptions::new(qos))
-            .await
-            .map_err(|error| {
-                io::Error::other(format!(
-                    "failed to publish mqtt burst message to topic '{topic}': {error}"
-                ))
-            })?;
-    }
-    sleep(POLL_INTERVAL).await;
+    let published = timeout(BROKER_TIMEOUT, async {
+        let mut notices = Vec::with_capacity(count);
+        for _ in 0..count {
+            nervix_primitives::task::consume_budget().await;
+            notices.push(
+                client
+                    .publish_tracked(topic, payload, PublishOptions::new(qos))
+                    .await
+                    .map_err(io::Error::other)?,
+            );
+        }
+        // Queue the complete burst before waiting so completion tracking preserves its demand.
+        for notice in notices {
+            notice
+                .wait_completion_async()
+                .await
+                .map_err(io::Error::other)?;
+        }
+        Ok::<_, io::Error>(())
+    })
+    .await;
     driver.abort();
     let _ = driver.await;
-    Ok(())
+    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
 }
 
 async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
@@ -5022,7 +5014,25 @@ async fn publish_kafka_record(
     payload: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
-    let mut client_config = kafka_client_config(dependencies)?;
+    publish_kafka_record_through(
+        kafka_client_config(dependencies)?,
+        topic,
+        partition,
+        payload,
+        headers,
+    )
+    .await
+}
+
+/// Publishes one record to `topic` through a producer that `client_config` connects to its broker,
+/// such as the mock broker a scenario owns.
+pub(crate) async fn publish_kafka_record_through(
+    mut client_config: ClientConfig,
+    topic: &str,
+    partition: Option<i32>,
+    payload: &str,
+    headers: &[(&str, &str)],
+) -> io::Result<()> {
     let producer: FutureProducer = client_config
         .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
@@ -5272,12 +5282,11 @@ fn kafka_consumer_group_member_count(
 }
 
 fn kafka_consumer_group_next_offset(
-    dependencies: &DependencyEndpoints,
+    mut client_config: ClientConfig,
     group: &str,
     topic: &str,
     partition: i32,
 ) -> io::Result<Option<i64>> {
-    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: BaseConsumer = client_config
         .set("group.id", group)
         .set("enable.auto.commit", "false")
@@ -5298,6 +5307,61 @@ fn kafka_consumer_group_next_offset(
         | Offset::Stored
         | Offset::Invalid
         | Offset::OffsetTail(_) => Ok(None),
+    }
+}
+
+/// Asserts, through a consumer that `client_config` connects to its broker, that consumer group
+/// `group` commits a next offset of at least `threshold` for `topic` partition `partition` within
+/// `duration`, or, when `should_reach` is false, that it stays below it for all of `duration`.
+pub(crate) async fn assert_kafka_consumer_group_next_offset_through(
+    client_config: ClientConfig,
+    group: &str,
+    topic: &str,
+    partition: i32,
+    threshold: i64,
+    should_reach: bool,
+    duration: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let query_config = client_config.clone();
+        let query_group = group.to_string();
+        let query_topic = topic.to_string();
+        let observation = nervix_primitives::task::spawn_blocking(move || {
+            kafka_consumer_group_next_offset(query_config, &query_group, &query_topic, partition)
+        })
+        .await
+        .map_err(io::Error::other)?;
+        let actual = match observation {
+            Ok(actual) => actual,
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => {
+                sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        let reached = actual.is_some_and(|offset| offset >= threshold);
+        if should_reach && reached {
+            return Ok(());
+        }
+        if !should_reach && reached {
+            return Err(io::Error::other(format!(
+                "Kafka consumer group '{group}' unexpectedly committed next offset {actual:?} for \
+                 topic '{topic}' partition {partition}; expected it to remain below {threshold}"
+            )));
+        }
+        if Instant::now() >= deadline {
+            if should_reach {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Kafka consumer group '{group}' to commit next offset \
+                     at least {threshold} for topic '{topic}' partition {partition}; observed \
+                     {actual:?}"
+                )));
+            }
+            return Ok(());
+        }
+        sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -5450,7 +5514,7 @@ async fn publish_zeromq(addr: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn observe_mqtt(
+pub(crate) async fn observe_mqtt(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {

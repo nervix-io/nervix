@@ -276,7 +276,16 @@ prebuilt Alpine netcat transfer. A node's readiness is not part of that check, b
 leader's link can start an election, during which a node can report no leader for a moment. The
 transfer counts all bytes at the receiver and times their arrival. It records a healthy ICMP and
 transfer baseline before any fault.
-ICMP observations have one 30-second total helper budget. Burst loss uses 400 packets at
+Each ICMP observation runs in its own detached helper. Docker's start of that helper has a
+60-second launch bound of its own: the chaos runs on the GitHub-hosted workers recorded Docker
+holding a container's start for about 30 seconds twice among 518,723 launches, while every other
+start took under 5.5 seconds. The sample then has its own 30-second bound, which a held start no
+longer consumes. The helper reports when its sample began and ended on the kernel uptime clock
+the controller reads too. The adjacent `*.probe.json` keeps the launch, wait, ping, log and removal
+outcomes with the launch and sample times. A failed observation names the stage that took the
+time: a start that outlasted the launch bound, a sample that outlasted its bound, ping's own exit,
+or a failed log read or removal. It keeps the helper's raw streams and Docker's state and events
+for the helper before removing it. Burst loss uses 400 packets at
 10 ms intervals; every other profile, healthy baseline and healing check uses 40 at 100 ms.
 Both sample in approximately four seconds. The parser requires the declared complete packet
 count. Effect limits scale by the number sent: loss profiles still need at least 7.5% loss and
@@ -286,16 +295,19 @@ fails injection qualification; a large sample cannot turn four replies per forty
 passing evidence. Pumba parameters, action hold times and product recovery deadlines do not
 change with the sample size. `just test-chaos-degraded-evidence` runs the focused controller,
 parser and effect controls; `just coverage-chaos-degraded-evidence` retains their shell coverage.
-The controls pin each profile's packet count and interval and the 30-second helper budget. They
-also exercise both sides of the inclusive reply and loss thresholds at 40 and 400 packets.
+The controls pin each profile's packet count and interval, the 60-second launch bound and the
+30-second sample bound. They also exercise both sides of the inclusive reply and loss thresholds
+at 40 and 400 packets.
 For a composed-action sampling change, run the same retained `mixed-instability` plan with
 `--plan FILE` on both immutable ordinary and diagnostic images, using a separate run ID and
 artifact directory for each. Check the plan hash, complete action trace, burst sample, exact
 output ledger, committed source offsets and cleanup verdict; the diagnostic run also requires
 complete clean deadlock evidence. Preserve the original failure alongside the new attempts.
 
-The 262,144-byte transfer has one 90-second deadline shared by the sender and receiver, covering
-connection establishment, TCP retransmissions, byte delivery and receiver completion. It uses
+The receiver's detached launch, and the launches of the profile's Pumba dry run and injector,
+have the same 60-second launch bound as an ICMP helper. The 262,144-byte transfer has one
+90-second deadline shared by the sender and receiver, covering connection establishment, TCP
+retransmissions, byte delivery and receiver completion. It uses
 the pinned BusyBox netcat's EOF half-close rather than an idle timeout. At 256 kbit/s the payload
 alone needs at least 8.192 seconds; packet loss
 can add retransmission stalls. The sender records its kernel uptime immediately before connecting,
@@ -1493,11 +1505,17 @@ controller against the supplied prebuilt image. It keeps coverage under
 that stays outside transfer time, a real healthy/256kbit twofold effect, a two-second connect delay,
 receiver completion delayed twelve seconds, partial bytes, complete loss, a receiver that does not
 listen, a receiver launch failure and a nonzero receiver exit, failed log retrieval and failed
-cleanup, invalid or missing clocks and mismatched clock coordinates. It uses only the pinned probe and
-nettools images with Docker, and leaves no helper behind. `just coverage-chaos-rate-probe` runs
-those controls under kcov and retains its
-shell Cobertura report under `target/chaos-rate-probe-coverage/`. These observations test the external
-probe; they make no claim about product recovery or model-checker coverage.
+cleanup, invalid or missing clocks and mismatched clock coordinates. It exercises the production
+ICMP probe with a six-second Docker start that stays outside an eight-second sample bound, a
+helper Docker creates but does not start within its launch bound, and a sample that outlasts its
+own bound, each with its stage, Docker's state and events and the helper's removal. It uses only
+the pinned probe and nettools images with Docker, and requires that no control leaves a helper
+behind. A failed run keeps its probes' records and raw streams and names their directory; within
+a scenario's verifier self-check that directory is `diagnostics/verifier-self-test/rate-probe`,
+and the run's finding lists the self-check's output and those records.
+`just coverage-chaos-rate-probe` runs those controls under kcov and retains its shell Cobertura
+report under `target/chaos-rate-probe-coverage/`. These observations test the external probe; they
+make no claim about product recovery or model-checker coverage.
 
 `just test-chaos-stateful-verifiers` runs the state, clock and window verdict controls separately.
 `just verify-chaos-clock` accepts the clock verifier's arguments for judging retained observer

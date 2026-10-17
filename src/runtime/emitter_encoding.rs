@@ -660,7 +660,9 @@ mod tests {
     use std::collections::VecDeque;
 
     use error_stack::{AttachmentKind, FrameKind};
-    use nervix_connector::{PerRecordOutcome, SinkPublishError, SinkRecord, SinkRecordId};
+    use nervix_connector::{
+        PerRecordOutcome, SinkFinish, SinkFinishResult, SinkPublishError, SinkRecord, SinkRecordId,
+    };
     use nervix_models::{
         BatchMessageLimit, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec,
         CreateWireSchema, JsonType, ResolvedCodecWireFormat, WireSchemaField,
@@ -690,7 +692,12 @@ mod tests {
         answers: VecDeque<Answer>,
     }
 
-    impl SinkLifecycle for ScriptedSink {}
+    #[async_trait]
+    impl SinkLifecycle for ScriptedSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl RecordSink for ScriptedSink {

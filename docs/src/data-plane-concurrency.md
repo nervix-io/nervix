@@ -1232,7 +1232,9 @@ architectural assertions, not proofs of exclusive ownership, bounded waiting or 
 
 An explicit callable contract wins over defaults. An implementation inherits its trait method's
 contract before its impl/type or lexical defaults; a recurring trait method's override remains
-recurring or names a bounded protocol. A type contract applies to its implementations. Duplicate,
+recurring or names a bounded protocol. A type contract applies to its implementations. An `extern`
+block holds no contract, so a foreign function or static takes those of the module that holds its
+block, in its own crate and through crate metadata alike. Duplicate,
 conflicting, malformed and misplaced annotations fail. A binding whose initializer owns exactly one
 anonymous body can supply that body's context: use it when a constructor installs a recurring task. Nested task bodies
 still require their actual entry contract.

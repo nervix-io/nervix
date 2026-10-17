@@ -223,6 +223,127 @@ Feature: Session protocol
       CREATE SCHEMA recovered_record (
       """
 
+  Scenario: A leader configuration step learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE SCHEMA configured_record ( value STRING );
+      CREATE RELAY configured SCHEMA configured_record UNBRANCHED;
+      CREATE SUBSCRIPTION configured_subscription TO configured;
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA configured_record;
+      """
+    Then the leadership move under the durably admitted command completed
+    And the last command output contains
+      """
+      CREATE SCHEMA configured_record (
+      """
+
+  Scenario: A session that keeps its subscription learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE SCHEMA held_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC held_event_codec
+        FROM WIRE JSON SCHEMA held_event_wire
+        TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST held_edge http-{{test_id}}-held.example.com;
+      CREATE ENDPOINT held_ingress ON held_edge PATH '/held' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        TO held_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION held_subscription TO held_events;
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When these NSPL commands are executed
+      """
+      START;
+      """
+    Then the leadership move under the durably admitted command completed
+    And node "{{successor}}" eventually accepts http traffic for host "http-{{test_id}}-held.example.com" path "/held"
+      """
+      {"seq":1}
+      """
+    And within "30s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+
+  Scenario: A command request under its own execution reference learns the outcome its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When this NSPL command request with execution reference "moved-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA referenced_record ( value STRING );
+      """
+    Then the last command request succeeded
+    And the leadership move under the durably admitted command completed
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA referenced_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA referenced_record (
+      """
+
+  Scenario: A background execution learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When these NSPL commands begin executing in the background
+      """
+      CREATE SCHEMA background_record ( value STRING );
+      """
+    Then the background NSPL execution succeeds
+    And the leadership move under the durably admitted command completed
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA background_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA background_record (
+      """
+
   Scenario: A redirect names no endpoint for a leader that discovery cannot reach
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
