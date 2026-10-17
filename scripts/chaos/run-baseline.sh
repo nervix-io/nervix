@@ -1340,6 +1340,18 @@ finish() {
             done < <(find "${artifact_dir}/traffic/offsets" -mindepth 2 -maxdepth 2 -type f \
                 \( -name 'result.json' -o -name 'stdout.txt' -o -name 'stderr.txt' \) -size +0c | sort)
         fi
+        # A failed self-check names its output and the probe records a failed self-test retained.
+        if [[ "${current_phase}" == "verifier self-check" \
+            && -s "${artifact_dir}/results/verifier-self-test.txt" ]]; then
+            evidence_paths+=(results/verifier-self-test.txt)
+        fi
+        if [[ -d "${artifact_dir}/diagnostics/verifier-self-test" ]]; then
+            while IFS= read -r evidence_path; do
+                evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+            done < <(find "${artifact_dir}/diagnostics/verifier-self-test" -type f \
+                \( -name '*.probe.json' -o -name '*.helper-state.json' -o -name '*.helper-events.ndjson' \) \
+                -size +0c | sort)
+        fi
         if [[ -n "${diagnostic_selection}" ]]; then
             for evidence_path in results/diagnostic-evidence.json deadlock/qualification.ndjson \
                 deadlock/verdict.txt; do
@@ -2007,8 +2019,10 @@ fi
 phase "verifier self-check"
 # The self-check drives Docker as a scenario does, so the worker's load stretches it: it takes half
 # a minute on a quiet worker and took 247 seconds beside three chaos runs on a loaded one. The bound
-# only ends a self-check that hangs.
+# only ends a self-check that hangs. A failed rate-probe self-test keeps its probes' records under
+# diagnostics/verifier-self-test.
 run_bounded 600 "${script_dir}/tests/self-test.sh" \
+    --evidence "${artifact_dir}/diagnostics/verifier-self-test" \
     >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
 
 phase "TLS generation"
