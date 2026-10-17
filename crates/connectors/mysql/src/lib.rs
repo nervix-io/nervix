@@ -41,12 +41,12 @@ use mysql_async::{
 };
 use nervix_connector::{
     MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
-use nervix_primitives::sync::atomic::Ordering;
+use nervix_primitives::{sync::atomic::Ordering, time::Instant};
 use tracing::{debug, trace};
 
 const MYSQL: &str = "mysql";
@@ -407,7 +407,12 @@ impl MySqlSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for MySqlSink {}
+impl SinkLifecycle for MySqlSink {
+    /// Each insert completes before the publish returns, so the pool holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RowSink for MySqlSink {

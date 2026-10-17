@@ -25,8 +25,8 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::future::join_all;
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkLifecycle, SinkPublishError, SinkRecordId,
-    SinkRecordPosition,
+    PerRecordOutcome, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkLifecycle,
+    SinkPublishError, SinkRecordId, SinkRecordPosition,
 };
 use nervix_models::{EmitterBatchPolicy, MessageErrorOperation, Timestamp};
 use uuid::Uuid;
@@ -258,6 +258,12 @@ impl Drop for ClientEmitterSink {
 
 #[async_trait]
 impl SinkLifecycle for ClientEmitterSink {
+    /// A batch is delivered only on its consumer's application ACK, and the batches still waiting
+    /// for one are the host's retained payloads, not a client's, so nothing is left to send.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+
     fn keeps_client_on_publish_failure(&self) -> bool {
         false
     }

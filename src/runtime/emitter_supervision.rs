@@ -95,6 +95,9 @@ impl RelayInteractionCommand for EmitterTaskCommand {
 #[derive(Debug)]
 pub(super) struct ScheduledEmitterTask {
     pub(super) commands: mpsc::Sender<EmitterTaskCommand>,
+    /// The deadline of the stop this task is performing, which bounds its attempts and the finish
+    /// of its sink. A stop command publishes it, and so does a stopping domain execution before its
+    /// teardown ends the task.
     pub(super) stop_signal: watch::Sender<Option<Instant>>,
     pub(super) task: JoinHandle<()>,
 }
@@ -191,6 +194,13 @@ impl ScheduledEmitterStopFailure {
 }
 
 impl ScheduledEmitterTask {
+    /// Gives the task the deadline by which it finishes its sink once terminal teardown ends it.
+    /// The stopping domain execution calls this before it signals the shutdown, so the task already
+    /// holds the deadline when the shutdown ends its loop.
+    pub(super) fn finish_by(&self, deadline: Instant) {
+        self.stop_signal.send_replace(Some(deadline));
+    }
+
     pub(super) async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
         flush_policy: FlushPolicy,
