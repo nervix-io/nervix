@@ -219,6 +219,10 @@ class Runner:
             "KACHE_KEY_SALT": salt,
         })
         reports.mkdir(parents=True, exist_ok=True)
+        # A termination record describes the run that wrote it; a reused report directory starts
+        # without the ones an earlier run left.
+        for previous in reports.glob("*.termination.json"):
+            previous.unlink()
         args = ["cargo", f"+{TOOLCHAIN}", "check", *configuration.cargo_arguments(), "--message-format=json"]
         log = reports.parent / "cargo.jsonl"
         print(f"typed ratchet: {configuration.name}: {' '.join(args)}", flush=True)
@@ -235,7 +239,8 @@ class Runner:
                 print(message["message"].get("rendered", message["message"]["message"]), file=sys.stderr)
             messages.append(message)
         if status or not any(message.get("reason") == "build-finished" and message.get("success") is True for message in messages):
-            raise AnalysisError(f"{configuration.name}: compiler run failed or did not finish; evidence: {log}")
+            failures = "".join("\n  " + failure for failure in failed_compilations(messages, reports))
+            raise AnalysisError(f"{configuration.name}: compiler run failed or did not finish; evidence: {log}{failures}")
         self.check_diagnostics(messages)
         return messages
 
@@ -384,6 +389,48 @@ def summarize(runner: Runner, evidence: list[dict[str, Any]]) -> list[dict[str, 
     if completed.returncode:
         raise AnalysisError(f"generated report validation failed:\n{completed.stderr.decode()}")
     return json.loads(completed.stdout)
+
+
+def failed_compilations(messages: list[dict[str, Any]], reports: pathlib.Path) -> list[str]:
+    """Name how each analysis compilation that failed ended, from the workspace wrapper's records.
+
+    Cargo's compiler wrapper reports a compiler ended by a signal with the exit status of a compile
+    error, so only these records tell a terminated compiler from compiler errors and from a driver
+    that failed without one, such as while publishing its report.
+    """
+    errors: dict[tuple[str, str], int] = {}
+    for message in messages:
+        if message.get("reason") != "compiler-message" or message["message"]["level"] != "error":
+            continue
+        target = message["target"]
+        compiled = (target["name"].replace("-", "_"), target_kind(target["kind"]))
+        errors[compiled] = errors.get(compiled, 0) + 1
+    failures = []
+    for path in sorted(reports.glob("*.termination.json")):
+        record = json.loads(path.read_text())
+        kind = "unknown"
+        if record["crate_types"]:
+            kind = target_kind(record["crate_types"])
+        compiled = f"{record['crate_name']} ({kind})"
+        ending = record["ending"]
+        if ending["kind"] == "signal":
+            signal_name = ending["name"] or "unnamed"
+            peak = record["peak_resident_bytes"] / 2**30
+            failure = f"{compiled}: the analysis compiler was terminated by signal {ending['signal']} ({signal_name}) after {record['seconds']:.0f}s at a peak resident size of {peak:.1f} GiB"
+            if record["oom_kills"]:
+                plural = "" if record["oom_kills"] == 1 else "s"
+                failure += f"; the kernel's out-of-memory killer recorded {record['oom_kills']} kill{plural} in its cgroup while it ran"
+            failures.append(failure + "; it wrote no compiler report")
+            continue
+        count = errors.get((record["crate_name"], kind), 0)
+        if count:
+            plural = "" if count == 1 else "s"
+            failures.append(f"{compiled}: the analysis compiler failed with {count} compiler error{plural} (exit status {ending['status']})")
+            continue
+        failures.append(f"{compiled}: the analysis compiler exited with status {ending['status']} without a compiler error, so the analysis driver itself failed, for example while publishing its report; its message is in the compiler output above")
+    if not failures:
+        failures.append("no analysis compilation ended unsuccessfully, so Cargo, a build script or the compiler wrapper failed outside them; their output above names the failure")
+    return failures
 
 
 def render_finding(site: dict[str, Any]) -> str:
