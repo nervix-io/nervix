@@ -43,3 +43,4 @@ nervix-simd-kernels = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
 rstest = { workspace = true }
+toml = { workspace = true }

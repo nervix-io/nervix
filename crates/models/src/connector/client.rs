@@ -32,10 +32,12 @@ use super::{
 };
 use crate::{
     AckWindow, AcknowledgementConfirmation, AlterIngestorError, AlterIngestorOperation,
-    CanonicalNsplError, ClientName, CreateIngestor, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
+    CanonicalNsplError, ClientName, CreateIngestor, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestDeliveryKind, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
     IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
-    SinkEntity, SinkReference, SourceEntity, SourceMetadataScope, SourceReferenceKind,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceEntity, SourceMetadataScope,
+    SourceReferenceKind,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -61,6 +63,14 @@ pub struct ClientIngestMode {
 }
 
 impl ClientIngestMode {
+    /// Which delivery mode this is: `ACK SEQUENTIAL` or `ACK PARALLEL`.
+    pub const fn kind(&self) -> IngestDeliveryKind {
+        match self.window {
+            AckWindow::Sequential => IngestDeliveryKind::AckSequential,
+            AckWindow::Parallel { .. } => IngestDeliveryKind::AckParallel,
+        }
+    }
+
     /// The acknowledgement window as a count: one batch for `ACK SEQUENTIAL`, `max` for
     /// `ACK PARALLEL MAX <max>`.
     pub fn window_size(&self) -> NonZeroU64 {
@@ -70,6 +80,14 @@ impl ClientIngestMode {
         }
     }
 }
+
+/// A producer's parallel window holds every admitted batch until its acknowledgement, so it
+/// collects acknowledgements without a batch timeout.
+const CLIENT_ACK_PARALLEL: DeclaredDelivery = DeclaredDelivery {
+    kind: IngestDeliveryKind::AckParallel,
+    example: "ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+    requires: &[],
+};
 
 impl SourceEntity for ClientProducerSource {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
@@ -81,6 +99,10 @@ impl SourceEntity for ClientProducerSource {
         reference: SourceReferenceKind::Schema,
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, CLIENT_ACK_PARALLEL],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: None,
+        options: &[],
     };
 }
 
@@ -176,15 +198,16 @@ pub struct ClientConsumerSink {
 impl SinkEntity for ClientConsumerSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        reference: SinkReferenceKind::Schema,
+        body: EmitterBodyForm::Native,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::ClientAck],
+        locator: None,
+        options: &[],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::ClientAck { .. })
-    }
 }
 
 impl SinkBody for ClientConsumerSink {

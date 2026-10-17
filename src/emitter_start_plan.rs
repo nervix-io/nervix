@@ -1547,7 +1547,7 @@ mod tests {
         CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
         CreateClientPostgres, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-        CreateClientZeroMq, EmitterBatchRequirement, ErrorPolicies, FlushPolicy, OtelLogsSink,
+        CreateClientZeroMq, EmitterBatchLegality, ErrorPolicies, FlushPolicy, OtelLogsSink,
         ProcessorInputs, RouteConstruction,
     };
     use nonzero_ext::nonzero;
@@ -1695,7 +1695,7 @@ mod tests {
         /// sink requires and leaving it out everywhere else.
         fn emitter(&self) -> CreateEmitter {
             let mut emitter = emitter(self.sink.clone(), self.mode.clone());
-            if let EmitterBatchRequirement::Required = self.sink.batch_requirement() {
+            if let EmitterBatchLegality::Required { .. } = self.sink.batch_legality() {
                 emitter.batch = Some(batch_policy());
             }
             emitter

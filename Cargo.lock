@@ -7459,6 +7459,7 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
+ "toml 0.8.2",
  "url",
  "uuid",
 ]

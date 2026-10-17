@@ -368,6 +368,68 @@ These annotations describe this chapter's existing lifecycle; they supply no run
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
 
+## Entity declarations
+
+Every connector entity declares, once in the vocabulary, everything a statement can say about it
+and what the entity does with what a statement says. The declaration is the oracle the other layers
+read: the grammar takes each external name's completion label from it, the vocabulary's own checks
+read it, generated conformance tests hold the grammar and completion to it, and an inventory holds
+the scenario suite to its runtime capabilities. Each example a declaration carries is a complete
+clause the grammar accepts, so documentation can show it and generated statements write it.
+
+| Side | What the entity declares |
+| --- | --- |
+| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Emitter | Header writes; the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. |
+
+A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
+`SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
+source answers which choices its statement made. Whether a source can honor a quiesce mode, whether
+a sink accepts a publishing mode, whether its body needs a codec, and the batching contract with its
+maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
+registry, the planner and the console keep their own copies of some of these facts until the work
+that owns those layers reads the declaration instead.
+
+### Generated conformance tests
+
+Tests generated from the declarations check every entity through the composed statement grammar, as
+a REPL or a client meets it, so a grammar module that accepts more or less than its entity declares
+fails them. They cover the three statement families:
+
+- Ingestors. Every declared delivery and quiesce mode, together with the choices it requires, parses
+  into its kind. So does every form of every option. A mode, a quiesce mode or an option that only
+  another entity declares is refused. So is a mode written without its required choices, a statement
+  that leaves a required option out, and an empty external name. Completion at the locator, the
+  options, `MODE` and `ON QUIESCE` offers exactly the declared items.
+- Emitters. Every declared publishing mode, body and batching choice parses into its kind, every
+  optional option parses, and every declared object store names its storage client. A batch above
+  the declared maximum breaks the batching contract. An undeclared publishing mode, body, batching
+  clause, option, envelope clause or `PROPERTIES` block is refused. Completion at `MODE` and after
+  the destination offers exactly the declared items.
+- Clients. `POOL SIZE` is written exactly where the client declares a pool, and only the declared
+  options parse.
+
+An emitter's head does not name its entity yet, so the words that open its destination after `TO`
+come from the test generator; the locator, the options and everything after them come from the
+declaration.
+
+### Capability inventory
+
+`tests/connector-capability-inventory.toml` registers, for every entity and every capability it
+declares, the scenarios that observe that capability at run time. The capabilities are each delivery
+or publishing mode, each option and each choice of an option, each typed metadata field, batching
+where it is available, and each envelope clause and property. `just validate-connector-capabilities`,
+which `just validate` runs, fails when a declared capability names no scenario, when an entry names a
+capability its entity does not declare or names it twice, and when a named scenario does not exist
+in its feature file. A scenario is identified by its feature file and its name exactly as the
+scenario line writes it.
+
+Quiesce modes and header access are not inventory capabilities. The host owns how a source is
+quiesced, the registry checks a program's header access against the declaration, and the generated
+tests hold the grammar to both. A connector that declares a new capability registers the scenario
+that observes it in the same change.
+
 ## Source boundary
 
 Endpoint and Syslog sources are assigned to all live voters when a schedule is prepared, including
@@ -1339,12 +1401,14 @@ drain boundary. This chapter does not redefine those output formats.
 
 ## Adding an integration
 
-1. Declare each entity it serves in the vocabulary: one Model per entity with its capabilities,
-   its delivery modes, and a typed name, checked by the entity's own rule, for each external name
-   its statement writes. The connector and entity together name the statement's head, such as
-   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
-   and its completion. Keep external driver configuration raw only where pass-through is its
-   intentional contract.
+1. Declare each entity it serves in the vocabulary: one Model per entity with its
+   [declaration](#entity-declarations), which states its modes, quiesce modes, locator, options,
+   body, batching and every other fact a statement can say about it, and a typed name, checked by
+   the entity's own rule, for each external name its statement writes. The connector and entity
+   together name the statement's head, such as `KAFKA TOPIC INGESTOR`. Then add the connector's
+   grammar module, which owns each entity's body, and its completion; the generated conformance
+   tests hold both to the declaration. Keep external driver configuration raw only where
+   pass-through is its intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    a source's variant belongs to the registry's ingestor planner.
@@ -1355,8 +1419,9 @@ drain boundary. This chapter does not redefine those output formats.
    [Finishing a sink](#finishing-a-sink) describes, and adds its row to that table. Add
    its composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
-   three-node execution and failure paths. Confirm the crate boundary and run the repository's
-   validation and connector tests.
+   three-node execution and failure paths, and register the scenarios that observe each declared
+   capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
+   run the repository's validation and connector tests.
 5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
    metric documentation, and the [NSPL skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/nspl/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.
