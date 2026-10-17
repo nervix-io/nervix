@@ -225,7 +225,7 @@ subsections after the boundary table follow this order.
 | Primitives | Modeled adapters keep the error types of the library they stand in for, such as the watch channel's `RecvError` and `SendError` | The library's own error shape, never a report |
 | Vocabulary | Model alteration errors, `CanonicalNsplError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
-| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError` and `SinkPublishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
+| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError`, `SinkPublishError` and `SinkFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
 | Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
@@ -481,8 +481,12 @@ A connector reports through the contract's own contexts and keeps its integratio
 them. `SourceError` names the connector and the operation that failed: opening, reading,
 acknowledging, rejecting, suspending, resuming or closing. `SinkStartError` separates an invalid
 configuration and a missing external entity from a failed initialization. `SinkPublishError`
-separates a failed publish, finish or commit, which the host retries on its backoff, from a
-misconfiguration, which it does not retry. A record the destination refuses for good is none of
+separates a failed publish or commit, which the host retries on its backoff, from a
+misconfiguration, which it does not retry. `SinkFinishError` reports a finish that did not send
+everything the sink's client still held when the emitter stopped: `Unsent` when the deadline passed,
+with the count of records the client still held, and `Flush` when the client failed while it sent
+them. The host does not retry a finish; a stop that asked for it fails, and teardown records it as
+the emitter's transient error. A record the destination refuses for good is none of
 these errors: it is a rejection in the write's per-record outcome, with the structured message
 error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
@@ -578,7 +582,11 @@ TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A deliver
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
 `ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
 `SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
-hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`.
+hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`. A
+finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
+beneath `SinkFinishError::Unsent`, which counts the records still queued; a flush that fails
+otherwise, or whose blocking task does not complete, keeps that cause beneath
+`SinkFinishError::Flush`.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator

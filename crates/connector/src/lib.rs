@@ -76,10 +76,11 @@ pub use sink::{
     MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts, PreparedRowRequest, RecordSink,
     RejectedSinkRecord, RowRequestPreparation, RowRequestSink, RowSink,
     SinkAcknowledgementServices, SinkAcknowledgements, SinkBoundedExecution, SinkCommitReport,
-    SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices, SinkHttpRequest,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
-    SinkRecordPosition, SinkRetryDelay, SinkRowRequest, SinkStagedCommit, SinkStagingDirectory,
-    SinkStartError, SinkStartResult, SinkTransientErrorStatus,
+    SinkEventReporter, SinkFinish, SinkFinishError, SinkFinishResult, SinkGeneralErrorHandler,
+    SinkHost, SinkHostServices, SinkHttpRequest, SinkLifecycle, SinkPublishError,
+    SinkPublishResult, SinkRecord, SinkRecordId, SinkRecordPosition, SinkRetryDelay,
+    SinkRowRequest, SinkStagedCommit, SinkStagingDirectory, SinkStartError, SinkStartResult,
+    SinkTransientErrorStatus,
 };
 pub use source::{
     BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgementOutcome,

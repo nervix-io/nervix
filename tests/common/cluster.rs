@@ -4498,52 +4498,47 @@ async fn publish_mqtt_with_qos(
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
-    let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    publish_mqtt_to_address(host, port, topic, payload, qos, retain).await
+}
+
+pub(crate) async fn publish_mqtt_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    qos: QoS,
+    retain: bool,
+) -> io::Result<()> {
+    let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
-    let driver = nervix_primitives::task::spawn(async move {
+    let driver = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
-    let mut last_error = None;
-    for attempt in 0..5 {
-        nervix_primitives::task::consume_budget().await;
-        // Runtime ingestors can still be attaching to the broker immediately after START.
-        // Retaining the per-test input payload makes MQTT publishes deterministic without
-        // changing application-level topic reuse, because scenario topics are unique.
-        match client
-            .publish(topic, payload, PublishOptions::new(qos).retain(retain))
+    let published = timeout(BROKER_TIMEOUT, async {
+        // Runtime ingestors can still be attaching immediately after START. Retain the input on
+        // its unique scenario topic, and keep driving until it is sent (QoS 0) or answered (QoS 1).
+        let notice = client
+            .publish_tracked(topic, payload, PublishOptions::new(qos).retain(retain))
             .await
-        {
-            Ok(()) => {
-                sleep(POLL_INTERVAL).await;
-                driver.abort();
-                let _ = driver.await;
-                return Ok(());
-            }
-            Err(error) => {
-                last_error = Some(io::Error::other(format!(
-                    "failed to publish mqtt message to topic '{topic}': {error}"
-                )));
-                if attempt < 4 {
-                    sleep(POLL_INTERVAL).await;
-                }
-            }
-        }
-    }
+            .map_err(io::Error::other)?;
+        notice
+            .wait_completion_async()
+            .await
+            .map_err(io::Error::other)
+    })
+    .await;
 
-    sleep(POLL_INTERVAL).await;
     driver.abort();
     let _ = driver.await;
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::other(format!("failed to publish mqtt message to topic '{topic}'"))
-    }))
+    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
 }
 
 async fn publish_mqtt_burst(
@@ -4562,36 +4557,56 @@ async fn publish_mqtt_burst_with_qos(
     count: usize,
     qos: QoS,
 ) -> io::Result<()> {
-    let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    publish_mqtt_burst_to_address(host, port, topic, payload, count, qos).await
+}
+
+pub(crate) async fn publish_mqtt_burst_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    count: usize,
+    qos: QoS,
+) -> io::Result<()> {
+    let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options)
         .capacity(count.max(16))
         .build();
-    let driver = nervix_primitives::task::spawn(async move {
+    let driver = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
-    for _ in 0..count {
-        nervix_primitives::task::consume_budget().await;
-        client
-            .publish(topic, payload, PublishOptions::new(qos))
-            .await
-            .map_err(|error| {
-                io::Error::other(format!(
-                    "failed to publish mqtt burst message to topic '{topic}': {error}"
-                ))
-            })?;
-    }
-    sleep(POLL_INTERVAL).await;
+    let published = timeout(BROKER_TIMEOUT, async {
+        let mut notices = Vec::with_capacity(count);
+        for _ in 0..count {
+            nervix_primitives::task::consume_budget().await;
+            notices.push(
+                client
+                    .publish_tracked(topic, payload, PublishOptions::new(qos))
+                    .await
+                    .map_err(io::Error::other)?,
+            );
+        }
+        // Queue the complete burst before waiting so completion tracking preserves its demand.
+        for notice in notices {
+            notice
+                .wait_completion_async()
+                .await
+                .map_err(io::Error::other)?;
+        }
+        Ok::<_, io::Error>(())
+    })
+    .await;
     driver.abort();
     let _ = driver.await;
-    Ok(())
+    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
 }
 
 async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
@@ -5485,7 +5500,7 @@ async fn publish_zeromq(addr: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn observe_mqtt(
+pub(crate) async fn observe_mqtt(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {

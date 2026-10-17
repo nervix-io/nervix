@@ -1679,7 +1679,7 @@ mod tests {
             .await
             .assured("the tracked watcher sends before entering its pending state");
 
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
 
         let dropped = timeout(ASYNC_EVENT_FAILSAFE, dropped_rx).await;
         assert!(
@@ -1747,7 +1747,7 @@ mod tests {
             dispatcher.executor.snapshot().relay_memory.reserved_bytes,
             0
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -1775,7 +1775,7 @@ mod tests {
             0
         );
         acks.ack_success();
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -1818,7 +1818,7 @@ mod tests {
             executor.snapshot().relay_memory.reserved_bytes,
             expected_bytes,
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0,);
         drop(roots);
     }
@@ -1855,7 +1855,7 @@ mod tests {
             1024 + 4096
         );
         acks.ack_success();
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
         assert_eq!(
             dispatcher.executor.snapshot().relay_memory.reserved_bytes,
             0
@@ -2578,7 +2578,7 @@ mod tests {
         });
         teardown.cancelled().await;
 
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
 
         assert_eq!(
             sweeps.load(Ordering::Relaxed),

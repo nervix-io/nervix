@@ -2614,7 +2614,7 @@ impl Application {
         // stopping them is what releases those, so each stop runs to completion rather than being
         // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by
         // its deadline supervision.
-        runtime.shutdown().await;
+        runtime.shutdown(deadline.remaining()).await;
         consensus.shutdown().await;
         let cluster_shutdown_result = cluster
             .shutdown()
