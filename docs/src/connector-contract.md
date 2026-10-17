@@ -912,6 +912,14 @@ source's acknowledgement and recovery contract then decides whether the record r
 entity-pause swap uses the stop request instead and cannot install the replacement until its old
 task drains successfully.
 
+Forced ownership recovery treats the unavailable former owner separately: after closing local
+dispatch gates, the host retires changing relay routes' preceding delivery generation before
+waiting for quiescence. An unresolved admission to the former owner uses the existing bounded
+cancellation path and fails unconfirmed record ACKs, allowing an acknowledged source to retry on
+the replacement route. Already admitted work keeps its ACK obligations and can replay after an
+uncertain outcome. The connector receives the same source and sink plans and retains its external
+commit boundary; a successful planned handoff still completes its drain before replacement.
+
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in

@@ -254,6 +254,16 @@ subsections after the boundary table follow this order.
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
+Forced ownership installation retires changing relay channels before its dispatch fence waits.
+The remote delivery owner maps a cancelled or unconfirmed admission through its existing typed
+delivery failure and fails the record ACKs it retained, rather than reporting successful processing
+or a codec/message error. The acknowledged source can then retry through the newly published route.
+An already admitted result keeps its record-ACK obligations; uncertainty can produce replay
+duplicates. Cancellation reconciliation keeps its five-second attempt budget independently of the
+entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+owns the admission verdict and [Execution Plans](./execution-plans.md#incremental-changes-and-rebuilds) owns
+installation and publication.
+
 ### Cluster Availability Reports
 
 `SHOW CLUSTER STATUS` keeps gossip visibility and effective member unavailability separate. A Raft

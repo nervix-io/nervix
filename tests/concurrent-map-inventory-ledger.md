@@ -54,6 +54,12 @@ when the key is absent or already present; a borrowed `Ref` holds its shard unti
 Method names are not evidence: each access below was traced from its call site to the loop that
 drives it.
 
+Forced ownership schedule swaps make one additional lifecycle read of `RuntimeInner::executions`
+to resolve the affected relays' retained services after closing their dispatch gates. The typed
+plan identifies those relays; channel-generation retirement and record delivery use the retained
+handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
+the registry entries. The read guard ends before waiting for dispatch quiescence.
+
 The frequency of a map is its hottest access:
 
 - **per record**: once per accepted record, row or delivered message
