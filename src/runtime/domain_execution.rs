@@ -561,7 +561,8 @@ impl Runtime {
         let build = || RuntimeError::build_domain_execution(domain);
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
-            self.stop_domain_execution(domain, existing).await;
+            self.stop_domain_execution(domain, existing, self.emitter_finish_deadline())
+                .await;
         }
 
         let Some(revision) = revision else {

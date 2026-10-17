@@ -89,11 +89,7 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use sqlx::{
-    AssertSqlSafe as SqlxAssertSqlSafe, Row as _,
-    postgres::{
-        PgConnectOptions as SqlxPgConnectOptions, PgPool as SqlxPgPool,
-        PgPoolOptions as SqlxPgPoolOptions, PgSslMode as SqlxPgSslMode,
-    },
+    AssertSqlSafe as SqlxAssertSqlSafe, Connection as _, Row as _, postgres::PgPool as SqlxPgPool,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt as _;
@@ -109,16 +105,17 @@ use crate::common::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain,
+        WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        client_connect_options, client_domain, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
+    command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
-        TestDependencies,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
+        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -126,13 +123,14 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{
-        TestUpload, TestUploadPart, WireOutcome as _, flatten_command_messages,
-        fresh_execution_reference, outcome_not_leader, outcome_succeeded, outcome_unknown,
+        SessionScope, TestUpload, TestUploadPart, WireOutcome as _, command_output,
+        fresh_execution_reference, outcome_awaits_leader,
     },
     runner_lag::RunnerLagObserver,
     scenario_phase::{
@@ -163,11 +161,14 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod mqtt_fixtures;
 mod paced_replication;
 mod paced_simulation;
+mod postgres_fixtures;
 mod process_cluster;
 mod restarted_voter;
 mod session_protocol;
+mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -296,6 +297,9 @@ struct CliClockProcess {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
+    postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
+    postgres_fixture_observations: Option<postgres_fixtures::Observations>,
     scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
@@ -305,6 +309,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -454,6 +459,9 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
+    /// shared test broker.
+    kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
@@ -577,6 +585,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
@@ -5843,36 +5852,6 @@ async fn clickhouse_post_for_world(world: &ScenarioWorld, query: &str) -> Result
     }
 }
 
-/// A verification client for the Postgres the scenario wrote to.
-///
-/// The same driver the product uses, so a scenario cannot pass against a connection contract the
-/// runtime does not actually speak.
-async fn postgres_client(
-    dependencies: &DependencyEndpoints,
-    tls: bool,
-) -> Result<SqlxPgPool, String> {
-    let addr = if tls {
-        dependencies.get(POSTGRES_TLS_ADDR)
-    } else {
-        dependencies.get(POSTGRES_ADDR)
-    }
-    .map_err(|error| error.to_string())?;
-    let mut options: SqlxPgConnectOptions = addr.parse().map_err(|source| format!("{source}"))?;
-    if tls {
-        let ca_file = dependencies
-            .tls_ca_path()
-            .map_err(|error| error.to_string())?;
-        options = options
-            .ssl_mode(SqlxPgSslMode::VerifyFull)
-            .ssl_root_cert(ca_file);
-    }
-    SqlxPgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options)
-        .await
-        .map_err(|source| source.to_string())
-}
-
 fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool, String> {
     let addr = if tls {
         dependencies.get(MYSQL_TLS_ADDR)
@@ -6083,18 +6062,30 @@ async fn when_domains_are_created_in_a_burst(
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
     let mut retention_peak = observer.raft_log_retention();
-    let mut session = world
+    let leader_uri = world
         .cluster()
-        .open_session(&leader, &world.domain)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
+        .grpc_uri(&leader)
+        .unwrap_or_else(|error| panic!("failed to resolve burst leader '{leader}': {error}"));
+    let connect_options = client_connect_options(&leader_uri)
+        .unwrap_or_else(|error| panic!("failed to configure burst client: {error}"));
+    let client =
+        Client::connect_with_options(&leader_uri, client_domain(&world.domain), connect_options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to open burst client session: {error:#}"));
     for index in 0..count {
         nervix_primitives::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
-        session
-            .run_command(&format!("CREATE DOMAIN {name};"))
+        let outcome = client
+            .execute(format!("CREATE DOMAIN {name};"))
             .await
-            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error}"));
+            .unwrap_or_else(|error| panic!("creating domain '{name}' failed: {error:#}"));
+        assert!(
+            outcome.succeeded(),
+            "creating domain '{name}' failed with {:?}: {}; diagnostics: {:?}",
+            outcome.disposition,
+            outcome.message,
+            outcome.diagnostics,
+        );
         let retention = observer.raft_log_retention();
         if retention.retained_bytes > retention_peak.retained_bytes {
             retention_peak = retention;
@@ -7515,11 +7506,11 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         "#
     );
     let commands = expand_placeholders(world, &commands);
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let started = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("the WASM reset graph must start");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(started.session);
+    world.active_session_node = Some(started.node);
     world.active_session_has_subscription = true;
 
     if !placement_commands.is_empty() {
@@ -8339,6 +8330,41 @@ async fn given_next_entity_gate_engagement_is_rejected(world: &mut ScenarioWorld
     world
         .fault_injection
         .fail_next_entity_gate_engagement(domain);
+}
+
+#[given(
+    expr = "the next ownership handoff gate engagement request in domain {string} breaks in \
+            transport"
+)]
+async fn given_next_handoff_engagement_request_breaks_in_transport(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .break_next_handoff_engagement_transport(domain);
+}
+
+#[then(
+    expr = "the broken ownership handoff gate engagement request in domain {string} was delivered"
+)]
+async fn then_broken_handoff_engagement_request_was_delivered(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .handoff_engagement_transport_failure_delivered(&domain),
+        "no ownership handoff gate engagement request in domain {domain} met the armed transport \
+         failure"
+    );
 }
 
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
@@ -10558,6 +10584,41 @@ async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: 
         .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[when(
+    expr = "node {string} resumes its runtime installation when forced recovery finds no schedule"
+)]
+async fn when_runtime_installation_resumes_after_missing_recovery_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .resume_installation_after_missing_recovery_schedule(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+#[then(expr = "forced recovery on node {string} observes its missing schedule")]
+async fn then_forced_recovery_observes_missing_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observation = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_missing_recovery_schedule(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await;
+    assert!(
+        observation.is_ok(),
+        "forced recovery did not observe node '{node_id}' before its initial schedule \
+         installation: {observation:?}"
+    );
+}
+
 #[then(expr = "node {string} reaches its runtime preparation pause")]
 async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -12440,6 +12501,36 @@ async fn when_the_external_member_leaves_kafka_consumer_group(
         .expect("the external Kafka group member should leave");
 }
 
+/// What a scenario requires of a consumer group's committed next offset: that it reaches a
+/// threshold, or that it stays below one.
+struct KafkaOffsetCondition {
+    should_reach: bool,
+    threshold: i64,
+}
+
+impl KafkaOffsetCondition {
+    /// Reads `at least <n>` or `below <n>`.
+    fn parse(condition: &str) -> Self {
+        let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ")
+        {
+            (true, threshold)
+        } else if let Some(threshold) = condition.strip_prefix("below ") {
+            (false, threshold)
+        } else {
+            panic!(
+                "Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}"
+            );
+        };
+        let threshold = threshold
+            .parse::<i64>()
+            .expect("Kafka offset threshold must be an integer");
+        Self {
+            should_reach,
+            threshold,
+        }
+    }
+}
+
 #[then(
     expr = "within {string} Kafka consumer group {string} next offset for topic {string} \
             partition {int} is {string}"
@@ -12455,29 +12546,54 @@ async fn then_kafka_consumer_group_next_offset_is(
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
-    let condition = expand_placeholders(world, &condition);
-    let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ") {
-        (true, threshold)
-    } else if let Some(threshold) = condition.strip_prefix("below ") {
-        (false, threshold)
-    } else {
-        panic!("Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}");
-    };
-    let threshold = threshold
-        .parse::<i64>()
-        .expect("Kafka offset threshold must be an integer");
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
     world
         .cluster()
         .assert_kafka_consumer_group_next_offset(
             &group,
             &topic,
             partition,
-            threshold,
-            should_reach,
+            condition.threshold,
+            condition.should_reach,
             duration,
         )
         .await
         .expect("Kafka consumer group committed-offset assertion failed");
+}
+
+/// The committed next offset the scenario's own mock Kafka broker holds for a consumer group.
+#[then(
+    expr = "within {string} mock Kafka consumer group {string} next offset for topic {string} \
+            partition {int} is {string}"
+)]
+async fn then_mock_kafka_consumer_group_next_offset_is(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+    condition: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before its offsets are read")
+        .client_config();
+    assert_kafka_consumer_group_next_offset_through(
+        client_config,
+        &group,
+        &topic,
+        partition,
+        condition.threshold,
+        condition.should_reach,
+        duration,
+    )
+    .await
+    .expect("mock Kafka consumer group committed-offset assertion failed");
 }
 
 #[then(expr = "RabbitMQ queue {string} eventually has {int} consumers")]
@@ -12992,85 +13108,124 @@ async fn execute_nspl_commands_on_node(
     Ok(session)
 }
 
-/// A session that ran a step's commands on the leader, and the node it ended on.
-struct LeaderSession {
-    session: TestSession,
-    node: String,
+/// Learns the outcome of `command`, whose attempt under `reference` on a session of `scope` returned
+/// `first`, from the node that leads now, and logs which node answered.
+async fn learn_command_outcome(
+    routes: &LeaderRoutes,
+    scope: &SessionScope,
+    command: &str,
+    reference: &str,
+    first: nervix_client_wire::CommandOutcome,
+) -> LearnedOutcome {
+    append_cucumber_log_line(&format!(
+        "execution reference {reference} awaits the current leader ({}); sending it to the nodes",
+        first.message
+    ));
+    let learned = routes.learn_outcome(scope, command, reference, first).await;
+    match &learned.answered_on {
+        Some(answered) => append_cucumber_log_line(&format!(
+            "node {} answered execution reference {reference}: {:?}",
+            answered.node, learned.outcome.disposition
+        )),
+        None => {
+            append_cucumber_log_line(&format!("no node answered execution reference {reference}"))
+        }
+    }
+    learned
 }
 
-/// How long one command may take, in all, to learn an outcome that leadership changes left
-/// unknown. A test cluster elects a leader within its two-second election timeout; the rest is
-/// slack for a loaded machine.
-const UNKNOWN_OUTCOME_RECOVERY: Duration = Duration::from_secs(60);
+/// Runs `command` on `session`, which stays where it is because it may hold subscriptions or a
+/// transaction. When the node it reached does not lead, or leadership moved before the outcome was
+/// known, another session of the same user learns the outcome from the node that leads now,
+/// provided the command leaves what `session` holds alone. Returns the command's messages when it
+/// completed, and otherwise the failure a raw session reports.
+async fn run_command_on_held_session(
+    routes: &LeaderRoutes,
+    session: &mut TestSession,
+    command: &str,
+) -> Result<String, String> {
+    let reference = fresh_execution_reference();
+    let mut outcome = session
+        .run_command_result_with_reference(command, &reference)
+        .await
+        .map_err(|error| error.to_string())?;
+    if outcome_awaits_leader(&outcome) && session.outcome_learnable_elsewhere(command) {
+        let scope = session.scope();
+        let learned = learn_command_outcome(routes, &scope, command, &reference, outcome).await;
+        outcome = learned.outcome;
+    }
+    command_output(&outcome).map_err(|error| error.to_string())
+}
 
-/// Runs `commands` on the current leader in one session. When leadership moves before a command
-/// reached the leader, or after the leader admitted it and before its outcome was known, the command
-/// is sent again with the same execution reference to the current leader, as the client protocol
-/// requires, and the step goes on there once the outcome is known. The session moves with the
-/// command only while it holds no subscription and no transaction, which no other session could
-/// continue; a command whose outcome stays unknown past that point fails the step as before.
+/// Runs `commands` on the current leader in one session, and returns that session and the node it
+/// ended on.
+///
+/// When leadership moves before a command reached the leader, or after the leader admitted it and
+/// before its outcome was known, the step learns the outcome by sending the command again with the
+/// same execution reference to the node that leads now, as the client protocol requires. While the
+/// session holds no subscription and no transaction, it moves to that node with the command and
+/// the step goes on there. Once it holds one it stays where it is, as
+/// [`run_command_on_held_session`] describes.
 async fn execute_nspl_commands_on_leader(
     world: &mut ScenarioWorld,
     commands: &str,
-) -> Result<LeaderSession, String> {
-    let mut node = current_leader_node(world).await;
+) -> Result<NodeSession, String> {
+    let node = current_leader_node(world).await;
     if !requires_persistent_session(commands) || subscription_graph_statements(commands).is_some() {
         // The client library sends each command and recovers its outcome itself, the server
         // statements of a subscription graph included.
         let session = execute_nspl_commands_on_node(world, &node, commands).await?;
-        return Ok(LeaderSession { session, node });
+        return Ok(NodeSession { node, session });
     }
     record_avro_wire_optional_fields(world, commands);
     append_cucumber_log_line(&format!(
         "nspl commands on node {node}: {}",
         commands.replace('\n', "\\n")
     ));
-    let mut session = world
+    let routes = world.cluster().leader_routes();
+    let session = world
         .cluster()
         .open_session(&node, &world.domain)
         .await
         .map_err(|error| error.to_string())?;
+    let mut current = NodeSession { node, session };
     let mut session_bound = false;
     for command in nspl_statements(commands) {
         nervix_primitives::task::consume_budget().await;
-        append_cucumber_log_line(&format!("nspl command on session {node}: {command}"));
-        let reference = fresh_execution_reference();
-        let deadline = Instant::now() + UNKNOWN_OUTCOME_RECOVERY;
-        let outcome = loop {
-            nervix_primitives::task::consume_budget().await;
-            let outcome = session
-                .run_command_result_with_reference(&command, &reference)
-                .await
-                .map_err(|error| error.to_string())?;
-            let awaits_leader = outcome_unknown(&outcome) || outcome_not_leader(&outcome);
-            if !awaits_leader || session_bound || Instant::now() >= deadline {
-                break outcome;
-            }
-            node = current_leader_node(world).await;
-            append_cucumber_log_line(&format!(
-                "leadership moved before execution reference {reference} reached a known outcome; \
-                 sending it to node {node}"
-            ));
-            session = world
-                .cluster()
-                .open_session(&node, &world.domain)
-                .await
-                .map_err(|error| error.to_string())?;
-        };
-        if !outcome_succeeded(&outcome) {
-            return Err(format!(
-                "command failed: {}\ndiagnostics: {:?}",
-                outcome.message, outcome.diagnostics
-            ));
+        append_cucumber_log_line(&format!(
+            "nspl command on session {}: {command}",
+            current.node
+        ));
+        if session_bound {
+            let output =
+                run_command_on_held_session(&routes, &mut current.session, &command).await?;
+            world.last_command_output = Some(output);
+            continue;
         }
-        world.last_command_output = Some(flatten_command_messages(&outcome));
+        let reference = fresh_execution_reference();
+        let mut outcome = current
+            .session
+            .run_command_result_with_reference(&command, &reference)
+            .await
+            .map_err(|error| error.to_string())?;
+        if outcome_awaits_leader(&outcome) {
+            let scope = current.session.scope();
+            let learned =
+                learn_command_outcome(&routes, &scope, &command, &reference, outcome).await;
+            outcome = learned.outcome;
+            if let Some(answered) = learned.answered_on {
+                current = answered;
+            }
+        }
+        let output = command_output(&outcome).map_err(|error| error.to_string())?;
+        world.last_command_output = Some(output);
         let statement = command.trim().to_ascii_uppercase();
         if command_updates_subscription_state(false, &command) || statement == "BEGIN;" {
             session_bound = true;
         }
     }
     record_mqtt_ingestors(world, commands);
-    Ok(LeaderSession { session, node })
+    Ok(current)
 }
 
 #[given(expr = "the active domain is {string}")]
@@ -13137,15 +13292,13 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
         .open_session(&leader, &world.domain)
         .await
         .expect("failed to open background NSPL session");
+    let routes = world.cluster().leader_routes();
     world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let mut last_output = String::new();
             for command in statements {
                 nervix_primitives::task::consume_budget().await;
-                last_output = session
-                    .run_command(&command)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                last_output = run_command_on_held_session(&routes, &mut session, &command).await?;
             }
             Ok(last_output)
         },
@@ -13405,10 +13558,19 @@ async fn execute_command_request_with_reference_on_leader(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
-    let result = session
+    let mut result = session
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    if outcome_awaits_leader(&result) {
+        // The step's session holds nothing and ends with the step, so whichever session learns the
+        // outcome stands in for it.
+        let routes = world.cluster().leader_routes();
+        let scope = session.scope();
+        let learned =
+            learn_command_outcome(&routes, &scope, &query, execution_reference, result).await;
+        result = learned.outcome;
+    }
     world.last_command_disposition = Some(result.disposition.clone());
     if result.succeeded() {
         world.last_command_error = None;
@@ -13476,7 +13638,10 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // The leader reclaims a reference only once its retry window has passed, so the wait spans
+    // the configured window and then leaves the reclamation a minute of its own.
+    let deadline =
+        Instant::now() + world.cluster_config.command_retry_validity + Duration::from_secs(60);
     loop {
         nervix_primitives::task::consume_budget().await;
         assert!(
@@ -13751,16 +13916,16 @@ async fn run_nspl_commands_on_active_session(
         "nspl commands on active session: {}",
         commands.replace('\n', "\\n")
     ));
-    let session = world
-        .active_session
-        .as_mut()
-        .expect("an active session must exist");
+    let routes = world.cluster().leader_routes();
     for command in nspl_statements(commands) {
+        nervix_primitives::task::consume_budget().await;
         append_cucumber_log_line(&format!("nspl command on active session: {command}"));
-        match session.run_command(&command).await {
-            Ok(output) => world.last_command_output = Some(output),
-            Err(error) => return Err(error.to_string()),
-        }
+        let session = world
+            .active_session
+            .as_mut()
+            .expect("an active session must exist");
+        let output = run_command_on_held_session(&routes, session, &command).await?;
+        world.last_command_output = Some(output);
         world.active_session_has_subscription =
             command_updates_subscription_state(world.active_session_has_subscription, &command);
     }
@@ -13813,12 +13978,11 @@ async fn when_a_new_session_executes_these_nspl_commands(
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL commands on a new session");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -13956,11 +14120,11 @@ async fn when_these_nspl_commands_are_executed(world: &mut ScenarioWorld, #[step
             .expect("failed to execute NSPL command on active session");
         return;
     }
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL setup command");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -15192,6 +15356,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
 }
 
 #[when("these NSPL commands are executed on the leader node")]
+#[when("these Plexus statements are executed on the leader node")]
 async fn when_these_nspl_commands_are_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16544,12 +16709,11 @@ async fn when_the_unacknowledged_source_ingestor_is_created(
     let source = UnacknowledgedSourceFixture::parse(&source);
     source.prepare(world).await;
     let commands = expand_placeholders(world, &source.commands());
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let created = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to create the unacknowledged source's models on the leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(created.session);
+    world.active_session_node = Some(created.node);
     world.active_session_has_subscription = true;
 }
 
@@ -16665,19 +16829,19 @@ async fn then_nspl_commands_complete_on_leader_within(
 }
 
 #[given("the leader node is configured with these NSPL commands")]
+#[given("the leader node is configured with these Plexus statements")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
-    let leader = current_leader_node(world).await;
     let commands = expand_placeholders(world, docstring(step));
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let configured = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL setup command on leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(configured.session);
+    world.active_session_node = Some(configured.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -16696,8 +16860,7 @@ async fn when_these_nspl_commands_fail_with(
 
     let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail with {:?}", expected_error),
         Err(error) => {
             assert!(
@@ -16759,8 +16922,7 @@ async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: 
     world.active_session_has_subscription = false;
 
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail"),
         Err(error) => {
             append_cucumber_log_line(&format!("expected command failure observed: {error}"));
@@ -16788,10 +16950,13 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), true),
     );
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let started = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to start ingestor logic fixture on leader");
+    let NodeSession {
+        node: leader,
+        session,
+    } = started;
     if transport.executes_on_scheduled_owner() {
         let placement = PhaseDeadline::after(Duration::from_secs(5));
         let mut last_output = None;
@@ -16867,8 +17032,7 @@ async fn when_the_ingestor_logic_fixture_fails_to_start_with_output_schema_and_p
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), false),
     );
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected ingestor logic fixture to fail during leader validation"),
         Err(error) => {
             append_cucumber_log_line(&format!("logic fixture start failure observed: {error}"));
@@ -21402,6 +21566,96 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     }
 }
 
+/// What DESCRIBE EMITTER reports about an emitter's failed attempt and its next one.
+struct DescribedEmitterRetry {
+    /// The failure DESCRIBE reports, absent while there is none.
+    transient_error: Option<String>,
+    /// How long the emitter waits before its next attempt, absent while none is scheduled.
+    reconnect_wait: Option<Duration>,
+}
+
+impl DescribedEmitterRetry {
+    fn from_describe_output(output: &str) -> Self {
+        let mut described = Self {
+            transient_error: None,
+            reconnect_wait: None,
+        };
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(error) = line.strip_prefix("transient error: ") {
+                if error != "-" {
+                    described.transient_error = Some(error.to_string());
+                }
+                continue;
+            }
+            let Some(wait) = line.strip_prefix("reconnect wait: ") else {
+                continue;
+            };
+            let Some(millis) = wait.strip_suffix("ms") else {
+                continue;
+            };
+            let millis = millis
+                .parse::<u64>()
+                .expect("DESCRIBE EMITTER reports the reconnect wait in whole milliseconds");
+            described.reconnect_wait = Some(Duration::from_millis(millis));
+        }
+        described
+    }
+
+    /// Whether the emitter failed and its next attempt, which has not started yet, is at most
+    /// `wait` away.
+    ///
+    /// DESCRIBE keeps reporting a failure until a publish succeeds, so once the next attempt is
+    /// due it reports a wait of zero while that attempt runs.
+    fn retries_within(&self, wait: Duration) -> bool {
+        if self.transient_error.is_none() {
+            return false;
+        }
+        match self.reconnect_wait {
+            Some(reconnect_wait) => !reconnect_wait.is_zero() && reconnect_wait <= wait,
+            None => false,
+        }
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports a transient error with the emitter's next attempt at most
+/// `wait` away, so a scenario acts at a known point between a failed attempt and the next one.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports a transient \
+            error with its next attempt at most {string} away"
+)]
+async fn then_within_duration_describe_emitter_reports_transient_error_with_next_attempt_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    wait: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let wait =
+        parse_duration_text(&wait).expect("the next attempt's wait must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let deadline = Instant::now() + duration;
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if DescribedEmitterRetry::from_describe_output(&output).retries_within(wait) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report a transient error with \
+             its next attempt at most {wait:?} away. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "node {string} eventually reports status containing {string}")]
 async fn then_node_eventually_reports_status_containing(
     world: &mut ScenarioWorld,
@@ -22019,6 +22273,120 @@ async fn given_kafka_topic_exists_with_partitions(
         .expect("failed to create kafka topic");
 }
 
+/// Starts the scenario's own mock Kafka broker with `topic` and names its address
+/// `{{mock_kafka_addr}}`.
+#[given(expr = "a mock Kafka broker serves topic {string}")]
+fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    // The topic's name expands the scenario's identity, which no step may have drawn yet.
+    initialize_scenario_identity(world);
+    let topic = expand_placeholders(world, &topic);
+    let broker =
+        KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
+    broker
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+    world.placeholders.insert(
+        "mock_kafka_addr".to_string(),
+        broker.bootstrap_servers().to_string(),
+    );
+    world.kafka_mock_broker = Some(broker);
+}
+
+#[given(expr = "mock Kafka topic {string} is observed")]
+async fn given_mock_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before it is observed")
+        .client_config();
+    world.broker_observer = Some(
+        observe_kafka_through(client_config, &topic)
+            .await
+            .expect("failed to observe the mock kafka topic"),
+    );
+}
+
+#[given("the mock Kafka broker refuses every write")]
+fn given_mock_kafka_broker_refuses_every_write(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses writes")
+        .refuse_writes()
+        .expect("the mock Kafka broker refuses writes");
+}
+
+#[when("the mock Kafka broker accepts writes again")]
+fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts writes again")
+        .accept_writes()
+        .expect("the mock Kafka broker accepts writes again");
+}
+
+#[given(expr = "the mock Kafka broker also serves topic {string}")]
+fn given_mock_kafka_broker_also_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it serves another topic")
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+}
+
+#[given("the mock Kafka broker refuses every offset commit")]
+fn given_mock_kafka_broker_refuses_every_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses offset commits")
+        .refuse_offset_commits()
+        .expect("the mock Kafka broker refuses offset commits");
+}
+
+#[given("the mock Kafka broker refuses the next offset commit")]
+fn given_mock_kafka_broker_refuses_the_next_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses an offset commit")
+        .refuse_next_offset_commits(1)
+        .expect("the mock Kafka broker refuses the next offset commit");
+}
+
+#[when("the mock Kafka broker accepts offset commits again")]
+fn when_mock_kafka_broker_accepts_offset_commits_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts offset commits again")
+        .accept_offset_commits()
+        .expect("the mock Kafka broker accepts offset commits again");
+}
+
+#[when(expr = "mock Kafka message is published to topic {string}")]
+async fn when_mock_kafka_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before a message is published to it")
+        .client_config();
+    world.last_publish_at = Some(Instant::now());
+    publish_kafka_record_through(client_config, &topic, None, &payload, &[])
+        .await
+        .expect("failed to publish the mock kafka message");
+}
+
 #[given(expr = "SQS queue {string} exists")]
 async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -22454,8 +22822,9 @@ async fn given_postgres_table_rejecting_poison_actions_exists(
         .postgres_table
         .as_ref()
         .expect("Postgres table should be recorded after preparation");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
@@ -22479,8 +22848,9 @@ async fn given_postgres_table_recording_insert_statement_sizes_exists(
         .clone();
     let audit_table = format!("{table}_insert_audit");
     let trigger_function = format!("{table}_record_insert");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "DROP TABLE IF EXISTS {audit_table};
@@ -22527,8 +22897,9 @@ async fn prepare_postgres_table_schema(
     primary_key: bool,
 ) {
     let table = expand_placeholders(world, &table);
-    let client = postgres_client(world.dependencies.endpoints(), tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(tls)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
         .execute(&client)
@@ -26856,8 +27227,9 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
 /// `application_name` is what distinguishes them from the harness's own connections and from any
 /// other application, which is how an operator checks a declared budget too.
 async fn postgres_application_connections(world: &ScenarioWorld, application: &str) -> i64 {
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     sqlx::query("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
         .bind(application)
@@ -26945,7 +27317,9 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         .as_ref()
         .expect("a Postgres table must be prepared before locking it")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+    let mut client = world
+        .dependencies
+        .postgres_lock_connection(world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
     let (release_tx, release_rx) = nervix_primitives::sync::oneshot::channel();
@@ -26964,7 +27338,7 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         locked_tx
             .send(())
             .expect("the locking step must still be waiting for its lock");
-        // Held until the scenario releases it, which is what keeps one pooled connection busy.
+        // This database lock keeps the product writer's pooled connection busy until release.
         // A dropped sender means the scenario ended without releasing, and the lock goes with it.
         release_rx
             .await
@@ -27002,8 +27376,9 @@ async fn then_postgres_table_eventually_contains_row(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27049,8 +27424,9 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27094,8 +27470,9 @@ async fn then_postgres_table_contains_exactly_one_row_for_each_user_id(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let rows = sqlx::query(SqlxAssertSqlSafe(format!(
         "SELECT postgres_user_id, count(*) FROM {table} GROUP BY postgres_user_id"
@@ -27137,8 +27514,9 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
         .expect("a Postgres table must be prepared before assertion")
         .clone();
     let audit_table = format!("{table}_insert_audit");
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -29040,6 +29418,9 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
 /// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
 /// end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
+    if let Some(peer) = world.websocket_peer.take() {
+        peer.stop().await;
+    }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
     world.otlp_receivers.clear();
@@ -29195,14 +29576,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                world.active_scenario = Some(ActiveScenarioRegistration::start(
-                    &feature_name,
-                    &scenario_name,
-                    scenario_line,
-                ));
+                let registration =
+                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let attempt = registration.attempt();
+                world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, |reason| {
+                    .admit_with(limit, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

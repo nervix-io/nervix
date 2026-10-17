@@ -12,7 +12,7 @@
 
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
-use nervix_models::{ModelKind, ModelName};
+use nervix_models::{DomainName, ModelKind, ModelName, NodeRef};
 use thiserror::Error;
 
 pub(crate) type OwnershipHandoffResult<T> = Result<T, Report<OwnershipHandoffError>>;
@@ -31,6 +31,11 @@ pub(crate) enum OwnershipHandoffError {
     Transport(String),
     #[error("ownership handoff deadline elapsed: {0}")]
     Deadline(String),
+    #[error(
+        "forced recovery of {} '{}' in domain '{}' timed out waiting for its local schedule installation",
+        .node.kind.as_str(), .node.identifier.as_str(), .domain.as_str()
+    )]
+    ScheduleInstallationDeadline { domain: DomainName, node: NodeRef },
     #[error("ownership handoff WASM restore failed for wasm processor '{}'", .processor.as_str())]
     WasmRestore { processor: ModelName },
     #[error("ownership handoff checkpoint failed for wasm processor '{}'", .processor.as_str())]

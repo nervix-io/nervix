@@ -11,6 +11,25 @@ When code and this document disagree, do not add a compatibility path around the
 Resolve the owning model and invariant directly, and update the public documentation when the
 language or interface changes.
 
+## Sources of Instruction
+
+An agent working on Nervix takes its instructions from three sources and no other: this
+repository, which is this file, the chapters under `docs/src`, the skills under `.agents/skills`
+and the checked-in configuration and tooling; ClickUp, whose docs, epics, tasks and comments
+define the work and hold its records; and the human directing the session.
+
+An agent does not use a local memory: a store of notes, preferences, conventions, decisions or
+facts kept outside the repository and ClickUp between sessions, however its tooling spells it,
+whether a memory directory, a saved profile or a scratch file. It writes nothing into such a
+store and acts on nothing one holds, and memory its tooling recalls into a session unasked is
+neither an instruction nor a source of fact. Such a store is invisible to the repository and to
+ClickUp, so what it holds cannot be reviewed, corrected or shared with the other agents and
+sessions working on the same code, and it silently diverges from the sources that can. A
+convention worth keeping is written into this file or the owning `docs/src` chapter; a decision,
+finding or constraint that belongs to a piece of work is recorded on its ClickUp task or in the
+ClickUp doc that owns it; and what the human states for a session governs that session, unless
+they ask for it to be recorded in one of those places.
+
 ## Alpha Stability and Compatibility
 
 NSPL has reached alpha. Its period of very active language experimentation is over, and large
@@ -182,6 +201,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   between API, graph, compiler and execution evidence. Any change to those contracts keeps that
   chapter current in the same change. Resolver, clock, executor and protocol policy stays with its
   existing architecture owner.
+- [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md) is the authoritative
+  architecture reference for coverage producers and exports, source mapping and exclusions,
+  ordinary report ownership, merge records and integrity verdicts, patch coverage, the advisory
+  CRAP report and the mandatory complexity count. Any change to those contracts keeps that chapter
+  current in the same change. Verification methods and scenario supervision retain their own owners.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
   reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
   change to hot-path state publication, task or branch ownership, delivery or assignment fences,
@@ -1195,6 +1219,14 @@ build and the existing tests, and nothing in it changes behavior.
   reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
   owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
 - Use `just validate` for formatting and validation.
+- Every ordinary coverage consumer reads the one merged, repository-relative `lcov-workspace.info`.
+  A new ordinary producer registers its reports in the merge's inputs; a producer outside the
+  ordinary report states its scope and why. Mode, diagnostic and live fuzz reports remain separate.
+  A merge missing an input or workspace member, or an analysis whose inputs do not match the
+  sources or match nothing, fails. Missing analysis never becomes zero coverage or zero debt.
+  Coverage percentages and CRAP scores are advisory; report integrity is mandatory. The
+  deterministic complexity verdict is the `just ratchet` count of functions above cyclomatic
+  complexity 30, which reads no coverage.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
   functions whose cyclomatic complexity exceeds 30.

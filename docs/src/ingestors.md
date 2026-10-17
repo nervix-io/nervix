@@ -830,10 +830,20 @@ its assignment, and retries that seek. It cannot commit a later offset while the
 position remains unresolved. Replays after a crash or assignment change may repeat records whose
 output was already written.
 
+Under `OFFSET BY CONSUMER GROUP` in an ACK mode, the ingestor commits each acknowledged batch's
+positions and reports progress for the batch only once the group's coordinator answered the commit.
+That costs one commit round trip per batch, which `ACK PARALLEL` spreads over every message of a
+batch. A commit the broker refuses, or does not answer within thirty seconds, is the ingestor's
+transient status in `DESCRIBE INGESTOR`, and the ingestor reads the batch again, so its output can
+repeat; the status clears once a later commit is answered. A graceful stop or an ownership move
+waits for the answer to every commit of the work it drains, within the drain timeout.
+
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
-commits the positions it has read on its own schedule, without waiting for downstream
-acknowledgement, so a failure can lose records whose positions were committed before their
-downstream work completed.
+commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
+for downstream acknowledgement, so a failure can lose records whose positions were committed before
+their downstream work completed. Suspending or stopping the ingestor commits the positions it has
+read since the last of those commits, and waits for the broker's answer before the consumer leaves
+its group.
 
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
@@ -1189,11 +1199,19 @@ asynchronous resolver. It tries the returned addresses in order within one 30-se
 DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
-Resolution and connection failures are transient source failures handled by the host's existing
-retry lifecycle. Cancelling or stopping the source drops a pending connection attempt.
+Resolution, connection and read failures are transient source failures. A peer Close records its
+code and reason in `DESCRIBE INGESTOR`; EOF also triggers recovery. Reconnects wait 250 ms initially,
+doubling to at most 30 seconds while attempts keep failing. A successful upgrade alone does not
+reset the delay or clear the last failure: a delivered batch does. Cancelling or stopping the
+source drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
+
+Suspension and terminal close send a Close frame and wait up to one second for the peer's reply,
+including the time needed to send the frame, before releasing the connection. A peer that does
+not answer cannot hold shutdown indefinitely. Terminal close also clears queued signaling
+payloads; suspension retains them.
 
 A `WEBSOCKETS CONNECTION` ingestor is a single-owner ingestor. It keeps its existing primary and
 replica assignment through schedule recomputation while every assigned cluster node remains live,

@@ -168,6 +168,9 @@ relay. Do not use them to scan across branches.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
+- For `WEBSOCKETS CONNECTION` recovery and graceful close, read `Ingestors` →
+  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  A successful upgrade does not establish data delivery or reset repeated-failure backoff.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
@@ -269,6 +272,10 @@ relay. Do not use them to scan across branches.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.
+- A Kafka `OFFSET BY CONSUMER GROUP` ingestor in an `ACK` mode waits for the broker to answer each
+  batch's commit before it reports progress, one round trip per batch, so prefer `ACK PARALLEL`
+  where throughput matters. A refused or unanswered commit is the ingestor's transient status and
+  its batch is read again, so downstream output can repeat.
 - Every ingestor head names its connector and entity, such as `CREATE KAFKA TOPIC INGESTOR`, and
   its body after `FROM` names no connector. Its client belongs to the head's connector, and an
   `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint of `TYPE HTTP` or `TYPE WEBSOCKETS`.
@@ -307,8 +314,11 @@ relay. Do not use them to scan across branches.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
-- Treat Kafka emitter success as local librdkafka producer-queue admission. Even in `ATTACHED`
-  mode, Nervix does not wait for a broker delivery receipt before completing its ACK share.
+- Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
+  `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
+  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
+  `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
+  bound.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts

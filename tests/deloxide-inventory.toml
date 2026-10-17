@@ -121,7 +121,12 @@ tags = [
   "@shutdown_flush_before_freeze",
   "@shutdown_source_confirmation",
   "@shutdown_source_confirmation_handoff",
+  "@shutdown_kafka_refused_commit",
+  "@shutdown_emitter_finish",
+  "@emitter_finish_at_stop",
   "@metrics_checkpoint_handoff",
+  "@forced_recovery_schedule",
+  "@websocket_source_lifecycle",
 ]
 target = "test:scenarios"
 
@@ -585,6 +590,36 @@ scenario = "A stopping node hands a Kafka ingestor over only once its transport 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A graceful stop and restart of a Kafka ingestor's owner on one and three nodes, after a consumer group commit the broker refused was read and committed again, while tracked source controls and ACK completion run during the stop and, on three nodes, the planned handoff. The mock broker, the Kafka client and the commit's blocking-pool wait are untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-kafka-refused-commit"
+invariant = "A Kafka ingestor reports a batch as acknowledged only once the broker answered its commit, so a batch whose commit was refused is read and committed again and restarting its owner reads nothing twice."
+invocation = "scenarios"
+scenario = "A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A one-node graceful shutdown whose in-place drain ends while a NO ACK Kafka emitter's producer still queues records it delivered. Terminal teardown hands the emitter its finish deadline before the domain's stop and finishes the sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-emitter-finish"
+invariant = "A node that stops in place finishes every emitter's sink by its shutdown deadline, so a NO ACK Kafka emitter's producer sends the records it still queued before the node stops."
+invocation = "scenarios"
+scenario = "A single node sends the records its NO ACK Kafka emitter's producer holds before it stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "STOP on one and three nodes tears down a NO ACK Kafka emitter whose producer still queues records it delivered. The domain teardown hands every emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_emission.feature"
+id = "scenario.emitter-finish-at-stop"
+invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
+invocation = "scenarios"
+scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline are untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -764,6 +799,26 @@ order_tags = [
   "@order_resume_tenants_cluster",
 ]
 scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-retention-activation"
+invariant = "Restored materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "scenarios"
+scenario = "Restored materialized branches measure idle lifetime from activation time"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Materialized branch retention after an independent cluster restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-restart-retention"
+invariant = "Reopened materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "scenarios"
+scenario = "Restarted materialized branches measure idle lifetime from activation time"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1056,6 +1111,26 @@ invariant = "A voter first heard through a relayed heartbeat keeps every schedul
 invocation = "scenarios"
 scenario = "A voter first heard through a relayed heartbeat keeps its ownership after cluster restart"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Whole-cluster teardown, replica store reopening, forced-recovery checkpoint selection and guest restoration during destination installation. Async application mutexes and installation watches are untracked."
+examples = 1
+feature = "tests/features/cluster/forced_recovery_schedule.feature"
+id = "scenario.forced-recovery-schedule"
+invariant = "A promoted replica preserves both confirmed guest saves when forced recovery observes the destination before its execution schedule is installed."
+invocation = "scenarios"
+scenario = "A promoted replica retains its guest saves when recovery precedes schedule installation"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: replica store reopening, forced-recovery checkpoint selection and guest restoration during destination installation. Async application mutexes and installation watches are untracked."
+examples = 1
+feature = "tests/features/cluster/forced_recovery_schedule.feature"
+id = "stress.forced-recovery-schedule"
+invariant = "A promoted replica preserves both confirmed guest saves when forced recovery observes the destination before its execution schedule is installed."
+invocation = "stress-restore-scenarios"
+scenario = "A promoted replica retains its guest saves when recovery precedes schedule installation"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Distributed native lifecycle and Kafka metadata restoration above the bulk budget, durable generation publication, checkpoint replication and acknowledgement, and exact owner and replica values after restart. Stream waits and assignment atomics are untracked."
@@ -1438,6 +1513,26 @@ scenario = "Materialized generations larger than the bulk budget resume on every
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-retention-activation"
+invariant = "Restored materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "stress-restore-scenarios"
+scenario = "Restored materialized branches measure idle lifetime from activation time"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: materialized branch retention after an independent cluster restart with past event watermarks and a fast physical expiration scan."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-restart-retention"
+invariant = "Reopened materialized branches retain their rows for the domain-clock lifetime begun at activation, independently of row event timestamps."
+invocation = "stress-scenarios"
+scenario = "Restarted materialized branches measure idle lifetime from activation time"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: a delayed restore coordinator racing a resumed materialized generation."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -1568,6 +1663,26 @@ scenario = "A node that stops in place keeps draining until its transport confir
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: a one-node graceful shutdown whose in-place drain ends while a NO ACK Kafka emitter's producer still queues records it delivered. Terminal teardown hands the emitter its finish deadline before the domain's stop and finishes the sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-emitter-finish"
+invariant = "A node that stops in place finishes every emitter's sink by its shutdown deadline, so a NO ACK Kafka emitter's producer sends the records it still queued before the node stops."
+invocation = "stress-scenarios"
+scenario = "A single node sends the records its NO ACK Kafka emitter's producer holds before it stops"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes tears down a NO ACK Kafka emitter whose producer still queues records it delivered. The domain teardown hands every emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_emission.feature"
+id = "stress.emitter-finish-at-stop"
+invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
+invocation = "stress-scenarios"
+scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: a three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, with tracked entity-gate state, source controls and ACK completion during the stop. The confirmation delay, the Kafka client and transport waits remain untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -1575,6 +1690,16 @@ id = "stress.shutdown-source-confirmation-handoff"
 invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
 invocation = "stress-scenarios"
 scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a graceful stop and restart of a Kafka ingestor's owner on one and three nodes, after a consumer group commit the broker refused was read and committed again, with tracked source controls and ACK completion during the stop and, on three nodes, the planned handoff. The mock broker, the Kafka client and the commit's blocking-pool wait remain untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-kafka-refused-commit"
+invariant = "A Kafka ingestor reports a batch as acknowledged only once the broker answered its commit, so a batch whose commit was refused is read and committed again and restarting its owner reads nothing twice."
+invocation = "stress-scenarios"
+scenario = "A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2117,12 +2242,20 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.websocket-source-drop",
+  "scenario.websocket-source-reconnect",
+  "scenario.websocket-source-move",
+  "stress.websocket-source-drop",
+  "stress.websocket-source-reconnect",
+  "stress.websocket-source-move",
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
   "stress.shutdown-source-confirmation",
   "stress.shutdown-source-confirmation-handoff",
+  "scenario.shutdown-kafka-refused-commit",
+  "stress.shutdown-kafka-refused-commit",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
@@ -2139,8 +2272,12 @@ workloads = [
   "owner.materialized-publications",
   "scenario.materialized-cut",
   "scenario.materialized-bulk-generations",
+  "scenario.materialized-retention-activation",
+  "scenario.materialized-restart-retention",
   "stress.materialized-cut",
   "stress.materialized-bulk-generations",
+  "stress.materialized-retention-activation",
+  "stress.materialized-restart-retention",
 ]
 
 [[owner]]
@@ -2158,7 +2295,14 @@ workloads = [
 
 [[owner]]
 path = "src/runtime/relay_boundary.rs"
-workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.materialized-retention-activation",
+  "scenario.materialized-restart-retention",
+  "stress.diagnostic-nodes",
+  "stress.materialized-retention-activation",
+  "stress.materialized-restart-retention",
+]
 
 [[owner]]
 path = "src/runtime/relay_channel.rs"
@@ -2200,9 +2344,71 @@ workloads = [
   "scenario.client-alter-drain",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
+  "scenario.shutdown-kafka-refused-commit",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
   "stress.shutdown-source-confirmation",
   "stress.shutdown-source-confirmation-handoff",
+  "stress.shutdown-kafka-refused-commit",
   "stress.wasm-kafka-restore",
 ]
+
+[[workload]]
+coverage = "WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "scenario.websocket-source-drop"
+invariant = "Dropping a WebSocket source exchanges Close frames before releasing its transport on one and three nodes."
+invocation = "scenarios"
+scenario = "Dropping a WebSocket ingestor sends its peer a Close frame on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "scenario.websocket-source-reconnect"
+invariant = "Peer closes retain their code and reason through successful upgrades; reconnect delays grow until a batch is delivered."
+invocation = "scenarios"
+scenario = "A repeatedly closing WebSocket peer is reconnected with growing delays on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 1
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "scenario.websocket-source-move"
+invariant = "A planned ownership handoff closes the former WebSocket session gracefully and the new owner delivers a batch."
+invocation = "scenarios"
+scenario = "Moving a WebSocket ingestor closes its former session gracefully"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "stress.websocket-source-drop"
+invariant = "Dropping a WebSocket source exchanges Close frames before releasing its transport on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Dropping a WebSocket ingestor sends its peer a Close frame on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "stress.websocket-source-reconnect"
+invariant = "Peer closes retain their code and reason through successful upgrades; reconnect delays grow until a batch is delivered."
+invocation = "stress-scenarios"
+scenario = "A repeatedly closing WebSocket peer is reconnected with growing delays on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: WebSocket source lifecycle through public Plexus commands, including tracked quiesce, schedule and teardown locks. Socket waits and timer ordering are outside the detector."
+examples = 1
+feature = "tests/features/runtime/websocket_client_ingestion.feature"
+id = "stress.websocket-source-move"
+invariant = "A planned ownership handoff closes the former WebSocket session gracefully and the new owner delivers a batch."
+invocation = "stress-scenarios"
+scenario = "Moving a WebSocket ingestor closes its former session gracefully"
+selections = ["deloxide-stress"]

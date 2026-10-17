@@ -8,6 +8,8 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use std::time::Duration;
+
 use ahash::HashMap;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -125,6 +127,53 @@ fn assert_records(
                 .assured("exact branch identity"),
         );
     }
+}
+
+#[test]
+fn restored_materialized_branches_receive_retention_from_activation_time() {
+    let activated_at = Timestamp::from_unix_nanos(3_600_000_000_000);
+    let future = activated_at
+        .checked_add(Duration::from_secs(3600))
+        .assured("the fixture's future event time fits the timestamp range");
+    let expected = HashMap::from_iter([
+        (key("past"), row(1, 1_000_000_000, 2_000_000_000)),
+        (
+            key("future"),
+            row(2, future.unix_nanos(), future.unix_nanos()),
+        ),
+    ]);
+    let first = expected.values().next().assured("two fixture rows exist");
+    let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        placement(),
+        first.arrow_schema(),
+    ));
+    let mut originator = owner(&state);
+    for (branch, record) in &expected {
+        originator
+            .update_last_by_timestamp(branch, record.clone())
+            .assured("the fixture assignment originates both branches");
+    }
+    let read = originator.read();
+    let mut instances = read.restored_branch_instances(activated_at);
+    let ttl = Duration::from_secs(1800);
+    let expires_at = activated_at
+        .checked_add(ttl)
+        .assured("the fixture's retention boundary fits the timestamp range");
+    let before_expiry = expires_at
+        .checked_sub(Duration::from_nanos(1))
+        .assured("the positive fixture boundary has a preceding instant");
+    assert!(instances.expire(before_expiry, ttl).is_empty());
+    let expired = instances
+        .expire(expires_at, ttl)
+        .into_iter()
+        .map(|(branch, _)| branch)
+        .collect::<super::super::HashSet<_>>();
+    let expected_branches = expected
+        .keys()
+        .cloned()
+        .collect::<super::super::HashSet<_>>();
+    assert_eq!(expired, expected_branches);
+    assert_records(&read.records(), &expected);
 }
 
 #[test]
@@ -547,6 +596,7 @@ fn deloxide_materialized_publications() {
     nervix_deadlock::DiagnosticRun::start(directory)
         .assured("the materialized diagnostic process starts its detector once");
     established_updates_retain_membership_and_arrow_payloads_and_keep_timestamp_ties();
+    restored_materialized_branches_receive_retention_from_activation_time();
     eviction_ends_retained_publications_and_recreation_gets_a_fresh_lifetime();
     rebinding_reseals_the_current_revision_under_its_current_fence();
     materialized_branch_eviction_withdraws_its_record_before_recreation();

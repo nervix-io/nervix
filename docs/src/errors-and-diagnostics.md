@@ -225,7 +225,7 @@ subsections after the boundary table follow this order.
 | Primitives | Modeled adapters keep the error types of the library they stand in for, such as the watch channel's `RecvError` and `SendError` | The library's own error shape, never a report |
 | Vocabulary | Model alteration errors, `CanonicalNsplError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
-| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError` and `SinkPublishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
+| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError`, `SinkPublishError` and `SinkFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
 | Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
@@ -481,8 +481,12 @@ A connector reports through the contract's own contexts and keeps its integratio
 them. `SourceError` names the connector and the operation that failed: opening, reading,
 acknowledging, rejecting, suspending, resuming or closing. `SinkStartError` separates an invalid
 configuration and a missing external entity from a failed initialization. `SinkPublishError`
-separates a failed publish, finish or commit, which the host retries on its backoff, from a
-misconfiguration, which it does not retry. A record the destination refuses for good is none of
+separates a failed publish or commit, which the host retries on its backoff, from a
+misconfiguration, which it does not retry. `SinkFinishError` reports a finish that did not send
+everything the sink's client still held when the emitter stopped: `Unsent` when the deadline passed,
+with the count of records the client still held, and `Flush` when the client failed while it sent
+them. The host does not retry a finish; a stop that asked for it fails, and teardown records it as
+the emitter's transient error. A record the destination refuses for good is none of
 these errors: it is a rejection in the write's per-record outcome, with the structured message
 error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
@@ -569,6 +573,31 @@ leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the c
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
+A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
+refuses to take a record for a reason that is not the record's own, a full producer queue included,
+and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
+drops without a delivery report keeps the report channel's cancellation the same way. Each carries
+the connector's description of the failure for the emitter's transient error, and a missed `ACK
+TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
+record itself, an invalid or oversized message, timestamp or record, rejects that record through
+`ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
+`SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
+hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`. A
+finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
+beneath `SinkFinishError::Unsent`, which counts the records still queued; a flush that fails
+otherwise, or whose blocking task does not complete, keeps that cause beneath
+`SinkFinishError::Flush`.
+
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
+the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
+does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaSourceError::CommitTask`. The
+commit of an acknowledged batch fails beneath `SourceError::Acknowledge`, so the ingestor's
+transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
+the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
+`MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
+`SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -601,6 +630,12 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 stays an infrastructure failure of the attempt, which the emitter retries.
 
 ### Connector Status Observation
+
+An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
+an end without a status has its own typed state. Transport failures keep the WebSocket driver's
+error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
+budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
+failure and its growing retry delay across successful reconnects until a batch is accepted.
 
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
 operations read the retained status without writing it; a transition clears an active failure.
@@ -1059,6 +1094,9 @@ it cannot bind or read its domain clock or routing snapshot, or cannot wait for 
 deadlines, reports a runtime event that names the task and its domain and renders the whole chain
 of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
 failure stays visible.
+The materialized relay reads that clock before rebuilding its branch activity registry. An
+unreadable activation time ends the task with this event; record event watermarks cannot supply
+the missing domain time.
 
 An owner-delivery admission failure logs the domain, relay, branch scope and target together with
 the transport report, including retained cancellation and rejection causes, before returning the
@@ -1112,6 +1150,10 @@ truncation or digest failure; none can publish or acknowledge a partial checkpoi
 handoff destination converts the same fetch failure to a checkpoint preparation failure before
 persisting or activating the candidate state. Diagnostics include the revision and lengths when
 useful, never guest bytes.
+Forced-recovery preparation treats an absent destination execution during startup as an installation
+wait within its current operation deadline. Its `ScheduleInstallationDeadline` context carries the
+typed domain and node when that wait expires. An installed fingerprint mismatch remains a schedule
+validation failure. Neither diagnostic includes checkpoint contents.
 Kafka offset replica catch-up uses the same typed envelope for its revision description. A
 subsequent bulk stream failure remains a transport request failure, with the target, placement and
 typed staging, admission, verification or native conversion cause retained beneath it. The
@@ -1154,8 +1196,9 @@ reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. In
 units remain available to continue, and a subsequent attempt can retry the stalled unit. A gate
 that expires during engagement reports `EntityGateOperationError::EngagementExpired` and releases
 its partial intake and relay holds. The preparation deadline bounds engagement, drain and capture
-independently of the activation lease. A typed reply timeout can retry the same engagement identity
-and scope within that budget; rejection and other request failures keep their classification.
+independently of the activation lease. A typed reply timeout, or a transport failure that broke the request's
+stream, can retry the same engagement identity and scope within that budget; rejection and other
+request failures keep their classification.
 
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct

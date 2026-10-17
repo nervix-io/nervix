@@ -36,15 +36,15 @@ use std::{io, net::SocketAddr, time::Duration};
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, ServiceUrl, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkStartResult, client_tls_paths, optional_client_config_value,
-    read_tls_file,
+    PerRecordOutcome, RecordSink, ServiceUrl, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartResult, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::{
     DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
 };
 use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
-use nervix_primitives::sync::Arc;
+use nervix_primitives::{sync::Arc, time::Instant};
 use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
     ErrorKind as RedisErrorKind, RedisFuture, ServerErrorKind,
@@ -369,7 +369,12 @@ impl RedisSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for RedisSink {}
+impl SinkLifecycle for RedisSink {
+    /// Each `PUBLISH` is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for RedisSink {

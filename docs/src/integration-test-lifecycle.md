@@ -68,6 +68,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Command outcome recovery | On the task of the step, or of its background execution, whose raw wire command left its outcome to the current leader: one session at a time, opened to each node in turn and dropped once that node answers | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -184,6 +185,37 @@ up to three more times with a new port selection. It also removes the failed con
 attempts are exhausted, so a scenario retry does not collide with its name. Other startup failures
 reach the scenario directly.
 
+The Postgres image starts a temporary Unix-socket server to initialize its database, then starts
+the final TCP/TLS server. The fixture waits for both readiness messages before publishing either
+endpoint. Its plaintext and certificate-verified TLS observation clients belong to that same
+suite environment. Each transport shares one SQLx pool with a maximum of two connections for short
+setup and observation queries across all scenarios. A deliberate table-lock controller detaches
+its physical SQLx connection before waiting for release, returning the observation permit. Its
+scenario release handle owns that connection's lifetime, so concurrent lock holders cannot consume
+the permits their own observation queries need. The environment closes both observation pools before
+stopping their container, including when scenarios still retain client handles. The existing suite
+teardown budget bounds that cleanup.
+
+The Postgres fixture scenarios exercise 48 concurrent observers retaining three client handles
+each over plaintext and TLS, and compare every returned text, byte sequence and observer number.
+Every query also checks its actual transport through Postgres's connection statistics. Two further
+examples hold locks through the existing fixture controller while another observer queries, once
+over each transport.
+The database batch scenarios retain their one- and three-node row, field, write-size, conflict,
+rejection and ambiguous-write assertions. Fixture concurrency adds no scenario admission limit.
+
+MQTT fixture publishers keep their event loop alive through the driver's tracked
+publication completion: a socket write for QoS 0 and the broker acknowledgement for QoS 1. The
+existing broker-operation timeout bounds that wait, and cancellation drops the driver. Retained
+scenario inputs still use unique topics. Bursts queue all their messages before waiting for
+completion. The fixture regression pauses a real broker connection for 500 ms and compares every
+complete delivered payload for QoS 0 and QoS 1, as individual messages and bursts of five.
+
+The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
+admission and exact retry. Its reclamation wait includes the configured validity followed by
+60 seconds for reclamation. The assertions still require the identity to remain expired after a
+durable restart, with the schema and committed transaction report preserved.
+
 The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions through
 one follower that the suite-owned environment starts with the container. The follower streams both
 outputs from the container's start into an in-memory transcript of at most 1 GiB per output, and
@@ -237,8 +269,13 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `2`, so its
-16-CPU runner has 32 slots. Cucumber may take up all parsed scenarios without charging a slot.
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
+16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
+attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
+the unchanged 41-minute suite budget. The additional slots use the observed CPU and memory
+headroom; their complete-suite qualification retains runner load and the actual margin rather than
+assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
+without charging a slot.
 Admission grants feature capacity and a run slot in one decision, after both are available. A
 scenario holds both through the end of teardown. The active-scenario diagnostic names the feature
 limit or run slot a waiting scenario needs. No scenario runs alone or prevents unrelated scenarios
@@ -251,16 +288,23 @@ suite, and
 available run slots favor a queued limited successor over queued ordinary work. The web console
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
 the other three waiting behind its whole queue. Their chains can therefore make progress throughout
-the suite rather than after it. Cucumber retries a failed
-scenario twice; `--retry 0` turns retries off for a focused run.
+the suite rather than after it. Cucumber retries a failed scenario twice; `--retry 0` turns retries
+off for a focused run. The before hook reads the attempt kind from its active-scenario registration.
+Each feature queue keeps retries ahead of first attempts, and admission selects an eligible retry
+before any first attempt, including a limited feature's first attempt. A retry still needs its
+feature capacity and a run slot together: one waiting for a full feature group leaves free slots
+available to other work. Ordinary and WASM-reset queues retain FIFO order within an attempt kind;
+the web-console group retains its feature fairness. The finite retry count bounds this priority;
+first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
+capacities before dispatch continues.
 
 The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, `just coverage-merge` builds the one repository-relative ordinary workspace report from their artifacts and fails on an incomplete one. `just check-coverage` then scores the repository's Rust sources against that report with the pinned cargo-crap, which the job builds through kache, and fails only when the analysis is vacuous: no CRAP score fails the job. The retained artifact and an advisory patch line coverage comment, which carries the CRAP section for the changed files, read the same report |
+| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
+| `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -408,12 +452,26 @@ The boundary between them is kept in four places.
   after failover. The large materialized backup workload submits
   each graph statement through the production client so a leadership change during its many relay
   definitions recovers that statement by reference; its Row subscription opens on a raw session
-  after the graph is ready. A leader setup step whose other commands need one session, because
-  they create a subscription or open a transaction, runs them over a raw wire session; when
-  leadership moves before one of them reached the leader, or after the leader admitted it and
-  before its outcome was known, the step sends that command again with the same execution
-  reference to the current leader, as a client must, and goes on there, within 60 seconds per
-  command and only while the session holds no subscription or transaction yet.
+  after the graph is ready. A step that sends commands to the leader over a raw wire session,
+  because they create a subscription or open a transaction, learns a command's outcome the way a
+  client must when leadership moves before the command reached the leader, or after the leader
+  admitted it and before its outcome was known. It sends the command again with the same
+  execution reference, on a session of the same user and domain, to each node in turn until the
+  node that leads answers with an outcome only a leader knows. A follower refuses the command
+  before admitting anything, a stopped node refuses the connection, and a node that still believes
+  it leads answers with another unknown outcome, so recovery reads no status to find the leader,
+  and a step's background execution recovers the same way. No new round starts once 60 seconds
+  have passed for one command, and a repeated command that joins an execution still applying waits
+  for its reply. While the step's session holds no subscription and no transaction, it moves to the
+  node that answered and the step goes on there. A session that holds one stays where it is, so
+  its subscriptions keep delivering. For the active session a later step reuses, for a background
+  execution's session, and for a setup session once it opened a subscription, another session of
+  the same user learns the outcome of a command that leaves what the session holds alone. A
+  command sent while the session is bound to a transaction keeps its unknown outcome and fails the
+  step, and so does a command that begins or ends a transaction, opens or deletes a subscription,
+  attaches a clock or changes the domain on a session that cannot move. A request a step sends once
+  under a scenario-chosen execution reference learns its outcome the same way before the step
+  records its disposition.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   retain the protocol's received dispositions. A paced-driver file fixture writes only the
@@ -460,6 +518,9 @@ The boundary between them is kept in four places.
   stopping the writer finishes its admitted command before counting completed writes: the response
   can arrive after all voters have already applied that command. The fixture still checks the
   storage-derived catch-up bound, append-stream limit and commands-memory budget.
+  Its initial burst of domain creation also uses one production client, retaining each command's
+  execution identity across a leadership change during finalization. A raw session's recoverable
+  disposition cannot end the fixture before follower catch-up starts.
   A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
   observability, web console, or interconnect. A readiness timeout may still move all listeners
   within the same startup budget. A changed interconnect address remains reserved while a peer
@@ -471,6 +532,11 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
+  The forced-recovery startup fixture holds the promoted replica's initial installation across a
+  whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
+  unavailable. The destination records its missing schedule before releasing the held installation
+  once, so the regression reaches that boundary without spending the recovery budget between
+  scenario steps. Public placement, recovery outcome and both branches' output remain the verdict.
   `just coverage-harness-liveness <filter>` measures the ordinary startup and other harness owner
   regressions with counters of their own, as the [diagnostic lane](#diagnostic-lane) section
   describes. A patch that also changes product code passes the retained `lcov.info` to
@@ -983,6 +1049,9 @@ until that node has ended.
   clusters are also dropped first. Dropping any server child kills it and returns its ports.
 - Broker and syslog observers, HTTP and gRPC receivers, the browser, and the session are closed
   before the cluster stops.
+- The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
+  a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
+  socket ownership stays in that task, so the same cancellation releases its active connection.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
   once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
@@ -1110,6 +1179,14 @@ first time a scenario needs one and shared by every scenario of the run. The run
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
+
+A scenario that needs a Kafka broker to refuse what the shared broker accepts for every other
+scenario starts a broker of its own: librdkafka's in-process mock cluster of one broker, which the
+scenario keeps until it ends, across its cluster's restarts. While the scenario asks it to, that
+broker refuses produce requests with `NOT_ENOUGH_REPLICAS`, which a producer retries, or offset
+commits with `GROUP_AUTHORIZATION_FAILED`, which a consumer does not retry; a scenario can also
+refuse only the next commit. The scenario publishes to it, observes its topics and reads a consumer
+group's committed offset through clients of its own, so no refusal reaches the shared broker.
 
 The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
 `START` and observe the consumer group's membership and the ingestor's readiness before injecting
@@ -1438,34 +1515,18 @@ After collecting unit and scenario profiles, `just coverage-report-workspace` ex
 workspace packages, including executed test files, as `lcov-workspace.info` with the checkout path
 beside it, and `just coverage-merge` maps that report onto the repository.
 
-Both CI collectors export `lcov-workspace.info` from every collected profile, with no package
-selection, and with `--no-default-ignore-filename-regex`, and write the absolute checkout path they
-ran in to `coverage-source-root.txt` beside it. Test lines stay in these reports, so merging native
-extra reports cannot make executed library properties appear uncovered because their files were
-filtered. Executing a crate's tests does not include that crate in a report whose package selection
-names only the root package. Filtering happens in the merge, not in the exports: the coverage job
-runs `just coverage-merge` over the `coverage-tests`, `coverage-scenarios` and
-`coverage-native-extras` artifacts, which maps every record onto the files tracked at the tested
-revision, drops dependency, toolchain and generated records by class, leaves out the native
-collections of other modes, and fails rather than publish a report that misses an input or a
-workspace member. It passes that one report to `just coverage-patch`, so library properties
-contribute to patch coverage alongside server and client tests. Patch coverage, CRAP scores and
-comment publication are advisory and never change the build verdict; the CRAP step fails only when
-its analysis cannot describe the merged report. The complexity verdict is the `just ratchet` count
-of functions above cyclomatic complexity 30, which the `checks` job enforces and which reads no
-coverage.
-The PR comment and workflow summary identify the exact comparison and the `coverage-merged`
-artifact retains the report, its merge record `target/coverage-merge/record.json`,
-`target/patch-coverage.md` and the CRAP reports `target/crap-report/crap.json` and
-`target/crap-report/crap.md`.
+[Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the producer catalog,
+export flags, checkout-root mapping, tracked-source policy, ordinary merge record and integrity
+failures. That chapter also owns the advisory patch/CRAP reports and the separate deterministic
+complexity verdict. The `coverage-merged` artifact retains the ordinary report, its merge record
+and both advisory reports.
+
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
 deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
 The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
 Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
-The merge reads each producer's checkout path explicitly when it maps LCOV sources from Blacksmith
-onto files on its GitHub-hosted runner.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |

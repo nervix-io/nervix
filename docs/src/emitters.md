@@ -927,14 +927,25 @@ TO KAFKA <client> TOPIC <topic>
 ```
 
 `ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration; Nervix's `ACK TIMEOUT` independently bounds
-the report wait. `NO_ACK` is fire-and-forget after local admission: Nervix acknowledges the
-emitter's `ATTACHED` ACK share when librdkafka accepts the record into its producer queue and does
-not wait for a delivery report. A later broker error, producer timeout, crash, or process exit can
-therefore lose an accepted record. A full local queue is an infrastructure condition paced by the
-declared retry policy with backpressure. Graceful shutdown drains queued records within the node
-drain bound in both modes. A definitive record-specific rejection, such as an oversized message,
-follows `ON MESSAGE ERROR`.
+compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
+also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
+name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
+the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
+delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
+milliseconds librdkafka holds refuses the emitter when it starts. `NO_ACK` is fire-and-forget after
+local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
+record into its producer queue and does not wait for a delivery report. A later broker error,
+producer timeout, crash, or process exit can therefore lose an accepted record. A full local queue
+is an infrastructure condition paced by the declared retry policy with backpressure. In `ACK` it
+ends the attempt without discarding an answer the broker already gave: the records the broker
+confirmed are delivered and are not sent again, and only the records still awaiting a report are
+retried. When the emitter stops, it flushes what the producer still queues, in both modes and
+regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
+the node's graceful shutdown each give that flush their deadline. Records still queued when the
+deadline passes are lost; `DESCRIBE EMITTER` reports how many as its transient error, and a
+replacement that cannot flush fails and keeps the running emitter. A definitive record-specific
+rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 
@@ -947,7 +958,8 @@ TO PULSAR <client> TOPIC <topic>
 
 `ACK` waits for each broker receipt. `NO_ACK` acknowledges producer acceptance and does not expose
 later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
-pipelines producer work.
+pipelines producer work. Messages the producer accepted under `NO_ACK` and has not sent when the
+emitter stops are discarded with the producer, which the node logs at `warn`.
 
 A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
 connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
@@ -1023,8 +1035,9 @@ TO MQTT <client> TOPIC <topic>
          RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
 
-QoS 0 acknowledges client acceptance. QoS 1 waits for `PUBACK`; QoS 2 waits for the complete
-exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
+QoS 0 acknowledges client acceptance, and QoS 0 publishes still queued in the client when the
+emitter stops are discarded with it, which the node logs at `warn`. QoS 1 waits for `PUBACK`; QoS 2
+waits for the complete exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
 policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
@@ -1732,8 +1745,10 @@ resends only records not yet confirmed or definitively rejected. With the
 [batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
 yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
-after a crash or downstream failure. External broker durability and idempotence settings remain
-the user's client and service configuration.
+after a crash or downstream failure. A stop sends what a Kafka producer still queues within the
+stop's deadline, while Pulsar `NO_ACK` and MQTT QoS 0 discard what their clients still queue; see
+[Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
+idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
 completes only after every attached emitter reaches its sink completion point. A failure on any
