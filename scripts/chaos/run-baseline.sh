@@ -1345,6 +1345,17 @@ finish() {
         elif [[ "${scenario}" == degraded-links ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
+        elif [[ "${scenario}" == backup-fault ]]; then
+            # A backup fault runs only on three nodes and requires its fault.
+            reproducer="$(printf 'just chaos run %q --image %q --fault %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${fault}" "${record_count}")"
+            if [[ "${outage_option_set}" == true ]]; then
+                reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
+            fi
+        elif [[ "${scenario}" == restore-fresh-cluster ]]; then
+            # A fresh-cluster restore runs only on three nodes and holds no outage.
+            reproducer="$(printf 'just chaos run %q --image %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}")"
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
