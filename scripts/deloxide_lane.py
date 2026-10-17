@@ -13,7 +13,9 @@ stressed restore scenarios get a lane, a budget and a CI runner of their own. Th
 `tests/deloxide-inventory.toml` registers every workload a selection runs: the disposable-process
 probes of `nervix-deadlock`, the diagnostic owner tests of the server library, and the tagged
 scenarios the scenario binary runs on diagnostic nodes. For each
-invocation the lane builds its executable for the selection, discovers what the build and the
+selection the lane first builds every selected test executable and diagnostic driver under a
+separate build budget. Only after all builds succeed does it start the workload budget. For each
+invocation it discovers what the build and the
 feature files hold, and refuses a registered workload that is missing or ignored, a discovered test
 or tagged scenario that is not registered, and a selection with nothing in it. It then runs the
 invocation supervised and accounts for what ran: libtest's outcome of every registered test, or the
@@ -21,7 +23,7 @@ scenario count Cucumber reports against the examples the tags select. Active det
 tagged suite in one process; order analysis starts fresh processes per feature and for the large
 restore examples the inventory isolates with `order_tags`.
 
-Every process the lane starts runs in a session of its own within its bound and the lane's budget.
+Every process the lane starts runs in a session of its own within its bound and its stage's budget.
 A process that outlives its bound gets SIGTERM, then SIGKILL after the stop grace, and its whole
 group with it; a process that the lane finds still running after its invocation ended is killed and
 fails the lane. The lane names how each invocation ended: completed, an active deadlock (status 3),
@@ -35,7 +37,9 @@ Each run keeps a fresh attempt directory below `<build target>/test-deloxide/<se
 log, the probes' artifacts, the evidence of every process, the description of every finding with
 its source sites, and `lane.json`, which records the revision, the toolchain and Deloxide's locked
 version, the selection, its features and bounds, and for every invocation its exact command,
-environment additions, discovery, accounting, ending, duration and evidence. A failed attempt is
+environment additions, discovery, accounting, ending, duration and evidence. Both stages record
+their own budget, start, ending and duration. `build <selection>` measures only the build stage;
+its `built` verdict cannot qualify as completed workload evidence. A failed attempt is
 never removed or reused. `replay` runs one recorded invocation again with exactly its command,
 environment and bound in a fresh attempt; OS schedules and timing are not recorded, so a replay can
 take another interleaving. `qualify` proves the supervision end to end: it runs deliberately failing
@@ -45,6 +49,8 @@ its evidence, the cleanup of every process, and the replay of a recorded active 
 Under the native coverage collector the lane builds into the collector's instrumented target
 directory, takes the prepared binaries from the target the prerequisites built, starts every test
 executable through Cargo's configured runner, and writes its record where the collector reads it.
+It measures an initial and a warm pass over every selected build in the same compiler context;
+both share the build budget and finish before the workload clock starts.
 
 `applicability --catalog <gate.json>` reads the compiler's acquisition catalog and requires every
 source file with a tracked blocking acquisition in a diagnostic configuration to have exactly one
@@ -174,6 +180,7 @@ class Kind(enum.StrEnum):
 
 @dataclass(frozen=True)
 class Bounds:
+    build_budget_seconds: int
     budget_seconds: int
     stop_grace_seconds: int
     suite_teardown_reserve_seconds: int
@@ -336,8 +343,9 @@ def parse_inventory(text: str) -> Inventory:
     lane = document.get("lane")
     if not isinstance(lane, dict):
         raise LaneError("the inventory needs a [lane] table")
-    _known_keys(lane, {"budget_seconds", "stop_grace_seconds", "suite_teardown_reserve_seconds"}, "[lane]")
+    _known_keys(lane, {"build_budget_seconds", "budget_seconds", "stop_grace_seconds", "suite_teardown_reserve_seconds"}, "[lane]")
     bounds = Bounds(
+        build_budget_seconds=_positive(lane, "build_budget_seconds", "[lane]"),
         budget_seconds=_positive(lane, "budget_seconds", "[lane]"),
         stop_grace_seconds=_positive(lane, "stop_grace_seconds", "[lane]"),
         suite_teardown_reserve_seconds=_positive(lane, "suite_teardown_reserve_seconds", "[lane]"),
@@ -1477,6 +1485,57 @@ def tail(log: Path, lines: int = 60) -> None:
         print(line, flush=True)
 
 
+class Stage(enum.StrEnum):
+    BUILD = "build"
+    WORKLOADS = "workloads"
+
+
+class BuildPass(enum.StrEnum):
+    INITIAL = "initial"
+    WARM = "warm"
+
+
+class StageBudget:
+    """One stage's real-time budget and retained timing, started only when that stage begins."""
+
+    def __init__(self, kind: Stage, seconds: int, clock: Callable[[], float]) -> None:
+        self.kind = kind
+        self.clock = clock
+        self.started = clock()
+        self.deadline = self.started + seconds
+        self.record: dict[str, object] = {
+            "name": str(kind),
+            "budget_seconds": seconds,
+            "started_at": utc_now(),
+            "verdict": "running",
+        }
+
+    def remaining(self) -> float:
+        return self.deadline - self.clock()
+
+    def bound(self, seconds: float) -> float:
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise LaneFailed(Failure.BUDGET, f"the {self.kind} stage's budget expired before its next operation")
+        return min(seconds, remaining)
+
+    def finish(self, verdict: str) -> None:
+        if self.record["verdict"] == "running":
+            self.record["verdict"] = verdict
+            self.record["duration_seconds"] = self.clock() - self.started
+            self.record["finished_at"] = utc_now()
+
+
+@dataclass(frozen=True)
+class PreparedInvocation:
+    """An invocation's diagnostic executables, all built before any workload starts."""
+
+    invocation: Invocation
+    executable: Path
+    cwd: Path
+    driver: Path | None
+
+
 class Lane:
     """One selection's run of every registered workload, in a fresh attempt directory."""
 
@@ -1495,7 +1554,9 @@ class Lane:
         self.workspace = workspace
         self.processes = processes
         self.clock = clock
-        self.deadline = clock() + inventory.bounds.budget_seconds
+        self.stage: StageBudget | None = None
+        self.stages: list[dict[str, object]] = []
+        self.build_measurements: list[dict[str, object]] = []
         attempts = workspace.attempts(selection.name)
         attempts.mkdir(parents=True, exist_ok=True)
         self.attempt = Path(tempfile.mkdtemp(prefix=prefix, dir=attempts))
@@ -1514,13 +1575,23 @@ class Lane:
         return f"deloxide lane ({self.selection.name})"
 
     def remaining(self) -> float:
-        return self.deadline - self.clock()
+        if self.stage is None:
+            raise LaneError("the lane has not started a stage")
+        return self.stage.remaining()
 
     def bound(self, seconds: float) -> float:
-        remaining = self.remaining()
-        if remaining <= 0:
-            raise LaneFailed(Failure.BUDGET, "the lane's budget expired before its next stage")
-        return min(seconds, remaining)
+        if self.stage is None:
+            raise LaneError("the lane has not started a stage")
+        return self.stage.bound(seconds)
+
+    def start_stage(self, kind: Stage, seconds: int) -> None:
+        if self.stage is not None:
+            self.stage.bound(self.stage.remaining())
+            self.stage.finish("complete")
+        self.stage = StageBudget(kind, seconds, self.clock)
+        self.stages.append(self.stage.record)
+        self.record.write()
+        print(f"{self.label()}: {kind} stage: {seconds}s budget", flush=True)
 
     def begin(self) -> None:
         root = self.root
@@ -1545,6 +1616,7 @@ class Lane:
             "dependencies": {"deloxide": locked_version(root, "deloxide")},
             "inventory": {"path": str(INVENTORY), "sha256": file_digest(root / INVENTORY)},
             "bounds": {
+                "build_budget_seconds": bounds.build_budget_seconds,
                 "budget_seconds": bounds.budget_seconds,
                 "stop_grace_seconds": bounds.stop_grace_seconds,
                 "suite_teardown_reserve_seconds": bounds.suite_teardown_reserve_seconds,
@@ -1559,8 +1631,11 @@ class Lane:
             "launches": self.launches,
             "workloads": self.workloads,
             "evidence": self.evidence,
+            "stages": self.stages,
+            "build_measurements": self.build_measurements,
         }
         self.record.write()
+        self.start_stage(Stage.BUILD, bounds.build_budget_seconds)
 
     def base_environment(self) -> dict[str, str]:
         prepared = self.workspace.prepared / "debug"
@@ -1578,8 +1653,8 @@ class Lane:
             raise LaneFailed(Failure.PREREQUISITE, f"the ONNX runtime path is unknown: {error.strip()}")
         return output.strip()
 
-    def execute(self) -> int:
-        """Run every invocation and qualify its evidence; return the lane's status."""
+    def execute(self, build_only: bool = False) -> int:
+        """Build the selected executables, then run and qualify every invocation unless build-only."""
 
         self.begin()
         try:
@@ -1589,12 +1664,18 @@ class Lane:
                     f"{self.workspace.report_tool()} is missing; `just tests-deps` builds it",
                 )
             onnx = self.onnx_runtime()
-            for invocation in self.inventory.invocations.values():
-                if self.selection.name not in invocation.selections:
-                    continue
+            prepared = self.prepare_invocations(BuildPass.INITIAL)
+            if self.workspace.instrumented and not build_only:
+                prepared = self.prepare_invocations(BuildPass.WARM)
+            self.bound(self.remaining())
+            if build_only:
+                return self.conclude(None, "", build_only=True)
+            self.start_stage(Stage.WORKLOADS, self.inventory.bounds.budget_seconds)
+            for invocation in prepared:
                 self.run_invocation(invocation, onnx)
             if self.totals.observations == 0:
                 raise LaneFailed(Failure.EVIDENCE_MISSING, "no process recorded evidence")
+            self.bound(self.remaining())
         except LaneFailed as failed:
             return self.conclude(failed.failure, failed.detail)
         except LaneError as error:
@@ -1613,14 +1694,19 @@ class Lane:
         return self.conclude(None, "")
 
     def finish(self) -> None:
+        if self.stage is not None:
+            verdict = str(self.record.content["verdict"])
+            if verdict == "built":
+                verdict = "complete"
+            self.stage.finish(verdict)
         self.record.content["counts"] = self.counts.describe()
         self.record.content["findings"] = self.totals.describe()
         self.record.content["finished_at"] = utc_now()
         self.record.write()
 
-    def conclude(self, failure: Failure | None, detail: str) -> int:
+    def conclude(self, failure: Failure | None, detail: str, build_only: bool = False) -> int:
         if failure is None:
-            self.record.content["verdict"] = "complete"
+            self.record.content["verdict"] = "built" if build_only else "complete"
         else:
             self.record.content["verdict"] = "failed"
             self.record.content["failure"] = {"class": str(failure), "detail": detail}
@@ -1633,9 +1719,25 @@ class Lane:
         observed = f"{self.label()}: evidence: {self.totals.line()}"
         print(accounted, flush=True)
         print(observed, flush=True)
+        timings = []
+        for measurement in self.build_measurements:
+            timing = (
+                f"{self.label()}: {measurement['kind']} build pass: "
+                f"{measurement['duration_seconds']:.3f}s"
+            )
+            timings.append(timing)
+            print(timing, flush=True)
+        for stage in self.stages:
+            timing = (
+                f"{self.label()}: {stage['name']} stage: {stage['verdict']}, "
+                f"{stage['duration_seconds']:.3f}s of {stage['budget_seconds']}s"
+            )
+            timings.append(timing)
+            print(timing, flush=True)
         attempt = display(self.attempt, self.root)
         if failure is None:
-            verdict = [f"{self.label()}: complete; attempt {attempt}"]
+            result = "builds complete" if build_only else "complete"
+            verdict = [f"{self.label()}: {result}; attempt {attempt}"]
             print(verdict[0], flush=True)
         else:
             verdict = [
@@ -1644,15 +1746,38 @@ class Lane:
             ]
             for line in verdict:
                 print(line, file=sys.stderr)
-        publish_step_summary(self.processes.base_environment, [accounted, observed, *verdict])
+        publish_step_summary(self.processes.base_environment, [accounted, observed, *timings, *verdict])
         if failure is None:
             return 0
         return failure.status()
 
     # Building.
 
+    def prepare_invocations(self, build_pass: BuildPass) -> list[PreparedInvocation]:
+        """Build one complete pass with the same target, features and inherited compiler context."""
+
+        started = self.clock()
+        prepared: list[PreparedInvocation] = []
+        for invocation in self.inventory.invocations.values():
+            if self.selection.name not in invocation.selections:
+                continue
+            executable, cwd = self.build_tests(invocation, build_pass)
+            driver = None
+            if invocation.driver is not None:
+                driver = self.build_driver(invocation.driver, build_pass)
+            prepared.append(PreparedInvocation(invocation, executable, cwd, driver))
+        self.build_measurements.append({
+            "kind": str(build_pass),
+            "duration_seconds": self.clock() - started,
+        })
+        self.record.write()
+        return prepared
+
     def cargo_build(self, name: str, arguments: Sequence[str]) -> list[dict[str, object]]:
-        """Build with Cargo within the budget, and return its JSON messages."""
+        """Build with Cargo within the build stage's budget, and return its JSON messages."""
+
+        if self.stage is None or self.stage.kind is not Stage.BUILD:
+            raise LaneError("diagnostic executables can be built only in the build stage")
 
         launch = Launch(
             name=name,
@@ -1668,7 +1793,7 @@ class Lane:
         self.launches.append({"stage": "build", **launch.describe(self.root), "ended": ended.describe()})
         self.record.write()
         if ended.ending is Ending.TIMED_OUT:
-            raise LaneFailed(Failure.BUDGET, f"{name} outlived the lane's budget; see {launch.log}")
+            raise LaneFailed(Failure.BUDGET, f"{name} outlived the build stage's budget; see {launch.log}")
         if ended.ending is not Ending.EXITED or ended.status != 0:
             tail(launch.log)
             raise LaneFailed(Failure.BUILD, f"{name} {describe_ending(ended)}; see {launch.log}")
@@ -1679,13 +1804,16 @@ class Lane:
                 messages.append(json.loads(line))
         return messages
 
-    def build_tests(self, invocation: Invocation) -> tuple[Path, Path]:
+    def build_tests(self, invocation: Invocation, build_pass: BuildPass = BuildPass.INITIAL) -> tuple[Path, Path]:
         """The test executable of `invocation` in this selection, and the package directory Cargo
         runs it in."""
 
         features = " ".join([*invocation.features, self.selection.feature])
+        name = f"{invocation.id}-build"
+        if build_pass is BuildPass.WARM:
+            name += "-warm"
         messages = self.cargo_build(
-            f"{invocation.id}-build",
+            name,
             ["test", "--no-run", "--package", invocation.package, "--features", features,
              *invocation.cargo_target()],
         )
@@ -1703,9 +1831,12 @@ class Lane:
             return Path(str(executable)), manifest.parent
         raise LaneFailed(Failure.BUILD, f"{invocation.id}: the build produced no test executable")
 
-    def build_driver(self, package: str) -> Path:
+    def build_driver(self, package: str, build_pass: BuildPass = BuildPass.INITIAL) -> Path:
+        name = f"{package}-build"
+        if build_pass is BuildPass.WARM:
+            name += "-warm"
         messages = self.cargo_build(
-            f"{package}-build", ["build", "--package", package, "--features", self.selection.feature]
+            name, ["build", "--package", package, "--features", self.selection.feature]
         )
         for message in messages:
             if message.get("reason") != "compiler-artifact":
@@ -1723,14 +1854,19 @@ class Lane:
     def command(self, executable: Path, arguments: Sequence[str]) -> tuple[str, ...]:
         return (*self.workspace.runner, str(executable), *arguments)
 
-    def run_invocation(self, invocation: Invocation, onnx: str) -> None:
+    def run_invocation(self, prepared: PreparedInvocation, onnx: str) -> None:
+        invocation = prepared.invocation
         registered = self.inventory.workloads_of(invocation.id, self.selection.name)
-        executable, cwd = self.build_tests(invocation)
+        executable, cwd = prepared.executable, prepared.cwd
         environment = {
             **self.base_environment(),
             "ORT_DYLIB_PATH": onnx,
             "CARGO_MANIFEST_DIR": str(cwd),
         }
+        if prepared.driver is not None:
+            environment["NERVIX_PACED_SIMULATION_PATH"] = str(prepared.driver)
+            library = self.workspace.prepared / "debug" / "libnervix_client_ffi.so"
+            environment["NERVIX_CLIENT_LIBRARY"] = str(library)
         evidence = self.attempt / "evidence" / invocation.id
         if invocation.evidence:
             evidence.mkdir(parents=True, exist_ok=True)
@@ -1857,11 +1993,6 @@ class Lane:
         except LaneError as error:
             raise LaneFailed(Failure.INVENTORY, str(error)) from error
         scenario_environment = dict(environment)
-        if invocation.driver is not None:
-            driver = self.build_driver(invocation.driver)
-            scenario_environment["NERVIX_PACED_SIMULATION_PATH"] = str(driver)
-            library = self.workspace.prepared / "debug" / "libnervix_client_ffi.so"
-            scenario_environment["NERVIX_CLIENT_LIBRARY"] = str(library)
         completed_runs = {workload.id: 0 for workload in registered}
         recorded_workloads: set[str] = set()
         for chunk in chunks:
@@ -2023,6 +2154,31 @@ def read_complete(path: Path, selection: str) -> dict[str, object]:
         raise RecordError(f"the Deloxide lane record is not of the {selection} selection")
     if content.get("verdict") != "complete":
         raise RecordError("the Deloxide lane did not complete")
+    stages = content.get("stages")
+    if not isinstance(stages, list) or len(stages) != 2:
+        raise RecordError("the Deloxide lane record needs both completed stages")
+    for stage, name in zip(stages, (Stage.BUILD, Stage.WORKLOADS), strict=True):
+        if not isinstance(stage, dict) or stage.get("name") != name or stage.get("verdict") != "complete":
+            raise RecordError(f"the Deloxide lane record has no completed {name} stage")
+        budget = stage.get("budget_seconds")
+        duration = stage.get("duration_seconds")
+        if type(budget) is not int or budget <= 0 or type(duration) not in (int, float) or not 0 <= duration <= budget:
+            raise RecordError(f"the Deloxide lane record has invalid {name} stage timing")
+    workspace = content.get("workspace")
+    if not isinstance(workspace, dict) or type(workspace.get("instrumented")) is not bool:
+        raise RecordError("the Deloxide lane record does not declare its instrumentation")
+    expected_passes = [BuildPass.INITIAL]
+    if workspace["instrumented"]:
+        expected_passes.append(BuildPass.WARM)
+    measurements = content.get("build_measurements")
+    if not isinstance(measurements, list) or len(measurements) != len(expected_passes):
+        raise RecordError("the Deloxide lane record is missing a completed build measurement")
+    for measurement, kind in zip(measurements, expected_passes, strict=True):
+        if not isinstance(measurement, dict) or measurement.get("kind") != kind:
+            raise RecordError(f"the Deloxide lane record has no {kind} build measurement")
+        duration = measurement.get("duration_seconds")
+        if type(duration) not in (int, float) or not 0 <= duration <= stages[0]["duration_seconds"]:
+            raise RecordError(f"the Deloxide lane record has invalid {kind} build timing")
     counts = content.get("counts")
     if not isinstance(counts, dict):
         raise RecordError("the Deloxide lane record has no counts")
@@ -2199,9 +2355,11 @@ def qualify(inventory: Inventory, processes: Processes, workspace: Workspace, se
     lane.record.content["qualification"] = cases
     try:
         executable, cwd = lane.build_tests(probes)
+        lane.bound(lane.remaining())
+        assert lane.stage is not None
+        lane.stage.finish("complete")
     except LaneFailed as failed:
-        print(f"deloxide qualification: {failed.failure}: {failed.detail}", file=sys.stderr)
-        return failed.failure.status()
+        return lane.conclude(failed.failure, failed.detail)
     problems: list[str] = []
     replayable: Launch | None = None
     for case in CASES:
@@ -2282,7 +2440,7 @@ def qualify(inventory: Inventory, processes: Processes, workspace: Workspace, se
             )
     lane.record.content["verdict"] = "complete" if not problems else "failed"
     lane.record.content["problems"] = problems
-    lane.record.write()
+    lane.finish()
     for problem in problems:
         print(f"deloxide qualification ({selection.name}): {problem}", file=sys.stderr)
     attempt = display(lane.attempt, workspace.root)
@@ -2367,6 +2525,8 @@ def main(
     commands = parser.add_subparsers(dest="command", required=True)
     run_parser = commands.add_parser("run", help="run every registered workload of a selection")
     run_parser.add_argument("selection")
+    build_parser = commands.add_parser("build", help="build a selection's executables without running workloads")
+    build_parser.add_argument("selection")
     qualify_parser = commands.add_parser("qualify", help="prove the lane's supervision on failing workloads")
     qualify_parser.add_argument("selection")
     replay_parser = commands.add_parser("replay", help="run one recorded launch again")
@@ -2423,7 +2583,7 @@ def main(
             if report:
                 report_path = Path(report)
             lane = Lane(inventory, selection, workspace, processes, report_path)
-            return lane.execute()
+            return lane.execute(build_only=arguments.command == "build")
     except LaneError as error:
         print(f"deloxide lane: {error}", file=sys.stderr)
         return FAILURE_STATUS
