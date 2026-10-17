@@ -43,7 +43,7 @@ Run `just chaos suite --help` for the smoke and soak suites that CI runs.
 
 An image whose io.nervix.diagnostic.selection label declares a Deloxide selection runs every node as
 a diagnostic node, and every run fails unless the deadlock evidence of each process it started
-qualifies; see the README's section on diagnostic images.
+qualifies; see Diagnostic Images in docs/src/cluster-chaos.md.
 EOF
 }
 
