@@ -725,8 +725,9 @@ just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nerv
 just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
 ```
 
-`scripts/chaos/README.md` describes every scenario, the suites, diagnostic images, their budgets
-and artifacts, and how to reproduce or replay a failed run.
+[External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
+the suites, diagnostic images, their budgets and artifacts, and how to reproduce or replay a failed
+run.
 
 ### Release evidence
 
