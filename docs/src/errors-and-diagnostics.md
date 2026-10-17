@@ -871,6 +871,12 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
+The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
+absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
+before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
+conversion error beneath that context. The check compares names and nested types after narrowing
+UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
