@@ -884,6 +884,11 @@ impl SessionServiceImpl {
         result: &CommandResult,
     ) -> Result<CommandResult, Box<CommandResult>> {
         let durable_result = durable_command_result(result)?;
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_command_finalization_if_armed(self.inner.consensus.local_node_id())
+            .await;
         let execution = match self
             .inner
             .consensus
