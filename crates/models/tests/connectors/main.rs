@@ -17,30 +17,32 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{
     AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
-    BatchMessageLimit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
-    ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName, ClientSinkEntity,
-    ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind, EmitterBatchPolicy,
-    EmitterBatchRequirement, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
-    HttpEndpointSource, HttpSinkEntity, HttpSource, HttpSourceEntity, IcebergCatalog, IcebergSink,
-    IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, IngestAcknowledgement,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestSourceKind, KafkaIngestMode,
-    KafkaOffsetMode, KafkaSinkEntity, KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource, Literal,
-    Model, ModelKind, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity,
-    MqttIngestMode, MqttQos, MqttSession, MqttSinkEntity, MqttSourceEntity, MqttTopicSource,
-    MySqlConflictAction, MySqlSink, MySqlSinkEntity, MySqlTableSink, NatsSinkEntity,
-    NatsSourceEntity, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink,
-    OtelSink, OtelSinkEntity, OtelTracesSink, ParseAsType, PostgresConflictAction, PostgresSink,
-    PostgresSinkEntity, PostgresTableSink, PrometheusSourceEntity, PulsarSinkEntity,
-    PulsarSourceEntity, PulsarTopicSink, RabbitMqSinkEntity, RabbitMqSourceEntity,
-    RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink, RedisSinkEntity,
-    RedisSource, RedisSourceEntity, RetryPolicy, SchemaName, SentryEventSink, SentrySink,
-    SentrySinkEntity, SinkClientReference, SinkReference, SinkValueMapping, SourceMetadataScope,
-    SourceReferenceKind, SqsSinkEntity, SqsSourceEntity, SyslogSinkEntity, SyslogSourceEntity,
-    TableName, WebsocketsEndpointSource, WebsocketsSourceEntity, ZeroMqSinkEntity,
-    ZeroMqSourceEntity,
+    BatchMessageLimit, BatchUnavailability, ClickHouseSink, ClickHouseSinkEntity,
+    ClickHouseTableSink, ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName,
+    ClientSinkEntity, ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind,
+    EmitterBatchLegality, EmitterBatchPolicy, EmitterBodyForm, EmitterPublishingMode,
+    EndpointIngestMode, EndpointType, Expression, HttpEndpointSource, HttpSinkEntity, HttpSource,
+    HttpSourceEntity, IcebergCatalog, IcebergSink, IcebergSinkEntity, IcebergStorageBackend,
+    IcebergTableSink, IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestSourceKind, KafkaIngestMode, KafkaOffsetMode, KafkaSinkEntity,
+    KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource, Literal, Model, ModelKind,
+    MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity, MqttIngestMode,
+    MqttQos, MqttSession, MqttSinkEntity, MqttSourceEntity, MqttTopicSource, MySqlConflictAction,
+    MySqlSink, MySqlSinkEntity, MySqlTableSink, NatsSinkEntity, NatsSourceEntity, OtelLogsSink,
+    OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink, OtelSink, OtelSinkEntity,
+    OtelTracesSink, ParseAsType, PostgresConflictAction, PostgresSink, PostgresSinkEntity,
+    PostgresTableSink, PrometheusSourceEntity, PulsarSinkEntity, PulsarSourceEntity,
+    PulsarTopicSink, RabbitMqSinkEntity, RabbitMqSourceEntity, RedisPubSubIngestMode,
+    RedisPubSubSink, RedisPubSubSource, RedisSink, RedisSinkEntity, RedisSource, RedisSourceEntity,
+    RetryPolicy, SchemaName, SentryEventSink, SentrySink, SentrySinkEntity, SinkClientReference,
+    SinkReference, SinkValueMapping, SourceMetadataScope, SourceReferenceKind, SqsSinkEntity,
+    SqsSourceEntity, SyslogSinkEntity, SyslogSourceEntity, TableName, WebsocketsEndpointSource,
+    WebsocketsSourceEntity, ZeroMqSinkEntity, ZeroMqSourceEntity,
 };
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
+
+mod surface;
 
 fn named<N>(raw: &str) -> N
 where
@@ -605,42 +607,43 @@ fn the_metadata_scopes_declare_their_fields_in_order() {
 /// What one sink pair declares, as the table below states it.
 struct SinkDeclaration {
     writes_headers: bool,
-    requires_codec: bool,
-    batch_required: bool,
+    body: EmitterBodyForm,
+    batch: EmitterBatchLegality,
     requires_batch_transformation: bool,
-    bounded_batch: bool,
     modes: &'static [&'static str],
 }
 
 fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
     let codec = |writes_headers, modes| SinkDeclaration {
         writes_headers,
-        requires_codec: true,
-        batch_required: false,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        bounded_batch: false,
         modes,
     };
-    let request = |batch_required| SinkDeclaration {
+    let request = |batch| SinkDeclaration {
         writes_headers: false,
-        requires_codec: false,
-        batch_required,
+        body: EmitterBodyForm::Values,
+        batch,
         requires_batch_transformation: false,
-        bounded_batch: false,
         modes: &["RequestAck"],
     };
+    let required = EmitterBatchLegality::Required { maximum: None };
+    let optional = EmitterBatchLegality::Optional { maximum: None };
     match kind {
         EmitSinkKind::Client(ClientSinkEntity::Consumer) => SinkDeclaration {
             writes_headers: false,
-            requires_codec: false,
-            batch_required: true,
+            body: EmitterBodyForm::Native,
+            batch: required,
             requires_batch_transformation: false,
-            bounded_batch: false,
             modes: &["ClientAck"],
         },
         EmitSinkKind::Http(HttpSinkEntity::Request) => SinkDeclaration {
             writes_headers: true,
-            ..request(false)
+            body: EmitterBodyForm::CodecOrWithoutBody,
+            ..request(EmitterBatchLegality::Unavailable {
+                reason: BatchUnavailability::OneRequestPerRecord,
+            })
         },
         EmitSinkKind::Kafka(KafkaSinkEntity::Topic)
         | EmitSinkKind::Pulsar(PulsarSinkEntity::Topic)
@@ -653,7 +656,13 @@ fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
         }
         EmitSinkKind::Nats(NatsSinkEntity::Subject) => codec(true, &["NoAck", "NatsJetStream"]),
         EmitSinkKind::Sqs(SqsSinkEntity::Queue) => SinkDeclaration {
-            bounded_batch: true,
+            batch: EmitterBatchLegality::Optional {
+                maximum: Some(
+                    "256KiB"
+                        .parse()
+                        .assured("256 KiB is a whole number of bytes"),
+                ),
+            },
             ..codec(true, &["SqsSingle", "SqsBatch"])
         },
         EmitSinkKind::Sentry(SentrySinkEntity::Event) => SinkDeclaration {
@@ -663,11 +672,11 @@ fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
         EmitSinkKind::Otel(
             OtelSinkEntity::Logs | OtelSinkEntity::Traces | OtelSinkEntity::Metrics,
         )
-        | EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => request(false),
+        | EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => request(optional),
         EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table)
         | EmitSinkKind::Postgres(PostgresSinkEntity::Table)
         | EmitSinkKind::MySql(MySqlSinkEntity::Table)
-        | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => request(true),
+        | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => request(required),
     }
 }
 
@@ -677,24 +686,20 @@ fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
         let expected = sink_declaration(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.writes_headers, expected.writes_headers, "{kind:?}");
-        assert_eq!(declared.requires_codec, expected.requires_codec, "{kind:?}");
-        assert_eq!(
-            declared.batch_requirement == EmitterBatchRequirement::Required,
-            expected.batch_required,
-            "{kind:?}"
-        );
+        assert_eq!(declared.body, expected.body, "{kind:?}");
+        assert_eq!(declared.batch, expected.batch, "{kind:?}");
         assert_eq!(
             declared.requires_batch_transformation, expected.requires_batch_transformation,
-            "{kind:?}"
-        );
-        assert_eq!(
-            declared.batch_size_maximum.is_some(),
-            expected.bounded_batch,
             "{kind:?}"
         );
         for (name, mode) in publishing_modes() {
             assert_eq!(
                 kind.accepts_publishing_mode(&mode),
+                expected.modes.contains(&name),
+                "{kind:?} {name}"
+            );
+            assert_eq!(
+                declared.publishing_modes.contains(&mode.kind()),
                 expected.modes.contains(&name),
                 "{kind:?} {name}"
             );
@@ -704,10 +709,12 @@ fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
 
 #[test]
 fn the_sqs_sink_admits_at_most_the_message_size_sqs_does() {
-    let maximum = EmitSinkKind::Sqs(SqsSinkEntity::Queue)
-        .capabilities()
-        .batch_size_maximum
-        .assured("SQS fixes a message size");
+    let EmitterBatchLegality::Optional {
+        maximum: Some(maximum),
+    } = EmitSinkKind::Sqs(SqsSinkEntity::Queue).capabilities().batch
+    else {
+        panic!("SQS batches optionally, up to the message size it fixes");
+    };
     assert_eq!(maximum.bytes().get(), 256 * 1024);
 }
 
@@ -723,13 +730,12 @@ fn a_sink_states_what_its_pair_declares() {
             assert_eq!(sink.connector(), kind.connector());
             assert_eq!(sink.transport_label(), kind.connector().keyword());
             assert_eq!(sink.capabilities(), declared);
-            assert_eq!(sink.requires_codec(), declared.requires_codec);
-            assert_eq!(sink.batch_requirement(), declared.batch_requirement);
+            assert_eq!(sink.requires_codec(), declared.body.requires_codec());
+            assert_eq!(sink.batch_legality(), declared.batch);
             assert_eq!(
                 sink.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
-            assert_eq!(sink.batch_size_maximum(), declared.batch_size_maximum);
             for (name, mode) in publishing_modes() {
                 assert_eq!(
                     sink.accepts_publishing_mode(&mode),
@@ -1039,9 +1045,10 @@ fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
             let mut original = arbitrary.create_emitter_to(kind);
             // An alteration checks the batching contract again, which is not what this check is
             // about, so the emitter batches exactly as its sink requires.
-            original.batch = match original.sink.batch_requirement() {
-                EmitterBatchRequirement::Required => Some(admissible_batch()),
-                EmitterBatchRequirement::Optional => None,
+            original.batch = match original.sink.batch_legality() {
+                EmitterBatchLegality::Required { .. } => Some(admissible_batch()),
+                EmitterBatchLegality::Optional { .. }
+                | EmitterBatchLegality::Unavailable { .. } => None,
             };
             let alter = AlterEmitter {
                 emitter: original.name.clone(),

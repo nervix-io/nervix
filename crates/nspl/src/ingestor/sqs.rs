@@ -37,7 +37,7 @@ pub(super) fn queue_body<'src>()
     );
     client_ref()
         .then_ignore(kw(Identifier::Queue))
-        .then(external_name("sqs_queue", SqsQueueName::parse))
+        .then(external_name::<SqsQueueName>())
         .then(optional_instances())
         .then_ignore(kw(Identifier::Mode))
         .then(mode)

@@ -61,8 +61,8 @@ use lapin::{
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
-    SinkStartError, SinkStartResult,
+    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
+    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, QueueName};
@@ -690,7 +690,14 @@ impl RabbitMqSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for RabbitMqSink {}
+impl SinkLifecycle for RabbitMqSink {
+    /// A `NO_ACK` write ends with a round trip the broker answers only after it took every
+    /// message written before it, and a confirmed write awaits each confirm, so the channel holds
+    /// nothing once a publish returns.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for RabbitMqSink {

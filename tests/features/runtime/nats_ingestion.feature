@@ -130,11 +130,11 @@ Feature: NATS ingestion
     And a NATS endpoint the scenario controls is configured
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64

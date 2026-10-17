@@ -375,12 +375,12 @@ Feature: NATS emission
     And a NATS endpoint the scenario controls is configured
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And NATS JetStream stream "window_{{test_id}}" exists for subject "window_out_{{test_id}}"
-    When these NSPL commands are executed
+    When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA window_input ( sequence I64 );
       CREATE SCHEMA window_record ( sequence I64, padding STRING );

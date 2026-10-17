@@ -54,6 +54,12 @@ when the key is absent or already present; a borrowed `Ref` holds its shard unti
 Method names are not evidence: each access below was traced from its call site to the loop that
 drives it.
 
+Forced ownership schedule swaps make one additional lifecycle read of `RuntimeInner::executions`
+to resolve the affected relays' retained services after closing their dispatch gates. The typed
+plan identifies those relays; channel-generation retirement and record delivery use the retained
+handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
+the registry entries. The read guard ends before waiting for dispatch quiescence.
+
 The frequency of a map is its hottest access:
 
 - **per record**: once per accepted record, row or delivered message
@@ -217,7 +223,7 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | `RuntimeInner::replicated_branch_aggregated_states` | tasks and replication routes retain metric placement and progress; the registry handles registration and observation | retain: lifecycle registry |
 | `RuntimeInner::frozen_ownership_handoff_entities` | tasks bind one entity publication; watches register before reading it and handoff release publishes before waking | retain: lifecycle registry |
 | `RuntimeInner::domains` | task startup binds the lifecycle allocation; ingestion reads pause and clock from one publication, Kafka reads its generation, and generators use their retained clock | retain: lifecycle registry |
-| `RuntimeInner::executions` | schedule installation and observation bind clock, routing and state assignment publications; announcers retain their installed route and assignment slot | retain: lifecycle registry |
+| `RuntimeInner::executions` | schedule installation and observation bind clock, routing and state assignment publications; a forced-recovery request checks for its domain under the application sequence and waits on installation changes within its existing deadline; announcers retain their installed route and assignment slot | retain: lifecycle registry |
 | `DomainForceFlush::state` mutex | participant idle and claimed polls read their readiness hint; an available obligation acquires the coordinator for its authoritative generation claim | retain: bounded generation protocol |
 | Prometheus `MetricVec` children | client outcome children, quiesce payload counters/gauges and subscription drop counters resolve once with their owner | retain: lifecycle registry |
 | `RuntimeInner::endpoint_intake_routes` | one immutable publication; borrowed host/path resolution per HTTP request, retained route per WebSocket connection | completed publication: Typed Ratchet 12 |
@@ -263,7 +269,7 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `RuntimeInner::executions` | schedule installation and observation; tasks bind clock, routing and assignment handles | lifecycle, observer | start version and published lifecycle generation | no record or batch guard for the repaired sites | retain: lifecycle registry |
+| `RuntimeInner::executions` | schedule installation and observation; forced recovery waits for an absent execution under its operation deadline; tasks bind clock, routing and assignment handles | lifecycle, observer | start version and published lifecycle generation | no record or batch guard for the repaired sites | retain: lifecycle registry |
 | `RuntimeInner::domain_routings` (`ArcSwap` persistent table) | installed at successful publication, withdrawn at domain removal and cleared on shutdown; tasks retain the selected domain publisher; fresh intake and eviction read the immutable table | per fresh request or source batch; per eviction | one stable routing publisher per installed domain | changed key copies a persistent path; reads acquire no discovery shard | retain: immutable publication |
 | `RuntimeInner::domains` | committed lifecycle installation by graph installation, authority-only fence installation by the domain clock owner on each committed domain change, and task binding | lifecycle, observer | pause, generation and start point publish with clock installation; each entry records the committed revision of its lifecycle so an older installation never replaces a newer one | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
 | `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; intake-only and full alteration hold engagement/release; the first local intake close snapshots quiescence keys before shutdown ownership handoffs; drain polls and `DESCRIBE` | lifecycle, observer; one scan on the open-to-closed intake transition, repeated closes return before scanning | hosts and both overlapping holds retain the exact control; releasing one hold removes only its share | short; the intake-close scan copies keys before engaging their controls | retain: lifecycle registry |
@@ -344,6 +350,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::startup_voter_gossip` | Armed after cluster stop; direct-link controls, digest heartbeat freezing, and the first reconciliation barrier read receiver-scoped entries; release removes the entry after that pass completes | test-only startup fault observation |
 | `FaultInjectionState::guest_save_interruptions` | Armed by a guest-save backup scenario and consumed once as that entity's owner starts its selected section; never reached during ordinary product execution | test-only capture fault control |
 | `FaultInjectionState::domain_clock_authority_proposal_rejections` | Armed by a clock takeover scenario or unit test and consumed once as that node, as leader, proposes an authority reconciliation; never reached during ordinary product execution | test-only clock fault control |
+| `FaultInjectionState::command_pauses` | Scenario-controlled one-shot boundaries; the forced-recovery startup fixture also records a missing destination schedule and releases that node's held initial installation. Scenario cleanup releases and clears the retained observations | test-only command and startup fault control |
+| `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 ### Rust client attachment recovery

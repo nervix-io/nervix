@@ -25,6 +25,36 @@ use super::*;
 const JOINS: &str = "Shuttle fails an execution when a model thread panics";
 
 #[test]
+fn shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication() {
+    check_interleavings(|| {
+        let channels = Arc::new(RelayChannels::default());
+        let branch = channels.bind(&None);
+        let retained = branch.ingress();
+        let producer = thread::spawn(move || {
+            branch.outbound(RelayOutboundChannel {
+                node_id: ClusterNodeName::parse("node-3").assured("valid peer"),
+                relay: RelayName::parse("events").assured("valid relay"),
+                kind: RelayPayloadKind::Routed,
+            })
+        });
+        let fencing = channels.clone();
+        let fence = thread::spawn(move || fencing.fence_routing());
+        let racing = producer.join().assured(JOINS);
+        fence.join().assured(JOINS);
+        assert!(retained.cancellation().is_cancelled());
+        assert!(racing.cancellation().is_cancelled());
+        let during = channels.bind(&None).ingress();
+        assert!(during.cancellation().is_cancelled());
+        channels.replace_destinations();
+        let successor = channels.bind(&None).ingress();
+        assert!(!successor.cancellation().is_cancelled());
+        assert!(retained.cancellation().is_cancelled());
+        assert!(racing.cancellation().is_cancelled());
+        assert!(during.cancellation().is_cancelled());
+    });
+}
+
+#[test]
 fn shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slot() {
     check_interleavings(|| {
         let channels = Arc::new(RelayChannels::default());

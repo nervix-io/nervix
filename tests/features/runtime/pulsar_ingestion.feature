@@ -58,6 +58,69 @@ Feature: Pulsar ingestion
       | 3            | 1         | 1             |
       | 3            | 2         | 1             |
 
+  Scenario Outline: A Pulsar ingestor delivers every payload it reads under MODE <delivery>
+    Given Pulsar is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT pulsar_main
+      TYPE PULSAR
+      CONFIG {
+        'addr' = '{{pulsar_addr}}'
+      };
+      CREATE PULSAR TOPIC INGESTOR pulsar_notifications
+      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' MODE <mode>
+      ON QUIESCE SUSPEND DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    When Pulsar message is published to topic "notifications_modes_{{test_id}}"
+      """
+      {"user_id":41}
+      """
+    And Pulsar message is published to topic "notifications_modes_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    And Pulsar message is published to topic "notifications_modes_{{test_id}}"
+      """
+      {"user_id":43}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "user_id":41
+      "user_id":42
+      "user_id":43
+      """
+
+    Examples:
+      | cluster_size | delivery     | mode                                                                                     |
+      | 1            | NO ACK       | NO ACK                                                                                   |
+      | 3            | NO ACK       | NO ACK                                                                                   |
+      | 1            | ACK PARALLEL | ACK PARALLEL MAX 4 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
+      | 3            | ACK PARALLEL | ACK PARALLEL MAX 4 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
+
   Scenario Outline: Pulsar ingestor reports transient source failures and recovers
     Given Pulsar is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

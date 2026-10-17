@@ -278,6 +278,47 @@ class MergeTests(unittest.TestCase):
         self.assertIn("SF:scripts/tool.py\nFN:1,2,Tool.run\nFNDA:1,Tool.run\nFNF:1\nFNH:1\nDA:1,1\nDA:2,1\n", report)
         self.assertNotIn("BR", report)
 
+    def test_a_line_counter_that_wrapped_below_zero_is_left_out_of_the_sum_and_recorded(self) -> None:
+        wrapped = 2**64 - 1
+        tests = self.workspace.export("tests", TESTS_ROOT, {
+            f"{TESTS_ROOT}/src/lib.rs": {1: 3, 2: 1, 4: 1, 5: 1},
+            f"{TESTS_ROOT}/crates/alpha/src/lib.rs": {1: 1},
+        })
+        scenarios = self.workspace.export("scenarios", SCENARIOS_ROOT, {
+            f"{SCENARIOS_ROOT}/src/lib.rs": {1: wrapped, 2: 5, 3: 2**64 - 2, 4: 2**63 - 1, 5: 2**63},
+        })
+        merge, report = self.workspace.merge(tests, scenarios)
+        # Line 3 has no counter but a wrapped one, so the merged report does not measure it.
+        self.assertEqual(counters(report, "src/lib.rs"), {1: 3, 2: 6, 4: 2**63, 5: 1})
+        described = merge.describe()
+        [tests_input, scenarios_input] = described["inputs"]
+        self.assertEqual(tests_input["reports"][0]["wrapped"], [])
+        self.assertEqual(scenarios_input["reports"][0]["wrapped"], [
+            {"source": "src/lib.rs", "line": 1, "count": wrapped},
+            {"source": "src/lib.rs", "line": 3, "count": 2**64 - 2},
+            {"source": "src/lib.rs", "line": 5, "count": 2**63},
+        ])
+        self.assertEqual(described["wrapped_counters"], 3)
+        self.assertIn("wrapped", described["policy"])
+        self.assertIn("Counters that wrapped below zero, left out of the sum: 3", merge.summary("report", "record"))
+
+    def test_a_function_counter_that_wrapped_below_zero_is_left_out_of_the_sum_and_recorded(self) -> None:
+        tests = self.workspace.export("tests", TESTS_ROOT, {f"{TESTS_ROOT}/crates/alpha/src/lib.rs": {1: 1}})
+        (tests / coverage_merge.WORKSPACE_REPORT).write_text(
+            (tests / coverage_merge.WORKSPACE_REPORT).read_text()
+            + f"SF:{TESTS_ROOT}/src/lib.rs\nFN:1,2,main\nFNDA:{2**64 - 1},main\nDA:1,1\nend_of_record\n"
+        )
+        scenarios = self.workspace.export("scenarios", SCENARIOS_ROOT, {})
+        (scenarios / coverage_merge.WORKSPACE_REPORT).write_text(
+            f"SF:{SCENARIOS_ROOT}/src/lib.rs\nFN:1,2,main\nFNDA:4,main\nDA:1,2\nend_of_record\n"
+        )
+        merge, report = self.workspace.merge(tests, scenarios)
+        self.assertIn("SF:src/lib.rs\nFN:1,2,main\nFNDA:4,main\nFNF:1\nFNH:1\nDA:1,3\n", report)
+        [tests_input, _] = merge.describe()["inputs"]
+        self.assertEqual(
+            tests_input["reports"][0]["wrapped"], [{"source": "src/lib.rs", "function": "main", "count": 2**64 - 1}]
+        )
+
     def test_files_outside_the_reports_of_an_input_are_never_read(self) -> None:
         tests = self.workspace.export("tests", TESTS_ROOT, {f"{TESTS_ROOT}/src/lib.rs": {1: 1}})
         (tests / "lcov.info").write_text(lcov({f"{TESTS_ROOT}/src/runtime/mod.rs": {1: 1}}))
@@ -452,6 +493,19 @@ class CommandTests(unittest.TestCase):
         status, errors = self.main(str(tests))
         self.assertEqual(status, 1)
         self.assertIn("coverage-inputs/tests/lcov-workspace.info: malformed LCOV line", errors)
+        self.assertFalse(self.output.exists())
+
+    def test_a_malformed_function_counter_fails_with_its_location(self) -> None:
+        tests = self.workspace.producer("tests", TESTS_ROOT)
+        (tests / coverage_merge.WORKSPACE_REPORT).write_text(
+            "SF:/ci/tests/nervix/src/lib.rs\nFN:1,2,main\nFNDA:many,main\nDA:1,1\nend_of_record\n"
+        )
+        status, errors = self.main(str(tests))
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "coverage-inputs/tests/lcov-workspace.info: malformed LCOV line in the record of src/lib.rs: FNDA:many,main",
+            errors,
+        )
         self.assertFalse(self.output.exists())
 
 

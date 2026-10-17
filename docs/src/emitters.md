@@ -940,8 +940,12 @@ producer timeout, crash, or process exit can therefore lose an accepted record. 
 is an infrastructure condition paced by the declared retry policy with backpressure. In `ACK` it
 ends the attempt without discarding an answer the broker already gave: the records the broker
 confirmed are delivered and are not sent again, and only the records still awaiting a report are
-retried. Graceful shutdown drains queued records within the node drain bound in both modes. A
-definitive record-specific rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
+retried. When the emitter stops, it flushes what the producer still queues, in both modes and
+regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
+the node's graceful shutdown each give that flush their deadline. Records still queued when the
+deadline passes are lost; `DESCRIBE EMITTER` reports how many as its transient error, and a
+replacement that cannot flush fails and keeps the running emitter. A definitive record-specific
+rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 
@@ -954,7 +958,8 @@ TO PULSAR <client> TOPIC <topic>
 
 `ACK` waits for each broker receipt. `NO_ACK` acknowledges producer acceptance and does not expose
 later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
-pipelines producer work.
+pipelines producer work. Messages the producer accepted under `NO_ACK` and has not sent when the
+emitter stops are discarded with the producer, which the node logs at `warn`.
 
 A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
 connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
@@ -1030,8 +1035,9 @@ TO MQTT <client> TOPIC <topic>
          RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
 
-QoS 0 acknowledges client acceptance. QoS 1 waits for `PUBACK`; QoS 2 waits for the complete
-exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
+QoS 0 acknowledges client acceptance, and QoS 0 publishes still queued in the client when the
+emitter stops are discarded with it, which the node logs at `warn`. QoS 1 waits for `PUBACK`; QoS 2
+waits for the complete exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
 policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
@@ -1404,9 +1410,11 @@ stores unchanged, where schemaful JSON codecs write padded base64.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
-land and only poison rows follow `ON MESSAGE ERROR`. Isolation can reapply rows from the failed
-insert; use the sink's idempotent write facilities where available. Dividing a flush into inserts
-also means one flush is not an atomic database transaction.
+land and only poison rows follow `ON MESSAGE ERROR`. Postgres re-executes them on the connection the
+failed insert already holds, so the rejection is routed without waiting for the client's pool, as
+[Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
+reapply rows from the failed insert; use the sink's idempotent write facilities where available.
+Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
 SQLSTATE and code. Destination response text can quote a bound value, so it is not included in
 diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
@@ -1747,8 +1755,10 @@ resends only records not yet confirmed or definitively rejected. With the
 [batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
 yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
-after a crash or downstream failure. External broker durability and idempotence settings remain
-the user's client and service configuration.
+after a crash or downstream failure. A stop sends what a Kafka producer still queues within the
+stop's deadline, while Pulsar `NO_ACK` and MQTT QoS 0 discard what their clients still queue; see
+[Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
+idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
 completes only after every attached emitter reaches its sink completion point. A failure on any
