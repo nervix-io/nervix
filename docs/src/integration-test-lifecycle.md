@@ -701,6 +701,13 @@ without expiring the records whose match policy it asserts. The Kafka handoff sc
 after entity-gate engagement uses a test-configured two-minute gate lease so its broker-delivery
 assertions and pause release fit inside the handoff budget under concurrent suite load.
 
+The branch-activity sampling scenario starts its second initial branch after the first branch's
+observed expiration. It observes each initial branch appearing and disappearing before posting
+fresh records: one branch's absence cannot establish another branch's lifetime, and HTTP acceptance
+does not establish when its branch task processed the record. The final observed expiration marks
+the physical maintenance scan used by the following idle and arrival steps; logical TTLs, scan
+latency and exact correlation pairings remain separate assertions.
+
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match
 its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery

@@ -5,11 +5,11 @@ Feature: Branch activity sampling
     Given branched relay expiration scan interval is configured as "6s"
     And runtime replication is configured with replica count 0 and snapshot interval "30s"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus statements are executed on the leader node
       """
       START AT NOW TIME RATE <time_rate>;
 
@@ -100,21 +100,31 @@ Feature: Branch activity sampling
       """
       {"user_id":42,"event_seq":1}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
+    Then within "20s" node "node-1" eventually reports describe relay as "exists"
+      """
+      DESCRIBE RELAY left_events WHERE (user_id = 42);
+      """
+    And within "30s" node "node-1" eventually reports describe relay as "not exists"
+      """
+      DESCRIBE RELAY left_events WHERE (user_id = 42);
+      """
+    # Stagger the initial arrivals across a scan: one branch's expiration cannot establish the
+    # other branch's lifetime. Both initial records must expire before the fresh records arrive.
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
       """
       {"user_id":7,"event_seq":2}
       """
     Then within "20s" node "node-1" eventually reports describe relay as "exists"
       """
-      DESCRIBE RELAY left_events WHERE (user_id = 42);
+      DESCRIBE RELAY left_events WHERE (user_id = 7);
+      """
+    And within "30s" node "node-1" eventually reports describe relay as "not exists"
+      """
+      DESCRIBE RELAY left_events WHERE (user_id = 7);
       """
     # Retention is enforced by a physical maintenance scan whose latency is separate from the
     # logical expiration boundary. The observed expiration therefore marks a scan boundary, and
     # idling towards the next one leaves the supervisors waiting for input across it.
-    And within "30s" node "node-1" eventually reports describe relay as "not exists"
-      """
-      DESCRIBE RELAY left_events WHERE (user_id = 42);
-      """
     When physical time passes for "4500ms"
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
       """
