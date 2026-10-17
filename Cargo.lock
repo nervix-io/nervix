@@ -6968,12 +6968,12 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
- "humantime",
- "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -7125,8 +7125,10 @@ name = "nervix-connector-sentry"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
@@ -7136,6 +7138,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -114,8 +114,8 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
-        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
+        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -125,6 +125,7 @@ use crate::common::{
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
+    nats_endpoint::NatsEndpoint,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
@@ -162,6 +163,7 @@ mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
 mod mqtt_fixtures;
+mod mqtt_sessions;
 mod mysql_isolation;
 mod paced_replication;
 mod paced_simulation;
@@ -473,6 +475,9 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
+    /// that connect through it.
+    nats_endpoint: Option<NatsEndpoint>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
@@ -600,6 +605,7 @@ impl fmt::Debug for ScenarioWorld {
             )
             .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
+            .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
@@ -913,6 +919,71 @@ async fn given_stallable_rabbitmq_endpoint(world: &mut ScenarioWorld) {
 #[given("a stallable MQTT endpoint is configured")]
 async fn given_stallable_mqtt_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "mqtt", MQTT_ADDR, "mqtt_stallable_addr").await;
+}
+
+/// Stands an endpoint the scenario controls in front of the NATS server, and names its address
+/// `{{nats_controlled_addr}}`.
+#[given("a NATS endpoint the scenario controls is configured")]
+async fn given_controlled_nats_endpoint(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(NATS_ADDR)
+        .unwrap_or_else(|error| panic!("NATS endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse NATS endpoint '{endpoint}': {error}"));
+    // `nats` is not a special URL scheme, so the URL keeps its host as opaque text.
+    let server_ip = match endpoint_url.host() {
+        Some(url::Host::Ipv4(address)) => std::net::IpAddr::V4(address),
+        Some(url::Host::Ipv6(address)) => std::net::IpAddr::V6(address),
+        Some(url::Host::Domain(host)) => host.parse().unwrap_or_else(|error| {
+            panic!("NATS endpoint '{endpoint}' does not name the server by its IP address: {error}")
+        }),
+        None => panic!("NATS endpoint '{endpoint}' has no host"),
+    };
+    let server_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("NATS endpoint '{endpoint}' has no explicit port"));
+    let controlled = NatsEndpoint::start(std::net::SocketAddr::new(server_ip, server_port))
+        .await
+        .unwrap_or_else(|error| panic!("failed to start the controlled NATS endpoint: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in NATS endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(controlled.local_port()))
+        .unwrap_or_else(|()| panic!("failed to replace port in NATS endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert("nats_controlled_addr".to_string(), endpoint_url.to_string());
+    world.nats_endpoint = Some(controlled);
+}
+
+fn controlled_nats_endpoint(world: &ScenarioWorld) -> &NatsEndpoint {
+    world
+        .nats_endpoint
+        .as_ref()
+        .expect("a NATS endpoint the scenario controls must be configured first")
+}
+
+/// The endpoint ends every connection it forwards and refuses new ones, as a NATS server that went
+/// down, while the server itself keeps running for the other scenarios that share it.
+#[when("the controlled NATS endpoint goes down")]
+fn when_controlled_nats_endpoint_goes_down(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).go_down();
+}
+
+/// The endpoint forwards everything clients send again and accepts new connections.
+#[when("the controlled NATS endpoint forwards everything")]
+fn when_controlled_nats_endpoint_forwards_everything(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).forward_everything();
+}
+
+/// Each connection forwards `publishes` more publishes and then stops reading what its client
+/// sends, while what the server sends still reaches the client.
+#[when(expr = "the controlled NATS endpoint holds what each client sends after {int} publishes")]
+fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishes: usize) {
+    controlled_nats_endpoint(world).hold_after(publishes);
 }
 
 /// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
@@ -1598,6 +1669,23 @@ async fn then_http_receiver_request_has_no_header(
     assert!(
         request.header_values(&header).is_empty(),
         "HTTP receiver '{name}' request {position} unexpectedly carries '{header}':\n{request}"
+    );
+}
+
+/// Compares envelope bytes across attempts independently of transport authentication that a
+/// reopened client may refresh.
+#[then(expr = "HTTP receiver {string} request {int} repeats the body of request {int}")]
+async fn then_http_receiver_request_repeats_body(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    let repeated_request = captured_http_request(world, &name, repeated);
+    let original_request = captured_http_request(world, &name, original);
+    assert_eq!(
+        repeated_request.body, original_request.body,
+        "HTTP receiver '{name}' request {repeated} body differs from request {original} body"
     );
 }
 
@@ -23495,19 +23583,35 @@ async fn when_nats_message_is_published(
         .expect("failed to publish nats message");
 }
 
+/// Provisions JetStream stream `stream` capturing `subject`, as an operator does.
+async fn provision_nats_jetstream_stream(world: &mut ScenarioWorld, stream: &str, subject: &str) {
+    let stream = expand_placeholders(world, stream);
+    let subject = expand_placeholders(world, subject);
+    world
+        .cluster()
+        .provision_nats_stream(&stream, &subject)
+        .await
+        .expect("failed to provision NATS JetStream stream");
+}
+
+/// The stream exists before the scenario's graph publishes to it.
+#[given(expr = "NATS JetStream stream {string} exists for subject {string}")]
+async fn given_nats_jetstream_stream_exists(
+    world: &mut ScenarioWorld,
+    stream: String,
+    subject: String,
+) {
+    provision_nats_jetstream_stream(world, &stream, &subject).await;
+}
+
+/// An operator provisions the stream while the scenario's graph already publishes to its subject.
 #[when(expr = "NATS JetStream stream {string} is provisioned for subject {string}")]
 async fn when_nats_jetstream_stream_is_provisioned(
     world: &mut ScenarioWorld,
     stream: String,
     subject: String,
 ) {
-    let stream = expand_placeholders(world, &stream);
-    let subject = expand_placeholders(world, &subject);
-    world
-        .cluster()
-        .provision_nats_stream(&stream, &subject)
-        .await
-        .expect("failed to provision NATS JetStream stream");
+    provision_nats_jetstream_stream(world, &stream, &subject).await;
 }
 
 #[then(expr = "NATS JetStream stream {string} eventually contains a payload on subject {string}")]
@@ -23525,6 +23629,158 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+/// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
+/// carries `n` in `field`.
+///
+/// The message is published exactly once, because the steps after it count how many times each
+/// record arrives; a second copy would deliver every record twice. An ingestor that reports itself
+/// ready has already subscribed, so the one copy reaches it.
+#[when(
+    expr = "a NATS message carrying records 1 to {int} by field {string} is published to subject \
+            {string}"
+)]
+async fn when_nats_message_carrying_records_is_published(
+    world: &mut ScenarioWorld,
+    count: i64,
+    field: String,
+    subject: String,
+) {
+    let subject = expand_placeholders(world, &subject);
+    let records = (1..=count)
+        .map(|value| serde_json::json!({ field.as_str(): value }))
+        .collect::<Vec<_>>();
+    let payload = serde_json::Value::Array(records).to_string();
+    world
+        .cluster()
+        .publish_nats_payloads(&subject, std::slice::from_ref(&payload))
+        .await
+        .expect("failed to publish a NATS message carrying records");
+}
+
+/// The runs of consecutive values in `values`, in order, such as `1-16, 17-5900, 1-12000`: how
+/// the records a stream holds were published, attempt by attempt. At most `limit` runs are named.
+fn consecutive_runs(values: &[i64], limit: usize) -> String {
+    struct ValueRun {
+        first: i64,
+        last: i64,
+    }
+    let mut runs: Vec<ValueRun> = Vec::new();
+    for value in values {
+        let next_of_last_run = match runs.last() {
+            Some(run) => run.last.checked_add(1) == Some(*value),
+            None => false,
+        };
+        match runs.last_mut() {
+            Some(run) if next_of_last_run => run.last = *value,
+            _ => runs.push(ValueRun {
+                first: *value,
+                last: *value,
+            }),
+        }
+    }
+    let mut named = Vec::new();
+    for run in runs.iter().take(limit) {
+        named.push(format!("{}-{}", run.first, run.last));
+    }
+    if runs.len() > limit {
+        named.push(format!("… {} runs in all", runs.len()));
+    }
+    named.join(", ")
+}
+
+/// Waits until JetStream `stream` holds a message for every value from 1 to `last` of `field`,
+/// then requires that it holds exactly one message for each value from 1 to `once`.
+#[then(
+    expr = "within {string} NATS JetStream stream {string} holds every record from 1 to {int} by \
+            field {string}, and records 1 to {int} exactly once"
+)]
+async fn then_nats_jetstream_stream_holds_records(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stream: String,
+    last: i64,
+    field: String,
+    once: i64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let stream = expand_placeholders(world, &stream);
+    let deadline = Instant::now() + duration;
+    let least = u64::try_from(last).expect("a record count is not negative");
+    let values = loop {
+        nervix_primitives::task::consume_budget().await;
+        // The stream cannot hold every record before it holds as many messages, and counting the
+        // messages is far cheaper than reading them.
+        let held = world
+            .cluster()
+            .nats_stream_message_count(&stream)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read NATS JetStream stream '{stream}': {error}")
+            });
+        if held < least {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for NATS JetStream stream '{stream}' to hold every record from \
+                 1 to {last} by '{field}'; it holds {held} messages"
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        let values = world
+            .cluster()
+            .nats_stream_field_values(&stream, &field)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read NATS JetStream stream '{stream}': {error}")
+            });
+        let held_values = values.iter().copied().collect::<BTreeSet<_>>();
+        let mut missing = Vec::new();
+        for value in 1..=last {
+            if !held_values.contains(&value) {
+                missing.push(value);
+            }
+        }
+        if missing.is_empty() {
+            break values;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for NATS JetStream stream '{stream}' to hold every record from 1 \
+             to {last} by '{field}'; {} are missing, the first of them {:?}",
+            missing.len(),
+            missing.iter().take(16).collect::<Vec<_>>(),
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+    };
+    let mut counts = BTreeMap::new();
+    for value in &values {
+        let count = counts.entry(*value).or_insert(0_usize);
+        *count = count
+            .checked_add(1)
+            .expect("a stream holds fewer messages than usize counts");
+    }
+    let mut repeated = Vec::new();
+    for value in 1..=once {
+        let held = match counts.get(&value) {
+            Some(held) => *held,
+            None => 0,
+        };
+        if held != 1 {
+            repeated.push((value, held));
+        }
+    }
+    assert!(
+        repeated.is_empty(),
+        "NATS JetStream stream '{stream}' holds {} of the records 1 to {once} by '{field}' other \
+         than exactly once, as (record, messages): {:?}. It holds {} messages, stored as the runs \
+         {}",
+        repeated.len(),
+        repeated.iter().take(16).collect::<Vec<_>>(),
+        values.len(),
+        consecutive_runs(&values, 32),
+    );
 }
 
 #[when(expr = "{int} sequential NATS messages are published to subject {string}")]
@@ -27019,6 +27275,63 @@ async fn then_last_observed_broker_message_has_headers(
     }
 }
 
+/// A Sentry recorder deduplicates complete envelopes by event id, including requests whose
+/// success response was lost. Keep the raw attempts to compare retries independently of that
+/// deduplication, and check both the envelope header and the event's complete supplied fields.
+#[then(expr = "Sentry receiver {string} recorded {int} distinct event(s) across {int} attempt(s)")]
+async fn then_sentry_receiver_recorded_events(
+    world: &mut ScenarioWorld,
+    name: String,
+    events: usize,
+    attempts: usize,
+    #[step] step: &Step,
+) {
+    let expected: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&expand_placeholders(world, docstring(step)))
+            .assured("the scenario supplies a valid expected event object");
+    let captured = http_receiver(world, &name).captured();
+    assert_eq!(captured.len(), attempts, "Sentry envelope attempt count");
+    let mut recorded = BTreeMap::new();
+    for request in captured {
+        assert_eq!(request.request_line(), "POST /api/1/envelope/");
+        assert_eq!(
+            request.header_values("content-type"),
+            vec![b"application/x-sentry-envelope".as_slice()]
+        );
+        assert_eq!(request.header_values("x-sentry-auth").len(), 1);
+        let mut lines = request.body.split(|byte| *byte == b'\n');
+        let header: serde_json::Value = serde_json::from_slice(
+            lines
+                .next()
+                .assured("a captured envelope has a header line"),
+        )
+        .assured("the envelope header is valid JSON");
+        let item: serde_json::Value =
+            serde_json::from_slice(lines.next().assured("a captured envelope has an item line"))
+                .assured("the envelope item header is valid JSON");
+        let bytes = lines
+            .next()
+            .assured("a captured envelope has an event line");
+        let event: serde_json::Value =
+            serde_json::from_slice(bytes).assured("the envelope event is valid JSON");
+        let id = header["event_id"]
+            .as_str()
+            .assured("a captured envelope has an event id");
+        uuid::Uuid::parse_str(id).assured("the envelope id is a valid UUID");
+        assert_eq!(event["event_id"], id);
+        assert_eq!(item["type"], "event");
+        assert_eq!(item["length"], bytes.len());
+        assert_eq!(item["content_type"], "application/json");
+        for (field, value) in &expected {
+            assert_eq!(&event[field], value, "Sentry event field {field}");
+        }
+        if let Some(previous) = recorded.insert(id.to_owned(), event.clone()) {
+            assert_eq!(previous, event, "one Sentry event id has one event");
+        }
+    }
+    assert_eq!(recorded.len(), events, "Sentry deduplicated event count");
+}
+
 #[then("Sentry eventually receives an event")]
 async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected =
@@ -29946,6 +30259,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
