@@ -44,12 +44,13 @@ use connection::{FailedRequest, SqsTrust};
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
-    client_tls_paths, optional_client_config_value, read_tls_file,
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
+use nervix_primitives::time::Instant;
 use nervix_simd_kernels::{XmlChars, XmlCharsError};
 pub use source::{
     SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
@@ -677,7 +678,12 @@ impl SqsSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for SqsSink {}
+impl SinkLifecycle for SqsSink {
+    /// Each send is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SqsSink {

@@ -27,11 +27,12 @@ mod source;
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord,
-    SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
-    optional_client_config_value,
+    PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    client_config_value, optional_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::time::Instant;
 pub use source::{ZeroMqSource, ZeroMqSourceError, ZeroMqSourceMessage, ZeroMqSourcePlan};
 use zeromq::{PushSocket, Socket, SocketSend};
 
@@ -101,7 +102,13 @@ impl ZeroMqSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for ZeroMqSink {}
+impl SinkLifecycle for ZeroMqSink {
+    /// Each send writes and flushes its frame to a peer's socket before it returns, so the
+    /// socket holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for ZeroMqSink {

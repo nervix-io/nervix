@@ -92,10 +92,11 @@ impl MySqlConnections for PooledSinkClient {
 
 #[async_trait]
 impl PostgresConnections for PooledSinkClient {
-    /// Borrow a connection for one operation, reporting the wait until the pool hands one over.
+    /// Borrow a connection for one insert, reporting the wait until the pool hands one over.
     ///
-    /// The borrow covers a bounded insert or its metadata work and no more: between inserts, and
-    /// across a flush interval or a retry backoff, this sink holds no connection.
+    /// The borrow covers one bounded insert, together with the write's metadata lookup on its first
+    /// insert and the isolation of the rows of an insert the database refused, and no more: between
+    /// inserts, and across a flush interval or a retry backoff, this sink holds no connection.
     async fn connection(&self) -> SinkPublishResult<PostgresConnection> {
         let pool = self
             .lease

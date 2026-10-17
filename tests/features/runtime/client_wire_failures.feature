@@ -271,7 +271,7 @@ Feature: Client wire failure regressions
 
   @client_wire_execution_history
   Scenario Outline: A reclaimed command identity stays expired after a durable restart
-    Given command retry identities are valid for "1s"
+    Given command retry identities are valid for "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands

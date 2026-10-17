@@ -30,6 +30,32 @@ Feature: Drain node
       - kind=junction name=handoff_junction from={{drained_owner}} to=
       """
 
+  Scenario: A drain retries a gate engagement whose interconnect stream broke
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA transport_event ( id I64 );
+      CREATE RELAY transport_input SCHEMA transport_event UNBRANCHED;
+      CREATE RELAY transport_output SCHEMA transport_event UNBRANCHED;
+      CREATE JUNCTION transport_junction FROM transport_input UNBRANCHED
+        TO transport_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "junction" "transport_junction" is saved as placeholder "drained_owner"
+    Given the next ownership handoff gate engagement request in domain "{{domain}}" breaks in transport
+    When these NSPL commands are executed on the leader node
+      """
+      DRAIN NODE {{drained_owner}};
+      """
+    Then the last command output contains
+      """
+      drained node '{{drained_owner}}' (moved 2 of 2 scheduled graph node(s))
+      """
+    And the broken ownership handoff gate engagement request in domain "{{domain}}" was delivered
+
   @planned-handoff-owner-loss
   Scenario: Losing the former owner during a held drain leaves relocation to failover
     Given entity gate deadline is configured as "60s"

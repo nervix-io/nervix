@@ -61,11 +61,11 @@ path = "crates/connectors/kafka/src/lib.rs"
 reason = "librdkafka's flush parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole drain."
 
 [[permission]]
-bound = "Each metadata request carries a five-second timeout, and a partition watch makes one request per watch interval."
+bound = "Each metadata request carries a five-second timeout, and a partition watch makes one request per watch interval. A source instance has at most one offset commit in flight: it waits for the answer at most thirty seconds, and its next commit waits for an unanswered one before it starts."
 items = ["task::spawn_blocking"]
-owner = "The Kafka source's partition inspection."
+owner = "The Kafka source's partition inspection and consumer-group offset commits."
 path = "crates/connectors/kafka/src/source.rs"
-reason = "librdkafka's metadata fetch parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole request."
+reason = "librdkafka's metadata fetch and synchronous offset commit park their calling thread until the broker answers. They wait on the network and compute nothing, so they would hold a CPU or storage worker idle for the whole request."
 
 [[permission]]
 bound = "One rename of the archive the client already wrote and synchronized."

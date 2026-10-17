@@ -121,6 +121,9 @@ tags = [
   "@shutdown_flush_before_freeze",
   "@shutdown_source_confirmation",
   "@shutdown_source_confirmation_handoff",
+  "@shutdown_kafka_refused_commit",
+  "@shutdown_emitter_finish",
+  "@emitter_finish_at_stop",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
@@ -584,6 +587,36 @@ id = "scenario.shutdown-source-confirmation-handoff"
 invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
 invocation = "scenarios"
 scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A graceful stop and restart of a Kafka ingestor's owner on one and three nodes, after a consumer group commit the broker refused was read and committed again, while tracked source controls and ACK completion run during the stop and, on three nodes, the planned handoff. The mock broker, the Kafka client and the commit's blocking-pool wait are untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-kafka-refused-commit"
+invariant = "A Kafka ingestor reports a batch as acknowledged only once the broker answered its commit, so a batch whose commit was refused is read and committed again and restarting its owner reads nothing twice."
+invocation = "scenarios"
+scenario = "A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A one-node graceful shutdown whose in-place drain ends while a NO ACK Kafka emitter's producer still queues records it delivered. Terminal teardown hands the emitter its finish deadline before the domain's stop and finishes the sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-emitter-finish"
+invariant = "A node that stops in place finishes every emitter's sink by its shutdown deadline, so a NO ACK Kafka emitter's producer sends the records it still queued before the node stops."
+invocation = "scenarios"
+scenario = "A single node sends the records its NO ACK Kafka emitter's producer holds before it stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "STOP on one and three nodes tears down a NO ACK Kafka emitter whose producer still queues records it delivered. The domain teardown hands every emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_emission.feature"
+id = "scenario.emitter-finish-at-stop"
+invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
+invocation = "scenarios"
+scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1630,6 +1663,26 @@ scenario = "A node that stops in place keeps draining until its transport confir
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: a one-node graceful shutdown whose in-place drain ends while a NO ACK Kafka emitter's producer still queues records it delivered. Terminal teardown hands the emitter its finish deadline before the domain's stop and finishes the sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-emitter-finish"
+invariant = "A node that stops in place finishes every emitter's sink by its shutdown deadline, so a NO ACK Kafka emitter's producer sends the records it still queued before the node stops."
+invocation = "stress-scenarios"
+scenario = "A single node sends the records its NO ACK Kafka emitter's producer holds before it stops"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes tears down a NO ACK Kafka emitter whose producer still queues records it delivered. The domain teardown hands every emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_emission.feature"
+id = "stress.emitter-finish-at-stop"
+invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
+invocation = "stress-scenarios"
+scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: a three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, with tracked entity-gate state, source controls and ACK completion during the stop. The confirmation delay, the Kafka client and transport waits remain untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -1637,6 +1690,16 @@ id = "stress.shutdown-source-confirmation-handoff"
 invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
 invocation = "stress-scenarios"
 scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a graceful stop and restart of a Kafka ingestor's owner on one and three nodes, after a consumer group commit the broker refused was read and committed again, with tracked source controls and ACK completion during the stop and, on three nodes, the planned handoff. The mock broker, the Kafka client and the commit's blocking-pool wait remain untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-kafka-refused-commit"
+invariant = "A Kafka ingestor reports a batch as acknowledged only once the broker answered its commit, so a batch whose commit was refused is read and committed again and restarting its owner reads nothing twice."
+invocation = "stress-scenarios"
+scenario = "A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2191,6 +2254,8 @@ workloads = [
   "scenario.shutdown-source-confirmation-handoff",
   "stress.shutdown-source-confirmation",
   "stress.shutdown-source-confirmation-handoff",
+  "scenario.shutdown-kafka-refused-commit",
+  "stress.shutdown-kafka-refused-commit",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
@@ -2279,10 +2344,12 @@ workloads = [
   "scenario.client-alter-drain",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
+  "scenario.shutdown-kafka-refused-commit",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
   "stress.shutdown-source-confirmation",
   "stress.shutdown-source-confirmation-handoff",
+  "stress.shutdown-kafka-refused-commit",
   "stress.wasm-kafka-restore",
 ]
 
