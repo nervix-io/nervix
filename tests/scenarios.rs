@@ -105,7 +105,8 @@ use crate::common::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
+        WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        client_connect_options, client_domain, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -401,6 +402,8 @@ struct ScenarioWorld {
     /// Releases the Postgres table lock a contention scenario is holding, if one is held. The
     /// lock lives in a spawned task because it must outlive the step that took it.
     postgres_lock_release: Option<nervix_primitives::sync::oneshot::Sender<()>>,
+    /// Releases each lock a scenario holds on a Postgres table it names, by table.
+    postgres_named_lock_releases: BTreeMap<String, nervix_primitives::sync::oneshot::Sender<()>>,
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
@@ -540,6 +543,10 @@ impl fmt::Debug for ScenarioWorld {
             .field("postgres_table", &self.postgres_table)
             .field("postgres_tls", &self.postgres_tls)
             .field("postgres_lock_held", &self.postgres_lock_release.is_some())
+            .field(
+                "postgres_named_locks_held",
+                &self.postgres_named_lock_releases.keys().collect::<Vec<_>>(),
+            )
             .field("mysql_table", &self.mysql_table)
             .field("mysql_tls", &self.mysql_tls)
             .field(
@@ -8331,6 +8338,41 @@ async fn given_next_entity_gate_engagement_is_rejected(world: &mut ScenarioWorld
         .fail_next_entity_gate_engagement(domain);
 }
 
+#[given(
+    expr = "the next ownership handoff gate engagement request in domain {string} breaks in \
+            transport"
+)]
+async fn given_next_handoff_engagement_request_breaks_in_transport(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .break_next_handoff_engagement_transport(domain);
+}
+
+#[then(
+    expr = "the broken ownership handoff gate engagement request in domain {string} was delivered"
+)]
+async fn then_broken_handoff_engagement_request_was_delivered(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .handoff_engagement_transport_failure_delivered(&domain),
+        "no ownership handoff gate engagement request in domain {domain} met the armed transport \
+         failure"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -12465,6 +12507,36 @@ async fn when_the_external_member_leaves_kafka_consumer_group(
         .expect("the external Kafka group member should leave");
 }
 
+/// What a scenario requires of a consumer group's committed next offset: that it reaches a
+/// threshold, or that it stays below one.
+struct KafkaOffsetCondition {
+    should_reach: bool,
+    threshold: i64,
+}
+
+impl KafkaOffsetCondition {
+    /// Reads `at least <n>` or `below <n>`.
+    fn parse(condition: &str) -> Self {
+        let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ")
+        {
+            (true, threshold)
+        } else if let Some(threshold) = condition.strip_prefix("below ") {
+            (false, threshold)
+        } else {
+            panic!(
+                "Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}"
+            );
+        };
+        let threshold = threshold
+            .parse::<i64>()
+            .expect("Kafka offset threshold must be an integer");
+        Self {
+            should_reach,
+            threshold,
+        }
+    }
+}
+
 #[then(
     expr = "within {string} Kafka consumer group {string} next offset for topic {string} \
             partition {int} is {string}"
@@ -12480,29 +12552,54 @@ async fn then_kafka_consumer_group_next_offset_is(
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
-    let condition = expand_placeholders(world, &condition);
-    let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ") {
-        (true, threshold)
-    } else if let Some(threshold) = condition.strip_prefix("below ") {
-        (false, threshold)
-    } else {
-        panic!("Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}");
-    };
-    let threshold = threshold
-        .parse::<i64>()
-        .expect("Kafka offset threshold must be an integer");
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
     world
         .cluster()
         .assert_kafka_consumer_group_next_offset(
             &group,
             &topic,
             partition,
-            threshold,
-            should_reach,
+            condition.threshold,
+            condition.should_reach,
             duration,
         )
         .await
         .expect("Kafka consumer group committed-offset assertion failed");
+}
+
+/// The committed next offset the scenario's own mock Kafka broker holds for a consumer group.
+#[then(
+    expr = "within {string} mock Kafka consumer group {string} next offset for topic {string} \
+            partition {int} is {string}"
+)]
+async fn then_mock_kafka_consumer_group_next_offset_is(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+    condition: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before its offsets are read")
+        .client_config();
+    assert_kafka_consumer_group_next_offset_through(
+        client_config,
+        &group,
+        &topic,
+        partition,
+        condition.threshold,
+        condition.should_reach,
+        duration,
+    )
+    .await
+    .expect("mock Kafka consumer group committed-offset assertion failed");
 }
 
 #[then(expr = "RabbitMQ queue {string} eventually has {int} consumers")]
@@ -22186,6 +22283,8 @@ async fn given_kafka_topic_exists_with_partitions(
 /// `{{mock_kafka_addr}}`.
 #[given(expr = "a mock Kafka broker serves topic {string}")]
 fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    // The topic's name expands the scenario's identity, which no step may have drawn yet.
+    initialize_scenario_identity(world);
     let topic = expand_placeholders(world, &topic);
     let broker =
         KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
@@ -22232,6 +22331,66 @@ fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
         .expect("a mock Kafka broker serves the scenario before it accepts writes again")
         .accept_writes()
         .expect("the mock Kafka broker accepts writes again");
+}
+
+#[given(expr = "the mock Kafka broker also serves topic {string}")]
+fn given_mock_kafka_broker_also_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it serves another topic")
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+}
+
+#[given("the mock Kafka broker refuses every offset commit")]
+fn given_mock_kafka_broker_refuses_every_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses offset commits")
+        .refuse_offset_commits()
+        .expect("the mock Kafka broker refuses offset commits");
+}
+
+#[given("the mock Kafka broker refuses the next offset commit")]
+fn given_mock_kafka_broker_refuses_the_next_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses an offset commit")
+        .refuse_next_offset_commits(1)
+        .expect("the mock Kafka broker refuses the next offset commit");
+}
+
+#[when("the mock Kafka broker accepts offset commits again")]
+fn when_mock_kafka_broker_accepts_offset_commits_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts offset commits again")
+        .accept_offset_commits()
+        .expect("the mock Kafka broker accepts offset commits again");
+}
+
+#[when(expr = "mock Kafka message is published to topic {string}")]
+async fn when_mock_kafka_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before a message is published to it")
+        .client_config();
+    world.last_publish_at = Some(Instant::now());
+    publish_kafka_record_through(client_config, &topic, None, &payload, &[])
+        .await
+        .expect("failed to publish the mock kafka message");
 }
 
 #[given(expr = "SQS queue {string} exists")]
@@ -27157,13 +27316,15 @@ async fn then_postgres_eventually_reports_connections(
     }
 }
 
-#[given(expr = "the Postgres table is locked against inserts")]
-async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
-    let table = world
-        .postgres_table
-        .as_ref()
-        .expect("a Postgres table must be prepared before locking it")
-        .clone();
+/// Holds `table` locked against inserts in a transaction of its own until the returned sender
+/// fires or is dropped. Reads still proceed, so a scenario observes the inserts that queue behind
+/// the lock while each holds the pooled connection it borrowed.
+///
+/// The lock lives in a spawned task because it must outlive the step that took it.
+async fn hold_postgres_table_lock(
+    world: &ScenarioWorld,
+    table: String,
+) -> nervix_primitives::sync::oneshot::Sender<()> {
     let mut client = world
         .dependencies
         .postgres_lock_connection(world.postgres_tls)
@@ -27198,7 +27359,18 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
     locked_rx
         .await
         .expect("the Postgres locking task must acquire its lock");
-    world.postgres_lock_release = Some(release_tx);
+    release_tx
+}
+
+#[given(expr = "the Postgres table is locked against inserts")]
+async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before locking it")
+        .clone();
+    let release = hold_postgres_table_lock(world, table).await;
+    world.postgres_lock_release = Some(release);
 }
 
 #[when("the Postgres table lock is released")]
@@ -27210,6 +27382,170 @@ async fn when_postgres_table_lock_is_released(world: &mut ScenarioWorld) {
     release
         .send(())
         .expect("the Postgres locking task must still be holding its lock");
+}
+
+#[given(expr = "Postgres table {string} is locked against inserts")]
+async fn given_named_postgres_table_is_locked(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let release = hold_postgres_table_lock(world, table.clone()).await;
+    let replaced = world
+        .postgres_named_lock_releases
+        .insert(table.clone(), release);
+    assert!(
+        replaced.is_none(),
+        "this scenario already holds a lock on Postgres table {table}"
+    );
+}
+
+#[when(expr = "the lock on Postgres table {string} is released")]
+async fn when_named_postgres_table_lock_is_released(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let release = world
+        .postgres_named_lock_releases
+        .remove(&table)
+        .unwrap_or_else(|| panic!("Postgres table {table} must be locked before releasing it"));
+    release
+        .send(())
+        .expect("the Postgres locking task must still be holding its lock");
+}
+
+/// Waits until an insert into `table` queues behind a lock. The writer of that insert has borrowed
+/// its pooled connection and holds it while it waits, which is how a scenario knows who holds a
+/// connection without reading Nervix's own state.
+#[then(expr = "Postgres eventually reports an insert into table {string} waiting for its lock")]
+async fn then_postgres_reports_insert_waiting_for_lock(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let waiting: i64 = sqlx::query(
+            "SELECT count(*) FROM pg_locks AS lock JOIN pg_class AS class ON class.oid = \
+             lock.relation WHERE class.relname = $1 AND NOT lock.granted",
+        )
+        .bind(&table)
+        .fetch_one(&client)
+        .await
+        .expect("failed to read Postgres lock waits")
+        .get(0);
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an insert into Postgres table {table} to wait for its lock"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then("the Postgres table eventually holds exactly these rows")]
+async fn then_postgres_table_eventually_holds_exactly_rows(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before assertion")
+        .clone();
+    let expected = expand_placeholders(world, docstring(step));
+    wait_for_exact_postgres_rows(world, &table, &expected).await;
+}
+
+#[then(expr = "the Postgres table {string} eventually holds exactly these rows")]
+async fn then_named_postgres_table_eventually_holds_exactly_rows(
+    world: &mut ScenarioWorld,
+    table: String,
+    #[step] step: &Step,
+) {
+    let table = expand_placeholders(world, &table);
+    let expected = expand_placeholders(world, docstring(step));
+    wait_for_exact_postgres_rows(world, &table, &expected).await;
+}
+
+/// One row of a Postgres emitter table, by every column the emitter maps.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PostgresEmittedRow {
+    user_id: i32,
+    action: String,
+}
+
+/// Waits until `table` holds exactly the rows `expected` lists, one JSON object per line naming
+/// its `postgres_user_id` and `postgres_action`, and every row also carries the RFC 3339 instant
+/// its emitter mapped into `postgres_now`. Every column is compared, so a row written with a
+/// missing or wrong value does not count as the expected one.
+async fn wait_for_exact_postgres_rows(world: &ScenarioWorld, table: &str, expected: &str) {
+    let mut expected_rows = Vec::new();
+    for line in expected
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let row: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("expected Postgres row {line:?} is not JSON: {error}"));
+        let Some(user_id) = row
+            .get("postgres_user_id")
+            .and_then(serde_json::Value::as_i64)
+        else {
+            panic!("expected Postgres row {line} names no postgres_user_id");
+        };
+        let Some(action) = row
+            .get("postgres_action")
+            .and_then(serde_json::Value::as_str)
+        else {
+            panic!("expected Postgres row {line} names no postgres_action");
+        };
+        let user_id = i32::try_from(user_id)
+            .unwrap_or_else(|_| panic!("expected Postgres user id {user_id} exceeds integer"));
+        expected_rows.push(PostgresEmittedRow {
+            user_id,
+            action: action.to_string(),
+        });
+    }
+    expected_rows.sort();
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let rows = sqlx::query(SqlxAssertSqlSafe(format!(
+            "SELECT postgres_user_id, postgres_now, postgres_action FROM {table}"
+        )))
+        .fetch_all(&client)
+        .await
+        .expect("failed to query Postgres table");
+        let mut observed_rows = Vec::with_capacity(rows.len());
+        let mut incomplete = Vec::new();
+        for row in &rows {
+            let user_id: Option<i32> = row.get(0);
+            let now: Option<String> = row.get(1);
+            let action: Option<String> = row.get(2);
+            let mapped_instant = match now.as_deref() {
+                Some(now) => chrono::DateTime::parse_from_rfc3339(now).is_ok(),
+                None => false,
+            };
+            match (user_id, action) {
+                (Some(user_id), Some(action)) if mapped_instant => {
+                    observed_rows.push(PostgresEmittedRow { user_id, action });
+                }
+                (user_id, action) => incomplete.push(format!("{user_id:?}/{now:?}/{action:?}")),
+            }
+        }
+        observed_rows.sort();
+        if incomplete.is_empty() && observed_rows == expected_rows {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Postgres table {table} to hold exactly {expected_rows:?}; \
+             observed {observed_rows:?}, incomplete rows {incomplete:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[then("the Postgres table eventually contains a row")]

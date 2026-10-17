@@ -588,6 +588,16 @@ beneath `SinkFinishError::Unsent`, which counts the records still queued; a flus
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `SinkFinishError::Flush`.
 
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
+the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
+does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaSourceError::CommitTask`. The
+commit of an acknowledged batch fails beneath `SourceError::Acknowledge`, so the ingestor's
+transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
+the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
+`MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
+`SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -1186,8 +1196,9 @@ reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. In
 units remain available to continue, and a subsequent attempt can retry the stalled unit. A gate
 that expires during engagement reports `EntityGateOperationError::EngagementExpired` and releases
 its partial intake and relay holds. The preparation deadline bounds engagement, drain and capture
-independently of the activation lease. A typed reply timeout can retry the same engagement identity
-and scope within that budget; rejection and other request failures keep their classification.
+independently of the activation lease. A typed reply timeout, or a transport failure that broke the request's
+stream, can retry the same engagement identity and scope within that budget; rejection and other
+request failures keep their classification.
 
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct

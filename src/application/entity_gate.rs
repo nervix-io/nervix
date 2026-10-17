@@ -44,6 +44,10 @@ use crate::runtime::EntityGateLease;
 pub(in crate::application) const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration =
     Duration::from_millis(100);
 
+/// The pause before an ownership-handoff gate engagement retries a request whose interconnect
+/// stream broke, which gives the transport time to replace the connection.
+const ENTITY_GATE_ENGAGEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::application) enum EntityGateControlOperation {
     DomainDrainStatus,
@@ -441,23 +445,39 @@ impl SessionServiceImpl {
             let remaining =
                 deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
             let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-            let response = self
-                .inner
-                .interconnect
-                .request_with_timeout(
-                    node_id,
-                    RemoteEntityGateRequest {
-                        coordination: coordination.clone(),
-                        domain: domain.clone(),
-                        relays: relays.to_vec(),
-                        affected_entities: affected_entities.to_vec(),
-                        purpose,
-                        deadline_millis,
-                        reason: reason.to_string(),
-                    },
-                    remaining.min(Duration::from_secs(2)),
-                )
-                .await;
+            #[cfg(feature = "testing")]
+            let broken_stream = purpose == EntityGatePurpose::OwnershipHandoff
+                && self
+                    .inner
+                    .runtime
+                    .take_handoff_engagement_transport_failure(domain);
+            #[cfg(not(feature = "testing"))]
+            let broken_stream = false;
+            let response = if broken_stream {
+                Err(Report::new(nervix_interconnect::RequestError::Transport {
+                    node: node_id.clone(),
+                    request:
+                        <RemoteEntityGateRequest as nervix_interconnect::InterconnectRequest>::NAME,
+                    reason: "injected broken interconnect stream".to_string(),
+                }))
+            } else {
+                self.inner
+                    .interconnect
+                    .request_with_timeout(
+                        node_id,
+                        RemoteEntityGateRequest {
+                            coordination: coordination.clone(),
+                            domain: domain.clone(),
+                            relays: relays.to_vec(),
+                            affected_entities: affected_entities.to_vec(),
+                            purpose,
+                            deadline_millis,
+                            reason: reason.to_string(),
+                        },
+                        remaining.min(Duration::from_secs(2)),
+                    )
+                    .await
+            };
             match response {
                 Ok(response) => break response,
                 Err(error)
@@ -471,6 +491,29 @@ impl SessionServiceImpl {
                     // Await the same receiver-owned admission fence. Its flush request and
                     // activation lease remain unchanged when a response is lost.
                     nervix_primitives::task::consume_budget().await;
+                }
+                Err(error)
+                    if purpose == EntityGatePurpose::OwnershipHandoff
+                        && matches!(
+                            error.current_context(),
+                            nervix_interconnect::RequestError::Transport { .. }
+                        )
+                        && nervix_primitives::time::Instant::now() < deadline =>
+                {
+                    // A broken stream leaves delivery as uncertain as a lost reply: a receiver
+                    // that admitted the request finishes the engagement itself, and a retry of
+                    // the same identity and scope observes that operation. The pause gives the
+                    // transport time to replace the connection; the deadline bounds the retries.
+                    nervix_primitives::task::consume_budget().await;
+                    debug!(
+                        domain = domain.as_str(),
+                        node = %node_id,
+                        error = %format_args!("{error:#}"),
+                        "retrying an ownership-handoff gate engagement after a transport failure"
+                    );
+                    let remaining =
+                        deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
+                    sleep(remaining.min(ENTITY_GATE_ENGAGEMENT_RETRY_INTERVAL)).await;
                 }
                 Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
             }

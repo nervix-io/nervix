@@ -2,10 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The node's shared Postgres pool and its connection options, the declared type of
-//!   each mapped column, the `unnest` insert every write becomes under the emitter's `BATCH` limits
-//!   and the size of one protocol message, its text parameters and their exact encoded size, the
-//!   `ON CONFLICT` clause of a conflict action, and SQLSTATE classification.
+//! - **Owns.** The node's shared Postgres pool and its connection options, the one borrowed
+//!   connection each insert runs on together with the write's metadata lookup and the row-by-row
+//!   isolation of a refused insert, the declared type of each mapped column, the `unnest` insert
+//!   every write becomes under the emitter's `BATCH` limits and the size of one protocol message,
+//!   its text parameters and their exact encoded size, the `ON CONFLICT` clause of a conflict
+//!   action, and SQLSTATE classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `sqlx` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -355,8 +357,23 @@ impl PostgresSink {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 
-    /// The declared type of each mapped column, read on a connection borrowed for this lookup
-    /// alone and returned before the inserts that follow it.
+    /// One connection from the node's pool, returned to it when the borrow is dropped.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the host's pool lease hands out the borrowed connection")
+    )]
+    async fn borrow(&self) -> error_stack::Result<PostgresConnection, PostgresWriteError> {
+        match self.connections.connection().await {
+            Ok(connection) => Ok(connection),
+            Err(error) => {
+                let reason = format!("{error:?}");
+                Err(error.change_context(PostgresWriteError::Pool { reason }))
+            }
+        }
+    }
+
+    /// The declared type of each mapped column, read on the connection the write's first insert
+    /// then runs on.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -365,18 +382,9 @@ impl PostgresSink {
     )]
     async fn column_types(
         &self,
+        connection: &mut PostgresConnection,
         columns: &[String],
     ) -> error_stack::Result<Vec<String>, PostgresWriteError> {
-        let mut connection = {
-            let mapping_input = self.connections.connection().await;
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let reason = format!("{error:?}");
-                    error.change_context(PostgresWriteError::Pool { reason })
-                }),
-            }
-        }?;
         let table_name = self.table.as_str().to_string();
         let column_refs = columns.to_vec();
         let rows = sqlx::query(
@@ -438,8 +446,7 @@ impl PostgresSink {
         ))
     }
 
-    /// One insert of `members`, on a connection borrowed for that insert and returned after it, so
-    /// a write of several inserts lets other local emitters through between them.
+    /// One insert of `members` on `connection`.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -448,6 +455,7 @@ impl PostgresSink {
     )]
     async fn insert(
         &self,
+        connection: &mut PostgresConnection,
         inserts: &UnnestInserts,
         members: Range<usize>,
     ) -> error_stack::Result<u64, PostgresWriteError> {
@@ -460,22 +468,82 @@ impl PostgresSink {
                 .assured("an insert carries rows of the write whose texts were bound");
             query = query.bind(texts);
         }
-        let mut connection = {
-            let mapping_input = self.connections.connection().await;
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let reason = format!("{error:?}");
-                    error.change_context(PostgresWriteError::Pool { reason })
-                }),
-            }
-        }?;
         let result = connection
             .0
             .execute(query)
             .await
             .map_err(PostgresWriteError::report_execute)?;
         Ok(result.rows_affected())
+    }
+
+    /// The connection a write's next insert runs on: the one `lent` still holds, which the write's
+    /// first insert takes over from its metadata lookup, or a fresh borrow.
+    async fn insert_connection(
+        &self,
+        lent: &mut Option<PostgresConnection>,
+    ) -> error_stack::Result<PostgresConnection, PostgresWriteError> {
+        if let Some(connection) = lent.take() {
+            return Ok(connection);
+        }
+        self.borrow().await
+    }
+
+    /// Writes the rows `written` names in one insert on `connection`, answering for each of them,
+    /// and returns the failure that ends the write when the insert fails for every row alike.
+    ///
+    /// When the server refuses a multi-row insert for one of its rows, each row is inserted alone
+    /// on the same connection: healthy rows land, only the refused ones follow the error policy,
+    /// and the write learns which rows those are without waiting on the pool again, where a shared
+    /// client's other borrowers or a new connection's establishment could hold it for long.
+    async fn write_insert(
+        &self,
+        connection: &mut PostgresConnection,
+        inserts: &UnnestInserts,
+        written: Range<usize>,
+        rows: &MappedSinkRows<'_>,
+        members: &[MappedSinkMember],
+        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+    ) -> error_stack::Result<(), PostgresWriteError> {
+        let error = match self.insert(connection, inserts, written.clone()).await {
+            Ok(_) => {
+                for index in written {
+                    outcome.deliver(rows.position(members[index]));
+                }
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        if !error.current_context().is_record_error() {
+            return Err(error);
+        }
+        if written.len() == 1 {
+            let member = members[written.start];
+            outcome.reject(RejectedSinkRecord::external(
+                rows.position(member),
+                rows.occurred_at(member),
+                error.current_context().record_reason(),
+            ));
+            return Ok(());
+        }
+        for index in written {
+            nervix_primitives::task::consume_budget().await;
+            let member = members[index];
+            let alone = index
+                .checked_add(1)
+                .assured("a row of the write is followed by at most its end");
+            match self.insert(connection, inserts, index..alone).await {
+                Ok(_) => outcome.deliver(rows.position(member)),
+                Err(error) if error.current_context().is_record_error() => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        error.current_context().record_reason(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     fn conflict_clause(
@@ -542,6 +610,11 @@ impl SinkLifecycle for PostgresSink {
 impl RowSink for PostgresSink {
     /// Writes the rows of every carrier in `unnest` inserts of at most `MAX MESSAGES` rows whose
     /// statement and bound arrays measure at most `MAX SIZE` bytes.
+    ///
+    /// Each insert borrows one connection and returns it before the next, so other local emitters
+    /// of the client get through between inserts. The metadata lookup runs on the first insert's
+    /// borrow, and a refused insert isolates its rows on the connection it ran on, so no step of
+    /// an insert waits on the pool once the insert has its connection.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let members = rows.members();
         let mut outcome = PerRecordOutcome::with_capacity(members.len());
@@ -558,13 +631,24 @@ impl RowSink for PostgresSink {
                 }
             }
         }
-        let column_types = match self.column_types(rows.target_columns).await {
+        let mut connection = match self.borrow().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                outcome.fail(PostgresWriteError::into_report(error));
+                return outcome;
+            }
+        };
+        let column_types = match self
+            .column_types(&mut connection, rows.target_columns)
+            .await
+        {
             Ok(column_types) => column_types,
             Err(error) => {
                 outcome.fail(PostgresWriteError::into_report(error));
                 return outcome;
             }
         };
+        let mut lent = Some(connection);
         let sql = match self.insert_sql(rows.target_columns, &column_types) {
             Ok(sql) => sql,
             Err(error) => {
@@ -602,50 +686,27 @@ impl RowSink for PostgresSink {
                     continue;
                 }
             };
-            match self.insert(&inserts, written.clone()).await {
-                Ok(_) => {
-                    for index in written {
-                        outcome.deliver(rows.position(members[index]));
-                    }
-                }
-                // A record-specific failure of a multi-row insert is isolated by inserting each of
-                // its rows alone, so healthy rows land and only the rejected ones follow the error
-                // policy.
-                Err(error) if error.current_context().is_record_error() && written.len() > 1 => {
-                    for index in written {
-                        nervix_primitives::task::consume_budget().await;
-                        let member = members[index];
-                        let alone = index
-                            .checked_add(1)
-                            .assured("a row of the write is followed by at most its end");
-                        match self.insert(&inserts, index..alone).await {
-                            Ok(_) => outcome.deliver(rows.position(member)),
-                            Err(error) if error.current_context().is_record_error() => {
-                                outcome.reject(RejectedSinkRecord::external(
-                                    rows.position(member),
-                                    rows.occurred_at(member),
-                                    error.current_context().record_reason(),
-                                ));
-                            }
-                            Err(error) => {
-                                outcome.fail(PostgresWriteError::into_report(error));
-                                return outcome;
-                            }
-                        }
-                    }
-                }
-                Err(error) if error.current_context().is_record_error() => {
-                    let member = members[written.start];
-                    outcome.reject(RejectedSinkRecord::external(
-                        rows.position(member),
-                        rows.occurred_at(member),
-                        error.current_context().record_reason(),
-                    ));
-                }
+            let mut connection = match self.insert_connection(&mut lent).await {
+                Ok(connection) => connection,
                 Err(error) => {
                     outcome.fail(PostgresWriteError::into_report(error));
                     return outcome;
                 }
+            };
+            // The connection returns to the pool when this insert ends, before the next borrows.
+            if let Err(error) = self
+                .write_insert(
+                    &mut connection,
+                    &inserts,
+                    written,
+                    &rows,
+                    &members,
+                    &mut outcome,
+                )
+                .await
+            {
+                outcome.fail(PostgresWriteError::into_report(error));
+                return outcome;
             }
         }
         trace!(
@@ -1015,6 +1076,7 @@ fn float_text(value: f64) -> Option<String> {
 mod tests {
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use nervix_connector::MappedSinkCarrier;
     use nervix_primitives::sync::StdArc;
 
     use super::*;
@@ -1368,9 +1430,8 @@ mod tests {
         }
     }
 
-    #[nervix_primitives::test]
-    async fn metadata_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
-        let sink = PostgresSink {
+    fn sink_without_connections() -> PostgresSink {
+        PostgresSink {
             connections: Box::new(NoConnections),
             table: TableName::parse("events").expect("the test table name is valid"),
             conflict_action: PostgresConflictAction::None,
@@ -1379,11 +1440,15 @@ mod tests {
                     .expect("one is a valid message limit"),
                 max_size: "1KiB".parse().expect("1KiB is a valid size"),
             }),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
+        let sink = sink_without_connections();
+        let Err(error) = sink.borrow().await else {
+            panic!("the test pool has no connection");
         };
-        let error = sink
-            .column_types(&["seq".to_string()])
-            .await
-            .expect_err("the test pool has no connection");
         assert!(matches!(
             error.current_context(),
             PostgresWriteError::Pool { .. }
@@ -1391,6 +1456,39 @@ mod tests {
         let report = PostgresWriteError::into_report(error);
         assert!(report.contains::<PostgresWriteError>());
         assert!(format!("{report:?}").contains("pool-acquire-detail"));
+    }
+
+    /// A write borrows its connection before its metadata lookup, so one it cannot borrow fails as
+    /// a whole with the pool's cause and answers for none of its rows.
+    #[nervix_primitives::test]
+    async fn a_write_without_a_connection_answers_no_row_and_keeps_the_acquire_diagnostic() {
+        let mut sink = sink_without_connections();
+        let batch = RecordBatch::try_new(
+            StdArc::new(Schema::new(vec![Field::new("seq", DataType::Int64, false)])),
+            vec![StdArc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .expect("the test batch matches its schema");
+        let target_columns = ["seq".to_string()];
+        let selected_rows = [0, 1];
+        let outcome = sink
+            .publish(MappedSinkRows {
+                target_columns: &target_columns,
+                carriers: vec![MappedSinkCarrier {
+                    batch_index: 0,
+                    batch: &batch,
+                    selected_rows: &selected_rows,
+                    occurred_at: nervix_models::Timestamp::from_unix_nanos(5),
+                    acknowledgements: None,
+                }],
+            })
+            .await;
+        let parts = outcome.into_parts();
+        assert!(parts.delivered.is_empty());
+        assert!(parts.rejected.is_empty());
+        let Some(error) = parts.infrastructure_error else {
+            panic!("a write without a connection fails as a whole");
+        };
+        assert!(format!("{error:?}").contains("pool-acquire-detail"));
     }
 
     #[test]

@@ -1180,6 +1180,14 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+A scenario that needs a Kafka broker to refuse what the shared broker accepts for every other
+scenario starts a broker of its own: librdkafka's in-process mock cluster of one broker, which the
+scenario keeps until it ends, across its cluster's restarts. While the scenario asks it to, that
+broker refuses produce requests with `NOT_ENOUGH_REPLICAS`, which a producer retries, or offset
+commits with `GROUP_AUTHORIZATION_FAILED`, which a consumer does not retry; a scenario can also
+refuse only the next commit. The scenario publishes to it, observes its topics and reads a consumer
+group's committed offset through clients of its own, so no refusal reaches the shared broker.
+
 The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
 `START` and observe the consumer group's membership and the ingestor's readiness before injecting
 the output failure. Their bounded subscription assertions therefore exercise replay and

@@ -54,7 +54,7 @@ use rdkafka::{
 };
 pub use source::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
     KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceMessage, KafkaSourceOffsetMode,
     KafkaSourcePlan, TopicPartitionInspector,
 };
