@@ -89,11 +89,7 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use sqlx::{
-    AssertSqlSafe as SqlxAssertSqlSafe, Row as _,
-    postgres::{
-        PgConnectOptions as SqlxPgConnectOptions, PgPool as SqlxPgPool,
-        PgPoolOptions as SqlxPgPoolOptions, PgSslMode as SqlxPgSslMode,
-    },
+    AssertSqlSafe as SqlxAssertSqlSafe, Connection as _, Row as _, postgres::PgPool as SqlxPgPool,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt as _;
@@ -116,9 +112,8 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
-        TestDependencies,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
+        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -164,8 +159,10 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod mqtt_fixtures;
 mod paced_replication;
 mod paced_simulation;
+mod postgres_fixtures;
 mod process_cluster;
 mod restarted_voter;
 mod session_protocol;
@@ -298,6 +295,9 @@ struct CliClockProcess {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
+    postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
+    postgres_fixture_observations: Option<postgres_fixtures::Observations>,
     scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
@@ -5848,36 +5848,6 @@ async fn clickhouse_post_for_world(world: &ScenarioWorld, query: &str) -> Result
     } else {
         clickhouse_post(world.dependencies.endpoints(), query).await
     }
-}
-
-/// A verification client for the Postgres the scenario wrote to.
-///
-/// The same driver the product uses, so a scenario cannot pass against a connection contract the
-/// runtime does not actually speak.
-async fn postgres_client(
-    dependencies: &DependencyEndpoints,
-    tls: bool,
-) -> Result<SqlxPgPool, String> {
-    let addr = if tls {
-        dependencies.get(POSTGRES_TLS_ADDR)
-    } else {
-        dependencies.get(POSTGRES_ADDR)
-    }
-    .map_err(|error| error.to_string())?;
-    let mut options: SqlxPgConnectOptions = addr.parse().map_err(|source| format!("{source}"))?;
-    if tls {
-        let ca_file = dependencies
-            .tls_ca_path()
-            .map_err(|error| error.to_string())?;
-        options = options
-            .ssl_mode(SqlxPgSslMode::VerifyFull)
-            .ssl_root_cert(ca_file);
-    }
-    SqlxPgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options)
-        .await
-        .map_err(|source| source.to_string())
 }
 
 fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool, String> {
@@ -13530,7 +13500,10 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // The leader reclaims a reference only once its retry window has passed, so the wait spans
+    // the configured window and then leaves the reclamation a minute of its own.
+    let deadline =
+        Instant::now() + world.cluster_config.command_retry_validity + Duration::from_secs(60);
     loop {
         nervix_primitives::task::consume_budget().await;
         assert!(
@@ -22652,8 +22625,9 @@ async fn given_postgres_table_rejecting_poison_actions_exists(
         .postgres_table
         .as_ref()
         .expect("Postgres table should be recorded after preparation");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
@@ -22677,8 +22651,9 @@ async fn given_postgres_table_recording_insert_statement_sizes_exists(
         .clone();
     let audit_table = format!("{table}_insert_audit");
     let trigger_function = format!("{table}_record_insert");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "DROP TABLE IF EXISTS {audit_table};
@@ -22725,8 +22700,9 @@ async fn prepare_postgres_table_schema(
     primary_key: bool,
 ) {
     let table = expand_placeholders(world, &table);
-    let client = postgres_client(world.dependencies.endpoints(), tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(tls)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
         .execute(&client)
@@ -27054,8 +27030,9 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
 /// `application_name` is what distinguishes them from the harness's own connections and from any
 /// other application, which is how an operator checks a declared budget too.
 async fn postgres_application_connections(world: &ScenarioWorld, application: &str) -> i64 {
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     sqlx::query("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
         .bind(application)
@@ -27143,7 +27120,9 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         .as_ref()
         .expect("a Postgres table must be prepared before locking it")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+    let mut client = world
+        .dependencies
+        .postgres_lock_connection(world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
     let (release_tx, release_rx) = nervix_primitives::sync::oneshot::channel();
@@ -27162,7 +27141,7 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         locked_tx
             .send(())
             .expect("the locking step must still be waiting for its lock");
-        // Held until the scenario releases it, which is what keeps one pooled connection busy.
+        // This database lock keeps the product writer's pooled connection busy until release.
         // A dropped sender means the scenario ended without releasing, and the lock goes with it.
         release_rx
             .await
@@ -27200,8 +27179,9 @@ async fn then_postgres_table_eventually_contains_row(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27247,8 +27227,9 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27292,8 +27273,9 @@ async fn then_postgres_table_contains_exactly_one_row_for_each_user_id(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let rows = sqlx::query(SqlxAssertSqlSafe(format!(
         "SELECT postgres_user_id, count(*) FROM {table} GROUP BY postgres_user_id"
@@ -27335,8 +27317,9 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
         .expect("a Postgres table must be prepared before assertion")
         .clone();
     let audit_table = format!("{table}_insert_audit");
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
