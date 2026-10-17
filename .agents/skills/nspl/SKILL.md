@@ -296,6 +296,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   without a message. A payload is decoded or rejected as a whole, unfolds into at most 65,536
   messages, and stays the unit of source acknowledgement. `ON EMITTING` must yield exactly one
   value per record.
+- A payload its codec refuses is consumed, never redelivered: the ingestor's `ON GENERAL ERROR LOG`
+  reports it as a decode rejection, `IGNORE` only counts it, and an acknowledged source commits past
+  it. Read `Ingestors` → `When The Codec Refuses A Payload` before relying on a broker's
+  redelivery or dead-lettering for malformed payloads.
 - Unfolding runs on the node's extension workers. Before relying on a `MODE NO ACK` source to keep
   its payloads while those workers are full, read `Ingestors` → `When The Extension Workers Are
   Full`: some sources wait for them, and others refuse the payload and count it.

@@ -571,6 +571,43 @@ pub enum CodecError {
     EncodeField { codec: String, field: String },
 }
 
+impl CodecError {
+    /// The field this context names at fault. An unfolding's context names none itself: the report
+    /// of the message it failed in, which it keeps, names that message's field.
+    pub(crate) fn field(&self) -> Option<&str> {
+        match self {
+            Self::MissingField { field, .. }
+            | Self::UnexpectedField { field, .. }
+            | Self::ParseField { field, .. }
+            | Self::EncodeField { field, .. } => Some(field),
+            Self::InvalidCodec { .. }
+            | Self::JsonDecode { .. }
+            | Self::JsonEncode { .. }
+            | Self::ColumnarJsonEncode { .. }
+            | Self::CborDecode { .. }
+            | Self::CborEncode { .. }
+            | Self::AvroDecode { .. }
+            | Self::AvroEncode { .. }
+            | Self::JaqNativeDecode { .. }
+            | Self::JaqNativeEncode { .. }
+            | Self::PayloadWrite { .. }
+            | Self::ProtobufDecode { .. }
+            | Self::ProtobufJaqInput { .. }
+            | Self::ProtobufEncode { .. }
+            | Self::SyslogDecode { .. }
+            | Self::SyslogEncode { .. }
+            | Self::ExpectedObject { .. }
+            | Self::InvalidJaqTransformation { .. }
+            | Self::ProtobufBatchMessageUndeclared { .. }
+            | Self::ProtobufBatchMessageShape { .. }
+            | Self::JaqTransform { .. }
+            | Self::JaqIngestionEvaluation { .. }
+            | Self::Unfold { .. }
+            | Self::UnfoldLimit { .. } => None,
+        }
+    }
+}
+
 /// A rule of a codec's wire format that its declaration, or a use of it, breaks.
 ///
 /// It is the cause beneath [`CodecError::InvalidCodec`].

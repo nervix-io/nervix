@@ -1788,6 +1788,12 @@ impl Cluster {
         }
     }
 
+    /// The messages `queue` holds ready for delivery now.
+    pub(crate) async fn rabbitmq_queue_messages(&self, queue: &str) -> io::Result<usize> {
+        let state = rabbitmq_queue_state(&self.dependencies, queue).await?;
+        Ok(state.messages)
+    }
+
     pub(crate) async fn wait_for_redis_channel_subscribers(
         &self,
         channel: &str,
@@ -4681,10 +4687,26 @@ async fn declare_rabbitmq_queue(channel: &lapin::Channel, queue: &str) -> io::Re
     Ok(())
 }
 
+/// What a passive declaration of a RabbitMQ queue reports about it.
+struct RabbitMqQueueState {
+    /// The messages ready for delivery. A delivery a consumer still holds unacknowledged is not one
+    /// of them until the consumer leaves.
+    messages: usize,
+    consumers: usize,
+}
+
 async fn rabbitmq_queue_consumer_count(
     dependencies: &DependencyEndpoints,
     queue: &str,
 ) -> io::Result<usize> {
+    let state = rabbitmq_queue_state(dependencies, queue).await?;
+    Ok(state.consumers)
+}
+
+async fn rabbitmq_queue_state(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<RabbitMqQueueState> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),
@@ -4706,7 +4728,10 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count().arch_into())
+    Ok(RabbitMqQueueState {
+        messages: declared.message_count().arch_into(),
+        consumers: declared.consumer_count().arch_into(),
+    })
 }
 
 async fn publish_redis(
