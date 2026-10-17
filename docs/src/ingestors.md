@@ -986,6 +986,24 @@ Delivery constraints:
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
+Without a `client_id` in the client configuration, one instance connects as
+`<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
+zero-based instance indices. An explicit identity shared by multiple instances must contain
+`{{instance}}`. Identities remain stable across node ownership changes.
+
+`DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
+opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
+and sends `DISCONNECT` with session expiry zero. Cleanup is best-effort: an unreachable broker is
+reported and does not prevent the drop. Its retained state can remain until the broker expires it
+or the operator clears it.
+
+Changing the input with `ALTER MQTT TOPIC INGESTOR ... SET FROM ...` retires the preceding filter
+and prepares the changed sessions at the new endpoint before the replacement starts. A failure to
+clean up the preceding endpoint does not prevent moving to a reachable new endpoint. Sessions
+whose broker, identity, filter, session mode and QoS still match are retained, including across
+an instance-count change. Changing a filter discards the retired filter's broker queue.
+Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
+
 `SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. It disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the
 session expires, resume establishes a fresh session and the interim is lost. `BUFFER` and `DROP`
@@ -1020,6 +1038,13 @@ are mandatory; use `INSTANCES 1` for a single queue member.
 Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
+
+A lost connection to the server ends the instance's subscription. `DESCRIBE INGESTOR` shows the
+loss, and then each failed reconnect, as its transient error, and the instance connects and
+subscribes again on the host's reconnect cadence: the delay starts at 250 ms, doubles after each
+failed attempt up to 30 s, and `DESCRIBE INGESTOR` shows it as the reconnect backoff. Messages the
+client received before the loss are still delivered. Core NATS retains nothing for a subscription
+that is not connected, so messages published while the instance reconnects never reach it.
 
 ### ZeroMQ
 

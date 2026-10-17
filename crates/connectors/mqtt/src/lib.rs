@@ -78,7 +78,7 @@ use rumqttc::{
 };
 pub use source::{
     MqttClientIdError, MqttSource, MqttSourceError, MqttSourceMessage, MqttSourcePlan,
-    MqttSourcePosition, MqttSourceSettings,
+    MqttSourcePosition, MqttSourceSessions, MqttSourceSettings,
 };
 use thiserror::Error;
 use tracing::warn;
