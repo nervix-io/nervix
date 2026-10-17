@@ -164,6 +164,7 @@ mod endpoint_intake;
 mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
+mod mysql_isolation;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
@@ -413,6 +414,8 @@ struct ScenarioWorld {
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
+    /// Independent MySQL sessions holding the table locks of this scenario's pool contention.
+    mysql_table_locks: BTreeMap<String, mysql_isolation::HeldTableLock>,
     mongodb_collection: Option<String>,
     mongodb_tls: bool,
     domain: String,
@@ -30221,6 +30224,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;
+                world.release_mysql_table_locks().await;
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {
                         let teardown = cluster.shutdown_for_teardown().await;
