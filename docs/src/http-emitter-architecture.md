@@ -7,26 +7,26 @@ whose response Nervix never receives, so delivery is not an exactly-once externa
 
 This chapter follows the implemented HTTP path across the language, decision layer, emitter host,
 and HTTP connector. The [Emitters manual](./emitters.md#http-request-configuration) owns the public
-NSPL contract and field-level rules. The [Connector Crates And The Connector Contract](./connector-contract.md)
+Plexus contract and field-level rules. The [Connector Crates And The Connector Contract](./connector-contract.md)
 chapter owns the shared host and connector boundary; [Control Plane](./control-plane.md),
 [Domain Clock](./domain-clock.md), [Resource Versions And Bindings](./resource-versions.md), and
 [Shutdown And Recovery](./shutdown.md) remain authoritative for their respective lifecycle,
 time, binding, and recovery rules. The [HTTP emitter acceptance ledger](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#http-emitter-09-qualification)
 records the public qualification evidence summarized below.
 
-## From NSPL to an active sink
+## From Plexus to an active sink
 
 The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
 selection into semantic Models. The registry validates the complete candidate against the same
 domain's `TYPE HTTP` client, codec, exact expression types, available scopes, sensitivity, source
 branches, and error route. The decision layer lowers the validated model into a typed execution
-plan. A running data-plane task receives that plan; it does not read a Model or reparse NSPL.
+plan. A running data-plane task receives that plan; it does not read a Model or reparse Plexus.
 The server composes the HTTP connector with the emitter host. These conversions and their
 installation boundary are described in [Execution Plans](./execution-plans.md).
 
 The sink has one request/response mode, with an explicit retry policy and exactly one body choice:
 
-```nspl,ignore
+```plexus,ignore
 TO HTTP <client>
   METHOD <string_expression>
   PATH <string_expression>
@@ -48,7 +48,7 @@ Here `outgoing` and `event_body_codec` are already declared in the domain. The c
 operator-provisioned destination; an input with method `PATCH` and path
 `/v1/events/42?notify=true` sends that method and target. Its tenant stays outside the body.
 
-```nspl
+```plexus
 CREATE CLIENT api TYPE HTTP CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
@@ -84,7 +84,7 @@ This alternative uses the same relay and client. `WITHOUT BODY` uses the source 
 `input`, `message`, and bare fields. There is no output schema, encoded input copy, or dummy body.
 It allows route `WHERE` and header invocations, but not `INHERIT`, `SET`, or `VALUES`.
 
-```nspl
+```plexus
 CREATE EMITTER delete_event
   FROM outgoing WHERE input.request_method = 'DELETE'
   TO HTTP api
@@ -139,7 +139,7 @@ The connector uses the node's configured resolver, verifies HTTPS trust and host
 load a CA and a paired client certificate and key from the HTTP client's resource mount. A
 client can, for example, bind already uploaded TLS files as follows:
 
-```nspl
+```plexus
 CREATE CLIENT secure_api TYPE HTTP
   MOUNT api_tls VERSION 3
   CONFIG {
@@ -319,7 +319,7 @@ inside one transaction. A bad candidate or refused commit leaves the active emit
 For example, this replacement changes the first emitter's method and path without replacing its
 codec construction or header invocations:
 
-```nspl
+```plexus
 ALTER EMITTER deliver_event
   SET TO HTTP api
     METHOD 'POST'
@@ -375,7 +375,7 @@ the ledger gives the exact scenario names, example counts, and receiver controls
 | 10. Terminal rejection | `http_emitter_responses.feature`, `http_emitter_retries.feature` | `101`, redirects, `400`, `404`, `409` and `413` route safe status errors with original input, state and branch; `Location` receives no request. |
 | 11. TLS and mTLS | `http_emitter_transport.feature` | Mounted client identity succeeds; untrusted, wrong-host and missing-certificate handshakes acknowledge nothing. |
 | 12. Relay and branch isolation | `http_emitter.feature`, `http_emitter_transport.feature` | Two relays and two branches retain their own request values and error branches behind collection. |
-| 13. Inspection and replacement | `http_emitter_lifecycle.feature`, `http_emitter.feature`, `tools/nspl_format.feature` | Both body modes round-trip; failed ALTER and COMMIT preserve the active emitter; admitted requests drain to their original destination. |
+| 13. Inspection and replacement | `http_emitter_lifecycle.feature`, `http_emitter.feature`, `tools/plexus_format.feature` | Both body modes round-trip; failed ALTER and COMMIT preserve the active emitter; admitted requests drain to their original destination. |
 | 14. Drain and replay | `http_emitter_lifecycle.feature`, `http_emitter_retries.feature` | Graceful shutdown force-flushes; forced ending leaves a Kafka offset for replay; a lost response permits the same effect twice. |
 
 The receiver's high-water mark stayed at one request awaiting a final head for one emitter serving

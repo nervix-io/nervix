@@ -1,7 +1,7 @@
 //! Layer: data plane.
 //! Owns: persistence and replica polling tasks for runtime state.
 //! May depend on: runtime state carriers, the state store, interconnect, and vocabulary models.
-//! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
+//! Must not know: control-plane transactions, Plexus parsing, or edge protocols.
 
 #![cfg_attr(
     nervix_lint,

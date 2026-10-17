@@ -8,7 +8,7 @@
 //!   state persistence and replication, and the entities that bind listening ports.
 //! - **Depends on.** The engines — the VM, the UDF and WASM hosts, codecs, the connector crates,
 //!   the interconnect, the state and resource stores — vocabulary and typed execution plans.
-//! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
+//! - **Must not know.** Plexus text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
 //! Schedule application, processor tasks, entrypoints, emitters and message-error delivery consume

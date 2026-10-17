@@ -5,7 +5,7 @@ session.
 
 A typical emitter:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS EMITTER kafka_notifications
   FROM notifications
   COLLECT FOR 10ms MAX BATCH SIZE 1MiB
@@ -40,7 +40,7 @@ An emitter defines:
 An emitter is the terminal consumer for its source relays. The `FROM` list uses the same
 source-local predicate form as other relay-consuming nodes:
 
-```nspl
+```plexus
 CREATE EMITTER combined_notifications
   FROM primary_notifications WHERE input.source = 'primary',
        replayed_notifications WHERE input.source = 'replay'
@@ -75,14 +75,14 @@ means Nervix collects an in-memory Arrow batch before handing it to the external
 is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
 backoff, acknowledgement keepalive, and sink acknowledgement timeouts stay on the physical clock.
 See [Domains And Time](domains-and-time.md) for the full clock split. The
-[NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
+[Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its sink clause: flush
 writes local Arrow IPC staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary. Which sinks gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
-[flush tuning guidance](nspl-overview.md).
+[flush tuning guidance](plexus-overview.md).
 
 An emitter may place `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` immediately after the
 complete `FROM <relay> [WHERE ...] [, ...]` list. This input policy runs before emitter filtering,
@@ -194,7 +194,7 @@ request through host preparation, the connector, retry, lifecycle and qualificat
 An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
 selection in this order:
 
-```nspl,ignore
+```plexus,ignore
 TO HTTP <client>
   METHOD <string_expression>
   PATH <string_expression>
@@ -241,7 +241,7 @@ For example, the first emitter below sends each record of `outgoing` with its ow
 tenant header and a JSON body of two of its fields, and the second deletes without a body.
 `api.example.com` stands for an endpoint the operator has already provisioned.
 
-```nspl
+```plexus
 CREATE CLIENT api TYPE HTTP CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
@@ -414,8 +414,8 @@ its declared confirmations and retries for error visibility and backpressure.
 #### HTTP inspection and metrics
 
 `SHOW CREATE EMITTER` and canonical formatting render the method and path expressions, the header
-invocations and the construction in canonical NSPL, with the explicit body selection. A configured
-expression is rendered as NSPL under the ordinary sensitivity rules, so an explicitly leaked field
+invocations and the construction in canonical Plexus, with the explicit body selection. A configured
+expression is rendered as Plexus under the ordinary sensitivity rules, so an explicitly leaked field
 appears as its `leak_sensitive(...)` call and never as a value. `DESCRIBE EMITTER`
 reports the request contract of the `deliver_event` example above in these lines:
 
@@ -465,7 +465,7 @@ counter, and the counters carry only the ordinary graph labels, never a request 
 An emitter may declare two hard limits for every batch it publishes, written after the complete sink
 clause and its route construction, and before the flush policy:
 
-```nspl,ignore
+```plexus,ignore
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
@@ -475,7 +475,7 @@ most bytes its encoded payload may occupy: a positive whole number followed by `
 neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
 rather than encoded bytes.
 
-```nspl,ignore
+```plexus,ignore
 CREATE EMITTER kafka_notifications
   FROM notifications
   TO KAFKA kafka_main TOPIC notifications_out
@@ -736,7 +736,7 @@ value carries octets as.
 
 `ALTER EMITTER` applies one or more comma-separated operations in written order:
 
-```nspl,ignore
+```plexus,ignore
 ALTER EMITTER <emitter>
     ADD FROM <relay> [WHERE <expr>]
   | DROP FROM <relay>
@@ -787,7 +787,7 @@ The complete candidate graph is validated before any change is committed.
 Codec emitters are transforming routes. They begin with an empty codec-schema payload and use
 explicit inheritance and ordered assignment:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS EMITTER kafka_notifications
   FROM notifications
   TO KAFKA kafka_main TOPIC notifications_out
@@ -816,7 +816,7 @@ explicit `INHERIT field LEAK SENSITIVE`, even when the codec target field is als
 
 Database, object-store, and OTEL direct emitters construct external name-keyed mappings:
 
-```nspl,ignore
+```plexus,ignore
 VALUES {
   "tenant" = input.tenant,
   "normalized" = lower(input.action),
@@ -872,7 +872,7 @@ Emitter TLS is configured on the referenced `CLIENT` exactly the same way as ing
 
 Common pattern:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <kind>
   MOUNT <tls_resource> VERSION <n>|LATEST
@@ -904,7 +904,7 @@ Transport-specific expectations:
 
 Example Kafka TLS emitter client:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
   MOUNT dev_tls VERSION 1
@@ -919,7 +919,7 @@ CREATE IF NOT EXISTS CLIENT kafka_tls
 
 ### Kafka
 
-```nspl,ignore
+```plexus,ignore
 TO KAFKA <client> TOPIC <topic>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
      | ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
@@ -949,7 +949,7 @@ rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 
-```nspl,ignore
+```plexus,ignore
 TO PULSAR <client> TOPIC <topic>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
      | ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
@@ -980,7 +980,7 @@ Pulsar TLS currently supports server trust configuration only. Nervix does not y
 
 ### RabbitMQ
 
-```nspl,ignore
+```plexus,ignore
 TO RABBITMQ <client> QUEUE <queue>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
      | ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
@@ -1012,7 +1012,7 @@ unacknowledged, and it reopens on its `RETRY POLICY` backoff.
 
 ### Redis Pub/Sub
 
-```nspl,ignore
+```plexus,ignore
 TO REDIS PUBSUB <client> CHANNEL <channel>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
@@ -1031,7 +1031,7 @@ still verifies the configured hostname and uses its configured CA and optional c
 The default client identity is `<domain>~<emitter>`. A `client_id` in the client configuration
 overrides that identity.
 
-```nspl,ignore
+```plexus,ignore
 TO MQTT <client> TOPIC <topic>
   MODE QOS 0 RETRY POLICY BACKOFF <duration> MAX <duration>
      | QOS (1 | 2) ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
@@ -1060,7 +1060,7 @@ QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
 
 ### NATS
 
-```nspl,ignore
+```plexus,ignore
 TO NATS <client> SUBJECT <subject>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
      | JETSTREAM ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
@@ -1081,7 +1081,7 @@ so delivery is at least once.
 
 ### ZeroMQ
 
-```nspl,ignore
+```plexus,ignore
 TO ZEROMQ <client>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
@@ -1091,7 +1091,7 @@ paced by the declared retry policy.
 
 ### Syslog
 
-```nspl,ignore
+```plexus,ignore
 TO SYSLOG <client>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
   ENCODE USING <codec>
@@ -1110,7 +1110,7 @@ octet-counted TCP/TLS frame, or one non-transparent TCP frame when it contains n
 
 ### SQS
 
-```nspl,ignore
+```plexus,ignore
 TO SQS <client> QUEUE <queue> [FIFO GROUP (FROM BRANCH | <string_expression>)]
   MODE (SINGLE | BATCH) RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
@@ -1166,7 +1166,7 @@ the emitter's `WHERE` drops is never sent, so a failure of its group is never re
 Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and
 public key:
 
-```nspl
+```plexus
 CREATE CLIENT sentry_main
   TYPE SENTRY
   CONFIG {
@@ -1216,7 +1216,7 @@ OTEL emission is a codec-free direct sink for OTLP logs, traces, and metric data
 `TYPE OTEL` client and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
 explicit; there is no hidden default:
 
-```nspl
+```plexus
 CREATE CLIENT otel_main
   TYPE OTEL
   CONFIG {
@@ -1242,7 +1242,7 @@ its own. A failed lookup is an export failure that the emitter retries on its `R
 
 One log record is mapped as follows:
 
-```nspl
+```plexus
 CREATE EMITTER audit_to_otel
   FROM audit_events
   TO OTEL otel_main LOGS
@@ -1292,7 +1292,7 @@ Trace emitters use `TO OTEL <client> TRACES`. Their closed `VALUES` set requires
 
 Each metric emitter defines exactly one metric stream:
 
-```nspl,ignore
+```plexus,ignore
 TO OTEL otel_main
 METRIC 'http.server.request.count' UNIT '1'
 DESCRIPTION 'Completed HTTP requests'
@@ -1357,7 +1357,7 @@ endpoint must already exist; an unreachable endpoint remains an initialization o
 
 ### ClickHouse
 
-```nspl
+```plexus
 CREATE EMITTER to_ch
   FROM notifications
   TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
@@ -1375,7 +1375,7 @@ CREATE EMITTER to_ch
 
 ClickHouse clients use the HTTP endpoint:
 
-```nspl
+```plexus
 CREATE CLIENT ch
   TYPE CLICKHOUSE
   CONFIG {
@@ -1424,7 +1424,7 @@ diagnostics. Connection and pool failures retain their causes for diagnosing a r
 
 ### Postgres
 
-```nspl
+```plexus
 CREATE EMITTER to_pg
   FROM notifications
   TO POSTGRES postgres_client INSERT TO TABLE my_table
@@ -1449,7 +1449,7 @@ healthy records are re-executed.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
-```nspl,ignore
+```plexus,ignore
 ON CONFLICT ("postgres_user_id") DO UPDATE
 ON CONFLICT ("postgres_user_id") DO NOTHING
 ON CONFLICT DO NOTHING
@@ -1466,7 +1466,7 @@ verification. There is no opportunistic fallback and no encrypted connection wit
 verification. See [Database Client Connection Pools](database-client-pools.md) for the accepted
 pool counts:
 
-```nspl
+```plexus
 CREATE CLIENT pg
   TYPE POSTGRES
   POOL SIZE MIN 2 MAX 8
@@ -1479,7 +1479,7 @@ For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'
 
 ### MySQL
 
-```nspl
+```plexus
 CREATE EMITTER to_mysql
   FROM notifications
   TO MYSQL mysql_client INSERT TO TABLE my_table
@@ -1509,17 +1509,17 @@ default on MySQL 8.x, which the client applies to every packet it sends.
 
 MySQL emitters may include an insert conflict policy after `VALUES`:
 
-```nspl,ignore
+```plexus,ignore
 ON CONFLICT DO UPDATE
 ON CONFLICT DO NOTHING
 ```
 
-MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table, so the NSPL conflict policy does not accept a target list. `DO UPDATE` uses `ON DUPLICATE KEY UPDATE` for all mapped `VALUES` columns. `DO NOTHING` uses a no-op duplicate-key update.
+MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table, so the Plexus conflict policy does not accept a target list. `DO UPDATE` uses `ON DUPLICATE KEY UPDATE` for all mapped `VALUES` columns. `DO NOTHING` uses a no-op duplicate-key update.
 
 MySQL clients declare their connection-pool bounds and use a mysql_async connection URL. See
 [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
-```nspl
+```plexus
 CREATE CLIENT mysql
   TYPE MYSQL
   POOL SIZE MIN 2 MAX 8
@@ -1532,7 +1532,7 @@ For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `
 
 ### MongoDB
 
-```nspl
+```plexus
 CREATE EMITTER to_mongodb
   FROM notifications
   TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
@@ -1565,7 +1565,7 @@ is genuinely NULL is still written as BSON null.
 
 MongoDB emitters may include an insert conflict policy after `VALUES`:
 
-```nspl,ignore
+```plexus,ignore
 ON CONFLICT ("mongodb_user_id") DO UPDATE
 ON CONFLICT ("mongodb_user_id") DO NOTHING
 ```
@@ -1578,7 +1578,7 @@ execute each write as one client bulk write.
 MongoDB clients declare their connection-pool bounds and use a MongoDB connection URL and database
 name. See [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
-```nspl
+```plexus
 CREATE CLIENT mongodb
   TYPE MONGODB
   POOL SIZE MIN 2 MAX 8
@@ -1592,7 +1592,7 @@ For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_
 
 ### Iceberg
 
-```nspl
+```plexus
 CREATE CLIENT s3_main
   TYPE S3
   CONFIG {
@@ -1640,7 +1640,7 @@ initialization or commit retry path; they do not advance the commit or ACK bound
 
 GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
 
-```nspl
+```plexus
 CREATE CLIENT gcs_main
   TYPE GCS
   CONFIG {
@@ -1672,7 +1672,7 @@ CREATE EMITTER iceberg_notifications
 
 Azure Blob uses `TYPE AZURE_BLOB` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
 
-```nspl
+```plexus
 CREATE CLIENT azure_main
   TYPE AZURE_BLOB
   CONFIG {
@@ -1735,7 +1735,7 @@ Iceberg writes typed records and takes none.
 JAQ-native codecs can reshape outbound payloads with `ON EMITTING` before writing the selected
 format:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_codec
   FROM JSON
   TO SCHEMA notification

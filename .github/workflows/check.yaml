@@ -1327,8 +1327,8 @@ jobs:
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
-      - name: NSPL completion walk
-        run: just coverage-native-extras nspl-completion-walk
+      - name: Plexus completion walk
+        run: just coverage-native-extras plexus-completion-walk
 
       # Each collection's report, completion record, executions and export diagnostics, whatever
       # its verdict: a failed or interrupted record is the evidence of what the collection saw. The

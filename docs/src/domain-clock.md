@@ -6,7 +6,7 @@ uses a capability bound to the exact domain lifecycle generation. Expression eng
 and connectors receive time from that capability instead of choosing a clock themselves.
 
 This chapter describes the internal architecture. See [Domains And Time](./domains-and-time.md)
-for the NSPL surface and operator-facing behavior.
+for the Plexus surface and operator-facing behavior.
 Explicit transactional `START` and `STOP` establish or revoke generations at ordered step
 boundaries; [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) owns how
 those lifecycle steps affect later planned scopes and the retained impact report.
@@ -527,7 +527,7 @@ or advancing the logical frontier. A reported checkpoint revision and reset gene
 durability and lifetime identity, not domain time; neither may establish or alter the clock used
 by a later guest callback.
 
-An NSPL reset uses this same clock contract. Repeating its durable command reference resumes the
+An Plexus reset uses this same clock contract. Repeating its durable command reference resumes the
 same guest-state lifetime replacement without changing the domain clock mapping.
 
 Generated records use the snapshot assigned to their generating operation. Buffered emitter

@@ -71,7 +71,7 @@ what each ending preserves, and how to read a shutdown that did not finish.
 
 ## Connect A Client
 
-[`nervix-cli`](client-tools-cli.md) is the interactive NSPL client. With no arguments it connects
+[`nervix-cli`](client-tools-cli.md) is the interactive Plexus client. With no arguments it connects
 to `http://127.0.0.1:47391` as user `default` and prompts for the password:
 
 ```bash
@@ -85,8 +85,8 @@ nervix[default]> SHOW CLUSTER STATUS;
 Statements end with `;`, and the prompt shows the active domain. The same statements can be typed
 into the web console's command line, or executed one-shot with
 `nervix-cli --command "<statements>"`. There is no file-execution mode: to run a saved script,
-paste it into the client or pass it through `--command "$(cat pipeline.nspl)"`. To format a saved
-script, use [`nervix-nspl-format`](client-tools-nspl-format.md).
+paste it into the client or pass it through `--command "$(cat pipeline.plexus)"`. To format a saved
+script, use [`nervix-plexus-format`](client-tools-plexus-format.md).
 
 ## Start Kafka And Redis
 

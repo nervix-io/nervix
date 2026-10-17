@@ -4,12 +4,12 @@ Feature: RabbitMQ emission
     And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -83,13 +83,13 @@ Feature: RabbitMQ emission
     And a stallable RabbitMQ endpoint is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "rabbitmq_boundary_in_{{test_id}}" exists with 1 partitions
     And RabbitMQ queue "rabbitmq_boundary_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );

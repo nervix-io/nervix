@@ -3,7 +3,7 @@
 //! reach, writing a checkpoint to stable storage, waiting for its replicas, and handoff restore
 //! validation.
 //! May depend on: replicated WASM guest state, the state store, compiled WASM modules and schedules.
-//! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
+//! Must not know: control-plane transactions, Plexus parsing, or edge protocols.
 
 #![cfg_attr(
     nervix_lint,

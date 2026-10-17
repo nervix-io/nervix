@@ -341,7 +341,7 @@ impl EmitSink {
         self.kind().capabilities()
     }
 
-    /// The NSPL keyword of the sink's connector, as `DESCRIBE` and diagnostics name it.
+    /// The Plexus keyword of the sink's connector, as `DESCRIBE` and diagnostics name it.
     pub fn transport_label(&self) -> &'static str {
         self.connector().keyword()
     }

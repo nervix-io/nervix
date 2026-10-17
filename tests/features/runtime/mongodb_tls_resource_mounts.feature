@@ -4,21 +4,21 @@ Feature: MongoDB TLS resource mounts
     And MongoDB is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has dev TLS resource directory "dev_tls"
     And MongoDB TLS collection "tls_notifications_mongodb_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,

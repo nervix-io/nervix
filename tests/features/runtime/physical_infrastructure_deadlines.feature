@@ -7,11 +7,11 @@ Feature: Physical infrastructure deadlines under domain pacing
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_poll_record (
         user_id I64
@@ -43,16 +43,16 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2010-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 2 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -68,11 +68,11 @@ Feature: Physical infrastructure deadlines under domain pacing
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_prometheus_sample (
         source STRING,
@@ -110,7 +110,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2000-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -126,11 +126,11 @@ Feature: Physical infrastructure deadlines under domain pacing
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_timeout_record (
         user_id I64
@@ -164,18 +164,18 @@ Feature: Physical infrastructure deadlines under domain pacing
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
     When physical time passes for "700ms"
     Then within "50ms" clock source recorder "{{test_id}}" records 1 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
     Given clock source recorder "{{test_id}}" is reset
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2010-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "1500ms" clock source recorder "{{test_id}}" records at least 3 requests
     And the first 3 requests recorded by clock source recorder "{{test_id}}" are separated by at least "200ms"
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -189,11 +189,11 @@ Feature: Physical infrastructure deadlines under domain pacing
   Scenario Outline: Required materialized state has no physical lifetime and preserves each branch
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA physical_wait_notification (
         tenant STRING,
@@ -301,7 +301,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       {"tenant":"initech","id":"i-1","source":"input"}
       """
     Then the relay subscription does not receive a payload within "250ms"
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -318,12 +318,12 @@ Feature: Physical infrastructure deadlines under domain pacing
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
     And Kafka topic "physical_ack_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_ack_record (
         user_id I64
@@ -386,7 +386,7 @@ Feature: Physical infrastructure deadlines under domain pacing
   Scenario: Silent peers obey the same shutdown bound without and after a domain clock
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
@@ -397,7 +397,7 @@ Feature: Physical infrastructure deadlines under domain pacing
     When node "node-3" is started
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '1970-01-01T00:00:00Z' TIME RATE 0.0001;
       STOP;

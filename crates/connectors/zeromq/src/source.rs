@@ -6,7 +6,7 @@
 //!   first frame of each message as the payload, and reopening the socket after a receive failure.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio and `zeromq`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

@@ -60,7 +60,7 @@ RULES = {
         Rule("combinator_control_flow",
              re.compile(r"\.\s*(?:map_or_else|map_or|and_then|ok_or_else|unwrap_or_else|or_else)\s*\(")),
         Rule("model_matches_in_data_plane", re.compile(r"\bModel\s*::")),
-        Rule("parser_imports_outside_edges", re.compile(r"\bnervix_nspl\s*::")),
+        Rule("parser_imports_outside_edges", re.compile(r"\bnervix_plexus\s*::")),
         Rule("files_over_3000_lines", None),
         # The analyzer's complexity has no spelling; splitting a function lowers it.
         Rule("functions_over_complexity_30", None),

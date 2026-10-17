@@ -12,14 +12,14 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "retried_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "retried_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "retried_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event ( seq I64, error_code STRING );
@@ -96,14 +96,14 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "detached_retried_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "detached_retried_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "detached_retried_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
@@ -167,13 +167,13 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "refused_{{test_id}}" exists with 1 partitions
     And Kafka topic "refused_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -246,12 +246,12 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given MongoDB is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MongoDB collection "retried_mongodb_{{test_id}}" rejecting poison actions exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE SCHEMA emitter_error ( error_code STRING, source_user_id I64 );

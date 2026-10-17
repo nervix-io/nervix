@@ -5,7 +5,7 @@
 //! May depend on: catalog pages, the owner's announcements, the branches a lifecycle names, and
 //! typed branch keys.
 //! Must not know: how a page, an announcement or a checkpoint travels, how a checkpoint is
-//! installed or stored, schedules, or NSPL.
+//! installed or stored, schedules, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

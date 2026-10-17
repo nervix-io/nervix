@@ -39,7 +39,7 @@ counters.
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures and their loaded procedural macro objects, using the analysis compiler's matching LLVM tools. API doctests finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | Every Criterion body once in test mode. Its instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
-| Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `nspl-completion-walk` recipe. |
+| Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `plexus-completion-walk` recipe. |
 
 The `extra-tests` job also exports ordinary Python tooling reports. Each recipe executes the
 owner's tests under coverage and publishes `python.lcov`; the merge discovers those names inside
@@ -80,7 +80,7 @@ lines they execute. Run them the way CI does:
 just coverage-native-extras
 ```
 
-Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
+Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
 `test-shuttle`, `test-loom`, `test-turmoil`, `test-deadlock-evidence-order`, `test-deadlock-report`,
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
 an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
@@ -91,7 +91,7 @@ and exports only after its
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash
-just coverage-native-extras nspl-completion-walk
+just coverage-native-extras plexus-completion-walk
 just coverage-native-extras test-primitives
 just coverage-native-extras test-shuttle test-loom
 just coverage-native-extras test-turmoil

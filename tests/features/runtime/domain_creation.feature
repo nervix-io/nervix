@@ -3,7 +3,7 @@ Feature: Domain creation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -11,7 +11,7 @@ Feature: Domain creation
       """
       created domain '{{domain}}'
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       DESCRIBE DOMAIN;
       """
@@ -20,7 +20,7 @@ Feature: Domain creation
       domain: {{domain}}
       status: stopped
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -39,11 +39,11 @@ Feature: Domain creation
   Scenario: A created stopped domain is immediately visible through every follower
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       DESCRIBE DOMAIN;
       """
@@ -52,7 +52,7 @@ Feature: Domain creation
       domain: {{domain}}
       status: stopped
       """
-    When these NSPL commands are executed on node "node-3"
+    When these Plexus commands are executed on node "node-3"
       """
       DESCRIBE DOMAIN;
       """

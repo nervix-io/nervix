@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     AckWindow, AcknowledgementConfirmation, AlterIngestorError, AlterIngestorOperation,
-    CanonicalNsplError, ClientName, CreateIngestor, DeclaredDelivery, DeclaredQuiesce,
+    CanonicalPlexusError, ClientName, CreateIngestor, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
     IngestDeliveryKind, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
     IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
@@ -141,13 +141,13 @@ impl ClientIngestorAlteration {
         }
     }
 
-    /// The canonical NSPL of each operation, in order.
-    pub(crate) fn operations_to_nspl(
+    /// The canonical Plexus of each operation, in order.
+    pub(crate) fn operations_to_plexus(
         &self,
-    ) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+    ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
         match self {
             Self::Producer(operations) => {
-                crate::canonical::alter_ingestor_operations_to_nspl(operations)
+                crate::canonical::alter_ingestor_operations_to_plexus(operations)
             }
         }
     }

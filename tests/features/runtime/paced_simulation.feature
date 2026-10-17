@@ -10,7 +10,7 @@ Feature: Paced simulation drivers
     Given a 1 node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE <time_rate>;
       """
@@ -49,13 +49,13 @@ Feature: Paced simulation drivers
     # among three nodes the authority of paced_simulation is node-3.
     And domain clock progress for domain "{{domain}}" on node "node-3" is paused before delivery
     When leadership is transferred to node "node-1"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 1.0;
       """
     Then domain clock progress for domain "{{domain}}" on node "node-3" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-3" resumes
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR simulated_readings ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE EMITTER observed_readings ONTO NODE node-2 IGNORE PREFERENCES;
@@ -95,7 +95,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """
@@ -131,18 +131,18 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 1.0;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 300 --sensors 2 --follow-generations"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
     Then within "60s" the paced simulation driver prints a line starting with "CLOCK generation=1 state=stopped"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 4.0;
       """
@@ -166,13 +166,13 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.05;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 30 --sensors 2 --credit-batches 2"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER EMITTER observed_readings SET TO CLIENT SCHEMA observed_reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
@@ -182,7 +182,7 @@ Feature: Paced simulation drivers
     Then within "60s" the paced simulation driver prints a line starting with "CONSUMER reopen_required consumer=output-1 emitter=observed_readings reason=contract_changed"
     And within "60s" the paced simulation driver prints a line starting with "CONSUMER reopened consumer=output-1 emitter=observed_readings generation=1"
     And within "60s" the paced simulation driver prints a line starting with "CONSUMER reopened consumer=rejections emitter=rejection_notices generation=1"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
@@ -225,7 +225,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings REPLACE ROUTE TO readings
         INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
@@ -239,7 +239,7 @@ Feature: Paced simulation drivers
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 8 --sensors 1 --credit-batches 1 --processing-time 2s"
     Then within "60s" the paced simulation driver prints a line starting with "WAITING credit"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
@@ -284,7 +284,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;
       START AT NOW TIME RATE 0.5;
@@ -306,7 +306,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings REPLACE ROUTE TO readings
         INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
@@ -320,7 +320,7 @@ Feature: Paced simulation drivers
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 30 --sensors 2 --deadline 5s"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <change>
       """
@@ -358,7 +358,7 @@ Feature: Paced simulation drivers
     And the gRPC endpoint of node "node-1" is forwarded from fixture address "127.0.0.1"
     # At half real time the admission window retains 51 seconds of wall time, which the replay
     # below stays well inside.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.5;
       """
@@ -392,7 +392,7 @@ Feature: Paced simulation drivers
     And the leader node is configured with the paced simulation example graph
     # One batch of 300 readings fills the byte credit, so each tick's batch waits for the one
     # before it to complete while the consumers acknowledge its output.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.5;
       """
@@ -422,7 +422,7 @@ Feature: Paced simulation drivers
     Given a 1 node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """
@@ -453,7 +453,7 @@ Feature: Paced simulation drivers
       """
       not json
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """
@@ -491,7 +491,7 @@ Feature: Paced simulation drivers
     When the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 5"
     Then within "60s" the paced simulation driver exits with status 2
     And the paced simulation driver's errors contain "the clock of domain 'paced_simulation' is stopped at generation 0; START the domain before running the simulation"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """

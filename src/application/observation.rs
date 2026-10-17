@@ -522,7 +522,7 @@ impl SessionServiceImpl {
             .registry
             .get::<CreatePlacement>(domain, &describe.name)
         {
-            Ok(Some(placement)) => placement.to_canonical_nspl().ok(),
+            Ok(Some(placement)) => placement.to_canonical_plexus().ok(),
             Ok(None) => None,
             Err(error) => return command_error(error.to_string()),
         };

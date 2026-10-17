@@ -6,7 +6,7 @@
 //!   leaves the socket unread or buffers and drops what it keeps reading.
 //! - **Depends on.** The connector source contract, the ZeroMQ connector, and pre-resolved
 //!   runtime execution handles.
-//! - **Must not know.** The ZeroMQ driver, socket lifecycle, NSPL parsing, registry validation,
+//! - **Must not know.** The ZeroMQ driver, socket lifecycle, Plexus parsing, registry validation,
 //!   or placement computation.
 
 #![cfg_attr(

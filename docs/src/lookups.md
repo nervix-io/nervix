@@ -1,7 +1,7 @@
 #  Lookups
 
 Lookups are resource-backed reference data models that can be queried directly or used inside
-structured NSPL expressions.
+structured Plexus expressions.
 
 ## Choosing An Enrichment Mechanism
 
@@ -23,7 +23,7 @@ into an arbitrary-key query service.
 
 The current lookup model is a hash map:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] HASH MAP <name>
   KEY <field>
   FROM RESOURCE <resource> VERSION <n>|LATEST
@@ -43,7 +43,7 @@ on every current live node, including while the domain is stopped. The next comm
 The web console's **Create → Hash map** form gathers the name, key field, resource, completed
 version or `LATEST`, file path, and codec as structured controls. The key-field picker lists the
 selected codec's output schema fields with their exact types. The form submits the current Model's
-canonical NSPL and waits for this same loading boundary before showing **Completed**. A failed
+canonical Plexus and waits for this same loading boundary before showing **Completed**. A failed
 load leaves the entered draft visible for inspection. The transaction can already have committed
 the Model before a malformed line fails activation, so a retry under the same name does not replace
 that Model.
@@ -51,7 +51,7 @@ that Model.
 A resource file is read line by line, and each non-blank line is one payload for the codec. With a
 schemaful codec, such as a JSON wire schema over JSON Lines, each line is one entry:
 
-```nspl
+```plexus
 CREATE RESOURCE zip_codes;
 UPLOAD RESOURCE zip_codes VERSION './lookups/zip_codes';
 
@@ -85,7 +85,7 @@ A line that fails to decode fails the hash map's creation with a diagnostic nami
 
 Direct lookup commands are session/control commands:
 
-```nspl,ignore
+```plexus,ignore
 DESCRIBE HASH MAP <name>;
 LOOKUP <name> KEY '<key>';
 ```
@@ -100,7 +100,7 @@ stopped.
 
 Expressions can call `LOOKUP_HASH_MAP`:
 
-```nspl,ignore
+```plexus,ignore
 LOOKUP_HASH_MAP("<hash_map>", <key_expr>, "<field>")
 ```
 
@@ -108,7 +108,7 @@ The function evaluates `<key_expr>`, looks up that key in the named hash map, an
 
 Example enrichment:
 
-```nspl
+```plexus
 CREATE BRANCH by_zip
   SCHEMA zip_branch TTL 5m;
 

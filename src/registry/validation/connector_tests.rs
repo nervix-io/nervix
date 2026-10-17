@@ -383,7 +383,7 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     };
     let mapping = nervix_models::ClickHouseValueMapping {
         column: "external_secret".to_string(),
-        expression: nervix_nspl::parse_expression("input.secret")
+        expression: nervix_plexus::parse_expression("input.secret")
             .assured("input.secret is a valid expression"),
     };
     *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
@@ -413,7 +413,7 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     else {
         panic!("the test emitter uses Postgres VALUES");
     };
-    values[0].expression = nervix_nspl::parse_expression("leak_sensitive(input.secret)")
+    values[0].expression = nervix_plexus::parse_expression("leak_sensitive(input.secret)")
         .assured("leak_sensitive(input.secret) is a valid expression");
     validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
         .assured("explicit leakage permits the direct VALUES mapping");
@@ -437,7 +437,7 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
     };
     let mapping = nervix_models::ClickHouseValueMapping {
         column: "external_value".to_string(),
-        expression: nervix_nspl::parse_expression("input.missing")
+        expression: nervix_plexus::parse_expression("input.missing")
             .expect("a missing field is still a valid expression"),
     };
     *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
@@ -474,9 +474,9 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
     emitter.body = nervix_models::EmitterBody::WithoutBody;
     *emitter.sink = EmitSink::Http(HttpSink::Request(HttpRequestSink {
         client: named("api"),
-        method: nervix_nspl::parse_expression("input.value")
+        method: nervix_plexus::parse_expression("input.value")
             .expect("a field reference is a valid expression"),
-        path: nervix_nspl::parse_expression("'/events'")
+        path: nervix_plexus::parse_expression("'/events'")
             .expect("a string literal is a valid expression"),
     }));
     let schema = CreateSchema {
@@ -636,7 +636,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         client: named("sqs_main"),
         queue: "events.fifo".to_string(),
         fifo_group: Some(SqsFifoGroup::Expression(
-            nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
+            nervix_plexus::parse_expression("input.value").expect("valid FIFO group expression"),
         )),
     })));
     valid.publishing_mode = EmitterPublishingMode::SqsSingle {
@@ -750,7 +750,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         },
         mode: AckMode::Attached,
         error_policies: ErrorPolicies::handled_by_log(),
-        construction: nervix_nspl::parse_route_construction(
+        construction: nervix_plexus::parse_route_construction(
             "INHERIT ALL INVOKE write_header(\"tenant\", input.tenant)",
         )
         .expect("valid construction"),
@@ -1253,7 +1253,7 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                     name: IngestorName::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: RelayName::parse("notifications").expect("valid identifier"),
-                        construction: nervix_nspl::parse_route_construction(
+                        construction: nervix_plexus::parse_route_construction(
                             "SET total = input.value, tenant = input.tenant",
                         )
                         .expect("route construction must parse"),
@@ -1336,7 +1336,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                 name: IngestorName::parse("ing").expect("valid identifier"),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: RelayName::parse("notifications").expect("valid identifier"),
-                    construction: nervix_nspl::parse_route_construction(
+                    construction: nervix_plexus::parse_route_construction(
                         "SET total = input.missing + 1",
                     )
                     .expect("route construction must parse"),
@@ -1430,8 +1430,10 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                 name: IngestorName::parse("ing").expect("valid identifier"),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: RelayName::parse("notifications").expect("valid identifier"),
-                    construction: nervix_nspl::parse_route_construction("INHERIT ALL EXCEPT value")
-                        .expect("route construction must parse"),
+                    construction: nervix_plexus::parse_route_construction(
+                        "INHERIT ALL EXCEPT value",
+                    )
+                    .expect("route construction must parse"),
                     flush_policy: None,
                     message_error_policy: MessageErrorPolicy::Log,
                     branch: Some(OutputBranch::Unbranched),
@@ -1487,12 +1489,12 @@ fn emitter_accepts_same_schema_inputs_from_different_named_branches() {
         vec![
             nervix_models::ProcessorInputWhere {
                 relay: named("source_a"),
-                where_clause: nervix_nspl::parse_expression("input.value = 'one'")
+                where_clause: nervix_plexus::parse_expression("input.value = 'one'")
                     .expect("valid source filter"),
             },
             nervix_models::ProcessorInputWhere {
                 relay: named("source_b"),
-                where_clause: nervix_nspl::parse_expression("input.value = 'two'")
+                where_clause: nervix_plexus::parse_expression("input.value = 'two'")
                     .expect("valid source filter"),
             },
         ],
@@ -1823,7 +1825,7 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
         table: named("events"),
         values: vec![nervix_models::IcebergValueMapping {
             column: "value".to_string(),
-            expression: nervix_nspl::parse_expression("input.value")
+            expression: nervix_plexus::parse_expression("input.value")
                 .assured("input.value is a valid expression"),
         }],
         location: "s3://lake/events".to_string(),

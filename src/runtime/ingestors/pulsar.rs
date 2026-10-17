@@ -6,7 +6,7 @@
 //!   host-owned intake.
 //! - **Depends on.** The connector source contract, the Pulsar connector, and pre-resolved runtime
 //!   execution handles.
-//! - **Must not know.** The Pulsar driver, consumer lifecycle, NSPL parsing, registry validation,
+//! - **Must not know.** The Pulsar driver, consumer lifecycle, Plexus parsing, registry validation,
 //!   or placement computation.
 
 #![cfg_attr(

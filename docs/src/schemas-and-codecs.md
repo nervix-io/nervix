@@ -6,7 +6,7 @@ Nervix separates internal runtime schema from wire schema.
 
 An internal schema describes the typed runtime record:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS SCHEMA notification (
   user_id U32,
   created_at DATETIME,
@@ -59,7 +59,7 @@ them before decoding into the internal schema.
 
 JSON wire schema:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS WIRE JSON SCHEMA notification_wire MODE STRICT (
   user_id integer,
   created_at string,
@@ -69,7 +69,7 @@ CREATE IF NOT EXISTS WIRE JSON SCHEMA notification_wire MODE STRICT (
 
 CBOR wire schema:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS WIRE CBOR SCHEMA notification_wire MODE LOOSE (
   user_id integer,
   created_at string,
@@ -79,7 +79,7 @@ CREATE IF NOT EXISTS WIRE CBOR SCHEMA notification_wire MODE LOOSE (
 
 AVRO wire schema:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
   user_id LONG,
   created_at STRING,
@@ -103,7 +103,7 @@ SYSLOG is different: it is a predefined singleton wire schema whose shape comes 
 protocol. It has no user-defined name, `CREATE WIRE` declaration, mode, field list, `ALTER`, or
 `DROP` lifecycle. A codec references it directly:
 
-```nspl
+```plexus
 CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
 ```
 
@@ -126,7 +126,7 @@ Internal schema operations are:
 
 For example:
 
-```nspl
+```plexus
 ALTER SCHEMA notification
   ADD FIELD note STRING OPTIONAL,
   RENAME FIELD created_at TO received_at,
@@ -149,14 +149,14 @@ Wire schema operations are:
 JSON, CBOR, and AVRO wire schemas are separate entity kinds. They may use the same name without
 colliding, and the exact format is required for every ALTER:
 
-```nspl
+```plexus
 ALTER WIRE JSON SCHEMA notification_wire
   ADD FIELD note string OPTIONAL;
 ```
 
 Mode changes use that same exact entity kind:
 
-```nspl
+```plexus
 ALTER WIRE JSON SCHEMA notification_wire MODE LOOSE;
 ```
 
@@ -165,7 +165,7 @@ mutations for one domain—`CREATE`, schema `ALTER`, relay `ALTER`, and `DROP`�
 one candidate graph and committed atomically. The following replacement changes the wire and
 internal types together and recreates their codec without exposing an intermediate invalid graph:
 
-```nspl
+```plexus
 BEGIN;
 ALTER WIRE JSON SCHEMA notification_wire
   ALTER FIELD user_id SET TYPE number;
@@ -201,7 +201,7 @@ that they must be recreated against the current schema.
 
 A codec maps one transport payload format to one internal schema.
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_codec
   FROM WIRE JSON SCHEMA notification_wire
   TO SCHEMA notification;
@@ -210,7 +210,7 @@ CREATE IF NOT EXISTS CODEC notification_codec
 Schemaful codecs are type-strict. A JSON `string` wire field does not implicitly decode
 into an internal `DATETIME` field. Declare the wire conversion explicitly:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_codec
   FROM WIRE JSON SCHEMA notification_wire
   TO SCHEMA notification
@@ -247,7 +247,7 @@ JAQ transformations. An ingestion transformation turns every value the payload h
 or more JSON objects, and each object is decoded into the internal schema as one message
 ([Unfolding Payloads](#unfolding-payloads)):
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_cbor
   FROM CBOR
   TO SCHEMA notification
@@ -262,7 +262,7 @@ CREATE IF NOT EXISTS CODEC notification_xml
 
 Protobuf codecs compile `.proto` files from an uploaded resource, decode or encode the selected message with `prost-reflect`, and use JAQ to translate between the protobuf JSON view and the internal schema:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_proto
   FROM PROTOBUF
   USING RESOURCE proto_bundle VERSION 1
@@ -279,7 +279,7 @@ The resource contains the `.proto` files. `USING RESOURCE` requires `VERSION <n>
 A protobuf codec that a [batching emitter](emitters.md#batching) encodes through names the message
 a batch is published as, after `MESSAGE`:
 
-```nspl,ignore
+```plexus,ignore
 CREATE CODEC notification_proto
   FROM PROTOBUF
   USING RESOURCE proto_bundle VERSION 1
@@ -358,7 +358,7 @@ JAQ-backed codecs must declare a JAQ transform. The concise
 [JAQ Reference](jaq-reference.md) links the full upstream manual for the exact `jaq-core` release
 Nervix embeds and summarizes the Nervix-specific boundary:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_codec
   FROM JSON
   TO SCHEMA notification
@@ -391,7 +391,7 @@ not depend on serde JSON object storage.
 A JAQ-backed codec — JAQ-native or protobuf — may declare a third transformation for emitters that
 declare a [batching clause](emitters.md#batching):
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC notification_envelope
   FROM JSON
   TO SCHEMA notification
@@ -411,7 +411,7 @@ record.
 The transformation replaces the format's [batch container](#batch-containers), so an array mapping,
 an envelope and a larger value are all ordinary uses:
 
-```nspl,ignore
+```plexus,ignore
 ON EMITTING BATCH '.'
 ON EMITTING BATCH 'map({id: .user_id})'
 ON EMITTING BATCH '{count: length, records: .}'
@@ -478,7 +478,7 @@ An empty JSON, CBOR, YAML, or XML payload holds no values and decodes into no me
 semantics apply unchanged: `.[]` unfolds an array into one message per element, a comma yields
 several messages, and `select` or `empty` yields no message for the values it rejects.
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CODEC order_lines_codec
   FROM JSON
   TO SCHEMA order_line

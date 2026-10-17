@@ -9,11 +9,11 @@ Feature: Fixed-format emitter batch envelopes
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the Sentry endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA error_event ( message STRING, environment STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA error_event
@@ -70,11 +70,11 @@ Feature: Fixed-format emitter batch envelopes
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the Sentry endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA error_event ( message STRING );
       CREATE SCHEMA rejected_event ( error_message STRING );
@@ -128,11 +128,11 @@ Feature: Fixed-format emitter batch envelopes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
@@ -190,11 +190,11 @@ Feature: Fixed-format emitter batch envelopes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
@@ -246,11 +246,11 @@ Feature: Fixed-format emitter batch envelopes
   Scenario Outline: A Syslog TCP receiver sees one batched frame with the declared framing
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
@@ -313,20 +313,20 @@ Feature: Fixed-format emitter batch envelopes
   Scenario Outline: A Syslog TLS receiver sees one batched RFC 5425 frame
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
@@ -396,11 +396,11 @@ Feature: Fixed-format emitter batch envelopes
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, body STRING );
       CREATE SCHEMA rejected_event ( seq I64, error_message STRING );

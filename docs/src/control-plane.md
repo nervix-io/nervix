@@ -4,7 +4,7 @@ The control plane is where Nervix applies strong consistency.
 
 It is responsible for:
 
-- storing NSPL models
+- storing Plexus models
 - validating references, compatibility, and placement claims
 - computing domain schedules
 - tracking domain lifecycle
@@ -13,7 +13,7 @@ It is responsible for:
 
 The most important property is that control-plane state is authoritative. A runtime node only exists because the control plane says it exists.
 
-Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
+Execution graph configuration is part of this control-plane state. Plexus models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
 
 Schedule planning captures live voter incarnations separately from destination candidates, which
 exclude both terminating incarnations and the captured consensus cordons. Revalidation uses the
@@ -68,9 +68,9 @@ can publish, including the largest one, still suppresses the stale revisions tha
 revision whose application fails is not recorded as applied, so the node applies that revision again
 instead of treating the failed attempt as its current state.
 
-## Replicated NSPL Transactions
+## Replicated Plexus Transactions
 
-NSPL command grouping is explicit. `BEGIN` creates a Raft-replicated control-plane transaction and
+Plexus command grouping is explicit. `BEGIN` creates a Raft-replicated control-plane transaction and
 returns its id. Following eligible statements are preflighted and then appended to that transaction
 in written order; `COMMIT` applies them and `REVERT` discards them. `BEGIN` inside an active
 transaction is rejected, as are `COMMIT` and `REVERT` without one. A request containing multiple
@@ -271,7 +271,7 @@ transaction has no readable report, which is the state of one that ended before 
 planned. The inspected report travels in its own typed envelope; the transaction status a command
 result carries continues to describe the caller's own session binding.
 
-NSPL reaches inspection through `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT |
+Plexus reaches inspection through `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT |
 JSON ]`. The session answers it before transaction queueing: sent while a transaction is attached,
 it neither becomes queued content nor consumes an operation number, and it takes no queue position,
 durable admission, or execution-reference replay, so repeating it reads the transaction again. It

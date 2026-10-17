@@ -1,7 +1,7 @@
 //! Public deduplicator and window workloads whose single-branch state exceeds the bulk budget.
 //!
 //! Layer: test harness.
-//! - **Owns.** The NSPL graph, the HTTP inputs that build one large keyspace and window beside many
+//! - **Owns.** The Plexus graph, the HTTP inputs that build one large keyspace and window beside many
 //!   small branches, the summaries a subscription reports for them, and the archive inventory of
 //!   their sections.
 //! - **Depends on.** Public commands, HTTP intake, Row subscriptions and the public archive reader.
@@ -104,7 +104,7 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
     )
     .await
     .assured("the workload client connects");
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -122,7 +122,7 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
 #[when(expr = "the large branch state subscription is opened on the leader node")]
 async fn when_large_branch_state_subscription_is_opened(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
-    let session = crate::execute_nspl_commands_on_node(
+    let session = crate::execute_plexus_commands_on_node(
         world,
         &leader,
         "CREATE SUBSCRIPTION large_keys TO unique_keys;

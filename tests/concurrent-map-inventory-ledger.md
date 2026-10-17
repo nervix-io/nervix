@@ -455,7 +455,7 @@ passed its 282 Python checks and documentation build. Fresh server and Python re
 Shuttle evidence above were collected before this integration; unchanged endpoint HTTP edge
 paths are exercised by the full PR scenario gate as well.
 
-The final pre-push integration also preserves the subsequent NSPL repairs and Typed Ratchet 13's
+The final pre-push integration also preserves the subsequent Plexus repairs and Typed Ratchet 13's
 checkpoint-replication publication. Endpoint owner and HTTP edge code are unchanged by that merge;
 server Clippy across all targets with `testing`, formatting, the 30 runner tests and the debt
 ratchet passed. The inventory now has 27 Bolero targets, and the combined recurring-lock count is

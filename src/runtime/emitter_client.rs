@@ -4,7 +4,7 @@
 //! - **Owns.** Packing one source relay and concrete branch at a time into exact-schema Arrow IPC,
 //!   retaining prepared bytes and source members, and applying application ACKs or rejections.
 //! - **Depends on.** The emitter host's prepared-payload contract and client delivery owner.
-//! - **Must not know.** Session transport, cluster routing, NSPL text, or an external connector.
+//! - **Must not know.** Session transport, cluster routing, Plexus text, or an external connector.
 
 #![cfg_attr(
     nervix_lint,

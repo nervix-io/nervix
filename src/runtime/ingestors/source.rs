@@ -10,7 +10,7 @@
 //!   connector error reporting.
 //! - **Depends on.** The connector source contract, declared delivery modes, and pre-resolved
 //!   runtime execution handles.
-//! - **Must not know.** A broker driver, connector-specific configuration, NSPL parsing, registry
+//! - **Must not know.** A broker driver, connector-specific configuration, Plexus parsing, registry
 //!   validation, or placement computation.
 
 #![cfg_attr(

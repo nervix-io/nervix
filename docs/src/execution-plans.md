@@ -1,7 +1,7 @@
 # Execution Plans
 
 An execution plan is the in-memory boundary between a committed domain schedule and the tasks
-that run it. NSPL becomes a semantic Model, registry validation establishes its contracts, and
+that run it. Plexus becomes a semantic Model, registry validation establishes its contracts, and
 scheduling commits the graph and its placement. The decision layer then converts the committed
 schedule into one complete typed execution revision. The runtime binds node-local resources and
 executes that revision. No production data-plane task reads a semantic Model, a scheduled node's

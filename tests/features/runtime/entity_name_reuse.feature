@@ -1,11 +1,11 @@
 Feature: Entity name reuse across kinds
   Scenario: Different entity kinds may share the same identifier
     Given a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA shared_name (
         user_id I64
@@ -17,7 +17,7 @@ Feature: Entity name reuse across kinds
           'bootstrap.servers' = '127.0.0.1:9092'
         };
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       SHOW CREATE SCHEMA shared_name;
       """
@@ -27,7 +27,7 @@ Feature: Entity name reuse across kinds
         user_id I64
       );
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       SHOW CREATE CLIENT shared_name;
       """

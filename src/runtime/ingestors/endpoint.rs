@@ -7,7 +7,7 @@
 //! - **Depends on.** The connector source contract, the domain's instantiated endpoint routes, and
 //!   the host's endpoint binding table.
 //! - **Must not know.** Request admission, the endpoint buffer, rejection with a retry delay, or
-//!   dispatch, all of which the host owns; NSPL parsing, registry validation, or placement
+//!   dispatch, all of which the host owns; Plexus parsing, registry validation, or placement
 //!   computation.
 
 #![cfg_attr(

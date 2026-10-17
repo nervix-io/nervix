@@ -7,7 +7,7 @@ Feature: Delivery latency metrics
   Scenario Outline: Node inputs record each batch's delivery latency from its rows' ingestion watermarks
     Given a <cluster_size> node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1m SKEW 1m;
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
@@ -72,7 +72,7 @@ Feature: Delivery latency metrics
       "sequence":3
       "sequence":4
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE JUNCTION admit;
       """
@@ -122,7 +122,7 @@ Feature: Delivery latency metrics
       relay="raw_readings"
       le="+Inf"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE REINGESTOR reingest;
       """
@@ -156,7 +156,7 @@ Feature: Delivery latency metrics
       relay="admitted_readings"
       le="5"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE JUNCTION forward;
       """
@@ -184,7 +184,7 @@ Feature: Delivery latency metrics
       relay="reingested_readings"
       le="0.1"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE EMITTER publish;
       """

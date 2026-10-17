@@ -2,11 +2,11 @@ Feature: Runtime node error policies
   Scenario Outline: Runtime nodes require their mandatory error policy blocks
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       <statement>;
       """
@@ -25,11 +25,11 @@ Feature: Runtime node error policies
   Scenario Outline: Pure runtime processors reject general error policies
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       <statement>;
       """
@@ -47,11 +47,11 @@ Feature: Runtime node error policies
   Scenario: General error policy rejects SEND TO because it is not tied to a concrete message
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE EMITTER kafka_emit
         FROM notifications
@@ -65,12 +65,12 @@ Feature: Runtime node error policies
   Scenario Outline: Emitter message errors can be sent to an error relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -151,11 +151,11 @@ Feature: Runtime node error policies
   Scenario Outline: Route filter evaluation errors retain their structured operation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA calculation (
         id STRING,
@@ -219,11 +219,11 @@ Feature: Runtime node error policies
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64

@@ -163,7 +163,7 @@ nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
-nervix-nspl = { workspace = true }
+nervix-plexus = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
@@ -378,8 +378,8 @@ members = [
   "crates/nervix-roto",
   "crates/web-console",
   "crates/nervix-vm",
-  "crates/nspl",
-  "crates/nspl-format",
+  "crates/plexus",
+  "crates/plexus-format",
   "crates/model-harness",
   "crates/models",
   "crates/primitives",
@@ -604,7 +604,7 @@ nervix-interconnect = { package = "nervix-interconnect", path = "crates/intercon
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
 nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
-nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
+nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = [
   "server",
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }

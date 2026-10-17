@@ -8,11 +8,11 @@ Feature: Remote record acknowledgements lost between nodes
     And a 3 node nervix cluster is started
     And Kafka topic "lost_ack_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "lost_ack_out_{{test_id}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA lost_ack_event ( event_id STRING, branch_name STRING, sequence I64 );
       CREATE WIRE JSON SCHEMA lost_ack_wire MODE STRICT (
@@ -44,7 +44,7 @@ Feature: Remote record acknowledgements lost between nodes
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR lost_ack_source ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY lost_ack_records ONTO NODE node-2 IGNORE PREFERENCES;

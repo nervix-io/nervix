@@ -9,7 +9,7 @@ Feature: Forced ownership recovery while a former owner holds relay deliveries
     And a 3 node nervix cluster is started
     And Kafka topic "forced_delivery_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "forced_delivery_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -73,7 +73,7 @@ Feature: Forced ownership recovery while a former owner holds relay deliveries
       """
       {"event_id":"held-during-failover"}
       """
-    And within "20s" these NSPL commands complete on node "node-1"
+    And within "20s" these Plexus commands complete on node "node-1"
       """
       CREATE RELAY forced_canary SCHEMA forced_event UNBRANCHED;
       """

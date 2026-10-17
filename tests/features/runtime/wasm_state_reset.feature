@@ -4,7 +4,7 @@ Feature: Coordinated WASM processor state reset
   can observe only the new lifetime.
 
   @execution_resource_plan
-  Scenario Outline: NSPL resets one WASM branch through the public command path
+  Scenario Outline: Plexus resets one WASM branch through the public command path
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
@@ -17,7 +17,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"beta","sequence":1}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
@@ -52,7 +52,7 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       """
 
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'beta' };
       """
@@ -72,7 +72,7 @@ Feature: Coordinated WASM processor state reset
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Retrying an NSPL reset keeps the selected branch's new lifetime
+  Scenario Outline: Retrying an Plexus reset keeps the selected branch's new lifetime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
@@ -81,7 +81,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"alpha","sequence":1}
       """
-    And this NSPL command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
+    And this Plexus command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
@@ -90,7 +90,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"alpha","sequence":2}
       """
-    And this NSPL command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
+    And this Plexus command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
@@ -121,7 +121,7 @@ Feature: Coordinated WASM processor state reset
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given command response delivery on node "{{old_leader}}" pauses after execution
-    When the active session begins this NSPL command request with execution reference "lost-reset-{{test_id}}" in the background
+    When the active session begins this Plexus command request with execution reference "lost-reset-{{test_id}}" in the background
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
@@ -134,12 +134,12 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"alpha","sequence":2}
       """
-    And this NSPL command request with execution reference "lost-reset-{{test_id}}" is executed on the leader node
+    And this Plexus command request with execution reference "lost-reset-{{test_id}}" is executed on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then the last command request succeeded
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """
@@ -161,7 +161,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"alpha","sequence":1}
       """
-    And this NSPL command request with an execution reference created "1h" before now is executed on the leader node
+    And this Plexus command request with an execution reference created "1h" before now is executed on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
@@ -183,7 +183,7 @@ Feature: Coordinated WASM processor state reset
       | 1            |
       | 3            |
 
-  Scenario Outline: Invalid NSPL reset selections leave the active branch unchanged
+  Scenario Outline: Invalid Plexus reset selections leave the active branch unchanged
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
@@ -192,7 +192,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"alpha","sequence":1}
       """
-    And this NSPL command request is executed on the leader node
+    And this Plexus command request is executed on the leader node
       """
       <command>
       """
@@ -217,7 +217,7 @@ Feature: Coordinated WASM processor state reset
       | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 7 };          | requires an exact STRING literal            |
       | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'unseen' };   | no active execution for the selected branch |
 
-  Scenario Outline: NSPL all-branch reset replaces each active branch together
+  Scenario Outline: Plexus all-branch reset replaces each active branch together
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
@@ -230,7 +230,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"beta","sequence":1}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR ALL BRANCHES;
       """
@@ -262,7 +262,7 @@ Feature: Coordinated WASM processor state reset
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: NSPL unbranched reset starts one fresh guest lifetime
+  Scenario Outline: Plexus unbranched reset starts one fresh guest lifetime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
@@ -271,7 +271,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"root","sequence":1}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR UNBRANCHED;
       """
@@ -304,18 +304,18 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"alpha","sequence":1}
       """
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
     Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION '{{transaction_id}}' FORMAT JSON;
       """
@@ -324,7 +324,7 @@ Feature: Coordinated WASM processor state reset
       /report/operations/0/operation/kind = "RESET_WASM_STATE"
       /report/execution_steps/0/actual/outcome/status = "APPLIED"
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION '{{transaction_id}}';
       """
@@ -336,7 +336,7 @@ Feature: Coordinated WASM processor state reset
       """
       WASM_STATE_RESET
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE WASM PROCESSOR counting_guest;
       """
@@ -345,7 +345,7 @@ Feature: Coordinated WASM processor state reset
       """
       {"tenant":"alpha"}
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE WASM PROCESSOR counting_guest FORMAT JSON;
       """
@@ -409,7 +409,7 @@ Feature: Coordinated WASM processor state reset
       state reset reason: OPERATOR
       state reset readiness: READY
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """
@@ -671,7 +671,7 @@ Feature: Coordinated WASM processor state reset
       """
       domain '{{domain}}' does not exist
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -683,7 +683,7 @@ Feature: Coordinated WASM processor state reset
       """
       domain '{{domain}}' is not running
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -695,7 +695,7 @@ Feature: Coordinated WASM processor state reset
       """
       WASM processor 'counting_guest' does not exist in domain '{{domain}}'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -813,7 +813,7 @@ Feature: Coordinated WASM processor state reset
     And a 3 node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
     And a non-node-1-owned branched state-counting WASM reset graph is running
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -895,16 +895,16 @@ Feature: Coordinated WASM processor state reset
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_guest_reset_filter;
       UPLOAD RESOURCE wasm_guest_reset_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -1008,16 +1008,16 @@ Feature: Coordinated WASM processor state reset
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_guest_reset_filter;
       UPLOAD RESOURCE wasm_guest_reset_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -1090,11 +1090,11 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 2;
       """
@@ -1144,11 +1144,11 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 1;
       """
@@ -1194,11 +1194,11 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 2;
       """
@@ -1209,7 +1209,7 @@ Feature: Coordinated WASM processor state reset
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "{{domain}} status=Running"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """
@@ -1235,7 +1235,7 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR counting_guest;
       """
@@ -1270,15 +1270,15 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_unusable}}';
       """
-    And these NSPL commands fail with "invalid WASM PROCESSOR 'counting_guest' in domain '{{domain}}'"
+    And these Plexus commands fail with "invalid WASM PROCESSOR 'counting_guest' in domain '{{domain}}'"
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR counting_guest;
       """
@@ -1286,7 +1286,7 @@ Feature: Coordinated WASM processor state reset
       """
       USING RESOURCE wasm_reset_guest VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_retained TO counted_events;
       """
@@ -1330,15 +1330,15 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_unusable}}';
       """
-    And these NSPL commands fail with "invalid WASM PROCESSOR"
+    And these Plexus commands fail with "invalid WASM PROCESSOR"
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR counting_guest;
       """
@@ -1346,7 +1346,7 @@ Feature: Coordinated WASM processor state reset
       """
       USING RESOURCE wasm_reset_guest VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR secondary_guest;
       """
@@ -1354,7 +1354,7 @@ Feature: Coordinated WASM processor state reset
       """
       USING RESOURCE wasm_reset_guest VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_retained TO counted_events;
       """
@@ -1380,11 +1380,11 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":3}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 3;
       """
@@ -1434,11 +1434,11 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"beta","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 2;
       """

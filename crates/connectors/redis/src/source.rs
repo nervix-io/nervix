@@ -6,7 +6,7 @@
 //!   through, including DNS, TCP, TLS, and Redis's own protocol setup.
 //! - **Depends on.** The connector contract, node DNS resolver, typed client configuration
 //!   entries, `error-stack`, Tokio and `redis`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

@@ -1,7 +1,7 @@
 Feature: CLI public session dispatch
   Scenario Outline: CLI applies semantic completion edits at the real cursor
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( value I64, secret STRING );
@@ -19,7 +19,7 @@ Feature: CLI public session dispatch
 
   Scenario: CLI completion uses UTF-8 byte edits after Unicode text
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( value I64 );
@@ -30,7 +30,7 @@ Feature: CLI public session dispatch
 
   Scenario: CLI completion searches local upload paths
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -40,7 +40,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI dispatches a command through a public session
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -57,7 +57,7 @@ Feature: CLI public session dispatch
     Given client grpc transport is configured with mode "<mode>"
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -84,7 +84,7 @@ Feature: CLI public session dispatch
   Scenario: CLI connects by hostname and follows the leader from a follower session
     Given cluster peers are addressed by "DNS names"
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -96,7 +96,7 @@ Feature: CLI public session dispatch
 
   Scenario: CLI rejects incorrect credentials through a public session
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -106,7 +106,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI subscription keeps receiving after a high volume of rows
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
@@ -131,7 +131,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI keeps printing notices and new subscription rows after its node restarts
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
@@ -175,7 +175,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI attaches its session to the active domain's clock
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -191,7 +191,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: The CLI follows a domain clock through its generations
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -200,7 +200,7 @@ Feature: CLI public session dispatch
     Then within "10s" the CLI clock output contains "attached to the clock of domain '{{domain}}': generation 1, paced: period 100ms, skew 10ms, logical origin 2030-01-01T00:00:00Z, UTC anchor"
     And within "10s" the CLI clock output contains "time rate 2"
     And within "10s" the CLI clock output has 3 increasing ticks for generation 1 of domain "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -228,7 +228,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: The CLI follows a domain clock across a cluster restart
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 500ms SKEW 50ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -249,7 +249,7 @@ Feature: CLI public session dispatch
 
   Scenario: The CLI restores a domain clock after transport loss
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;

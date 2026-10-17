@@ -6629,7 +6629,7 @@ dependencies = [
  "nervix-client-core",
  "nervix-dns",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "reedline",
@@ -6664,7 +6664,7 @@ dependencies = [
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
@@ -7469,7 +7469,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "nervix-nspl"
+name = "nervix-paced-simulation"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-schema",
+ "bolero",
+ "clap",
+ "error-stack",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-deadlock",
+ "nervix-models",
+ "nervix-primitives",
+ "nervix-recovery",
+ "serde",
+ "serde_json",
+ "strum 0.26.3",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "nervix-plexus"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
@@ -7498,7 +7522,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nervix-nspl-format"
+name = "nervix-plexus-format"
 version = "0.1.0-dev"
 dependencies = [
  "ariadne 0.5.1",
@@ -7509,35 +7533,11 @@ dependencies = [
  "meticulous",
  "nervix-arbitrary",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "tempfile",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "nervix-paced-simulation"
-version = "0.1.0-dev"
-dependencies = [
- "ahash",
- "arrow-array",
- "arrow-schema",
- "bolero",
- "clap",
- "error-stack",
- "meticulous",
- "nervix-client-core",
- "nervix-deadlock",
- "nervix-models",
- "nervix-primitives",
- "nervix-recovery",
- "serde",
- "serde_json",
- "strum 0.26.3",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]
@@ -7714,7 +7714,7 @@ dependencies = [
  "nervix-jaq",
  "nervix-model-harness",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "nervix-roto",
@@ -7852,7 +7852,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-execution",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -7946,7 +7946,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-dataflow-graph",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "strum 0.26.3",

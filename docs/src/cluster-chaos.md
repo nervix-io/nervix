@@ -58,7 +58,7 @@ names it. The contracts its scenarios verify stay with the chapters that own the
 
 | Method | Runs | Establishes | Cannot establish |
 | --- | --- | --- | --- |
-| Cucumber scenarios ([Integration Test Lifecycle](./integration-test-lifecycle.md)) | Real nodes in a scenario binary or as local processes, with real sockets and time | Public behavior through NSPL, HTTP, the CLI and cluster state, including SIGKILL recovery of a local process | Behavior of the packaged image, kernel network faults, process pauses |
+| Cucumber scenarios ([Integration Test Lifecycle](./integration-test-lifecycle.md)) | Real nodes in a scenario binary or as local processes, with real sockets and time | Public behavior through Plexus, HTTP, the CLI and cluster state, including SIGKILL recovery of a local process | Behavior of the packaged image, kernel network faults, process pauses |
 | Turmoil ([Deterministic Interconnect Simulation](./interconnect-simulation.md)) | The production transport on simulated hosts | Interconnect deadlines, reconciliation and fencing under scheduled link faults, with seeded replay | Whole nodes, consensus, storage, a real kernel |
 | Shuttle and Loom ([Data-Plane Concurrency](./data-plane-concurrency.md)) | Production owners under a model checker | In-process interleavings and memory-ordering claims | Anything across processes or hosts |
 | Deloxide lanes | Diagnostic nodes in the scenario harness | Active and potential deadlocks among tracked locks in the exercised workloads | The packaged image under real faults |
@@ -86,7 +86,7 @@ Bolero obligation, and none of those discharges a suite.
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
 | `compose.yaml`, `compose.diagnostic.yaml` | The deployment and its diagnostic overlay |
-| `fixtures/` | The NSPL graphs, record generators, the WASM guest and an explicit mixed plan |
+| `fixtures/` | The Plexus graphs, record generators, the WASM guest and an explicit mixed plan |
 | `tests/` | The runner's self-tests |
 | `.github/workflows/chaos.yaml`; the `chaos-*` and `build-diagnostic` jobs of `.github/workflows/docker-build.yaml` | CI |
 
@@ -165,10 +165,10 @@ amd64 workers.
 
 | Fixture | Use |
 | --- | --- |
-| `fixtures/baseline.nspl` | The graph every scenario installs. It is described in the list below the table |
+| `fixtures/baseline.plexus` | The graph every scenario installs. It is described in the list below the table |
 | `fixtures/generate-baseline.jq` | The records: a run-scoped `event_id`, a `sequence`, the branches `alpha`, `beta` and `gamma` in turn, and content derived from the sequence |
-| `fixtures/stateful.nspl`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
-| `fixtures/paced.nspl`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
+| `fixtures/stateful.plexus`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
+| `fixtures/paced.plexus`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
 | `fixtures/wasm/processors/branch-counter.wat` | The stateful scenario's prebuilt WASM guest, in WebAssembly text |
 | `fixtures/mixed-burst-loss-leader-peer.json` | An explicit one-step mixed-instability plan the soak suite runs |
 
@@ -194,7 +194,7 @@ A run compiles nothing:
 - the controller is shell and jq
 - every Nervix process is the packaged image
 - every tool is a pinned image
-- the graphs are NSPL text
+- the graphs are Plexus text
 - the guest is WebAssembly text
 
 CI holds this to the letter. The job that runs a shard removes every Rust toolchain directory from
@@ -383,7 +383,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | `Nervix startup` | `nervix-1`, then the other nodes. Each must answer `/readyz` and every listener within 120 seconds, and `SHOW CLUSTER STATUS` must name every node within 120 seconds |
 | `startup status publication` | The validated public status, published by byte copy and atomic rename within 30 seconds |
 | `image identity verification` | Every node container runs the resolved image |
-| `NSPL graph installation` | The domain `chaos_baseline`, the graph through the packaged CLI, and `START` |
+| `Plexus graph installation` | The domain `chaos_baseline`, the graph through the packaged CLI, and `START` |
 | `public placement evidence` | On three nodes, `RELOCATE` places the ingestor on `node-1`, the relay on `node-2` and the emitter on `node-3`, so traffic crosses nodes. Each owner must read back through `DESCRIBE` within 60 seconds |
 | The scenario's own phases | Traffic startup, then each fault and its recovery |
 | `load pacing` | The pacing verdict of every continuous load |
@@ -1218,7 +1218,7 @@ just chaos run stateful --image nervix:debian --fault cluster-restart
 just chaos run stateful --image nervix:debian --nodes 1 --fault cluster-restart
 ```
 
-**The graph.** `fixtures/stateful.nspl` runs in the baseline domain beside the baseline path, which
+**The graph.** `fixtures/stateful.plexus` runs in the baseline domain beside the baseline path, which
 keeps its own traffic and exact ledger. A separate kcat container produces records to
 `chaos_state_input`, one a second and one kcat call per record. Two branches, `alpha` and `beta`,
 interleave strictly by sequence, and every record carries its branch index. An `ACK PARALLEL`
@@ -1336,7 +1336,7 @@ just chaos run domain-time --image nervix:debian --nodes 1 --fault cluster-resta
 **The setup.**
 
 - The runner creates the paced domain `chaos_paced` with `PERIOD 1s SKEW 1s`, installs
-  `fixtures/paced.nspl`, and starts it with `START AT NOW TIME RATE 4.0`, so logical time runs four
+  `fixtures/paced.plexus`, and starts it with `START AT NOW TIME RATE 4.0`, so logical time runs four
   times faster than physical time.
 - A separate kcat container produces two interleaved branches to `chaos_paced_input` every 250 ms.
   The ingestor stamps each record with `TIMESTAMP NOW` and `received_at = now()`.
@@ -1602,7 +1602,7 @@ recorded inputs:
 - **The tool images.** It starts them by their recorded digest references rather than the pins
   checked in now. Each must have its recorded image ID or carry the repository digest its reference
   pins.
-- **The plan, fixture and graph.** It copies the recorded plan, input fixture and NSPL graph, and
+- **The plan, fixture and graph.** It copies the recorded plan, input fixture and Plexus graph, and
   each must still match the digest the manifest records.
 - **The deployment and limits.** It deploys the recorded node settings and load interval, refuses to
   start when Compose renders anything else, and applies the recorded limits.

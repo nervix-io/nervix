@@ -2,11 +2,11 @@ Feature: Branched session subscriptions
   Scenario Outline: Session subscriptions mask sensitive branch-key fields
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA incoming_notification (
         tenant STRING SENSITIVE,
@@ -79,11 +79,11 @@ Feature: Branched session subscriptions
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -145,11 +145,11 @@ Feature: Branched session subscriptions
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -194,33 +194,33 @@ Feature: Branched session subscriptions
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "targets namespace 'branch'"
+    When these Plexus commands fail with "targets namespace 'branch'"
       """
       CREATE SUBSCRIPTION branch_scope_subscription TO notifications
       WHERE branch.tenant = 'acme';
       """
-    When these NSPL commands fail with "targets namespace 'relay_state.notifications'"
+    When these Plexus commands fail with "targets namespace 'relay_state.notifications'"
       """
       CREATE SUBSCRIPTION materialized_scope_subscription TO notifications
       WHERE relay_state.notifications.tenant = 'acme';
       """
-    When these NSPL commands fail with "targets namespace 'output'"
+    When these Plexus commands fail with "targets namespace 'output'"
       """
       CREATE SUBSCRIPTION output_scope_subscription TO notifications
       WHERE output.tenant = 'acme';
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SUBSCRIPTION construction_subscription TO notifications
       SET normalized = lower(input.raw);
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SUBSCRIPTION side_effect_subscription TO notifications
       WHERE input.active
       INVOKE write_header('tenant', input.tenant);
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications
       WHERE tenant = 'acme' AND message.active AND input.user_id = 42;

@@ -30,7 +30,7 @@ use nervix_models::{
     RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
     TransactionOperationNumber,
 };
-use nervix_nspl::client_statement::ClientStatement;
+use nervix_plexus::client_statement::ClientStatement;
 use tracing::{error, info, warn};
 
 use super::{
@@ -2389,18 +2389,18 @@ impl SessionServiceImpl {
                     }
                 };
 
-                let canonical = match model.to_canonical_nspl() {
+                let canonical = match model.to_canonical_plexus() {
                     Ok(v) => v,
                     Err(_) => {
                         let diagnostic = CommandDiagnostic::unlocated(
-                            "model contains values that cannot be rendered as canonical NSPL"
+                            "model contains values that cannot be rendered as canonical Plexus"
                                 .to_string(),
                         );
                         return CommandResult {
                             diagnostics: vec![diagnostic],
                             ..CommandResult::new(
                                 CommandDisposition::Failed,
-                                "failed to render canonical NSPL".to_string(),
+                                "failed to render canonical Plexus".to_string(),
                             )
                         };
                     }
@@ -2878,7 +2878,9 @@ mod tests {
         );
         assert_eq!(
             deduplicator.deduplicate_on,
-            vec![nervix_nspl::parse_expression("input.transaction_id").expect("valid expression")]
+            vec![
+                nervix_plexus::parse_expression("input.transaction_id").expect("valid expression")
+            ]
         );
         assert_eq!(deduplicator.max_time, "10m");
         assert_eq!(deduplicator.mode, nervix_models::AckMode::Attached);
@@ -2889,7 +2891,7 @@ mod tests {
 
     #[test]
     fn parse_server_statement_accepts_junction_from_application_crate() {
-        let parsed = nervix_nspl::server_statement::parse_server_statement(
+        let parsed = nervix_plexus::server_statement::parse_server_statement(
             "CREATE JUNCTION join_streams FROM ss1, ss2 UNBRANCHED TO ss10 INHERIT ALL FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
@@ -2902,7 +2904,7 @@ mod tests {
 
     #[test]
     fn parse_server_statement_accepts_deduplicator_from_application_crate() {
-        let parsed = nervix_nspl::server_statement::parse_server_statement(
+        let parsed = nervix_plexus::server_statement::parse_server_statement(
             "CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.transaction_id MAX TIME \
              10m UNBRANCHED TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
              ERROR LOG;",

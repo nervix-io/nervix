@@ -6,7 +6,7 @@
 //!   source lifecycle operations.
 //! - **Depends on.** The connector source contract, connector-owned Syslog configuration, Tokio
 //!   sockets, `memchr`, and rustls.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

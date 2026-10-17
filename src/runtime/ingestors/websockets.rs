@@ -6,7 +6,7 @@
 //!   client names, with host-owned intake.
 //! - **Depends on.** The WebSocket connector, the connector source contract, the node resolver,
 //!   and pre-resolved runtime execution handles.
-//! - **Must not know.** WebSocket transport internals, NSPL parsing, registry validation, or
+//! - **Must not know.** WebSocket transport internals, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(

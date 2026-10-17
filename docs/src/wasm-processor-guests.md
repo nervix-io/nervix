@@ -32,7 +32,7 @@ WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does no
 
 Every declaration requires both limits immediately after `FILE`, in this order:
 
-```nspl,ignore
+```plexus,ignore
 FILE "processor.wasm"
 MAX FUEL 1000000000
 MAX MEMORY 64MiB

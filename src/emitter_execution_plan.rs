@@ -458,7 +458,7 @@ mod tests {
     }
 
     fn expression(raw: &str) -> Expression {
-        nervix_nspl::parse_expression(raw).expect("the fixture uses valid expressions")
+        nervix_plexus::parse_expression(raw).expect("the fixture uses valid expressions")
     }
 
     fn emitter(sink: EmitSink, body: EmitterBody) -> CreateEmitter {

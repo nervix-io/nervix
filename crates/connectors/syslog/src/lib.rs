@@ -6,7 +6,7 @@
 //!   6587 framing, peer metadata, source lifecycle operations, and record publication.
 //! - **Depends on.** The connector contract, typed client configuration entries, Tokio sockets,
 //!   `memchr`, and rustls.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

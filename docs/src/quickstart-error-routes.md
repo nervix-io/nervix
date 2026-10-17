@@ -15,7 +15,7 @@ record arrives with `quantity` of zero.
 Error handlers construct an ordinary record on an ordinary relay. Fields taken from
 `partial_output` must be `OPTIONAL` — the failed operation may not have produced them:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA priced_order (
@@ -45,7 +45,7 @@ CREATE RELAY order_errors SCHEMA order_error UNBRANCHED;
 (`error.*`), the original input (`input.*`), and the partial output of the failed construction
 (`partial_output.*`):
 
-```nspl
+```plexus
 CREATE JUNCTION price_orders
   FROM orders
   UNBRANCHED
@@ -67,7 +67,7 @@ COMMIT;
 declare. Error routes preserve the branch in which the failure executed — this junction is
 unbranched, so `order_errors` is unbranched too. The node-level `ON GENERAL ERROR` policy exists
 only on ingestors and emitters
-([Runtime Node Error Policies](nspl-overview.md#runtime-node-error-policies)).
+([Runtime Node Error Policies](plexus-overview.md#runtime-node-error-policies)).
 
 ## Trigger A Failure
 

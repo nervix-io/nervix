@@ -1,7 +1,7 @@
 //! Public materialized restore workloads with acknowledged input rows and small observable outputs.
 //!
 //! Layer: test harness.
-//! - **Owns.** NSPL graphs, client inputs, archive inventory assertions and generator subscriptions
+//! - **Owns.** Plexus graphs, client inputs, archive inventory assertions and generator subscriptions
 //!   that qualify many containers and a single container larger than the bulk memory budget,
 //!   plus bounded public state observations after an exact-row deadline expires.
 //! - **Depends on.** Public commands, acknowledged client producers, Row subscriptions and the
@@ -62,7 +62,7 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     )
     .await
     .assured("the workload client connects");
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -75,7 +75,7 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
         world.last_command_output = Some(outcome.message);
     }
     let leader = current_leader_node(world).await;
-    let session = crate::execute_nspl_commands_on_node(
+    let session = crate::execute_plexus_commands_on_node(
         world,
         &leader,
         "CREATE SUBSCRIPTION summary_subscription TO summaries;",

@@ -2,7 +2,7 @@ Feature: Cluster leader failover
 
   Scenario: Cluster elects a new leader when the current leader stops
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -21,7 +21,7 @@ Feature: Cluster leader failover
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
@@ -203,7 +203,7 @@ Feature: Cluster leader failover
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;

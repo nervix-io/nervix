@@ -127,7 +127,7 @@ quota, metrics and node-local cleanup boundary.
 
 ### Coordinated WASM Reset Publications
 
-An NSPL reset first records a typed ordered transaction step with its captured planning inputs,
+An Plexus reset first records a typed ordered transaction step with its captured planning inputs,
 statement identity, and reset scope. That record changes no processor Model or schedule by itself;
 the coordinator uses its retained execution reference for the `Publishing` and `Ready` mutations.
 If the leader stops after recording the step, transaction recovery resumes that same reference.

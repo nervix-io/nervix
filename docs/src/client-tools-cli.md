@@ -1,6 +1,6 @@
 # Command Line Client
 
-`nervix-cli` is the interactive NSPL client. It is installed alongside `nervix-server`
+`nervix-cli` is the interactive Plexus client. It is installed alongside `nervix-server`
 ([Cargo Install From GitHub](installation-cargo.md)) and is also present in the container image
 ([Docker](installation-docker.md)).
 
@@ -40,7 +40,7 @@ nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cer
 | `--domain <NAME>` | | `default` | domain the session starts in |
 | `--username <NAME>` | `NERVIX_USERNAME` | `default` | registry user |
 | `--password <PASSWORD>` | `NERVIX_PASSWORD` | | prompted interactively when unset |
-| `--command <NSPL>` | | | run statements once and exit |
+| `--command <Plexus>` | | | run statements once and exit |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by
@@ -57,14 +57,14 @@ subcommand for this release.
 The client runs in exactly one of three modes, in this order of precedence:
 
 1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, `restore`, or `drain-node`.
-2. **`--command`**, which submits NSPL, prints the result, and exits.
+2. **`--command`**, which submits Plexus, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
 There is no file-execution mode. To run a saved script, pass it through `--command`; to format
-one, use [`nervix-nspl-format`](client-tools-nspl-format.md):
+one, use [`nervix-plexus-format`](client-tools-plexus-format.md):
 
 ```bash
-nervix-cli --domain quickstart --command "$(cat pipeline.nspl)"
+nervix-cli --domain quickstart --command "$(cat pipeline.plexus)"
 ```
 
 ## The Interactive REPL
@@ -276,7 +276,7 @@ sorted line for every selected model. In a transaction, the queued response is a
 ## Backing Up
 
 `BACKUP` in the REPL or through `--command` runs the backup and downloads its archive into the
-named file on this machine. The `backup` subcommand does the same with arguments instead of NSPL,
+named file on this machine. The `backup` subcommand does the same with arguments instead of Plexus,
 and exits with a nonzero status whenever the archive was not delivered:
 
 ```bash
@@ -315,7 +315,7 @@ retains it.
 
 `RESTORE` in the REPL or through `--command` streams the archive the statement names from this
 machine to the leader, and prints the restore's report when it ends. The `restore` subcommand does
-the same with arguments instead of NSPL, shows how much of the archive was sent while it streams,
+the same with arguments instead of Plexus, shows how much of the archive was sent while it streams,
 and exits with a nonzero status whenever the restore did not complete:
 
 ```bash
@@ -360,7 +360,7 @@ nervix-cli --domain quickstart subscribe sampled orders \
 | `--dropping` | drop deliveries when the session transport queue is full |
 | `--blocking` | block instead of dropping; this is the default, so the flag is only ever explicit |
 | `--batch-sample-rate <0.0-1.0>` | sampling of each row the predicate selected |
-| `--where <expression>` | NSPL predicate over delivered records, read exactly as the `WHERE` clause of a typed `CREATE SUBSCRIPTION` and validated locally before the subscription opens |
+| `--where <expression>` | Plexus predicate over delivered records, read exactly as the `WHERE` clause of a typed `CREATE SUBSCRIPTION` and validated locally before the subscription opens |
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
@@ -496,7 +496,7 @@ reference and retains it until the terminal result. If the session lands on a fo
 follows the redirect and reconnects on its own, repeating the statement under the same reference,
 and waits out an election the same way; ordinary commands are bounded by the client's 120-second
 retry deadline. `BACKUP` uses the global `--backup-wait-timeout` instead, ten minutes by default,
-for the entire command across all domain cuts and reconnections. This applies to NSPL in
+for the entire command across all domain cuts and reconnections. This applies to Plexus in
 `--command` and the REPL as well as the `backup` subcommand. Its per-domain `TIMEOUT` does not
 determine that total wait. A statement the leader never answered in its wait is reported with its execution
 reference as not known yet. A redirect that reaches the terminal as a statement's own result is
@@ -517,5 +517,5 @@ transaction id and attaches it on the new connection before resuming any queued 
 commit. Each append keeps its execution reference and expected queue position. A pending commit
 waits for the exact retained terminal result recorded under its own reference. An open
 transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
-reverts it. See [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+reverts it. See [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).

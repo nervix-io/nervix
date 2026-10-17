@@ -9,7 +9,7 @@
 //!   and every refusal that must happen before the first of those steps.
 //! - **Depends on.** The archive format's verified description, the replicated records a restore
 //!   step carries, and the vocabulary.
-//! - **Must not know.** How an archive was read or staged, how its NSPL was parsed, or how a step
+//! - **Must not know.** How an archive was read or staged, how its Plexus was parsed, or how a step
 //!   reaches consensus or the resource store.
 //!
 //! A plan is a pure function of the archive, the statement, the users and domains the cluster
@@ -142,7 +142,7 @@ pub(crate) enum RestorePlanError {
 }
 
 /// What a restore reads from its archive: the verified description, and each domain's models,
-/// parsed from its `models.nspl` in written order and keyed by the domain's archived name.
+/// parsed from its `models.plexus` in written order and keyed by the domain's archived name.
 pub(crate) struct ArchiveToRestore<'archive> {
     pub(crate) description: &'archive ArchiveDescription,
     pub(crate) models: &'archive BTreeMap<DomainName, Vec<Model<RequestedResourceVersion>>>,
@@ -566,7 +566,7 @@ mod tests {
     use nervix_models::{
         ClusterNodeName, DomainPace, DomainStartPoint, PlacementPolicy, Statement, Timestamp,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 
     use super::*;
 

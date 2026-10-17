@@ -14,7 +14,7 @@ the four types listed above.
 The clause is required, with its two bounds in this order, immediately after the client type and
 before an optional resource mount:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE POSTGRES|MYSQL|MONGODB|REDIS
   POOL SIZE MIN <minimum> MAX <maximum>
@@ -22,7 +22,7 @@ CREATE [IF NOT EXISTS] CLIENT <name>
   CONFIG { <connector configuration> };
 ```
 
-```nspl
+```plexus
 CREATE CLIENT postgres_main
   TYPE POSTGRES
   POOL SIZE MIN 2 MAX 8

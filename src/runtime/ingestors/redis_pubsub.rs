@@ -6,7 +6,7 @@
 //!   buffers or drops what the subscription keeps receiving.
 //! - **Depends on.** The connector source contract, the Redis connector, and pre-resolved runtime
 //!   execution handles.
-//! - **Must not know.** The Redis driver, subscription lifecycle, NSPL parsing, registry
+//! - **Must not know.** The Redis driver, subscription lifecycle, Plexus parsing, registry
 //!   validation, or placement computation.
 
 #![cfg_attr(

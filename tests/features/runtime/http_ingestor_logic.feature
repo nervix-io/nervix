@@ -2,7 +2,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map rejects schema mismatches introduced by SET
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -21,7 +21,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map supports chained calls and nested boolean expressions
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -71,7 +71,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map supports arithmetic operators with nested conditions
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -117,7 +117,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map supports contextual, text, and regular-expression builtins
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -216,7 +216,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map supports literals, casts, and unary expressions
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -266,7 +266,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map supports transcendental and rounding math builtins
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -324,7 +324,7 @@ Feature: HTTP ingestor specific filter-map logic
   Scenario Outline: HTTP ingestor filter-map supports all Nervix internal schema types
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """

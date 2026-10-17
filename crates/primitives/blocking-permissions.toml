@@ -238,8 +238,8 @@ reason = "Epoch interruption must progress while a guest occupies an executor wo
 [[permission]]
 bound = "At most the configured jobs per frontier level; each worker claims a finite level entry, and the scope joins all workers before the next level or the walk budget is checked."
 items = ["thread::Builder", "thread::scope"]
-owner = "The NSPL completion graph walker."
-path = "crates/nspl/tests/completion_walk/walker.rs"
+owner = "The Plexus completion graph walker."
+path = "crates/plexus/tests/completion_walk/walker.rs"
 reason = "The test harness evaluates a finite grammar frontier in parallel and has no node executor."
 
 [[permission]]

@@ -52,7 +52,7 @@ fn execution_reference(raw: &str) -> CommandExecutionReference {
     CommandExecutionReference::parse(raw).expect("scenario execution references are valid")
 }
 
-#[when(expr = "the active session sends request {string} with this NSPL command")]
+#[when(expr = "the active session sends request {string} with this Plexus command")]
 async fn when_active_session_sends_named_command(
     world: &mut ScenarioWorld,
     name: String,
@@ -69,7 +69,7 @@ async fn when_active_session_sends_named_command(
 
 #[when(
     expr = "the active session sends request {string} with execution reference {string} and this \
-            NSPL command"
+            Plexus command"
 )]
 async fn when_active_session_sends_named_referenced_command(
     world: &mut ScenarioWorld,

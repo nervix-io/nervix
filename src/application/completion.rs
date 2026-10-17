@@ -6,7 +6,7 @@
 //!   preparation and readiness, and HTTPS listener installation.
 //! - **Depends on.** Consensus for the committed revision, cluster availability, and authenticated
 //!   incarnation-aware progress observations.
-//! - **Must not know.** Session transports, NSPL syntax, runtime tasks, or data-plane payloads.
+//! - **Must not know.** Session transports, Plexus syntax, runtime tasks, or data-plane payloads.
 
 #![cfg_attr(
     nervix_lint,

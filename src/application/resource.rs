@@ -1215,7 +1215,7 @@ mod tests {
         ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp,
         UserName,
     };
-    use nervix_nspl::client_statement::local_path_fragment;
+    use nervix_plexus::client_statement::local_path_fragment;
     use sorted_vec::SortedVec;
 
     #[cfg(feature = "testing")]

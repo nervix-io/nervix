@@ -564,7 +564,7 @@ impl IngestSourceDraft {
 pub(super) enum IngestSourceDraftError {
     #[error("Choose an ingestor source type")]
     Kind,
-    #[error("A client ingestor reads the batches applications publish and is created in NSPL")]
+    #[error("A client ingestor reads the batches applications publish and is created in Plexus")]
     ClientSource,
     #[error("Choose a source client or endpoint")]
     Reference,
@@ -635,7 +635,7 @@ mod tests {
         MqttSourceEntity, NatsSourceEntity, NodeRef, PulsarSourceEntity, RedisSourceEntity,
         RequestedResourceVersion, Statement, WebsocketsSourceEntity,
     };
-    use nervix_nspl::statement::parse_statement;
+    use nervix_plexus::statement::parse_statement;
 
     use super::{DeliveryChoice, IngestSourceDraft, OffsetChoice, QuiesceChoice};
     use crate::create_dialog::{
@@ -728,7 +728,7 @@ mod tests {
                 )),
                 false,
             ));
-            let canonical = statement.to_canonical_nspl().assured("ingestor renders");
+            let canonical = statement.to_canonical_plexus().assured("ingestor renders");
             assert_eq!(
                 parse_statement(&canonical).assured("canonical ingestor parses"),
                 statement,

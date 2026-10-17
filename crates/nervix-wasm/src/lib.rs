@@ -8,7 +8,7 @@
 //! - **Depends on.** The vocabulary for processor limits and timestamps, `nervix-wasm-protocol`
 //!   for the envelopes it exchanges with a guest, and the node's bounded executor, whose bulk
 //!   workers compile a module.
-//! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
+//! - **Must not know.** Plexus, the registry, the execution graph, or where a guest's output is
 //!   routed. It calls a guest and returns what the guest produced.
 
 #![cfg_attr(

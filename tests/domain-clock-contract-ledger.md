@@ -7,7 +7,7 @@ epic](https://app.clickup.com/t/86bbwcry1). The source audit began in [Domain cl
 that audit are represented by the current-source regressions below. Tasks 02–13 repaired and
 documented their owning product paths; task 14 records the final contract qualification.
 
-The Cucumber scenarios exercise NSPL and runtime behavior through public endpoints and session
+The Cucumber scenarios exercise Plexus and runtime behavior through public endpoints and session
 subscriptions. The clock-contract scenarios and direct arithmetic regressions run in the ordinary
 suite. Explicit tag selections isolate the focused cases; the validation records preserve the
 observed red baselines and subsequent results.
@@ -126,7 +126,7 @@ dependency explicitly and scopes recorder names with `{{test_id}}`.
 
 Task 11 audited physical waits at their semantic owner. A `Duration` is configuration, not a clock
 coordinate; it becomes physical only when the owner starts a monotonic timer. A domain clock is
-introduced only for an explicit NSPL cadence or semantic lifetime. The resulting ownership is:
+introduced only for an explicit Plexus cadence or semantic lifetime. The resulting ownership is:
 
 | Semantic owner | Physical operations retained by that owner | Bound and evidence |
 | --- | --- | --- |
@@ -274,7 +274,7 @@ Recorded on 8 September 2026 against the task 02 worktree:
 | `Delayed clock progress cannot move observed logical time backwards` | Pass in both one- and three-node examples; 32 steps passed. |
 | `nervix-models` unit suite | Pass; 98 tests covered timestamp endpoints, validated rates and periods, rounding, direct advancement, and overflow. |
 | Runtime domain-clock unit suite | Pass; six task 02 tests passed. The historical-origin probe remains ignored for task 05. |
-| `just validate` | Pass, including all-feature workspace Clippy and all 139 executable NSPL documentation blocks. |
+| `just validate` | Pass, including all-feature workspace Clippy and all 139 executable Plexus documentation blocks. |
 | `just ratchet` | Pass with the new clock model included; the checked-in string-error debt fell from 520 to 516. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -292,7 +292,7 @@ Recorded on 9 September 2026 against the task 03 worktree:
 | Physical monotonic deadline unit | Pass; the opaque physical capability waited on Tokio's monotonic timer. |
 | WASM explicit invocation-time unit | Pass; one explicit context supplied guest time and timeout-request time without leaking into the next invocation. |
 | `nervix-server` library suites | Pass; default features ran 789 tests with one task-05 probe ignored, and `testing` ran 797 tests with the same probe ignored. |
-| `just validate` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
+| `just validate` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline, and the checked-in string-error debt fell from 514 to 512. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -308,7 +308,7 @@ Recorded on 9 September 2026 against the task 04 worktree:
 | `A joining or restarted node installs the current clock generation before execution` | Pass; one scenario and all 12 steps verified join and full-cluster restart installation before node-local HTTP execution. |
 | `Delayed clock progress cannot move observed logical time backwards` | Pass in both the one- and three-node examples; all 32 steps passed with progress held across physical time and then released. |
 | Authority and progress unit coverage | Pass; pure selection covered membership and incarnation changes, consensus covered revision fencing and identical direct/transactional lifecycle commits, and runtime covered exact generation/revision/incarnation/peer fences, stopped and restarted generations, missing domains, bounded tick history, and execution refusal without installed authority. |
-| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
+| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. Clamped-arithmetic debt fell from 13 to 11 and string-error debt fell from 512 to 510. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -326,7 +326,7 @@ Recorded on 9 September 2026 against the task 05 worktree:
 | `nervix-models` unit suite | Pass; 103 tests included exact integer admission arithmetic across inclusive edges, gaps, overlapping windows, the 256-position bound, and the full timestamp range. |
 | `nervix-server` library suite | Pass; 799 tests passed with no ignored tests. |
 | `just book 0.1.0-dev` | Pass; executable documentation, console screenshots, and the HTML, LLM, and Markdown book renderers completed. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and executable NSPL documentation. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and executable Plexus documentation. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell by two. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -341,7 +341,7 @@ Recorded on 10 September 2026 against the task 06 worktree, including the merged
 | Focused generator, inferencer, emitter, and telemetry scenarios | Pass; 24 scenarios and 272 steps covered generator and inferencer mappings, SQS groups, PostgreSQL, MySQL, ClickHouse, MongoDB, Iceberg, Sentry, and OTEL clock classes. |
 | `nervix-vm` unit suite | Pass; 102 tests covered explicit execution contexts with no context-free runtime execution entry point. |
 | `nervix-server` library suite | Pass; 793 tests passed after merging the current consensus and startup paths. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -357,7 +357,7 @@ Recorded on 10 September 2026 against the task 07 worktree, including the merged
 | Reingestor branch-buffering regressions | Pass; staggered branches retained independent deadlines and acknowledgement ownership, forced and shutdown drains completed, and per-route byte bounds flushed independently. |
 | Generator flush regressions | Pass; route buffers honored `EACH` byte boundaries and drained on source gating, domain pause, and task exit. |
 | `nervix-server` library suite | Pass; 801 tests passed with no ignored tests. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell from 497 to 496. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -381,7 +381,7 @@ branched from:
 | Merged `origin/main` re-run | Pass; after merging the current `origin/main`, the ten emitter cadence scenarios and 121 scenarios across Kafka emission and ingestion, Iceberg, emitter inputs, metrics and publishing modes, branch buffering, materialized relays, and reingestors passed again. |
 | `nervix-server` library suite | Pass; 840 tests passed with no ignored tests on the merged tree. |
 | `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record. The full `just
@@ -401,7 +401,7 @@ Recorded on 10 September 2026 against the task 09 worktree:
 | Cadence arithmetic unit coverage | Pass; four tests covered newest-due coalescing, direct full-range advancement, a typed terminal-boundary error, and generation revalidation after wake. |
 | Focused generator unit coverage | Pass; three tests covered logical flush size, columnar state and branch projection, and branch validation. |
 | `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -421,7 +421,7 @@ Recorded on 11 September 2026 against the task 10 worktree:
 | Clock-contract and metric regressions | Pass; domain clock contract, execution time, ingestion time, domain, junction, and reingestor metric scenarios covered 45 scenarios and 510 steps. |
 | Ownership handoff and scheduling regressions | Pass; relocation and cluster scheduling covered 40 scenarios and 640 steps with the production sticky scheduler where those scenarios select it. |
 | `nervix-server` library suite | Pass; 833 tests passed with no ignored tests, and 838 after merging the current `origin/main`. |
-| `just validate` | Pass before and after merging `origin/main`, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass before and after merging `origin/main`, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass before and after merging `origin/main`; every architecture-debt count is at or below its checked-in baseline. |
 | Post-merge re-verification | Pass; against the merged `origin/main` the fresh-activity scenario, branched expiration, correlator, domain buffer timing, materialized relay, and window processor features covered 77 scenarios and 965 steps, including the columnar snapshot streaming and shared cadence work that landed on main. |
 
@@ -447,7 +447,7 @@ Recorded on 11 September 2026 against the task 11 worktree:
 | Complete task 11 public matrix | Pass; all 15 scenarios and all 183 steps in `physical_infrastructure_deadlines.feature` passed together. This is the task 11 matrix, not the complete repository Cucumber qualification owned by task 14. |
 | Interconnect suite | Pass; all 34 tests covered queued stream deadlines, streaming progress timeouts, membership cancellation, shutdown cancellation, management isolation, relay admission, and duplex streams. |
 | Server, consensus, and executor unit suites | Pass; all 837 `nervix-server` library tests, all 43 consensus unit tests and 12 consensus documentation tests, and all 16 executor tests passed. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
 
 The actual-UTC source audit found only the observation owners enumerated above. None of the
@@ -471,7 +471,7 @@ Recorded on 13 September 2026 against the task 12 worktree:
 | Logical branch expiry | Pass; both one- and three-node paced-expiration scenarios and all 16 steps expired branch-local processor state on logical time. |
 | Interconnect unit suite | Pass; all 35 tests covered progress and liveness reservations, bulk isolation, relay admission, cancellation, terminal outcomes, membership removal, shutdown, and request deadlines. The request-policy control fixes `DomainClockProgressRequest` to `Management/Progress`, a unit response, and a two-second physical timeout. |
 | Server library suite | Pass; all 848 tests covered current generation and authority fences, delayed and reordered progress, the newest accepted report, local nondecrease, placement, failover, recovery, and runtime shutdown. |
-| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all 140 executable NSPL documentation blocks, and the clock architecture boundary check. |
+| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all 140 executable Plexus documentation blocks, and the clock architecture boundary check. |
 | `just ratchet` with `RUSTC_WRAPPER=kache` | Pass; every architecture-debt count is at or below its checked-in baseline. |
 
 The transport carries only the current typed request. Its payload contains the domain and fenced
@@ -492,13 +492,13 @@ Recorded on 13 September 2026 against the task 13 worktree:
 | Public bound-engine-clock reproducer before product changes | Pass in both the one- and three-node examples. The running data-plane path already supplied the paced domain snapshot to Roto, so the behavioral scenario did not expose the dormant context-free APIs. The source and API audit found those paths in the generic VM injector and WASM host and found a data-plane-wide actual-UTC helper. |
 | `A volatile Roto UDF receives the bound domain execution time` | Pass; both one- and three-node examples and all 12 steps evaluated `now()` near the domain's 2000 logical origin rather than actual UTC. |
 | Clock architecture source check | Pass; direct actual-UTC reads, actual-UTC boundary imports, physical-deadline capability construction, VM injection, WASM guest operations, and ownership headers conform to their declared owner sets. The check runs in `just validate` and `just validate-ci`. |
-| Typed model and language coverage | Pass; all 104 model and 780 NSPL unit tests covered typed domain periods and skew, typed HTTP, Prometheus, and generator cadence, canonical rendering, and current-shape persistence. |
+| Typed model and language coverage | Pass; all 104 model and 780 Plexus unit tests covered typed domain periods and skew, typed HTTP, Prometheus, and generator cadence, canonical rendering, and current-shape persistence. |
 | Engine coverage | Pass; all 105 VM, 6 Roto, and 38 WASM unit tests covered explicit execution snapshots across injection, initialization, input, timeout, flush, and state operations, including Rust and Go guests. |
 | Stopped-domain direct lookup regression | Fixed after the complete suite exposed all 11 examples in `lookup.feature` requesting an active domain snapshot only to timestamp a metric. All 11 lookup scenarios and 144 steps now pass across stopped domains, remote owners, replicas, and cluster restarts. Both hash-map metric scenarios and all 42 steps also pass; direct control-plane lookups retain wall-rate metrics and correctly leave domain-rate metrics unavailable because no graph record or execution timestamp exists. |
 | Server and consensus suites | Pass; all 848 `nervix-server` library tests and all 43 consensus unit tests passed. |
-| Public documentation and skill | Pass; the NSPL skill publication dry-run, all 140 executable NSPL documentation blocks, 90 documentation-generator tests, and 6 documentation-worker tests passed. |
+| Public documentation and skill | Pass; the Plexus skill publication dry-run, all 140 executable Plexus documentation blocks, 90 documentation-generator tests, and 6 documentation-worker tests passed. |
 | `just book 0.1.0-dev` | Pass; fresh console screenshots and the HTML, LLM, and Markdown renderers completed successfully. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable NSPL documentation blocks, and the clock architecture boundary check. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable Plexus documentation blocks, and the clock architecture boundary check. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. String error signatures fell from 487 to 485 and bare error signatures fell from 838 to 834, and the baseline records both reductions. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record. The full
@@ -536,7 +536,7 @@ The final execution record is:
 | Bounded HTTP/2 progress selection with retries disabled | Pass; all 3 scenarios and all 63 steps covered slow and fast historical bulk load plus independent relay admission. Progress used its reserved management subquota without spending liveness capacity. |
 | Domain-clock unit suite | Pass; all 24 tests covered arithmetic bounds, admission origin, monotonic reads, lifecycle outcomes, generation binding, wait cancellation and revalidation, cadence coalescing, progress fencing, and retained latest progress. |
 | Interconnect unit suite | Pass; all 35 tests covered current request policy, independent progress and liveness reservations, bulk isolation, relay admission, cancellation, terminal outcomes, membership removal, shutdown, and request or streaming deadlines. |
-| `RUSTC_WRAPPER=kache just validate` | Pass. Formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable NSPL documentation blocks, and the clock architecture boundary check completed successfully. |
+| `RUSTC_WRAPPER=kache just validate` | Pass. Formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable Plexus documentation blocks, and the clock architecture boundary check completed successfully. |
 | `RUSTC_WRAPPER=kache just ratchet` | Pass. Every architecture-debt count is at or below its checked-in baseline. |
 
 The public matrix ran one- and three-node topologies, historical, unpaced, slow, and fast clocks,
@@ -556,6 +556,6 @@ which passed here under both slow and fast bulk-load cases.
 Only the current stored and protocol shapes remain. Clock progress uses the typed HTTP/2 request
 and never serializes a process-local monotonic instant. Runtime batches, suspended work,
 acknowledgement guards, tokens, and maps remain in memory. The architecture, domain-time public
-documentation, and published NSPL skill describe the qualified clock classes and failure
+documentation, and published Plexus skill describe the qualified clock classes and failure
 semantics. No product correction or additional clock work was required by this final run; F1–F10
 are qualified for closure.

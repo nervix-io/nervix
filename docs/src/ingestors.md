@@ -4,7 +4,7 @@ Ingestors are the entry points into the runtime graph.
 
 A typical ingestor:
 
-```nspl
+```plexus
 CREATE BRANCH by_user
   SCHEMA user_branch TTL 5m;
 
@@ -35,7 +35,7 @@ alteration never changes what an ingestor reads; to read another connector or en
 ingestor and create it again. `DROP INGESTOR`, `DESCRIBE INGESTOR`, `SHOW CREATE INGESTOR`,
 `SHOW INGESTORS`, and relocation address an ingestor by its name alone.
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> INGESTOR <name>
   FROM <body>
   [DECODE USING <codec>]
@@ -70,7 +70,7 @@ Every ingestor defines:
 - optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
 
 `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO
-<relay>`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum batching
+<relay>`. The [Plexus Overview](plexus-overview.md) defines the system-owned 100 µs minimum batching
 window for `FLUSH IMMEDIATE`. It has no size boundary. Every route also requires its own
 `ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures
 independently. `ON MESSAGE ERROR SEND TO` uses that same route's interval and maximum batch-size
@@ -95,7 +95,7 @@ At runtime, the ingestor:
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows independently for every matching destination and branch group
 - writes each route's buffered rows when its configured interval or size boundary fires, when the
-  documented [`FLUSH IMMEDIATE` system timeout](nspl-overview.md) expires, or when the domain is
+  documented [`FLUSH IMMEDIATE` system timeout](plexus-overview.md) expires, or when the domain is
   force-flushed by a model alteration, a domain pause, or a planned ownership handoff
 
 Branch execution receives these completed Arrow batches and does not buffer them behind another
@@ -156,7 +156,7 @@ confirmations before it closes them; see
 `ALTER` names the connector and entity of the stored ingestor in its head and applies one or more
 comma-separated operations in written order:
 
-```nspl,ignore
+```plexus,ignore
 ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
     SET FROM <complete body of the head's connector and entity>
   | SET QUIESCE <quiesce body>
@@ -370,7 +370,7 @@ Client-backed ingestors can use resource-mounted client config values for TLS ma
 
 Ingestors may declare an optional arrival filter and per-route construction clauses:
 
-```nspl
+```plexus
 CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
@@ -412,7 +412,7 @@ General notes:
 - all node expressions use explicit typing; there is no implicit cast insertion
 - nested predicates and nested/chained builtin calls are supported
 - leader-side validation requires every required output and branch field to be initialized
-- public Models store structured expressions; the runtime never reparses NSPL
+- public Models store structured expressions; the runtime never reparses Plexus
 - source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor
   supports it; `KAFKA TOPIC` provides `metadata.topic`, `metadata.partition`, and
   `metadata.offset`, while `SYSLOG LISTENER` provides `metadata.peer_addr`
@@ -468,7 +468,7 @@ The same captured source envelope remains available while a supported ingestor c
 Header values are non-sensitive strings and do not propagate through relays unless explicitly
 assigned to schema-backed fields:
 
-```nspl,ignore
+```plexus,ignore
 SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
@@ -484,7 +484,7 @@ For outbound ingestor clients, TLS is configured on the `CLIENT`, not on the `IN
 
 General pattern:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <kind>
   MOUNT <tls_resource> VERSION <n>|LATEST
@@ -522,7 +522,7 @@ an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 
 Example Kafka TLS client:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CLIENT kafka_tls
   TYPE KAFKA
   MOUNT dev_tls VERSION 1
@@ -535,7 +535,7 @@ CREATE IF NOT EXISTS CLIENT kafka_tls
 
 Example HTTP TLS client:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS CLIENT http_tls
   TYPE HTTP
   MOUNT dev_tls VERSION 1
@@ -557,7 +557,7 @@ submit through a Nervix session instead of reading an external system. There is 
 `CREATE CLIENT`, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
 already carries the ingestor's input schema, and every batch is acknowledged.
 
-```nspl
+```plexus
 CREATE SCHEMA order_in (
   region STRING, order_id STRING, amount I64, card STRING SENSITIVE
 );
@@ -578,7 +578,7 @@ CREATE CLIENT PRODUCER INGESTOR orders_in
   ON GENERAL ERROR LOG;
 ```
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] CLIENT PRODUCER INGESTOR <name>
   FROM SCHEMA <schema>
   MODE ACK SEQUENTIAL | ACK PARALLEL MAX <n>
@@ -777,7 +777,7 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 
 ### `HTTP REQUEST`
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] HTTP REQUEST INGESTOR <name>
   FROM <client> EVERY <duration>
   MODE NO ACK
@@ -796,7 +796,7 @@ CREATE [IF NOT EXISTS] HTTP REQUEST INGESTOR <name>
 
 ### Kafka
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] KAFKA TOPIC INGESTOR <name>
   FROM <client>
   TOPIC '<topic>'
@@ -867,7 +867,7 @@ does not change the auto-commit loss windows of `MODE NO ACK`.
 
 ### Pulsar
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] PULSAR TOPIC INGESTOR <name>
   FROM <client>
   TOPIC '<topic>'
@@ -881,7 +881,7 @@ CREATE [IF NOT EXISTS] PULSAR TOPIC INGESTOR <name>
 ```
 
 Pulsar ingestors use Nervix-managed shared subscriptions. The subscription
-name is still required by Pulsar, but subscription type is not exposed in NSPL.
+name is still required by Pulsar, but subscription type is not exposed in Plexus.
 Client config currently supports:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
@@ -899,7 +899,7 @@ subscription initial position and the suspension window is lost.
 
 ### RabbitMQ
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] RABBITMQ QUEUE INGESTOR <name>
   FROM <client>
   QUEUE '<queue>'
@@ -938,7 +938,7 @@ anything.
 
 ### Redis Pub/Sub
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] REDIS PUBSUB INGESTOR <name>
   FROM <client>
   CHANNEL '<channel>'
@@ -959,7 +959,7 @@ source's existing retry cadence; Redis Pub/Sub does not replay messages missed w
 
 ### MQTT
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] MQTT TOPIC INGESTOR <name>
   FROM <client>
   TOPIC '<topic-filter>'
@@ -1021,7 +1021,7 @@ again on its declared `RETRY POLICY`, or on the host's reconnect cadence in `MOD
 
 ### NATS
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] NATS SUBJECT INGESTOR <name>
   FROM <client>
   SUBJECT '<subject>'
@@ -1048,7 +1048,7 @@ that is not connected, so messages published while the instance reconnects never
 
 ### ZeroMQ
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] ZEROMQ PULL INGESTOR <name>
   FROM <client>
   MODE NO ACK
@@ -1063,7 +1063,7 @@ data is read on resume. `BUFFER` and `DROP` keep reading locally.
 
 ### Syslog
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] SYSLOG LISTENER INGESTOR <name>
   FROM <client>
   MODE NO ACK
@@ -1084,7 +1084,7 @@ diagnostic. These failures do not acknowledge a message; Syslog has no applicati
 
 ### SQS
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] SQS QUEUE INGESTOR <name>
   FROM <client>
   QUEUE '<queue>'
@@ -1114,7 +1114,7 @@ is deleted only once it is acknowledged, so a lookup failure never removes one f
 
 ### Prometheus
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] PROMETHEUS QUERY INGESTOR <name>
   FROM <client>
   QUERY '<promql>'
@@ -1135,7 +1135,7 @@ the node's extension workers full waits for them; see
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] HTTP ENDPOINT INGESTOR <name>
   FROM <endpoint> MODE NO ACK
   ON QUIESCE REJECT RETRY AFTER <duration>
@@ -1184,7 +1184,7 @@ Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and 
 
 TLS is configured on the VHOST itself:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
   WITH TLS tls_bundle VERSION 3;
 ```
@@ -1192,7 +1192,7 @@ CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
 `WITH TLS` requires a version. `VERSION LATEST` binds the highest completed version of the bundle
 when the statement is applied:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
   WITH TLS tls_bundle VERSION LATEST;
 ```
@@ -1210,7 +1210,7 @@ The referenced resource bundle must contain:
 
 ### `WEBSOCKETS CONNECTION`
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] WEBSOCKETS CONNECTION INGESTOR <name>
   FROM <client> MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
@@ -1255,7 +1255,7 @@ after `TYPE WEBSOCKETS`.
 A signaling protocol declares a wire format and expresses the whole handshake as
 [JAQ](./schemas-and-codecs.md#jaq-transformations) programs:
 
-```nspl
+```plexus
 CREATE SIGNALING PROTOCOL bybit_subscribe
   FORMAT JSON
   ON CONNECT
@@ -1301,7 +1301,7 @@ diagnostic. A failed handshake delivers no frame to the relay.
 Peers commonly start streaming before they finish acknowledging. `ACCEPT DATA`
 says where payload starts flowing to the relay:
 
-```nspl,ignore
+```plexus,ignore
 ON CONNECT ACCEPT DATA                                  -- from the first frame
 WAIT JAQ '<matcher>' [FAIL JAQ '<matcher>'] [CAPTURE '<program>'] ACCEPT DATA
 ```
@@ -1322,7 +1322,7 @@ reaches a relay from a connection that was never established. Without
 `CAPTURE` records values from the frame that satisfied its matcher, and every
 program can read what has been captured so far through the `$state` variable:
 
-```nspl
+```plexus
 CREATE SIGNALING PROTOCOL exchange_login
   FORMAT JSON
   ON CONNECT
@@ -1344,7 +1344,7 @@ frame that matched.
 A handshake may wait before it sends anything, which is how a server-initiated
 challenge is answered — wait for the challenge, capture it, then reply:
 
-```nspl
+```plexus
 CREATE SIGNALING PROTOCOL challenge_response
   FORMAT JSON
   ON CONNECT
@@ -1360,7 +1360,7 @@ only for its duration — it is never logged, and does not reach ingestion.
 `PROTOBUF` signaling declares its resource, the version it compiles, and one message type per
 direction:
 
-```nspl,ignore
+```plexus,ignore
 CREATE SIGNALING PROTOCOL protobuf_subscribe
   FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION 1
     CONFIG {'file' = 'signaling.proto', 'include' = '.'}

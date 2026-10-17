@@ -69,7 +69,7 @@ macro_rules! declare_transports {
                 }
             }
 
-            /// How NSPL spells the client's type.
+            /// How Plexus spells the client's type.
             pub(super) fn label(self) -> &'static str {
                 self.connector().keyword()
             }
@@ -356,7 +356,7 @@ mod tests {
         CreateStatement, ModelKind, ModelName, NodeRef, RequestedResourceVersion, ResourceName,
         Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{ClientConfigDraft, ClientDraft, ClientDraftError, ClientTransport};
 
@@ -392,7 +392,7 @@ mod tests {
             );
             let statement =
                 Statement::Create(CreateStatement::new(Box::new(completed.actual), false));
-            let source = statement.to_canonical_nspl().assured("client renders");
+            let source = statement.to_canonical_plexus().assured("client renders");
             assert!(source.contains(&format!("TYPE {}", transport.label())));
             assert_eq!(
                 parse_client_statement(&source).assured("canonical client must parse"),
@@ -445,13 +445,13 @@ mod tests {
         draft.config[0].value = "private value".to_string();
         let completed = draft.build().assured("client has mount and configuration");
         let actual = Statement::Create(CreateStatement::new(Box::new(completed.actual), false))
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("actual client renders");
         let presented = Statement::Create(CreateStatement::new(
             Box::new(completed.presentation),
             false,
         ))
-        .to_canonical_nspl()
+        .to_canonical_plexus()
         .assured("presented client renders");
         assert!(actual.contains("MOUNT tls_bundle VERSION 3"));
         assert!(actual.contains("WITH SIGNALING PROTOCOL handshake"));

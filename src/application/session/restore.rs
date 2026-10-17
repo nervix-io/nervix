@@ -23,7 +23,7 @@ use nervix_client_wire::{
     RestoreUploadFailure, VerifiedFrame,
 };
 use nervix_models::{Statement, UserName};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
 use super::outcome::command_outcome;
 use crate::application::{

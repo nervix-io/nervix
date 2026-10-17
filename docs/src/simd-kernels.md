@@ -390,7 +390,7 @@ decoder; it remains connector-level evidence rather than a Kafka pipeline measur
    it wins. Any end-to-end claim additionally needs same-host A/B. Publish raw evidence on the
    task and update this chapter and the caller's authoritative chapter in the same change.
 6. Run focused checks and `just validate`; lower ratchet baselines that fall. Keep public
-   contracts and NSPL skill routing current when their surfaces change, then run `just book dev`.
+   contracts and Plexus skill routing current when their surfaces change, then run `just book dev`.
 
 Do not add explicit kernels for operations LLVM already vectorizes without a measured caller
 benefit, or duplicate Arrow and library dispatch. Division by a column has no constant reciprocal

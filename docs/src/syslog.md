@@ -13,13 +13,13 @@ The pieces are intentionally independent. A `KAFKA TOPIC` ingestor can decode a 
 with a codec that uses the `SYSLOG` wire schema, and a `SYSLOG LISTENER` ingestor can pass its
 frames to a JSON codec.
 Pairing the format and transport pieces creates a conventional syslog receiver or forwarder.
-`SYSLOG` is a reserved NSPL keyword.
+`SYSLOG` is a reserved Plexus keyword.
 
 ## Predefined wire schema and codec
 
 Reference the predefined wire schema directly from a codec:
 
-```nspl
+```plexus
 CREATE CODEC syslog_codec
   FROM SYSLOG
   TO SCHEMA syslog_event;
@@ -55,7 +55,7 @@ optional header fields and structured data become the RFC 5424 NILVALUE `-`.
 
 An example schema that supports both decoding and encoding is:
 
-```nspl
+```plexus
 CREATE SCHEMA syslog_event (
   facility U8,
   severity U8,
@@ -110,7 +110,7 @@ Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy
 
 A syslog client describes one direction-dependent socket endpoint:
 
-```nspl,ignore
+```plexus,ignore
 CREATE CLIENT <name>
   TYPE SYSLOG [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG {
@@ -145,7 +145,7 @@ replaced without restarting the node.
 
 TLS file paths use normal client resource mounts. For example:
 
-```nspl
+```plexus
 CREATE CLIENT syslog_tls
   TYPE SYSLOG MOUNT syslog_identity VERSION 1
   CONFIG {
@@ -176,7 +176,7 @@ configuration error, with the setting or path that failed. They do not include T
 A `SYSLOG LISTENER` ingestor reads through a `TYPE SYSLOG` client. It has one delivery mode,
 `NO ACK`, and no `INSTANCES` clause:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] SYSLOG LISTENER INGESTOR <name>
   FROM <client>
   MODE NO ACK
@@ -198,7 +198,7 @@ Every received message exposes its remote socket address as optional `STRING`
 peer. Transport metadata does not propagate through a relay unless a route assigns it to a
 schema-backed field:
 
-```nspl,ignore
+```plexus,ignore
 TO received_syslog
   INHERIT ALL
   SET peer_addr = metadata.peer_addr
@@ -257,7 +257,7 @@ cause without quoting the frame's payload.
 
 The syslog sink requires a codec and supports only `NO_ACK`:
 
-```nspl,ignore
+```plexus,ignore
 TO SYSLOG <client>
   MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
   ENCODE USING <codec>

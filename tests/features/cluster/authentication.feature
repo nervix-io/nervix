@@ -2,7 +2,7 @@ Feature: Authentication
 
   Scenario Outline: Client authentication requires a valid user password
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER auth_user WITH PASSWORD 'created-password';
       """
@@ -38,7 +38,7 @@ Feature: Authentication
 
   Scenario Outline: Client authentication applies async backoff to repeated attempts
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER throttled_user WITH PASSWORD 'created-password';
       """

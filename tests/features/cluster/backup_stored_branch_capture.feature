@@ -21,7 +21,7 @@ Feature: Admitted capture of stored deduplicator and window checkpoints
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "running.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup "running.nvxb" holds a deduplicator keyspace and a window of tenant "large" above 32 MiB beside 24 small branches of each
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """

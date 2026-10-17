@@ -8,7 +8,7 @@ upload step. See [Declaration](udfs.md#declaration).
 
 ## Declare The Function
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE UDF amount_band
@@ -35,7 +35,7 @@ the body spans lines verbatim. The available column operations are cataloged in
 Calls always use the `udf::` qualifier and compose with builtins and route filters
 ([Calling UDFs](udfs.md#calling-udfs)):
 
-```nspl
+```plexus
 CREATE RELAY banded_orders SCHEMA order_tiered UNBRANCHED;
 
 CREATE JUNCTION band_orders

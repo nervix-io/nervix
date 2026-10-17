@@ -6,7 +6,7 @@
 //!   host-owned intake.
 //! - **Depends on.** The connector source contract, the Syslog connector, and pre-resolved runtime
 //!   execution handles.
-//! - **Must not know.** Syslog socket drivers, framing, TLS configuration, NSPL parsing, registry
+//! - **Must not know.** Syslog socket drivers, framing, TLS configuration, Plexus parsing, registry
 //!   validation, or placement computation.
 
 #![cfg_attr(

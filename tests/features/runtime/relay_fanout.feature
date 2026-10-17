@@ -2,12 +2,12 @@ Feature: Relay fan-out
   @relay_fanout_subscriber_loss
   Scenario Outline: Losing a relay subscriber keeps delivery flowing to the relay's other consumers
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SCHEMA notification (
         seq I64
@@ -64,7 +64,7 @@ Feature: Relay fan-out
       """
       "seq":1
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION notification_view;
       """

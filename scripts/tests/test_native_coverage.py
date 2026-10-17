@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
             [producer.name for producer in native_coverage.PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom", "test-turmoil",
+             "test-primitives-deloxide", "plexus-completion-walk", "test-shuttle", "test-loom", "test-turmoil",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
              "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
@@ -183,8 +183,8 @@ class InventoryTests(unittest.TestCase):
         producers = native_coverage.PRODUCERS
         self.assertEqual(native_coverage.select_producers([], producers), list(producers))
         self.assertEqual(
-            native_coverage.select_producers(["nspl-completion-walk", "bench-smoke"], producers),
-            [next(producer for producer in producers if producer.name == "nspl-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
+            native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),
+            [next(producer for producer in producers if producer.name == "plexus-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
         )
         with self.assertRaisesRegex(RunnerError, "no producer `bench`; the producers are"):
             native_coverage.select_producers(["bench"], producers)

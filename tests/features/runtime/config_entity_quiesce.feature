@@ -3,12 +3,12 @@ Feature: Config entity quiesce classification
     Given schema change drain timeout is configured as "20s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA config_event ( seq I64 );
       CREATE WIRE JSON SCHEMA config_event_wire MODE STRICT ( seq integer );
@@ -63,7 +63,7 @@ Feature: Config entity quiesce classification
       """
       {"seq":2}
       """
-    And these NSPL commands begin executing in the background
+    And these Plexus commands begin executing in the background
       """
       BEGIN;
       DROP CODEC config_event_codec;
@@ -78,7 +78,7 @@ Feature: Config entity quiesce classification
       """
       "seq":2
       """
-    And the background NSPL execution succeeds
+    And the background Plexus execution succeeds
     When http payload is posted to node "node-1" with host "http-{{test_id}}-config.example.com" path "/config-quiesce"
       """
       {"seq":3}
@@ -95,7 +95,7 @@ Feature: Config entity quiesce classification
       """
       {"seq":2}
       """
-    And these NSPL commands begin executing in the background
+    And these Plexus commands begin executing in the background
       """
       BEGIN;
       DROP EMITTER config_out;
@@ -122,7 +122,7 @@ Feature: Config entity quiesce classification
       """
       "seq":2
       """
-    And the background NSPL execution succeeds
+    And the background Plexus execution succeeds
     When http payload is posted to node "node-1" with host "http-{{test_id}}-config.example.com" path "/config-quiesce"
       """
       {"seq":3}

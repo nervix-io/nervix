@@ -6,7 +6,7 @@
 //!   offsets, and the partition watch a domain-offset source rebalances on.
 //! - **Depends on.** The connector source contract, typed Kafka plans, and pre-resolved runtime
 //!   handles.
-//! - **Must not know.** The Kafka driver, NSPL parsing, registry validation, or placement
+//! - **Must not know.** The Kafka driver, Plexus parsing, registry validation, or placement
 //!   computation.
 
 #![cfg_attr(

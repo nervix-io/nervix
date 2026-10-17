@@ -86,7 +86,7 @@ impl SessionConsumers {
         // A flush-only retuning keeps the endpoint; normalize that cadence before hashing the
         // construction, publishing and acknowledgement contract.
         model.flush_policy = FlushPolicy::Immediate;
-        let canonical = model.to_canonical_nspl().map_err(|_| {
+        let canonical = model.to_canonical_plexus().map_err(|_| {
             (
                 EmitterOpenRefusal::EndpointUnavailable,
                 "emitter contract could not be rendered".to_string(),

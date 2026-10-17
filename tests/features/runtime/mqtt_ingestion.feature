@@ -3,11 +3,11 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -64,12 +64,12 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When ingestor "mqtt_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -130,11 +130,11 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -189,11 +189,11 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -239,11 +239,11 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -298,11 +298,11 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "invalid ack timeout 'oops'"
+    When these Plexus commands fail with "invalid ack timeout 'oops'"
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -340,7 +340,7 @@ Feature: MQTT ingestion
       """
       invalid ack timeout 'oops'
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE INGESTOR mqtt_notifications;
       """
@@ -366,12 +366,12 @@ Feature: MQTT ingestion
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MQTT topic "notifications_ack_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -448,11 +448,11 @@ Feature: MQTT ingestion
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -489,7 +489,7 @@ Feature: MQTT ingestion
       """
       ready: true
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
         DRAIN NODE node-1;
         SHOW CLUSTER STATUS;
@@ -515,12 +515,12 @@ Feature: MQTT ingestion
     And entity gate deadline is configured as "30s"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -568,7 +568,7 @@ Feature: MQTT ingestion
       """
       "user_id":51
       """
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       ALTER MQTT TOPIC INGESTOR mqtt_notifications SET DECODE USING notification_codec_v2;
       """
@@ -590,7 +590,7 @@ Feature: MQTT ingestion
       nervix_ingestor_quiesce_buffered_records: 2
       """
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And within "10s" the relay subscription receives payloads
       """
       "user_id":52

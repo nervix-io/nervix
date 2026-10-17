@@ -17,11 +17,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -114,11 +114,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -177,11 +177,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -245,11 +245,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -303,12 +303,12 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "http_leases_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -387,11 +387,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -505,11 +505,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -596,11 +596,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -660,11 +660,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event

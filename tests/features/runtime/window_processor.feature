@@ -5,11 +5,11 @@ Feature: Window processor runtime behavior
     And graceful shutdown drain is enabled
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
@@ -39,7 +39,7 @@ Feature: Window processor runtime behavior
       """
     Then the last cluster status owner for scheduled "window_processor" "moving_window" is saved as placeholder "window_owner"
     And the first replica for scheduled "window_processor" "moving_window" in the last cluster status is saved as placeholder "window_destination"
-    When these NSPL commands are executed on node "{{window_destination}}"
+    When these Plexus commands are executed on node "{{window_destination}}"
       """
       CREATE SUBSCRIPTION window_subscription TO window_outputs;
       """
@@ -82,11 +82,11 @@ Feature: Window processor runtime behavior
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
@@ -125,7 +125,7 @@ Feature: Window processor runtime behavior
       """
       {"tenant":"beta","value":100}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE WINDOW PROCESSOR moving_window ONTO NODE {{window_destination}} IGNORE PREFERENCES;
       """
@@ -155,11 +155,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Tumbling message windows emit non-overlapping aggregates per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -260,11 +260,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Sliding message windows delete stepped entries from online aggregate state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -366,11 +366,11 @@ Feature: Window processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -432,7 +432,7 @@ Feature: Window processor runtime behavior
     Then within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "metrics" across physical nodes totals 4
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries;
       """
@@ -460,11 +460,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram percentiles are configured declaratively in aggregate expressions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -540,11 +540,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram invalid configuration is rejected before runtime starts
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -560,7 +560,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_invalid_histogram_latency;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_invalid_histogram_latency;
       """
-    When these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration 'not-a-duration': expected number at 0"
+    When these Plexus commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration 'not-a-duration': expected number at 0"
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency FROM metrics
         WIDTH 3 MESSAGES
@@ -570,7 +570,7 @@ Feature: Window processor runtime behavior
         SET tenant = FIRST(input.tenant), latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 10, 0, 100, 'not-a-duration')
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '18446744073709551615s 1000000000ns': it is longer than a duration can be"
+    And these Plexus commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '18446744073709551615s 1000000000ns': it is longer than a duration can be"
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency FROM metrics
         WIDTH 3 MESSAGES
@@ -589,11 +589,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Describe window processor reports deduplicated aggregate structures
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -709,11 +709,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram delay retains removed step buckets for later windows
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -786,11 +786,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram delay expires on a scheduled timeout without new records
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -862,11 +862,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Duration-only windows flush on a scheduled timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -933,11 +933,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Combined width conditions flush when either messages or duration expires
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1026,11 +1026,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Branched window chains preserve concrete branch keys through output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1133,11 +1133,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Window output routes read the aggregates their own route declared
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1227,7 +1227,7 @@ Feature: Window processor runtime behavior
         references: 2
         input: input.latency
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION metric_extremes_subscription TO metric_extremes;
         START;
@@ -1287,11 +1287,11 @@ Feature: Window processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1378,11 +1378,11 @@ Feature: Window processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         tenant STRING,

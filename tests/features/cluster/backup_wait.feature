@@ -5,14 +5,14 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{backup_base}}_a;
       START;
       CREATE UNPACED DOMAIN {{backup_base}}_b;
       """
     Given the active domain is "{{backup_base}}_b"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -48,14 +48,14 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Given a 3 node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{backup_base}}_a;
       START;
       CREATE UNPACED DOMAIN {{backup_base}}_b;
       """
     Given the active domain is "{{backup_base}}_b"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -91,14 +91,14 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{backup_base}}_a;
       START;
       CREATE UNPACED DOMAIN {{backup_base}}_b;
       """
     Given the active domain is "{{backup_base}}_b"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -130,14 +130,14 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{backup_base}}_a;
       START;
       CREATE UNPACED DOMAIN {{backup_base}}_b;
       """
     Given the active domain is "{{backup_base}}_b"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -151,24 +151,24 @@ Feature: Bounded multi-domain backup waits and exact recovery
       | 1            |
       | 3            |
 
-  Scenario Outline: An NSPL cluster backup waits across independent domain cut budgets
+  Scenario Outline: An Plexus cluster backup waits across independent domain cut budgets
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{backup_base}}_a;
       START;
       CREATE UNPACED DOMAIN {{backup_base}}_b;
       """
     Given the active domain is "{{backup_base}}_b"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
     Given the backup cut for domain "{{backup_base}}_a" will pause after draining
     And the backup cut for domain "{{backup_base}}_b" will pause after draining
-    When an NSPL cluster backup crosses two delayed cuts into "cluster-wait.nvxb"
+    When an Plexus cluster backup crosses two delayed cuts into "cluster-wait.nvxb"
     Then backup archive "cluster-wait.nvxb" contains both delayed quiesced domain cuts
 
     Examples:

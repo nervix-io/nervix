@@ -4,7 +4,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario Outline: A visual VHOST and HTTP endpoint serve a running ingestor
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -37,7 +37,7 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".prompt-row input" is filled with "SHOW CREATE ENDPOINT visual_ingest;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE HTTP ENDPOINT INGESTOR visual_source FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -56,7 +56,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: A pooled client preserves its explicit bounds and sends masked configuration values
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -100,7 +100,7 @@ Feature: Web console visual client, vhost and endpoint creation
       """
       {"ca.pem":"sample material"}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE visual_client_bundle;
@@ -134,7 +134,7 @@ Feature: Web console visual client, vhost and endpoint creation
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has TLS resource directory "visual_tls" for hosts "tls-{{test_id}}.example.com"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE visual_tls_bundle;
@@ -166,7 +166,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: WebSocket client and endpoint select an existing signaling protocol
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SIGNALING PROTOCOL visual_handshake FORMAT JSON ON CONNECT SEND JAQ '{hello: true}' WAIT JAQ '.ready' TIMEOUT 5s;
@@ -211,7 +211,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: An endpoint can select a VHOST staged earlier in its transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -249,7 +249,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: Selected endpoint references survive a leader reconnection
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE VHOST reconnect_edge reconnect-{{test_id}}.example.com;

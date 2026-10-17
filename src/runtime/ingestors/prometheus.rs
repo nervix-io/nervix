@@ -6,7 +6,7 @@
 //!   on.
 //! - **Depends on.** The connector source contract, typed Prometheus plans and pre-resolved runtime
 //!   handles.
-//! - **Must not know.** Prometheus query or sample details, NSPL parsing, registry validation, or
+//! - **Must not know.** Prometheus query or sample details, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(

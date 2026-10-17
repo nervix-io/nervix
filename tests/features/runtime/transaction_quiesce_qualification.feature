@@ -6,7 +6,7 @@ Feature: Transaction quiesce qualification
     And the active domain is "{{domain}}"
     Then the current leader node is saved as placeholder "original_leader"
     And a node other than placeholder "original_leader" is saved as placeholder "catch_up_node"
-    Given the leader node is configured with these NSPL commands
+    Given the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CORDON NODE {{catch_up_node}};
@@ -17,7 +17,7 @@ Feature: Transaction quiesce qualification
     Given the leader raft log position and retained bytes are remembered
     When client "owner" queues 128 transaction qualification schema changes
     Then client "owner" transaction id is saved as placeholder "transaction_id"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
       """
@@ -39,7 +39,7 @@ Feature: Transaction quiesce qualification
     Then within "60s" node "{{catch_up_node}}" retains transaction "{{transaction_id}}" with 128 report operations
     When leadership is transferred from node "{{original_leader}}" to node "{{catch_up_node}}"
     Then node "{{catch_up_node}}" eventually reports leader "{{catch_up_node}}"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
       """
@@ -47,7 +47,7 @@ Feature: Transaction quiesce qualification
     When client "owner" attempts to commit its transaction
     Then client "owner" transaction state is "COMMITTED"
     Given client "observer" is connected to node "{{catch_up_node}}" with cluster seeds
-    When client "observer" executes these NSPL commands
+    When client "observer" executes these Plexus commands
       """
       DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT JSON;
       """
@@ -67,7 +67,7 @@ Feature: Transaction quiesce qualification
     And the last transaction inspection is remembered for restart comparison
     When the cluster is restarted
     Given client "restarted_observer" is connected to the leader node
-    When client "restarted_observer" executes these NSPL commands
+    When client "restarted_observer" executes these Plexus commands
       """
       DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT JSON;
       """

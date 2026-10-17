@@ -1,7 +1,7 @@
 Feature: Web console execution graph
   Scenario: Execution graph draws an unbranched pipeline as a single straight line
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_record (
@@ -47,7 +47,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph keeps fan-out clear of items and gives each route its own port
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_record (
@@ -104,7 +104,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph draws a relay read both as input and as materialized state as two relations
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA reading_record (
@@ -137,7 +137,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph contains a branch group and names its branch and key fields
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (
@@ -186,7 +186,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph marks a reingestor feedback loop as a return path
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retry_record (
@@ -234,7 +234,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph reports its framing, feed state and every node kind
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_record (

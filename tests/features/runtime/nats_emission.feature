@@ -3,12 +3,12 @@ Feature: NATS emission
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And NATS subject "columnar_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA columnar_event (
         sequence I64,
@@ -80,7 +80,7 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       SHOW CLUSTER STATUS;
       """
@@ -118,12 +118,12 @@ Feature: NATS emission
     And NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And NATS subject "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -197,12 +197,12 @@ Feature: NATS emission
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And NATS subject "narrow_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA narrow_event (
         sequence I64,
@@ -252,7 +252,7 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       SHOW CLUSTER STATUS;
       """
@@ -287,12 +287,12 @@ Feature: NATS emission
     And NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "jetstream_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );

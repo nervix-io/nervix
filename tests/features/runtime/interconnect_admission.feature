@@ -4,7 +4,7 @@ Feature: Interconnect relay admission
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -12,7 +12,7 @@ Feature: Interconnect relay admission
       CREATE PACED DOMAIN runnable_{{test_id}} WITH PERIOD 100ms SKEW 100ms;
       """
     Given the active domain is "blocked_{{test_id}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -37,7 +37,7 @@ Feature: Interconnect relay admission
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
     Given the active domain is "runnable_{{test_id}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -61,7 +61,7 @@ Feature: Interconnect relay admission
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 100.0;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -90,14 +90,14 @@ Feature: Interconnect relay admission
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       CREATE UNPACED DOMAIN branches_{{test_id}};
       """
     Given the active domain is "branches_{{test_id}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         tenant STRING,
@@ -139,7 +139,7 @@ Feature: Interconnect relay admission
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -168,14 +168,14 @@ Feature: Interconnect relay admission
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       CREATE UNPACED DOMAIN cancellation_{{test_id}};
       """
     Given the active domain is "cancellation_{{test_id}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         tenant STRING,
@@ -209,7 +209,7 @@ Feature: Interconnect relay admission
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;

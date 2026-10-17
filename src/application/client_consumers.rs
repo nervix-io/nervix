@@ -4,7 +4,7 @@
 //! - **Owns.** The local attachment or authenticated interconnect stream for one consumer,
 //!   forwarding its Arrow attempts and settlement, and detaching it when either peer disappears.
 //! - **Depends on.** The node's volatile emitter endpoint and the interconnect duplex contract.
-//! - **Must not know.** Session request frames, NSPL text, or graph processing.
+//! - **Must not know.** Session request frames, Plexus text, or graph processing.
 
 #![cfg_attr(
     nervix_lint,

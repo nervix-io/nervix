@@ -30,7 +30,7 @@ use super::{CancellableRead, RestoreRefusal};
 use crate::runtime::{StagedArtifact, restored_key_fixed_bytes};
 
 /// Owned archive values overlap decoding, native per-entry conversion and resolver scratch,
-/// restore-plan copies, and placement descriptions. NSPL additionally overlaps tokens, parser
+/// restore-plan copies, and placement descriptions. Plexus additionally overlaps tokens, parser
 /// state, semantic Models and transaction-planner copies. Resources, guest saves and Arrow columns stay on
 /// disk and do not contribute to this retained-memory admission.
 const RECORD_WORKING_MULTIPLIER: u64 = 16;
@@ -168,7 +168,7 @@ impl SectionVisitor for MetadataMeasure<'_> {
         for section in &manifest.sections {
             let multiplier = match section.content {
                 SectionContent::Record(_) => RECORD_WORKING_MULTIPLIER,
-                SectionContent::Nspl => MODEL_WORKING_MULTIPLIER,
+                SectionContent::Plexus => MODEL_WORKING_MULTIPLIER,
                 SectionContent::ResourceArchive
                 | SectionContent::WasmGuestBlob
                 | SectionContent::MaterializedColumns

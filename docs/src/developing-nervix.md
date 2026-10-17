@@ -95,9 +95,9 @@ Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
 startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
-remove the environment variable or flag from normal startup. Later users can be created through NSPL:
+remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
-```nspl
+```plexus
 CREATE USER my_username WITH PASSWORD 'my_secure_password';
 ```
 
@@ -282,9 +282,9 @@ reads a build directory after its lint and the runner's disk cannot hold every c
 once, a target that passed deletes its own; a failed target keeps its directory, and a local run
 keeps them all for the next one.
 
-`just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
-the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
-are intentionally not complete NSPL scripts; the fence remains identified as NSPL in the rendered
+`just validate-plexus-docs` scans `docs/src` and parses every exact `plexus` code fence directly with
+the parser crate. Use `plexus,ignore` only for loose grammar synopses and statement fragments that
+are intentionally not complete Plexus scripts; the fence remains identified as Plexus in the rendered
 documentation.
 
 For test runs:

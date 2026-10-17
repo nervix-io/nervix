@@ -4,12 +4,12 @@ Feature: Kafka emission
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "columnar_json_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA incoming_event (
         clean STRING,
@@ -85,12 +85,12 @@ Feature: Kafka emission
     And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_headers_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -197,12 +197,12 @@ Feature: Kafka emission
     And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -276,12 +276,12 @@ Feature: Kafka emission
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "mode_boundary_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -342,14 +342,14 @@ Feature: Kafka emission
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "detached_confirming_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "detached_confirming_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "detached_confirming_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -411,7 +411,7 @@ Feature: Kafka emission
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -419,7 +419,7 @@ Feature: Kafka emission
     And a mock Kafka broker serves topic "stale_copy_out_{{test_id}}"
     And the mock Kafka broker refuses every write
     And mock Kafka topic "stale_copy_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -495,13 +495,13 @@ Feature: Kafka emission
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "held_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "held_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
@@ -556,7 +556,7 @@ Feature: Kafka emission
       """
     # The producer holds the three delivered records for the rest of its two-minute linger.
     And the observed broker does not receive a payload within "2s"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """

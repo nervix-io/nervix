@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The two hard limits of `BATCH MAX MESSAGES <n> MAX SIZE <bytes>` as validated
 //!   values: the member count, bounded by what the message histograms track, and the exact encoded
-//!   size, as a positive whole number of bytes with its canonical NSPL spelling.
+//!   size, as a positive whole number of bytes with its canonical Plexus spelling.
 //! - **Depends on.** Serialization primitives.
 //! - **Must not know.** Which sink or codec a policy is declared on, how a batch is packed, encoded
 //!   or measured, or how a connector publishes it.

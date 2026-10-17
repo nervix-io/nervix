@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Preparing the complete processor-plan map for one installed domain revision.
 //! - **Depends on.** Decision-layer processor specifications and installed runtime capabilities.
-//! - **Must not know.** NSPL text, parser state or control-plane transaction mechanics.
+//! - **Must not know.** Plexus text, parser state or control-plane transaction mechanics.
 
 #![cfg_attr(
     nervix_lint,

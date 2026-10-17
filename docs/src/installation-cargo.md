@@ -1,12 +1,12 @@
 # Cargo Install From GitHub
 
-Install the Nervix server, the interactive CLI, and the NSPL formatter directly from the
+Install the Nervix server, the interactive CLI, and the Plexus formatter directly from the
 [Nervix GitHub repository](https://github.com/nervix-io/nervix):
 
 ```bash
 cargo install --locked \
   --git https://github.com/nervix-io/nervix.git \
-  nervix-server nervix-cli nervix-nspl-format
+  nervix-server nervix-cli nervix-plexus-format
 ```
 
 This builds the binaries from source and installs them into Cargo's binary directory, which is
@@ -20,7 +20,7 @@ Confirm that the commands are available:
 ```bash
 nervix-server --help
 nervix-cli --help
-nervix-nspl-format --help
+nervix-plexus-format --help
 ```
 
 ## Pin A Git Revision
@@ -32,7 +32,7 @@ reviewed commit:
 cargo install --locked \
   --git https://github.com/nervix-io/nervix.git \
   --rev <commit-sha> \
-  nervix-server nervix-cli nervix-nspl-format
+  nervix-server nervix-cli nervix-plexus-format
 ```
 
 Run the same command with a different revision to upgrade. Add `--force` if Cargo reports that the
@@ -41,5 +41,5 @@ selected packages are already installed.
 To remove both binaries:
 
 ```bash
-cargo uninstall nervix-server nervix-cli nervix-nspl-format
+cargo uninstall nervix-server nervix-cli nervix-plexus-format
 ```

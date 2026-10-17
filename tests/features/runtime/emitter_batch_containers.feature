@@ -19,18 +19,18 @@ Feature: Emitter batch containers
         "event.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Event {\n  int64 seq = 1;\n  string note = 2;\n}\n\nmessage EventBatch {\n  repeated Event events = 1;\n}\n\nmessage EventEnvelope {\n  uint32 count = 1;\n  repeated Event records = 2;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "containers_{{test_id}}" exists with 1 partitions
     And Kafka topic "containers_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_json_wire MODE STRICT ( seq integer, note string );
@@ -192,13 +192,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "transformed_{{test_id}}" exists with 1 partitions
     And Kafka topic "transformed_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA rich_event ( seq I64, tags <tags_type>, blob BYTES );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA rich_event
@@ -288,18 +288,18 @@ Feature: Emitter batch containers
         "event.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Event {\n  int64 seq = 1;\n  string note = 2;\n}\n\nmessage EventBatch {\n  repeated Event events = 1;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "json_batches_{{test_id}}" exists with 1 partitions
     And Kafka topic "proto_batches_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA echoed_event ( seq I64, note STRING, path STRING );
@@ -402,13 +402,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "subdivided_{{test_id}}" exists with 1 partitions
     And Kafka topic "subdivided_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -482,13 +482,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "failed_batches_{{test_id}}" exists with 1 partitions
     And Kafka topic "failed_batches_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -561,13 +561,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "syslog_frames_{{test_id}}" exists with 1 partitions
     And Kafka topic "syslog_frames_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA syslog_event (
         facility U8,

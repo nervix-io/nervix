@@ -568,7 +568,7 @@ mod tests {
             repl_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
-                    "Web console NSPL REPL",
+                    "Web console Plexus REPL",
                     ScenarioAttempt::First,
                     |reason| {
                         if reason == AdmissionWait::WebConsole {
@@ -634,7 +634,7 @@ mod tests {
 
         let mut names = [
             "Ordinary feature one",
-            "Web console NSPL REPL",
+            "Web console Plexus REPL",
             "Ordinary feature two",
             "Web console domain clock",
             "Coordinated WASM processor state reset",
@@ -644,7 +644,7 @@ mod tests {
             &names[..3],
             &[
                 "Coordinated WASM processor state reset",
-                "Web console NSPL REPL",
+                "Web console Plexus REPL",
                 "Web console domain clock",
             ]
         );

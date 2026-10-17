@@ -3,7 +3,7 @@ Feature: Materialized backup and archived lifecycle resumption
   Scenario Outline: RESUME reproduces an unpaced archived lifecycle in a fresh cluster
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;
@@ -17,7 +17,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 0 models
     And the CLI restore reports domain "{{domain}}" as "RUNNING" at start version 1
     And every node reports the resumed lifecycle archived in "resume.nvxb"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -37,7 +37,7 @@ Feature: Materialized backup and archived lifecycle resumption
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( tenant STRING, value I64, source STRING );
@@ -92,7 +92,7 @@ Feature: Materialized backup and archived lifecycle resumption
     When the CLI restores "domain {{domain}} --as {{domain}}_staging_failure --resume" from "materialized.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_staging_failure"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -104,12 +104,12 @@ Feature: Materialized backup and archived lifecycle resumption
     When the CLI restores "domain {{domain}} --as {{domain}}_durable_failure --resume" from "materialized.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_durable_failure"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
     When the cluster is restarted
-    And these NSPL commands fail with "restore state installation is incomplete"
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -127,7 +127,7 @@ Feature: Materialized backup and archived lifecycle resumption
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "materialized-stopped.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "materialized.nvxb" and "materialized-stopped.nvxb" preserve complete domain "{{domain}}" restored as stopped domain "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -150,7 +150,7 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION generated_subscription TO generated;
       """
@@ -168,7 +168,7 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       key={"tenant":"beta"} payload={"source":"beta-state","tenant":"beta","value":2}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       START;
@@ -194,7 +194,7 @@ Feature: Materialized backup and archived lifecycle resumption
     And round 2 of 1 KiB materialized rows is submitted for 2 tenants
     Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
     When the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restarted_retention TO summaries;
       """
@@ -225,14 +225,14 @@ Feature: Materialized backup and archived lifecycle resumption
     When restore "DOMAIN {{domain}} RESUME" of backup archive "retention.nvxb" is streamed to node "{{leader}}" under execution reference "retention-resume"
     Then the restore stream's outcome is "completed" as "executed"
     And every node reports the resumed lifecycle archived in "retention.nvxb"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_retention TO summaries;
       """
     Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
     When the cluster is restarted
     Then every node reports the resumed lifecycle archived in "retention.nvxb"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reopened_retention TO summaries;
       """
@@ -268,7 +268,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_large_failure"
     When the cluster is restarted
-    And these NSPL commands fail with "restore state installation is incomplete"
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -291,14 +291,14 @@ Feature: Materialized backup and archived lifecycle resumption
     And every node reports the resumed lifecycle archived in "large-materialized.nvxb"
     When restore "DOMAIN {{domain}} RESUME" of backup archive "large-materialized.nvxb" is streamed to node "{{leader}}" under execution reference "large-resume"
     Then the restore stream's outcome is "completed" as "recovered"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_summaries TO summaries;
       """
     Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     When the cluster is restarted
     Then every node reports the resumed lifecycle archived in "large-materialized.nvxb"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reopened_summaries TO summaries;
       """
@@ -351,7 +351,7 @@ Feature: Materialized backup and archived lifecycle resumption
     And node "{{leader}}" eventually reports a leader other than "{{leader}}"
     And restore "DOMAIN {{domain}} AS {{domain}}_copy RESUME" of backup archive "large-stale.nvxb" completes on node "{{survivor}}" under execution reference "large-stale-restore"
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION resumed_summaries TO summaries;
       """
@@ -383,7 +383,7 @@ Feature: Materialized backup and archived lifecycle resumption
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10s;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
@@ -403,7 +403,7 @@ Feature: Materialized backup and archived lifecycle resumption
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.5;
       """
     Given client "driver" is connected to node "node-1"
-    When client "driver" executes these NSPL commands
+    When client "driver" executes these Plexus commands
       """
       ATTACH DOMAIN CLOCK;
       """
@@ -423,7 +423,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 9 models
     And every node reports the resumed lifecycle archived in "paced.nvxb"
     Given client "driver" is connected to node "restored-1"
-    When client "driver" executes these NSPL commands
+    When client "driver" executes these Plexus commands
       """
       ATTACH DOMAIN CLOCK;
       CREATE SUBSCRIPTION restored_events TO state;
@@ -455,7 +455,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value I32 );

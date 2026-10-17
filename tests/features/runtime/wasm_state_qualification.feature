@@ -24,17 +24,17 @@ Feature: WASM guest-state qualification across crash windows
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_qualification_restart_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_qualification_filter;
       UPLOAD RESOURCE wasm_qualification_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -99,7 +99,7 @@ Feature: WASM guest-state qualification across crash windows
     And within "30s" Kafka consumer group "wasm_qualification_restart_group_{{test_id}}" next offset for topic "wasm_qualification_restart_in_{{test_id}}" partition 0 is "below 3"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -136,22 +136,22 @@ Feature: WASM guest-state qualification across crash windows
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_qualification_failover_in_{{test_id}}" exists with 1 partitions
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_qualification_failover_filter;
       UPLOAD RESOURCE wasm_qualification_failover_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -192,13 +192,13 @@ Feature: WASM guest-state qualification across crash windows
       START;
       """
     # Keep node-1 cordoned so the surviving replica owns recovery through the output assertion.
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "filter_even_rows" is saved as placeholder "failed_owner"
     And the first replica for scheduled "wasm_processor" "filter_even_rows" in the last cluster status is saved as placeholder "promoted_replica"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -266,17 +266,17 @@ Feature: WASM guest-state qualification across crash windows
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_qualification_cluster_restart_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_qualification_filter;
       UPLOAD RESOURCE wasm_qualification_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -341,7 +341,7 @@ Feature: WASM guest-state qualification across crash windows
     And within "30s" Kafka consumer group "wasm_qualification_cluster_restart_group_{{test_id}}" next offset for topic "wasm_qualification_cluster_restart_in_{{test_id}}" partition 0 is "below 3"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -411,7 +411,7 @@ Feature: WASM guest-state qualification across crash windows
       state reset reason: OPERATOR
       state reset readiness: READY
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """

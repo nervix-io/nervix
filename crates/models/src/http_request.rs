@@ -5,7 +5,7 @@
 //! - **Owns.** The valid origin, method, target and application-header values of an outbound HTTP
 //!   request, including the bounds that are checked both for literals and evaluated records.
 //! - **Depends on.** The URL Standard parser and semantic error vocabulary.
-//! - **Must not know.** NSPL parsing, registry state, Arrow batches or connector I/O.
+//! - **Must not know.** Plexus parsing, registry state, Arrow batches or connector I/O.
 
 #![cfg_attr(
     nervix_lint,

@@ -7,7 +7,7 @@
 //!   answer with, the requests they captured, the faults they observed, its own TLS identity and the
 //!   client identity it issues, and the bounded stop that ends all of them.
 //! - **Depends on.** Tokio, Rustls and rcgen, and the HTTP/1.1 request grammar through `httparse`.
-//! - **Must not know.** Scenario state, nodes, NSPL, or what the requests it captures mean.
+//! - **Must not know.** Scenario state, nodes, Plexus, or what the requests it captures mean.
 //!
 //! # Scripted responses
 //!

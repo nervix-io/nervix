@@ -7,7 +7,7 @@
 //!   properties as ingest headers, and per-message acknowledgement and negative acknowledgement.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio and `pulsar`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

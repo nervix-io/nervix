@@ -470,7 +470,7 @@ impl ServerProcess {
         )
     }
 
-    /// Runs NSPL through an authenticated session whose active domain is `domain`.
+    /// Runs Plexus through an authenticated session whose active domain is `domain`.
     pub(crate) async fn run_commands(&self, domain: &str, commands: &str) -> io::Result<String> {
         run_command_via_client(&self.grpc_uri(), domain, commands).await
     }

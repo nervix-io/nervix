@@ -5,7 +5,7 @@
 //!   bounded retained Arrow bytes, and the application result that releases source work.
 //! - **Depends on.** Typed emitter plans, Arrow schema contracts, the execution-sensitive
 //!   primitive boundary, and physical time.
-//! - **Must not know.** Sessions, their wire format, NSPL text, or a client's transport.
+//! - **Must not know.** Sessions, their wire format, Plexus text, or a client's transport.
 
 #![cfg_attr(
     nervix_lint,

@@ -3,7 +3,7 @@
 //! and the rejection a peer receives for one.
 //! May depend on: the model vocabulary, the interconnect's handoff failure envelope, and
 //! `error-stack` reports, which keep a runtime state persistence failure beneath them.
-//! Must not know: schedules, consensus transactions, NSPL, or edge protocols.
+//! Must not know: schedules, consensus transactions, Plexus, or edge protocols.
 
 #![cfg_attr(
     nervix_lint,

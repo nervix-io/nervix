@@ -7,11 +7,11 @@ Feature: Attached record outcomes across independent branch deliveries
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "ack_owners_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "ack_owners_out_{{test_id}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA ack_owner_event ( event_id STRING, branch_name STRING, sequence I64 );
       CREATE WIRE JSON SCHEMA ack_owner_wire MODE STRICT (

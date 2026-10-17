@@ -3,11 +3,11 @@ Feature: Ingestor metrics
   Scenario Outline: DESCRIBE INGESTOR and Prometheus report ingestor output metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -49,7 +49,7 @@ Feature: Ingestor metrics
       {"user_id":42}
       {"user_id":43}
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE INGESTOR ingestor_metrics_source;
       """
@@ -101,7 +101,7 @@ Feature: Ingestor metrics
       """
       p90_1m=1.0
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE RELAY notifications;
       """
@@ -149,11 +149,11 @@ Feature: Ingestor metrics
   Scenario Outline: Ingestor MAX BATCH SIZE counts Arrow payload bytes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -198,13 +198,13 @@ Feature: Ingestor metrics
     And MQTT is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Ten required I64 values occupy 80B, so the size boundary closes this batch after the tenth
     # message without depending on how quickly the broker delivers the burst.
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -294,11 +294,11 @@ Feature: Ingestor metrics
     Given MQTT is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -347,11 +347,11 @@ Feature: Ingestor metrics
   Scenario Outline: DESCRIBE INGESTOR restores metrics for a running domain after process restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -394,11 +394,11 @@ Feature: Ingestor metrics
       """
       total=2
       """
-    When these NSPL commands fail with "already running"
+    When these Plexus commands fail with "already running"
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE INGESTOR ingestor_metrics_source;
       """
@@ -417,11 +417,11 @@ Feature: Ingestor metrics
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -466,11 +466,11 @@ Feature: Ingestor metrics
   Scenario Outline: DESCRIBE INGESTOR counts every message a JAQ codec unfolds from one payload
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64

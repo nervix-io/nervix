@@ -4,12 +4,12 @@ Feature: Kafka acknowledgements across relay-owner recovery
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "relay_handoff_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA relay_handoff_event ( event_id STRING, branch_name STRING, sequence I64 );
       CREATE WIRE JSON SCHEMA relay_handoff_wire MODE STRICT (
@@ -42,7 +42,7 @@ Feature: Kafka acknowledgements across relay-owner recovery
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR relay_handoff_source ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY relay_handoff_records ONTO NODE node-2 IGNORE PREFERENCES;
@@ -105,7 +105,7 @@ Feature: Kafka acknowledgements across relay-owner recovery
       """
     And within "30s" Kafka consumer group "relay_handoff_group_{{test_id}}" next offset for topic "relay_handoff_in_{{test_id}}" partition 0 is "at least 5"
     When node "node-2" is restarted 1 times with a new interconnect address
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE RELAY relay_handoff_records ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;

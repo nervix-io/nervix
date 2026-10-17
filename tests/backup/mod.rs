@@ -6,7 +6,7 @@
 //!   through its own session, the downloads it shapes itself, archives it alters to probe the
 //!   reader's refusals, and the checks of what an archive holds.
 //! - **Depends on.** The public CLI, the harness's own session and download client, the archive
-//!   format's reader, and the language layer to parse an archive's NSPL.
+//!   format's reader, and the language layer to parse an archive's Plexus.
 //! - **Must not know.** How the server assembles, retains or streams an archive.
 
 use cucumber::{given, then, when};
@@ -14,7 +14,7 @@ use nervix_backup::{SectionContent, SectionEntry, SectionReader, SectionVisitor,
 use nervix_models::{
     BackupArchiveSummary, CommandExecutionReference, DomainName, Statement, Timestamp,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 
 use super::*;
 use crate::common::{
@@ -47,7 +47,7 @@ pub(crate) struct TestBackup {
 /// How long a backup the CLI runs may take, download included.
 const CLI_BACKUP_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The largest `models.nspl` a scenario reads back.
+/// The largest `models.plexus` a scenario reads back.
 const MODELS_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Where a scenario's archive named `name` lives.
@@ -375,7 +375,7 @@ fn then_backup_archive_is_larger_than(world: &mut ScenarioWorld, file: String, m
     );
 }
 
-/// Collects every `models.nspl` of an archive, keyed by its section path.
+/// Collects every `models.plexus` of an archive, keyed by its section path.
 #[derive(Default)]
 struct ModelsCollector {
     documents: BTreeMap<String, String>,
@@ -394,19 +394,19 @@ impl SectionVisitor for ModelsCollector {
         entry: &SectionEntry,
         content: &mut SectionReader<'_>,
     ) -> Result<(), error_stack::Report<nervix_backup::ArchiveReadError>> {
-        if entry.content != SectionContent::Nspl {
+        if entry.content != SectionContent::Plexus {
             let mut sink = std::io::sink();
             std::io::copy(content, &mut sink).expect("a section can be read through");
             return Ok(());
         }
         let bytes = content.read_all(entry, MODELS_LIMIT)?;
-        let text = String::from_utf8(bytes).expect("models.nspl is UTF-8");
+        let text = String::from_utf8(bytes).expect("models.plexus is UTF-8");
         self.documents.insert(entry.path.to_string(), text);
         Ok(())
     }
 }
 
-/// The NSPL an archive holds for `domain`, read after the whole archive verifies on a blocking task.
+/// The Plexus an archive holds for `domain`, read after the whole archive verifies on a blocking task.
 async fn archived_models(path: PathBuf, domain: DomainName) -> String {
     off_the_runner(move || {
         let file = std::fs::File::open(&path).expect("the archive exists");
@@ -422,10 +422,10 @@ async fn archived_models(path: PathBuf, domain: DomainName) -> String {
     .await
 }
 
-/// The canonical NSPL of every model `source` creates, in name order.
+/// The canonical Plexus of every model `source` creates, in name order.
 fn created_models(source: &str) -> Vec<String> {
     let statements = parse_client_statements(source)
-        .unwrap_or_else(|error| panic!("the NSPL parses: {error:?}"));
+        .unwrap_or_else(|error| panic!("the Plexus parses: {error:?}"));
     let mut models = Vec::new();
     for statement in statements {
         let ClientStatement::Server(Statement::Create(create)) = statement else {
@@ -433,8 +433,8 @@ fn created_models(source: &str) -> Vec<String> {
         };
         let rendered = create
             .body
-            .to_canonical_nspl()
-            .expect("a parsed model renders as NSPL");
+            .to_canonical_plexus()
+            .expect("a parsed model renders as Plexus");
         models.push(rendered);
     }
     models.sort();
@@ -442,7 +442,7 @@ fn created_models(source: &str) -> Vec<String> {
 }
 
 #[then(
-    expr = "backup archive {string} holds for domain {string} exactly the models these NSPL \
+    expr = "backup archive {string} holds for domain {string} exactly the models these Plexus \
             commands create"
 )]
 async fn then_archive_holds_exactly_the_models(
@@ -458,7 +458,7 @@ async fn then_archive_holds_exactly_the_models(
     assert_eq!(
         created_models(&archived),
         expected,
-        "models.nspl:\n{archived}"
+        "models.plexus:\n{archived}"
     );
 }
 
@@ -477,12 +477,12 @@ async fn then_archive_holds_a_contiguous_run(
     let domain = scenario_domain(world, &domain);
     let archived = archived_models(path, domain).await;
     let statements = parse_client_statements(&archived)
-        .unwrap_or_else(|error| panic!("models.nspl parses: {error:?}\n{archived}"));
+        .unwrap_or_else(|error| panic!("models.plexus parses: {error:?}\n{archived}"));
     let mut schema_found = false;
     let mut numbers = BTreeSet::new();
     for statement in statements {
         let ClientStatement::Server(Statement::Create(create)) = statement else {
-            panic!("models.nspl holds only model creations:\n{archived}");
+            panic!("models.plexus holds only model creations:\n{archived}");
         };
         let name = create.body.name().to_string();
         if name == schema {

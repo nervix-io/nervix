@@ -5,11 +5,11 @@ Feature: Branch activity sampling
     Given branched relay expiration scan interval is configured as "6s"
     And runtime replication is configured with replica count 0 and snapshot interval "30s"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE <time_rate>;
 

@@ -6,7 +6,7 @@ Feature: Restarted voter observation before automatic failover
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA restart_event ( id I64 );
@@ -23,7 +23,7 @@ Feature: Restarted voter observation before automatic failover
     Then node-1 reaches automatic scheduling with the relayed voter marked unavailable
     When node-1 completes that scheduling pass and receives further voter heartbeats
     Then node "node-1" sees node "node-3" live
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """

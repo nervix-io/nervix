@@ -27,7 +27,7 @@ One live branch instance can hold the following at each graph node that belongs 
 
 `FLUSH EACH` has a configured byte boundary. `FLUSH IMMEDIATE` has no size boundary; its pending
 depth depends on arrivals during the system-owned 100 µs window. See the
-[authoritative flush rule and tuning guidance](nspl-overview.md).
+[authoritative flush rule and tuning guidance](plexus-overview.md).
 
 WASM code compilation is shared while mutable guest state is not. See
 [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory).
@@ -119,7 +119,7 @@ not pay for a window's state, and a window width does not bound a correlator.
 - Route `FLUSH EACH` interval and `MAX BATCH SIZE` bound how long rows wait and how much a route
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
-  at boundaries that work per batch; see the [flush tuning guidance](nspl-overview.md) for which
+  at boundaries that work per batch; see the [flush tuning guidance](plexus-overview.md) for which
   sinks those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
@@ -144,7 +144,7 @@ not pay for a window's state, and a window width does not bound a correlator.
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not
   reduce the cost of any branch instance that becomes live.
 
-See the existing [FLUSH tuning guidance](nspl-overview.md) instead of treating example values as
+See the existing [FLUSH tuning guidance](plexus-overview.md) instead of treating example values as
 defaults.
 
 ## What To Watch

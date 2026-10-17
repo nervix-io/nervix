@@ -6,7 +6,7 @@
 //!   drops what the queue subscription keeps receiving.
 //! - **Depends on.** The connector source contract, the NATS connector, and pre-resolved runtime
 //!   execution handles.
-//! - **Must not know.** The NATS driver, subscription lifecycle, NSPL parsing, registry
+//! - **Must not know.** The NATS driver, subscription lifecycle, Plexus parsing, registry
 //!   validation, or placement computation.
 
 #![cfg_attr(

@@ -4,7 +4,7 @@ Feature: Cordon node
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       SHOW CLUSTER STATUS;
@@ -13,7 +13,7 @@ Feature: Cordon node
       """
       raft.cordoned_nodes: node-2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -58,7 +58,7 @@ Feature: Cordon node
   Scenario: An uncordoned node is visible as schedulable again
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       UNCORDON NODE node-2;

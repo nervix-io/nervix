@@ -1671,7 +1671,7 @@ mod tests {
                             .assured("the fixture cadence is a positive duration"),
                         output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                             relay: named("output"),
-                            construction: nervix_nspl::parse_route_construction(
+                            construction: nervix_plexus::parse_route_construction(
                                 "SET value = relay_state.input.value",
                             )
                             .expect("generator route must parse"),
@@ -1888,7 +1888,7 @@ mod tests {
                             with_inherit_all(ProcessorOutputs::new(vec![
                                 ProcessorOutput {
                                     relay: named("errors"),
-                                    construction: nervix_nspl::parse_route_construction(
+                                    construction: nervix_plexus::parse_route_construction(
                                         r#"WHERE input.value = "error""#,
                                     )
                                     .expect("route construction must parse"),
@@ -1898,7 +1898,7 @@ mod tests {
                                 },
                                 ProcessorOutput {
                                     relay: named("warnings"),
-                                    construction: nervix_nspl::parse_route_construction(
+                                    construction: nervix_plexus::parse_route_construction(
                                         r#"WHERE input.value = "warn""#,
                                     )
                                     .expect("route construction must parse"),

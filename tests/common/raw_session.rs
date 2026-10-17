@@ -9,7 +9,7 @@
 //!   frames a scenario sends to probe the server's refusals, backup downloads and restore streams a
 //!   scenario shapes itself, and whether another session of its user can learn the outcome of a
 //!   command it sent.
-//! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
+//! - **Depends on.** The client wire contract and its gRPC codec, the Plexus client statement parser
 //!   to route subscription statements and to tell which statements change what a session holds,
 //!   and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
@@ -50,7 +50,7 @@ use nervix_models::{
     ArchiveDigest, CommandExecutionReference, DomainName, ResourceName, ResourceUploadIdentity,
     RestoreArchive, SubscriptionName, TransactionPosition, TransactionStatus,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc, time::Instant};
 use tonic::{
     Request, Status, Streaming,
@@ -465,7 +465,7 @@ pub(crate) async fn download_backup(
 /// A restore stream a scenario shapes itself.
 pub(crate) struct TestRestore<'a> {
     pub(crate) reference: &'a CommandExecutionReference,
-    /// The `RESTORE` statement the start names, as canonical NSPL.
+    /// The `RESTORE` statement the start names, as canonical Plexus.
     pub(crate) statement: &'a str,
     pub(crate) archive: &'a [u8],
     /// The digest the start declares, when it is not the archive's own.

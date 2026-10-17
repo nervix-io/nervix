@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Nervix is a domain-owned streaming system whose public language is NSPL. This file records the
+Nervix is a domain-owned streaming system whose public language is Plexus. This file records the
 repository's durable architecture and correctness rules. It intentionally does not mirror the
-current module tree, enumerate parser helpers, or restate the complete NSPL grammar; those details
+current module tree, enumerate parser helpers, or restate the complete Plexus grammar; those details
 belong in the code, public specification, and tests.
 
 When code and this document disagree, do not add a compatibility path around the disagreement.
@@ -32,14 +32,14 @@ they ask for it to be recorded in one of those places.
 
 ## Alpha Stability and Compatibility
 
-NSPL has reached alpha. Its period of very active language experimentation is over, and large
+Plexus has reached alpha. Its period of very active language experimentation is over, and large
 backward-incompatible changes are no longer expected. The language will continue to evolve during
 alpha, however, and focused breaking changes may still be made when they materially improve its
 model or correctness.
 
 Nervix supports exactly one shape of everything: the current one. Until an explicit compatibility
 policy is introduced, there is no migration, dual read, version negotiation, or deprecation window.
-When a Model, stored shape, NSPL form, protocol message, or public interface changes, the previous
+When a Model, stored shape, Plexus form, protocol message, or public interface changes, the previous
 form is deleted outright in the same change.
 
 When a stored shape changes, previously written data using that shape is expected to break. It must
@@ -79,7 +79,7 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 
 ### Language pipeline
 
-- NSPL is lexed and parsed once into structured public semantic Models.
+- Plexus is lexed and parsed once into structured public semantic Models.
 - Parser-only spans and recovery state remain internal to parsing and diagnostics.
 - Completion is derived from expectations of the composed top-level grammar. REPLs and clients
   must not merge suggestions from independent feature parsers.
@@ -93,7 +93,7 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Grammar labels use underscore style, such as `field_name` and `string_literal`. Completion labels
   for composed keyword phrases use their human-readable space-separated form.
 - The compiler consumes semantic Models directly. Persisted or public Models must never contain raw
-  executable NSPL that the runtime reparses.
+  executable Plexus that the runtime reparses.
 - Grammar keywords are case-insensitive language tokens. Original spelling may be retained for
   diagnostics, but unknown words are not a substitute for declaring language keywords.
 - External connector configuration remains raw only where pass-through is the intentional public
@@ -288,7 +288,7 @@ Nervix is layered. Innermost first, and each layer may name only the layers insi
    [Execution-sensitive primitives](#execution-sensitive-primitives).
 2. **Vocabulary.** Models, names, timestamps, branch keys, and node references: the words every
    other layer speaks.
-3. **Language.** NSPL lexing, parsing, completion, and lowering into Models. The parser is an edge
+3. **Language.** Plexus lexing, parsing, completion, and lowering into Models. The parser is an edge
    dependency only. It is named by the language crate itself, the formatter, the client tools, and
    the session adapter; every other layer consumes Models.
 4. **Engines and infrastructure.** The expression VM and its frontend, the UDF and WASM hosts, wire
@@ -1128,7 +1128,7 @@ build and the existing tests, and nothing in it changes behavior.
   cleanup and signals, diagnostic images, the suites and their shards, CI triggers, labels and
   cancellation, guarantees and limits, and qualification evidence. The product contracts its
   scenarios verify stay with their own chapters.
-- Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
+- Unit tests support but do not replace cucumber coverage for behavior observable through an Plexus
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
   unit tests unless the user explicitly approves the exception for the current task.
@@ -1187,11 +1187,11 @@ build and the existing tests, and nothing in it changes behavior.
   the repository, update that definition to require delivery to the corresponding ClickUp task.
   Then continue execution following this rule; an outdated epic or task definition does not
   override it.
-- `.agents/skills/nspl/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
-  Nervix with NSPL. Use it when helping users author, explain, review, or troubleshoot NSPL;
+- `.agents/skills/plexus/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
+  Nervix with Plexus. Use it when helping users author, explain, review, or troubleshoot Plexus;
   agents without automatic skill discovery must read it directly. Do not turn it into a workflow
   for extending the parser, Models, compiler, or runtime.
-- Avoid duplicating public guidance between `docs/src` and the NSPL skill. `SKILL.md` and its
+- Avoid duplicating public guidance between `docs/src` and the Plexus skill. `SKILL.md` and its
   references may contain documentation routing, agent workflow, and concise correctness checks;
   detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
   `docs/src` and should be read from there rather than restated in the skill.
@@ -1308,11 +1308,11 @@ build and the existing tests, and nothing in it changes behavior.
   Cargo configuration: the host may set the wrapper there, and an empty `RUSTC_WRAPPER` switches
   it off. When kache is unavailable or a build fails under it, stop and report that instead of
   building without it.
-- Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
+- Use `just validate-skill` to validate the public Plexus skill against the Agent Skills publication
   checks. CI runs this validation but does not create GitHub releases; the public default branch is
   the install source.
-- `docs/book.toml` owns the curated public NSPL chapter allowlist rendered into the versioned
-  `llms.txt` agent index. Keep that list focused on user-facing NSPL configuration and exclude
+- `docs/book.toml` owns the curated public Plexus chapter allowlist rendered into the versioned
+  `llms.txt` agent index. Keep that list focused on user-facing Plexus configuration and exclude
   architecture, repository-development, and local-operation material.
 - After each development cycle, run `just validate` and any focused tests added or changed.
 - Use `just test` for the full suite so repository-required environment is configured.
@@ -1346,11 +1346,11 @@ build and the existing tests, and nothing in it changes behavior.
   inventory names, or adds a value to the matrix of one, updates the inventory in the same change;
   `just test-release-evidence` reads the Deloxide lane and release image matrices from the
   workflows and fails when the inventory lacks one of their jobs.
-- `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
+- `just plexus-completion-walk` walks the Plexus completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
   and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
   changes that add a label must keep it passing; a new finding is a defect, not something to record
-  in its baseline. `just nspl-completion-walk-deep` relaxes deduplication to reach branches the
+  in its baseline. `just plexus-completion-walk-deep` relaxes deduplication to reach branches the
   gating budget stops short of.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
@@ -1387,7 +1387,7 @@ build and the existing tests, and nothing in it changes behavior.
   denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
   fails validation.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
-  instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
+  instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, the canonical `test-turmoil` suite,
   each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
@@ -1432,8 +1432,8 @@ build and the existing tests, and nothing in it changes behavior.
   file the analysis did not read or bind, or no matched file. A function in a file the report holds
   no record of is listed as unmeasured, never scored as uncovered. `just test-crap-report`
   exercises it, and `just coverage-crap-report-runner` collects its Python line coverage.
-- Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
-  user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
+- Every public interface or Plexus surface change must update the relevant `docs/src` pages and the
+  user-facing Plexus skill in the same change. Keep `.agents/skills/plexus/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
 - Keep parser tests near the grammar they protect.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,

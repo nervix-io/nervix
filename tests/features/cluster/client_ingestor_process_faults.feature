@@ -9,7 +9,7 @@ Feature: Client producers across real node process faults
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
@@ -37,7 +37,7 @@ Feature: Client producers across real node process faults
     And the server process cluster leader is saved as placeholder "leader"
     And a server process cluster node other than placeholder "leader" is saved as placeholder "owner"
     And a server process cluster node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{leader}} IGNORE PREFERENCES;
@@ -78,7 +78,7 @@ Feature: Client producers across real node process faults
     And batch "fourth" is not admitted because "producer ended"
     When HTTP receiver "sink" releases its held responses with "respond 200"
     And server process node "{{owner}}" restarts from its existing database
-    And these NSPL commands are executed on the server process cluster
+    And these Plexus commands are executed on the server process cluster
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
@@ -105,7 +105,7 @@ Feature: Client producers across real node process faults
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
@@ -133,7 +133,7 @@ Feature: Client producers across real node process faults
     And the server process cluster leader is saved as placeholder "leader"
     And a server process cluster node other than placeholder "leader" is saved as placeholder "owner"
     And a server process cluster node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{leader}} IGNORE PREFERENCES;
@@ -203,7 +203,7 @@ Feature: Client producers across real node process faults
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
@@ -231,7 +231,7 @@ Feature: Client producers across real node process faults
     And the server process cluster leader is saved as placeholder "leader"
     And a server process cluster node other than placeholder "leader" is saved as placeholder "owner"
     And a server process cluster node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{leader}} IGNORE PREFERENCES;

@@ -1,6 +1,6 @@
 # User-Defined Functions
 
-NSPL user-defined functions (UDFs) are domain-owned functions written in
+Plexus user-defined functions (UDFs) are domain-owned functions written in
 [Roto](roto-language-reference.md) and invoked anywhere
 an ordinary expression function can be used. They execute in process over Arrow columns: one UDF
 invocation receives every message of a batch that reaches it, or, inside a conditional arm, only
@@ -27,7 +27,7 @@ described on this page, not part of the Roto standard library.
 
 ## Declaration
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] UDF <name>
   WITH ROTO_0_13
   ARGS (<argument> <type> [OPTIONAL], ...)
@@ -46,11 +46,11 @@ The declared signature must exactly match the named Roto entry function; implici
 inserted.
 
 Dollar-quoted strings (`$$...$$` and `$tag$...$tag$`) are verbatim and may span lines. They are
-valid wherever NSPL accepts a string literal.
+valid wherever Plexus accepts a string literal.
 
 For example:
 
-```nspl
+```plexus
 CREATE UDF risk_band
   WITH ROTO_0_13
   ARGS (score F64)
@@ -75,7 +75,7 @@ The Roto column names for scalar declarations are `U8Column`, `I8Column`, `U16Co
 Calls use the dedicated, case-insensitive `udf::` qualifier and compose with fields, literals,
 builtins, and other call sites:
 
-```nspl
+```plexus
 CREATE JUNCTION scoring FROM raw_events
   UNBRANCHED
   TO scored_events
@@ -85,7 +85,7 @@ CREATE JUNCTION scoring FROM raw_events
     ON MESSAGE ERROR LOG;
 ```
 
-The NSPL compiler validates exact arity and types when the consuming model is created. Use an
+The Plexus compiler validates exact arity and types when the consuming model is created. Use an
 explicit `AS` or `TRY_CAST` conversion when conversion is intended. An unqualified call never
 resolves to a UDF. The separate namespace allows a UDF name to equal a builtin name without
 changing either call when a later Nervix version adds builtins. Results retain the maximum
@@ -96,7 +96,7 @@ Roto `test` blocks execute during `CREATE UDF`. If any test rejects, creation fa
 
 The web console's **Create → Roto UDF** form edits ordered arguments and the result with the exact
 schema types, optional flags, volatility, and a source editor that keeps the function and its test
-blocks verbatim. It renders the completed Model as canonical NSPL and shows **Completed** only
+blocks verbatim. It renders the completed Model as canonical Plexus and shows **Completed** only
 after compilation and all Roto tests succeed. A rejected test leaves the entered declaration and
 source in the form for correction.
 
@@ -122,7 +122,7 @@ the node's relay, control and bulk work keeps its own workers throughout.
 
 Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. The
 extension class runs one job per available CPU but one, shared with JAQ transformations, and is not
-an NSPL setting. Limit concurrent UDF-bearing paths or isolate them onto separate Nervix processes
+an Plexus setting. Limit concurrent UDF-bearing paths or isolate them onto separate Nervix processes
 when one workload could hold every extension worker. See
 [Capacity Planning For Branched Graphs](capacity-planning.md).
 
@@ -158,7 +158,7 @@ that has no vectorized kernel.
 
 ## Introspection and lifecycle
 
-```nspl
+```plexus
 SHOW UDFS;
 DESCRIBE UDF risk_band;
 SHOW CREATE UDF risk_band;
