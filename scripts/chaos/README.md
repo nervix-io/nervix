@@ -1102,7 +1102,11 @@ isolation must come back still isolated. While the faults
 hold, a quorum that can still communicate must agree on a caught-up leader within 90 seconds and
 acknowledge a `CREATE RESOURCE` canary through that leader within 30 seconds, or 60 under a
 degraded link. Random or burst loss on the one link left between the remaining quorum can stall
-commits until the loss heals, so such a step records these checks without requiring them. With no
+commits until the loss heals, so such a step records these checks without requiring them. When every
+voter is still in a quorum, either end of a randomly or burst-lossy link may fall behind the other
+two voters, because the loss can stall the append stream to it, and those two voters must then agree
+on the caught-up leader; the hold's `settled_without` names the end left out. A voter off the lossy
+link is never left out. With no
 quorum able to communicate, a canary through every running node is bounded at 20 seconds and none may
 be acknowledged, and a node cut off from every quorum may neither apply an entry
 past the boundary recorded when the partition was verified nor, in quorum loss, advance its term. A
@@ -1732,7 +1736,9 @@ stateful and domain-time scenarios. Its mixed-instability runs last 30 minutes e
 seeds 42 under `preserve-quorum` and 45 and 136 under `temporary-quorum-loss`, and two rotating
 seeds, one per policy, that every run draws and records. Seed 136 crashes a voter inside the crash
 of the bootstrap node, exercising the recovered peer contact path when that bootstrap name no
-longer resolves.
+longer resolves. `mixed-burst-loss-leader-peer` runs the one-step plan in
+`fixtures/mixed-burst-loss-leader-peer.json`: burst loss from the leader to one follower, the step
+of seed 993081495 that moved leadership to that follower and left the old leader behind the quorum.
 
 Beside what a run needs, a suite needs `setsid` from util-linux and a `tee` that takes `-p`, as the
 one of GNU coreutils does, and refuses to start without them; its cleanup reads process state from

@@ -254,6 +254,16 @@ subsections after the boundary table follow this order.
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
+Forced ownership installation retires changing relay channels before its dispatch fence waits.
+The remote delivery owner maps a cancelled or unconfirmed admission through its existing typed
+delivery failure and fails the record ACKs it retained, rather than reporting successful processing
+or a codec/message error. The acknowledged source can then retry through the newly published route.
+An already admitted result keeps its record-ACK obligations; uncertainty can produce replay
+duplicates. Cancellation reconciliation keeps its five-second attempt budget independently of the
+entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+owns the admission verdict and [Execution Plans](./execution-plans.md#incremental-changes-and-rebuilds) owns
+installation and publication.
+
 ### Cluster Availability Reports
 
 `SHOW CLUSTER STATUS` keeps gossip visibility and effective member unavailability separate. A Raft
@@ -573,6 +583,15 @@ leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the c
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
+MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
+ingestor, above the connector's `MqttSourceError::RetireInstance` and instance index. The report
+keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
+deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
+its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
+events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
+the replacement's changed sessions remains an installation failure. Neither path rejects a record
+or confirms payload delivery.
+
 A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
 refuses to take a record for a reason that is not the record's own, a full producer queue included,
 and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
@@ -628,6 +647,16 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
+
+A NATS source whose client loses its connection to the server reports
+`NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
+received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
+`SourceError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
+NATS JetStream publish keeps the driver's `PublishError` beneath `SinkPublishError::Publish` when the
+client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
+connector's description of the failure for the emitter's transient error. A message above the
+server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
+missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
 ### Connector Status Observation
 
@@ -959,8 +988,12 @@ or leaves a handed-over row unanswered. Either fails the attempt without a retry
 emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
 rows then follow `ON MESSAGE ERROR` as a failed publish.
 
-The Sentry sink rejects a final serialized event above its decompressed event limit before sending
-the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+The Sentry sink prepares its envelope before the host retains the payload. Invalid event JSON,
+invalid event fields and a final serialized event above its decompressed limit become definitive
+payload rejections at that boundary. The full typed preparation report is projected into the
+external message error once; all source members share its reference while keeping their own
+execution times. No refused envelope is sent or retained for a transport retry. The Syslog sink
+rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
 A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
 its requests from mapped rows, measure each request they would send. If halving still leaves one

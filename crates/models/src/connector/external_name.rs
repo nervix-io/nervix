@@ -100,9 +100,16 @@ pub(crate) fn require_length(text: &str, max: usize) -> Result<(), ExternalNameE
 /// Declares external name types, each checked by its rule.
 ///
 /// A rule is a function from the text as written to whether it is a name of that kind. The type
-/// keeps the text exactly as written, so equality, ordering and display are the text's own.
+/// keeps the text exactly as written, so equality, ordering and display are the text's own. Each
+/// type also declares the label completion offers where a name of its kind is expected and one
+/// name its rule admits.
 macro_rules! external_names {
-    ($($(#[$doc:meta])* pub struct $Name:ident => $rule:path;)+) => {
+    (
+        $(
+            $(#[$doc:meta])*
+            pub struct $Name:ident => $rule:path, label $label:literal, example $example:literal;
+        )+
+    ) => {
         $(
             $(#[$doc])*
             #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ::serde::Serialize)]
@@ -114,6 +121,14 @@ macro_rules! external_names {
             pub struct $Name(String);
 
             impl $Name {
+                /// The label completion offers where a name of this kind is expected, and one name
+                /// its rule admits.
+                pub const DECLARATION: $crate::ExternalNameDeclaration =
+                    $crate::ExternalNameDeclaration {
+                        label: $label,
+                        example: $example,
+                    };
+
                 /// Checks `raw` against this kind's rule and keeps it exactly as written.
                 pub fn parse(
                     raw: &str,
@@ -125,6 +140,14 @@ macro_rules! external_names {
                 #[inline]
                 pub fn as_str(&self) -> &str {
                     &self.0
+                }
+            }
+
+            impl $crate::ExternalName for $Name {
+                const DECLARATION: $crate::ExternalNameDeclaration = $Name::DECLARATION;
+
+                fn parse(raw: &str) -> ::error_stack::Result<Self, $crate::ExternalNameError> {
+                    $Name::parse(raw)
                 }
             }
 

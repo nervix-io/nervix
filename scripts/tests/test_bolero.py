@@ -206,6 +206,7 @@ class InventoryTests(unittest.TestCase):
             "models-name-validation",
             "models-external-names",
             "models-external-name-validation",
+            "models-connector-declarations",
             "models-timestamps",
             "models-timestamp-text",
             "models-domain-clock",
@@ -324,6 +325,7 @@ class InventoryTests(unittest.TestCase):
             "emitter-row-preparations",
             "emitter-retained-payloads",
             "sqs-batch-requests",
+            "sentry-prepared-envelopes",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "websocket-signaling-protobuf-values",
@@ -371,12 +373,16 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-postgres",
             "nervix-connector-websockets",
             "nervix-connector-otel",
+            "nervix-connector-sentry",
             "nervix-web-console",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
-            self.assertIn(target.test_target, {"lib", "test:representations", "bin:nervix-web-console"})
+            self.assertIn(
+                target.test_target,
+                {"lib", "test:representations", "test:connectors", "bin:nervix-web-console"},
+            )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 

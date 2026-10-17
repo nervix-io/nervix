@@ -326,14 +326,43 @@ impl fmt::Display for EmitterBatchPolicy {
     }
 }
 
-/// Whether a sink accepts an emitter without the batching clause.
+/// Whether an emitter of one entity may write the batching clause, must write it, or cannot, and
+/// the largest batch payload its destination admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmitterBatchRequirement {
+pub enum EmitterBatchLegality {
+    /// Every write carries several rows, and there is no unbounded form of it, so every emitter
+    /// writes the clause.
+    Required {
+        /// The largest batch payload the destination protocol itself admits, where it fixes one.
+        maximum: Option<PayloadSizeLimit>,
+    },
     /// Without the clause the sink publishes one record per message, event or frame, or keeps the
     /// request grouping it has always had.
-    Optional,
-    /// Every write carries several rows, and there is no unbounded form of it.
-    Required,
+    Optional {
+        /// The largest batch payload the destination protocol itself admits, where it fixes one.
+        maximum: Option<PayloadSizeLimit>,
+    },
+    /// The destination cannot carry a batch, for the reason its transport gives.
+    Unavailable { reason: BatchUnavailability },
+}
+
+impl EmitterBatchLegality {
+    /// Whether an emitter can publish in batches at all.
+    pub const fn is_available(self) -> bool {
+        match self {
+            Self::Required { .. } | Self::Optional { .. } => true,
+            Self::Unavailable { .. } => false,
+        }
+    }
+}
+
+/// Why a destination cannot carry a batch. It reads as what the destination's emitters do
+/// instead: "HTTP emitters send one request per record".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
+pub enum BatchUnavailability {
+    /// Every request carries exactly one record.
+    #[strum(to_string = "send one request per record")]
+    OneRequestPerRecord,
 }
 
 #[cfg(test)]

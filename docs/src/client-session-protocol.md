@@ -1471,10 +1471,12 @@ no read outlives the close of its consumer.
 Consumer and producer operations can share one session. A read awaiting output runs beside
 commands, producer submissions and their outcomes, clock observations, and consumer settlement.
 Each server attachment is bound to its session exchange. The Rust client keeps a desired consumer
-across reconnects and emitter relocation, reports one interruption before the next delivery for each
-exchange it lost, whether the loss or a reply racing it is observed first, and
-opens a new attachment only while the generation, contract, schema and granted behavior still
-match its original open. Removed or changed endpoints require an explicit new consumer. A delivery
+across reconnects and emitter relocation, and reports one interruption before the next delivery for
+each exchange it lost, whether the loss or a reply racing it is observed first. A read decides under
+one lock whether it reports a gap or reads through its attachment, so a loss that arrives as a read
+starts is reported by that read before the client recovers the session or restores the consumer; a
+later read restores it. The client opens a new attachment only while the generation, contract,
+schema and granted behavior still match its original open. Removed or changed endpoints require an explicit new consumer. A delivery
 reference remains bound to the exchange that delivered it; the client never sends its ACK on the
 replacement exchange, and
 a settlement whose answer was lost is uncertain. The serving node forwards remote consumers on an
