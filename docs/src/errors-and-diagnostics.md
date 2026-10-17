@@ -886,6 +886,12 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
+The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
+absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
+before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
+conversion error beneath that context. The check compares names and nested types after narrowing
+UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
@@ -2025,8 +2031,8 @@ consume the sample's bound. The probe record keeps each stage's outcome and the 
 times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
 Docker's state and events for it before its removal. A failed required attempt remains evidence
 even after a subsequent successful qualification. The controller's measurement budget does not extend the
-product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
-commands, measurement interpretation and retained artifact paths.
+product's recovery budget. [External Cluster Chaos](./cluster-chaos.md#link-degradation) owns
+the commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact
 arguments and bound, elapsed time, helper identities and both raw streams. The operation record
 exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the
