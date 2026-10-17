@@ -2845,6 +2845,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/__fuzz__/tests__bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth/corpus"
+domain_version = 1
+features = []
+id = "iceberg-nested-datetime-staging"
+invariant = "Every nested list boundary is retained and every UTC nanosecond datetime at any list depth becomes the containing Iceberg microsecond, including negative and boundary values."
+manifest = "Cargo.toml"
+max_input_bytes = 160
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/lib.rs"
+test = "tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/mqtt/src/__fuzz__/tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
 domain_version = 1
 features = []
@@ -2946,6 +2961,21 @@ package = "nervix-connector-kafka"
 random_iterations = 256
 source = "crates/connectors/kafka/src/source.rs"
 test = "source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/sentry/src/__fuzz__/envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
+domain_version = 1
+features = []
+id = "sentry-prepared-envelopes"
+invariant = "One prepared Sentry envelope preserves every supplied event field, event-id spelling, timestamp and platform, fills only absent defaults, frames the complete event with its exact byte length, and every HTTP attempt sends those identical prepared bytes."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-sentry"
+random_iterations = 128
+source = "crates/connectors/sentry/src/envelope_properties.rs"
+test = "envelope_properties::bolero_prepared_envelopes_preserve_complete_events_across_attempts"
 test_target = "lib"
 
 [[target]]

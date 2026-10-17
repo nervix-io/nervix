@@ -36,6 +36,15 @@ it resolved when its task, branch, channel, or attempt was created. A shared reg
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
 
+MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
+plans from the installed execution, releases the registry guard, stops the source tasks, and
+then performs network cleanup and replacement preparation. Each connection has one mutable
+owner; simultaneous attempts are bounded by the declared source instance count. Matching session
+identities keep their broker state across instance-count changes. The public drop, topic-change
+and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
+diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
+tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
@@ -343,6 +352,12 @@ borrows. A ready borrow writes nothing; the first Pending poll publishes its wai
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
 slot, so a replacement sink's slot survives an earlier sink's teardown.
 
+Postgres and MySQL borrow once per bounded insert and retain that connection through any
+record-error isolation. Isolation therefore takes no second pool wait behind another writer.
+The connection returns before the next insert or retry backoff. The MySQL public contention
+scenario exercises the real driver and database; these external asynchronous waits are outside
+Deloxide's tracked locks and the model checkers' coverage.
+
 Generators retain the domain acknowledgement tracker. Ingest executions, groups and endpoint
 bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
 exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
@@ -469,6 +484,9 @@ at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or sourc
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
 `MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
 
+A record sink prepares its external bytes once before retention, including when a payload carries
+one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
+across retries and connector replacement; preparation adds no shared owner or synchronization.
 A payload offered to the sink stays in the same task's buffer until the sink answers for it. The
 task marks each member row prepared, and the one answer for the payload resolves every member: a
 row resolves once, so neither a repeated answer nor a later attempt resolves its acknowledgement
@@ -870,6 +888,20 @@ count, so a report that took the shared lock first keeps the share, and a report
 finds no entry. A terminal outcome, the delivery's own failure, and the sweep each take the share
 out of the registry with one removal, so exactly one of them resolves it. The atomics establish no
 ordering across locations; the shard lock orders the recheck against every earlier report.
+
+Brokered sinks keep each publish's pending answers in the shared `ConfirmationWindow`. When a
+publish fails, the window polls every remaining answer once without waiting and settles the
+confirmed and rejected records before returning the failure. Unanswered or failed answers keep
+their records unresolved for the host's retry. The read uses
+`nervix_primitives::task::unconstrained`: Tokio's exhausted cooperative budget can otherwise make an
+already delivered channel answer appear pending. This pass is bounded by the configured `MAX`
+window size.
+
+The window's Shuttle checks exercise settlement racing broker answers, window admission and
+deadline expiry through the production owner. Shuttle does not model Tokio's cooperative budget;
+ordinary primitive and window tests deliver more answers than one budget permits and verify that
+every given answer is settled. [Execution Primitives](execution-primitives.md) owns the adapter's
+behavior in each mode, and [Connector Contract](connector-contract.md) owns the publish outcomes.
 
 ### Client ingestor endpoints
 

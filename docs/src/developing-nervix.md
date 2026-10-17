@@ -811,12 +811,12 @@ phases a scenario reports, and how each failure reaches CI output.
 `just book <version>` renders this book, and `just book-pdf <version>` additionally produces
 `nervix.pdf` through pandoc and XeLaTeX.
 
-Both recipes require the exact mdBook release pinned by `MDBOOK_VERSION` in
-`scripts/build_book.py`, and they fail with that version in the message when a different one is
-installed. CI resolves the same constant, so a local build always matches what is published. The
-pin is exact because the rendered theme targets mdBook's internal element IDs and because the PDF
-relies on mdBook rewriting print-page links into in-document anchors — on an older release every
-cross-chapter link in the PDF would point back at the website instead.
+Both recipes accept stable mdBook patch releases in the major/minor series selected by
+`MDBOOK_VERSION` in `scripts/build_book.py`: the current `0.5.3` pin accepts `0.5.x`, including
+`0.5.4`. A different major or minor version, or a malformed version, fails with the supported series
+in the message. CI installs the exact pinned release for reproducible publication. The series
+requirement protects the theme's element IDs and mdBook's rewriting of print-page links into
+in-document anchors, which the PDF uses for cross-chapter links.
 
 Install the pinned release with:
 
