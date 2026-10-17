@@ -1402,9 +1402,9 @@ stores unchanged, where schemaful JSON codecs write padded base64.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
-land and only poison rows follow `ON MESSAGE ERROR`. Postgres re-executes them on the connection the
-failed insert already holds, so the rejection is routed without waiting for the client's pool, as
-[Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
+land and only poison rows follow `ON MESSAGE ERROR`. Postgres and MySQL re-execute them on the
+connection the failed insert already holds, so isolation does not wait for the client's pool again,
+as [Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
 reapply rows from the failed insert; use the sink's idempotent write facilities where available.
 Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
@@ -1489,6 +1489,9 @@ MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INS
 `MAX MESSAGES` records and no more than fit the 65,535 placeholders one statement binds, and its
 statement text and bound values measure at most `MAX SIZE` bytes, as
 [Database writes](#database-writes) describes. The insert result acknowledges those records.
+An insert and its row-by-row isolation use one borrowed connection, returned before the next
+insert. Isolation obtains each row's outcome without a second acquisition from the client's pool,
+even when other emitters are waiting. The host handles those outcomes when the write completes.
 Conflict clauses are the user's tool for bounding duplicates when poison isolation re-executes a
 failed insert. Declare a `MAX SIZE` no larger than the server's `max_allowed_packet`, 64 MiB by
 default on MySQL 8.x, which the client applies to every packet it sends.

@@ -46,6 +46,16 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
+write locks. It observes a pending metadata lock on the server before queuing the next writer,
+and observes each emitter's public pool-wait state to establish the borrowing order. Releasing
+the first table leaves the second locked while the scenario checks the poison write's rejection,
+all mapped rows and the insert log's connection identity. This is a one-node scenario because all
+three emitters must share one node's pool of exactly one connection. Each table lock is explicitly
+released and its session disconnected; the scenario's cleanup releases remaining locks before
+cluster shutdown, including when an assertion fails. These are external database locks, outside
+Deloxide's tracked thread-blocking locks.
+
 Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
 path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
 validation and title checks remain enabled. This exclusion records a source decision rather than
