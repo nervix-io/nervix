@@ -407,7 +407,8 @@ nothing else, so a record no family owns is refused as well. Recovered resource 
 most one upload for each resource version, and an expired command execution's reference carries
 the issue time its expiry is ordered by. A transaction is in a state its transitions reach: an
 open or committing transaction queues exactly the statements and source bytes it accepted, a
-finished one queues none, a commit's results apply consecutive statements from the first and its
+finished one queues none and keeps the identity and admission of exactly as many statements as it
+accepted, a commit's results apply consecutive statements from the first and its
 progress stays inside the queue, and a failure names a statement the transaction accepted. Every
 log read checks that a log record is stored under its own entry's index.
 

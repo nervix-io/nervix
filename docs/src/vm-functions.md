@@ -979,7 +979,10 @@ The reference owns each family's contract. These notes describe its implementati
 
 - **Numeric.** Checked lanes cover arithmetic, comparison, `abs`, `sign`, and rounding.
   - `round(value, digits)` rounds exactly, with halves away from zero, using integer arithmetic on
-    the significand. Integer rounding to negative digits computes in 128 bits.
+    the significand. Its unchanged-value shortcut checks the distance to both neighbors: a normal
+    power of two has a neighbor toward zero only half a unit away. A decimal step near that gap
+    uses the exact decimal expansion, for positive and negative digit counts alike. Integer
+    rounding to negative digits computes in 128 bits.
   - Bit operations reuse Arrow's `binary` and `unary` for `and`, `or`, `xor`, and `not`, and
     branch-free lanes for shifts.
   - Classification never fails.

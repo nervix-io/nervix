@@ -45,7 +45,8 @@ Options:
   --fault FAULT          stateful fault: none, owner-crash, owner-pause, owner-partition or
                          cluster-restart; domain-time fault: none, voter-crash, voter-pause,
                          voter-partition, voter-stop or cluster-restart. One node supports none and
-                         cluster-restart (default: ${fault}).
+                         cluster-restart (default: ${fault}). backup-fault requires one of
+                         owner-crash, leader-crash, owner-partition or rolling-restart.
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -142,6 +143,9 @@ while [[ "$#" -gt 0 ]]; do
             elif [[ "${scenario}" == backup ]]; then
                 record_count=1000
                 overall_timeout=1800
+            elif [[ "${scenario}" == backup-fault || "${scenario}" == restore-fresh-cluster || "${scenario}" == backup-cycles ]]; then
+                record_count=1000
+                overall_timeout=2400
             elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
                 record_count=1000
                 overall_timeout=2700
@@ -374,18 +378,35 @@ fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-# The restart, recovery, stateful, domain-time and mixed-instability scenarios share their traffic,
-# findings and exit handling.
+# The restart, recovery, stateful, domain-time, mixed-instability, backup fault and fresh-cluster
+# restore scenarios share their traffic, findings and exit handling.
 recovery_scenario=false
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability | backup-fault | restore-fresh-cluster) recovery_scenario=true ;;
 esac
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
+# The backup scenarios install the backup form of the baseline graph, whose Kafka ingestor keeps
+# domain-owned offsets instead of a consumer group.
+backup_graph=false
+case "${scenario}" in
+    backup | backup-cycles | backup-fault | restore-fresh-cluster) backup_graph=true ;;
+esac
+# The backup scenarios without node faults also install a deduplicator and a detached window on the
+# backup graph's relay, whose outputs they judge exactly after backups and restores.
+backup_state_graph=false
+case "${scenario}" in
+    backup-cycles | restore-fresh-cluster) backup_state_graph=true ;;
+esac
+# Every scenario that injects a fault drives Pumba through the local Docker daemon.
+uses_pumba=true
+case "${scenario}" in
+    baseline | backup | backup-cycles | restore-fresh-cluster) uses_pumba=false ;;
+esac
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
 fi
 case "${scenario}" in
@@ -401,9 +422,15 @@ case "${scenario}" in
             *) setup_error "--fault for domain-time must be none, voter-crash, voter-pause, voter-partition, voter-stop or cluster-restart, not ${fault}" ;;
         esac
         ;;
+    backup-fault)
+        case "${fault}" in
+            owner-crash | leader-crash | owner-partition | rolling-restart) ;;
+            *) setup_error "--fault for backup-fault must be owner-crash, leader-crash, owner-partition or rolling-restart, not ${fault}" ;;
+        esac
+        ;;
     *)
         [[ "${fault_option_set}" != true ]] \
-            || setup_error '--fault applies only to stateful and domain-time'
+            || setup_error '--fault applies only to stateful, domain-time and backup-fault'
         ;;
 esac
 if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
@@ -578,6 +605,11 @@ deadlock_evidence_bytes_limit=67108864
 # Qualifying the evidence takes a second or two a file; within the teardown reserve it gets this
 # long altogether, and a file it did not reach is not qualified, which fails the run.
 deadlock_qualification_budget_seconds=300
+# A restore-fresh-cluster run starts a second Compose project of fresh nodes. Its Compose arguments
+# let the exit trap capture that project's diagnostics, and its evidence nodes join the diagnostic
+# verdict; both stay empty for every other run.
+fresh_cluster_compose_args=()
+fresh_cluster_evidence_nodes=()
 
 export CHAOS_RUN_ID="${run_id}"
 export CHAOS_CLUSTER_ID="${cluster_id}"
@@ -610,7 +642,7 @@ case "${scenario}" in
         # One record every two seconds keeps the bounded fixture flowing through all four cases.
         load_interval_ms=2000
         ;;
-    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time)
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | backup-fault | restore-fresh-cluster)
         # One record a second keeps the bounded fixture flowing through the slowest case.
         load_interval_ms=1000
         ;;
@@ -916,6 +948,15 @@ capture_diagnostics() {
             >"${artifact_dir}/diagnostics/compose.log" 2>&1
         trim_file "${artifact_dir}/diagnostics/compose.log" 2097152
     fi
+    if ((${#fresh_cluster_compose_args[@]} > 0)); then
+        timeout --foreground --kill-after=5s 30s \
+            docker compose "${fresh_cluster_compose_args[@]}" ps --all --format json \
+            >"${artifact_dir}/diagnostics/fresh-compose-ps.json" 2>&1
+        timeout --foreground --kill-after=5s 30s \
+            docker compose "${fresh_cluster_compose_args[@]}" logs --no-color --timestamps --tail 2000 \
+            >"${artifact_dir}/diagnostics/fresh-compose.log" 2>&1
+        trim_file "${artifact_dir}/diagnostics/fresh-compose.log" 2097152
+    fi
 
     # The recording is closed only after every heal, so it holds the run's own recovery actions.
     if docker_event_recording_finish diagnostics/docker-events.recording.json \
@@ -1000,11 +1041,12 @@ qualify_deadlock_evidence() {
         timeout --foreground --kill-after=5s 30s docker pause "${running[@]}" \
             >"${artifact_dir}/deadlock/pause.txt" 2>&1
     fi
-    local number
-    for number in 1 2 3; do
-        local node="node-${number}"
-        local node_dir="${artifact_dir}/deadlock/${node}"
+    # Every node the run started has a directory: the run's numbered nodes and any fresh cluster's.
+    local node_dir
+    for node_dir in "${artifact_dir}/deadlock/"*/; do
+        node_dir="${node_dir%/}"
         [[ -d "${node_dir}" ]] || continue
+        local node="${node_dir##*/}"
         local judged=0
         local path
         while IFS= read -r path; do
@@ -1220,6 +1262,7 @@ finish() {
             --recording-covered "${run_event_recording_covered}" \
             --qualification "${artifact_dir}/deadlock/qualification.ndjson" \
             --selection "${diagnostic_selection}" --nodes "${node_count}" \
+            ${fresh_cluster_evidence_nodes[@]+"${fresh_cluster_evidence_nodes[@]}"} \
             --max-files-per-node "${deadlock_evidence_files_per_node}" \
             --max-bytes "${deadlock_evidence_bytes_limit}" \
             --output "${artifact_dir}/results/diagnostic-evidence.json" \
@@ -1302,6 +1345,17 @@ finish() {
         elif [[ "${scenario}" == degraded-links ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
+        elif [[ "${scenario}" == backup-fault ]]; then
+            # A backup fault runs only on three nodes and requires its fault.
+            reproducer="$(printf 'just chaos run %q --image %q --fault %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${fault}" "${record_count}")"
+            if [[ "${outage_option_set}" == true ]]; then
+                reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
+            fi
+        elif [[ "${scenario}" == restore-fresh-cluster ]]; then
+            # A fresh-cluster restore runs only on three nodes and holds no outage.
+            reproducer="$(printf 'just chaos run %q --image %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}")"
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
@@ -1872,11 +1926,11 @@ select_run_network
 resolve_tool_image kafka "${CHAOS_KAFKA_IMAGE}"
 resolve_tool_image kcat "${CHAOS_KCAT_IMAGE}"
 resolve_tool_image probe "${CHAOS_PROBE_IMAGE}"
-if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
+if [[ "${uses_pumba}" == true ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
 # A recorded tool image is the one its recorded image ID names in a store of the recording kind, or
@@ -1917,7 +1971,7 @@ if ((image_package_status != 0)); then
     setup_error "image-package probe for '${image_ref}' failed with status ${image_package_status}; see diagnostics/image-package"
 fi
 prepare_diagnostic_evidence
-if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
+if [[ "${uses_pumba}" == true ]]; then
     [[ -S /var/run/docker.sock ]] \
         || setup_error "${scenario} requires a local /var/run/docker.sock for Pumba"
     run_bounded 30 docker run --rm \
@@ -1940,7 +1994,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault ]]; then
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
     network_preflight_status=0
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
@@ -1960,7 +2014,7 @@ if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || 
 fi
 
 update_manifest '.status = "running"'
-if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
+if [[ "${uses_pumba}" == true ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
     update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
@@ -2072,6 +2126,8 @@ if [[ "${scenario}" == stateful ]]; then
         chaos_enriched_output chaos_counted_output)
 elif [[ "${scenario}" == domain-time ]]; then
     scenario_topics=(chaos_paced_input chaos_paced_output)
+elif [[ "${backup_state_graph}" == true ]]; then
+    scenario_topics=(chaos_unique_output chaos_window_output)
 fi
 for scenario_topic in ${scenario_topics[@]+"${scenario_topics[@]}"}; do
     broker_admin /opt/kafka/bin/kafka-topics.sh \
@@ -2117,7 +2173,7 @@ done
 
 phase "Plexus graph installation"
 plexus_fixture="$(<"${fixture_file}")"
-if [[ "${scenario}" == backup ]]; then
+if [[ "${backup_graph}" == true ]]; then
     # shellcheck source=backup-scenario.sh
     source "${script_dir}/backup-scenario.sh"
     plexus_fixture="$(backup_graph_fixture "${plexus_fixture}")" \
@@ -2159,6 +2215,10 @@ domain_cli_command "${plexus_fixture}" \
 if [[ "${scenario}" == stateful ]]; then
     domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
         >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
+fi
+if [[ "${backup_state_graph}" == true ]]; then
+    domain_cli_command "$(<"${script_dir}/fixtures/backup-state.plexus")" \
+        >"${artifact_dir}/public/configure-backup-state-plexus.txt" 2>&1
 fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
 if [[ "${scenario}" == domain-time ]]; then
@@ -2239,6 +2299,19 @@ if [[ "${scenario}" != "baseline" ]]; then
     elif [[ "${scenario}" == backup ]]; then
         # Graph installation sourced backup-scenario.sh.
         run_backup_scenario
+    elif [[ "${scenario}" == backup-cycles ]]; then
+        # Graph installation sourced backup-scenario.sh.
+        run_backup_cycles
+    elif [[ "${scenario}" == backup-fault ]]; then
+        # Graph installation sourced backup-scenario.sh, whose archive steps this scenario reuses.
+        # shellcheck source=backup-fault-scenario.sh
+        source "${script_dir}/backup-fault-scenario.sh"
+        run_backup_fault
+    elif [[ "${scenario}" == restore-fresh-cluster ]]; then
+        # Graph installation sourced backup-scenario.sh, whose archive steps this scenario reuses.
+        # shellcheck source=restore-fresh-scenario.sh
+        source "${script_dir}/restore-fresh-scenario.sh"
+        run_restore_fresh_cluster
     elif [[ "${scenario}" == stale-follower ]]; then
         # shellcheck source=stale-follower-scenario.sh
         source "${script_dir}/stale-follower-scenario.sh"
@@ -2309,14 +2382,14 @@ if [[ "${scenario}" != baseline ]]; then
 fi
 
 phase "offset and output boundaries"
-if [[ "${scenario}" != backup ]]; then
+if [[ "${backup_graph}" != true ]]; then
     wait_for "Nervix consumer offsets at source boundary ${input_end}" 120 \
         consumer_offsets_at_end "${input_end}"
     cp "${artifact_dir}/traffic/consumer-group.attempt.txt" \
         "${artifact_dir}/traffic/consumer-group-final.txt"
 fi
 output_wait_timed_out=false
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup || "${recovery_scenario}" == true ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${backup_graph}" == true || "${recovery_scenario}" == true ]]; then
     output_wait_seconds=120
     if [[ "${scenario}" == degraded-links ]]; then
         output_wait_seconds="${drain_seconds}"
@@ -2362,7 +2435,7 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 
 phase "external ledger verification"
 ledger_args=()
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup || "${recovery_scenario}" == true ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${backup_graph}" == true || "${recovery_scenario}" == true ]]; then
     ledger_args+=(--allow-replay-duplicates)
 fi
 "${script_dir}/verify-ledger.sh" \
@@ -2414,7 +2487,7 @@ if [[ "${scenario}" == "baseline" ]]; then
         "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
     mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
 fi
-if [[ "${scenario}" != backup ]]; then
+if [[ "${backup_graph}" != true ]]; then
     broker_admin /opt/kafka/bin/kafka-consumer-groups.sh \
         --bootstrap-server broker:9092 --group chaos_baseline --describe \
         >"${artifact_dir}/public/consumer-group-final.txt"
@@ -2463,6 +2536,19 @@ elif [[ "${scenario}" == backup ]]; then
           ledger:"results/ledger.json",remote_path:"results/remote-path.json",
           backup:"backup/domain.nvxb",progress:$progress[0]}' \
         >"${artifact_dir}/results/backup.json"
+elif [[ "${scenario}" == backup-cycles ]]; then
+    jq -n \
+        --arg run_id "${run_id}" --arg image_id "${image_id}" \
+        --argjson nodes "${node_count}" \
+        --argjson accepted_records "${input_end}" --argjson observed_records "${output_end}" \
+        --slurpfile progress "${artifact_dir}/results/backup-cycles-progress.json" \
+        --slurpfile ledger "${artifact_dir}/results/ledger.json" \
+        '{verdict:"pass",run_id:$run_id,image_id:$image_id,topology_nodes:$nodes,
+          accepted_source_records:$accepted_records,observed_output_records:$observed_records,
+          replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,
+          ledger:"results/ledger.json",remote_path:"results/remote-path.json",
+          progress:$progress[0]}' \
+        >"${artifact_dir}/results/backup-cycles.json"
 elif [[ "${scenario}" == "rolling-restart" ]]; then
     jq -n \
         --arg run_id "${run_id}" \
