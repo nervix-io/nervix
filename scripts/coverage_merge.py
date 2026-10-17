@@ -21,7 +21,10 @@ kept only when its file is tracked at the tested revision. Dependency, toolchain
 other records are dropped, and the merge record counts them by class. The counters of every report
 that measured a file are summed by `bolero_coverage.merge_lcov`. The report holds line and function
 counters: llvm-cov exports no branches for the Rust producers, and coverage.py names Python branches
-in words that LCOV readers such as cargo-crap refuse, so branch records are left out.
+in words that LCOV readers such as cargo-crap refuse, so branch records are left out. A counter at or
+above 2^63 is a count that concurrent threads drove below zero, which llvm-cov exports as its
+unsigned wrap. It counts no executions, so it is left out of the sum and the merge record lists it
+under its report; a line no other report counts is then not measured.
 
 The merge fails, writes no report and records why, when the report would be incomplete:
 
@@ -108,6 +111,15 @@ DROPPED_POLICY = {
 }
 KEPT_POLICY = "files the tested revision tracks, test sources included, by their repository paths"
 BRANCH_POLICY = "left out: the Rust producers export none, and Python branches are named in words"
+# The smallest counter that is negative as a signed 64-bit count. llvm-cov derives some line and
+# function counts as differences of counters, and an instrumented executable updates its counters
+# without atomics, so threads that run the same code concurrently can lose increments and leave a
+# difference below zero. The export writes it as its unsigned wrap, which counts no executions.
+WRAPPED_COUNT = 2**63
+WRAPPED_POLICY = (
+    "left out of the sum and listed by report: a counter at or above 2^63 is a count difference "
+    "that concurrent threads drove below zero and llvm-cov exported as its unsigned wrap"
+)
 # The branch records of an LCOV record, which the merged report leaves out.
 BRANCH_LINES = ("BRDA:", "BRF:", "BRH:")
 
@@ -288,9 +300,44 @@ class Input:
         return {"input": self.path, "root": str(self.origin), "reports": self.reports, "left_out": self.left_out}
 
 
+@dataclass(frozen=True)
+class WrappedCounter:
+    """A line or function counter of a kept record that wrapped below zero, so it counts nothing."""
+
+    source: str
+    # The line a DA counter counts, or the function an FNDA counter counts.
+    line: int | None
+    function: str | None
+    count: int
+
+    @classmethod
+    def of(cls, line: str, source: str) -> WrappedCounter | None:
+        """The wrapped counter an LCOV line of the record holds, or None when it holds a count."""
+        kind, _, value = line.rstrip("\n").partition(":")
+        if kind == "DA":
+            number, count = value.split(",")[:2]
+            wrapped = cls(source, int(number), None, int(count))
+        elif kind == "FNDA":
+            count, _, name = value.partition(",")
+            if not count.isdigit():
+                raise native.RunnerError(f"malformed LCOV line in the record of {source}: {line.rstrip()}")
+            wrapped = cls(source, None, name, int(count))
+        else:
+            return None
+        if wrapped.count < WRAPPED_COUNT:
+            return None
+        return wrapped
+
+    def describe(self) -> dict[str, object]:
+        if self.line is not None:
+            return {"source": self.source, "line": self.line, "count": self.count}
+        return {"source": self.source, "function": self.function, "count": self.count}
+
+
 @dataclass
 class Counts:
-    """What one report held: its records, the ones kept, and the dropped ones by class."""
+    """What one report held: its records, the ones kept, the dropped ones by class, and the
+    counters of its kept records that wrapped below zero."""
 
     records: int = 0
     kept: int = 0
@@ -298,6 +345,7 @@ class Counts:
     inside: int = 0
     dropped: collections.Counter[Dropped] = field(default_factory=collections.Counter)
     first: str | None = None
+    wrapped: list[WrappedCounter] = field(default_factory=list)
 
     def describe_dropped(self) -> dict[str, int]:
         return {str(dropped): count for dropped, count in sorted(self.dropped.items())}
@@ -320,6 +368,7 @@ class Merge:
         self.kept_records = 0
         self.kept: set[str] = set()
         self.dropped: dict[Dropped, set[str]] = {}
+        self.wrapped = 0
 
     def display(self, path: Path) -> str:
         return display(path, self.root)
@@ -448,16 +497,19 @@ class Merge:
         self.normalized.append(destination)
         self.records += counts.records
         self.kept_records += counts.kept
+        self.wrapped += len(counts.wrapped)
         described: dict[str, object] = {
             "report": self.display(report.path), "records": counts.records, "kept": counts.kept,
             "dropped": counts.describe_dropped(),
+            "wrapped": [wrapped.describe() for wrapped in counts.wrapped],
         }
         if report.collection is not None:
             described.update(report.collection.describe())
         return described
 
     def place(self, record: native.LcovRecord, origin: PurePosixPath, counts: Counts, normalized: TextIO) -> None:
-        """Keep one record under its repository path, or count it under the class it is dropped as."""
+        """Keep one record under its repository path, or count it under the class it is dropped as.
+        A kept record's counters that wrapped below zero are listed instead of summed."""
         counts.records += 1
         if counts.first is None:
             counts.first = record.source
@@ -469,6 +521,10 @@ class Merge:
             normalized.write(f"SF:{located.path}\n")
             for line in record.lines[1:]:
                 if line.startswith(BRANCH_LINES):
+                    continue
+                wrapped = WrappedCounter.of(line, located.path)
+                if wrapped is not None:
+                    counts.wrapped.append(wrapped)
                     continue
                 if not line.endswith("\n"):
                     line += "\n"
@@ -498,12 +554,13 @@ class Merge:
             "inputs": [item.describe() for item in self.inputs],
             "records": {"read": self.records, "kept": self.kept_records, "files": len(self.kept)},
             "dropped_files": {str(dropped): len(sources) for dropped, sources in sorted(self.dropped.items())},
+            "wrapped_counters": self.wrapped,
             "members": {
                 "measured": sorted(measured),
                 "unmeasured": [name for name in self.members.names() if name not in measured],
             },
             "policy": {
-                "kept": KEPT_POLICY, "branches": BRANCH_POLICY,
+                "kept": KEPT_POLICY, "branches": BRANCH_POLICY, "wrapped": WRAPPED_POLICY,
                 "dropped": {str(dropped): meaning for dropped, meaning in DROPPED_POLICY.items()},
             },
         }
@@ -517,6 +574,7 @@ class Merge:
             f"{len(self.inputs)} inputs into {output}: {len(self.kept)} tracked files",
             f"Dropped files by class: {dropped or 'none'}",
             f"Left out collections of other modes: {', '.join(left_out) or 'none'}",
+            f"Counters that wrapped below zero, left out of the sum: {self.wrapped or 'none'}",
             f"Workspace members measured: {len(self.members.measured(self.kept))} of {len(self.members.members)}",
             f"Merge record: {record}",
         ]

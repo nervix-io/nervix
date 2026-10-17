@@ -486,3 +486,88 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  # A NO ACK emitter delivers a record once its producer takes it, so a record can still be queued in
+  # the producer when the domain stops. The client lingers for two minutes, so the producer holds the
+  # records the emitter already delivered until STOP finishes the emitter and its producer sends them.
+  @emitter_finish_at_stop @deloxide_stress
+  Scenario Outline: STOP sends the records a NO ACK Kafka emitter's producer still holds
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "held_out_{{test_id}}" exists with 1 partitions
+    And Kafka topic "held_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA held_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge held-stop-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        TIMESTAMP NOW
+        TO held_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT lingering_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'linger.ms' = '120000'
+      };
+      CREATE EMITTER held_output FROM held_events
+        TO KAFKA lingering_kafka TOPIC held_out_{{test_id}} MODE NO_ACK
+          RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING held_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "held-stop-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    And http payload is posted to node "node-1" with host "held-stop-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":2}
+      """
+    And http payload is posted to node "node-1" with host "held-stop-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":3}
+      """
+    Then within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      messages_total sent relay=held_events
+      """
+    And the last command output owner is saved as placeholder "held_owner"
+    And within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      messages_total sent relay=held_events physical_node={{held_owner}} total=3
+      """
+    # The producer holds the three delivered records for the rest of its two-minute linger.
+    And the observed broker does not receive a payload within "2s"
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"sequence":1}
+      {"sequence":2}
+      {"sequence":3}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

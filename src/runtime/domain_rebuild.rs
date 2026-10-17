@@ -289,7 +289,8 @@ impl Runtime {
         };
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
-            Box::pin(self.stop_domain_execution(domain, existing)).await;
+            Box::pin(self.stop_domain_execution(domain, existing, self.emitter_finish_deadline()))
+                .await;
         }
 
         let Some(revision) = revision else {

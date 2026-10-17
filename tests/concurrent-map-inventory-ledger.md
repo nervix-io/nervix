@@ -54,6 +54,12 @@ when the key is absent or already present; a borrowed `Ref` holds its shard unti
 Method names are not evidence: each access below was traced from its call site to the loop that
 drives it.
 
+Forced ownership schedule swaps make one additional lifecycle read of `RuntimeInner::executions`
+to resolve the affected relays' retained services after closing their dispatch gates. The typed
+plan identifies those relays; channel-generation retirement and record delivery use the retained
+handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
+the registry entries. The read guard ends before waiting for dispatch quiescence.
+
 The frequency of a map is its hottest access:
 
 - **per record**: once per accepted record, row or delivered message
@@ -345,6 +351,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::guest_save_interruptions` | Armed by a guest-save backup scenario and consumed once as that entity's owner starts its selected section; never reached during ordinary product execution | test-only capture fault control |
 | `FaultInjectionState::domain_clock_authority_proposal_rejections` | Armed by a clock takeover scenario or unit test and consumed once as that node, as leader, proposes an authority reconciliation; never reached during ordinary product execution | test-only clock fault control |
 | `FaultInjectionState::command_pauses` | Scenario-controlled one-shot boundaries; the forced-recovery startup fixture also records a missing destination schedule and releases that node's held initial installation. Scenario cleanup releases and clears the retained observations | test-only command and startup fault control |
+| `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 ### Rust client attachment recovery

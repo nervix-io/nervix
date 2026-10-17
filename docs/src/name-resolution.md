@@ -455,6 +455,13 @@ is assumed to be covered:
 | ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))` | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
+Postgres observation clients in the test harness use that same SQLx resolution path. Their suite
+environment retains the plaintext and TLS pools and their certificate-authority files through
+client closure. MQTT fixture publishers retain their native driver through publication completion;
+the broker operation timeout of 10 seconds also bounds connection setup. [Integration Test
+Lifecycle](./integration-test-lifecycle.md) owns fixture readiness, connection capacity, operation
+budgets and teardown.
+
 Tokio's `lookup_host` and `TcpStream::connect` with a host name, and `Url::socket_addrs`, resolve
 through the C library on a thread of Tokio's blocking pool, and librdkafka calls it on its own
 threads. Such a lookup follows the host's `nsswitch.conf`, NSS

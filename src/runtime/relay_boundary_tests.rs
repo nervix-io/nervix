@@ -44,6 +44,55 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_owner: bool) {
+    let owner = named::<ClusterNodeName>("node-1");
+    let consumers = vec![RemoteRuntimeConsumer {
+        node_id: named("node-3"),
+        relay: named("events"),
+        mode: AckMode::Attached,
+    }];
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        0,
+        0,
+        consumers.clone(),
+        None,
+        Arc::new(BranchPresence::new()),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    services.replace_owner_node(Some(owner.clone()));
+    let retained = services.ingress_slot(&None);
+    services.fence_routing_change(Some(&owner), &consumers);
+    assert!(!retained.cancellation().is_cancelled());
+
+    let destination = if move_owner { named("node-2") } else { owner };
+    let destinations = if move_owner { consumers } else { Vec::new() };
+    services.fence_routing_change(Some(&destination), &destinations);
+    assert!(retained.cancellation().is_cancelled());
+    assert!(services.ingress_slot(&None).cancellation().is_cancelled());
+    let appearing = string_branch_key("tenant", "beta");
+    assert!(
+        services
+            .ingress_slot(&appearing)
+            .cancellation()
+            .is_cancelled()
+    );
+
+    services.replace_owner_node(Some(destination));
+    services.replace_remote_runtime_consumers(destinations);
+    assert!(!services.ingress_slot(&None).cancellation().is_cancelled());
+    assert!(
+        !services
+            .ingress_slot(&appearing)
+            .cancellation()
+            .is_cancelled()
+    );
+    assert!(retained.cancellation().is_cancelled());
+}
+
 #[nervix_primitives::test(start_paused = true)]
 async fn runtime_report_chain_detached_relay_delivery_log() {
     use crate::runtime::report_observer::ReportLogObserver;
@@ -1128,7 +1177,10 @@ async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_
         .stop(Duration::from_secs(1))
         .await
         .expect("relay owner should drain");
-    owner.runtime.shutdown().await;
+    owner
+        .runtime
+        .shutdown(owner.runtime.domain_drain_timeout())
+        .await;
 }
 
 /// Watches the whole relay budget could never hold are refused before the rows are decoded, and
@@ -1174,7 +1226,10 @@ async fn acknowledgement_watches_larger_than_the_relay_budget_keep_their_typed_c
              {requested} bytes exceeds the whole relay memory budget of {capacity} bytes"
         )
     );
-    owner.runtime.shutdown().await;
+    owner
+        .runtime
+        .shutdown(owner.runtime.domain_drain_timeout())
+        .await;
 }
 
 /// A batch for `schema` with one row, acknowledged through `acks`.
@@ -1654,6 +1709,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
+            runtime.emitter_finish_deadline(),
         )
         .await;
 

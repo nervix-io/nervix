@@ -6887,6 +6887,7 @@ dependencies = [
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "rdkafka",
  "thiserror 2.0.21",
  "tracing",
@@ -7458,6 +7459,7 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
+ "toml 0.8.2",
  "url",
  "uuid",
 ]
@@ -7807,6 +7809,7 @@ dependencies = [
  "nervix-recovery",
  "reqwest 0.13.5",
  "serde_json",
+ "sqlx",
  "strum 0.26.3",
  "tempfile",
  "testcontainers",

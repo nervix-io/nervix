@@ -55,9 +55,10 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, ParsedRetryPolicy,
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
-    client_tls_paths, next_retry_delay, optional_client_config_value, read_tls_file,
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    client_config_value, client_tls_paths, next_retry_delay, optional_client_config_value,
+    read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, TopicName};
@@ -67,7 +68,7 @@ use nervix_primitives::{
         atomic::{AtomicU32, Ordering},
         watch,
     },
-    time::sleep,
+    time::{Instant, sleep},
 };
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
@@ -650,6 +651,18 @@ impl Drop for MqttSink {
 
 #[async_trait]
 impl SinkLifecycle for MqttSink {
+    /// A QoS 0 publish is delivered once the client takes it, and the event loop sends it later,
+    /// so the client can still hold delivered publishes, which closing it discards. A QoS 1 or 2
+    /// publish is delivered only once the broker answered for it.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        match self.mode {
+            MqttPublishingMode::Qos0 => Ok(SinkFinish::Discarded),
+            MqttPublishingMode::Qos1(_) | MqttPublishingMode::Qos2(_) => {
+                Ok(SinkFinish::NothingHeld)
+            }
+        }
+    }
+
     /// A publish failure leaves the client connected: its event loop reconnects on its own
     /// schedule, and dropping it would discard the session the broker still holds.
     fn keeps_client_on_publish_failure(&self) -> bool {
@@ -1437,6 +1450,45 @@ mod tests {
             "mqtt rejected record: v5 puback returned non-success reason: NotAuthorized"
         );
         assert!(outcome.infrastructure_error.is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_a_qos0_sink_discards_what_its_client_may_still_hold() {
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink("mqtt://127.0.0.1:9", "unsent", fixture.dns.clone());
+
+        let finished = sink
+            .finish(Instant::now())
+            .await
+            .expect("a QoS 0 sink answers its finish");
+
+        assert_eq!(finished, SinkFinish::Discarded);
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_a_confirmed_sink_has_nothing_to_send() {
+        let fixture = DnsFixture::start().await;
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::MIN,
+            timeout: Duration::from_secs(30),
+        };
+        let mut sink = MqttSink::new(
+            qos1_config(
+                "mqtt://127.0.0.1:9",
+                "answered",
+                fixture.dns.clone(),
+                confirmation,
+            ),
+            SinkHost::new(SilentHost),
+        )
+        .expect("the test sink config is valid");
+
+        let finished = sink
+            .finish(Instant::now())
+            .await
+            .expect("a confirmed sink answers its finish");
+
+        assert_eq!(finished, SinkFinish::NothingHeld);
     }
 
     #[nervix_primitives::test]

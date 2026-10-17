@@ -337,8 +337,11 @@ The coordinator then queries the exact operation's drain status. A participant p
 freeze before returning a drained status, and capture requires that coordination identity's freeze
 in addition to its held gate. Pending status retains the work counts used by timeout diagnostics.
 Each engagement request keeps the two-second reply bound; a typed timeout retries the same identity
-and complete scope within the original preparation deadline. A retry observes the existing
-receiver-owned operation and lease. Other request failures keep their existing classification.
+and complete scope within the original preparation deadline. A transport failure, such as a stream
+that broke, leaves delivery as uncertain as a lost reply, so it retries the same identity and scope
+too, after a 100-millisecond pause that gives the connection time to be replaced. A retry observes
+the existing receiver-owned operation and lease. Other request failures keep their existing
+classification.
 
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
@@ -868,6 +871,15 @@ known admitted result and does not undo work handed to the runtime.
 Removing or evicting a concrete branch cancels its unadmitted channel generation and releases its
 reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
 keeps a previous branch lifetime from being confused with the new runtime instance.
+
+A committed forced ownership change also retires changing relay routes' preceding channel
+generation before the local graph installer waits for dispatch quiescence. The sender interrupts
+its admission wait and uses the same cancellation operation and five-second reconciliation budget.
+It need not wait for the fenced former owner to resume. An admitted result keeps the receiver's
+record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for source
+retry, with possible replay duplicates. No transport message or automatic replay contract changes.
+The installer publishes successor routes only after completing the local swap, so another dispatch
+cannot open a fresh channel toward a preceding consumer while that fence is held.
 
 ### Consumers That Leave The Receiver
 

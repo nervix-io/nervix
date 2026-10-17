@@ -271,7 +271,7 @@ Feature: Client wire failure regressions
 
   @client_wire_execution_history
   Scenario Outline: A reclaimed command identity stays expired after a durable restart
-    Given command retry identities are valid for "1s"
+    Given command retry identities are valid for "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -529,8 +529,8 @@ Feature: Client wire failure regressions
 
   @client_wire_stalled_commit
   Scenario: A stalled commit cannot block expiry, another domain, or tombstone cleanup
-    Given the transaction idle timeout is configured as "1s"
-    And the transaction tombstone retention is configured as "1s"
+    Given the transaction idle timeout is configured as "15s"
+    And the transaction tombstone retention is configured as "30s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands

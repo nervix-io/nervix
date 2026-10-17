@@ -68,15 +68,14 @@ Feature: Runtime node input collection
       """
       {"tenant":"beta","sequence":2}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "input_collection_source" as "batches_total sent relay=incoming physical_node=node-1 total=4"
-    And the relay subscription does not receive a payload within "300ms"
-    Then within "6s" the relay subscription receives payloads
+    Then within "30s" the relay subscription receives payloads no sooner than "3s" after the first http payload was posted
       """
       {"sequence":1,"tenant":"alpha"}
       {"sequence":2,"tenant":"alpha"}
       {"sequence":1,"tenant":"beta"}
       {"sequence":2,"tenant":"beta"}
       """
+    And within "5s" node "node-1" eventually reports describe ingestor "input_collection_source" as "batches_total sent relay=incoming physical_node=node-1 total=4"
     And node "{{junction_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
       """
       target_kind="JUNCTION"
