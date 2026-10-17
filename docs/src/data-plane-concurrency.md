@@ -154,9 +154,12 @@ A concrete producer retains its branch channel handle. The relay publishes branc
 persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
 publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
 outbound slots, including candidates created during replacement. Eviction cancels the exact branch
-before withdrawing its allocation. An independently expiring receiver branch permits a still-live
-producer to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended`
-and prevents rebinding. Domain terminal teardown cancels the relay publication itself.
+before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
+invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
+branches of the relays it publishes through for its key. Another relay's branch for the same key
+keeps its channels. An independently expiring receiver branch permits a still-live producer to
+bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
+prevents rebinding. Domain terminal teardown cancels the relay publication itself.
 
 Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
 select cancellation, and transport admission retains its existing physical deadline. They do not
