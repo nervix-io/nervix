@@ -481,7 +481,11 @@ record and summary, naming every problem, and no report. An identical input name
 once, so neither the order of the inputs nor a repeated artifact changes the result.
 
 The union is line coverage. Its executable lines are the union of every contribution's lines, a line
-is covered when any contribution executed it, and its counter is the sum. Function and branch
+is covered when any contribution executed it, and its counter is the sum. A counter that wrapped
+below zero counts no executions, as in the [ordinary merge](#the-ordinary-workspace-report): the
+union leaves it out of the sum and lists it under its contribution in the record, and a line only
+such counters count is not measured. Any collection can hold such counters when its instrumented
+executables run the same code on concurrent threads. Function and branch
 identities depend on the toolchain and configuration each producer built with, so the union carries
 none; each producer's own report keeps them. Native collections leave out harness code below
 `tests`, `examples` and `benches` directories, so only the ordinary report measures those files.
@@ -491,7 +495,7 @@ The job writes `target/coverage-full/` and retains it as the `coverage-full` art
 | --- | --- |
 | `lcov-full.info` | The union, in source and line order |
 | `beyond-ordinary.info` | One `TN:` section per contribution, with the lines it covered that the ordinary report did not cover |
-| `record.json` | The verdict, the selection, every required producer and where it was found, each contribution's identity and line attribution, the totals per mode, the workspace members and the source policy |
+| `record.json` | The verdict, the selection, every required producer and where it was found, each contribution's identity, line attribution and counters that wrapped below zero, the totals per mode, the workspace members and the source policy |
 | `summary.md` | The contributor breakdown, which CI also publishes as the job summary |
 | `selection.json` | The recorded selection |
 

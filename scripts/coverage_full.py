@@ -32,7 +32,10 @@ selection does not enable each fail the union with a message naming what to fix;
 report. An identical input named twice counts once.
 
 The union is line coverage. Its executable lines are the union of every contribution's lines, a line
-is covered when any contribution executed it, and its counter is the sum. Function and branch
+is covered when any contribution executed it, and its counter is the sum. A counter at or above 2^63
+is a count difference that concurrent threads drove below zero, which llvm-cov exports as its
+unsigned wrap. As in the ordinary merge, it counts no executions: it is left out of the sum and listed
+under its contribution, and a line only such counters count is not measured. Function and branch
 identities depend on the toolchain and configuration each producer built with, so the union carries
 none; each producer's own report keeps them. The ordinary report is not changed, and the CRAP report
 and the ordinary patch coverage keep reading it alone.
@@ -40,7 +43,8 @@ and the ordinary patch coverage keep reading it alone.
 `target/coverage-full/` then holds `lcov-full.info`, the union; `beyond-ordinary.info`, one test
 section per contribution with the lines it covered that the ordinary report did not cover;
 `record.json`, the verdict, the selection, every required producer and where it was found, each
-contribution's identity and attribution, the totals per mode, and the source policy; and
+contribution's identity, attribution and counters that wrapped below zero, the totals per mode, and
+the source policy; and
 `summary.md`, the contributor breakdown CI publishes as the job summary. A failed union writes its
 record and summary, naming every problem, and no report.
 """
@@ -65,10 +69,12 @@ from scripts.coverage_merge import (
     DROPPED_POLICY,
     KEPT_POLICY,
     WORKSPACE_REPORT,
+    WRAPPED_POLICY,
     Checkout,
     Dropped,
     MergeError,
     Tracked,
+    WrappedCounter,
     display,
     git,
 )
@@ -452,7 +458,8 @@ class Lines:
 
 @dataclass
 class Contribution:
-    """One producer's report as the union reads it: its identity, and its line counters by file."""
+    """One producer's report as the union reads it: its identity, its line counters by file, and
+    the counters that wrapped below zero, which it leaves out as the ordinary merge does."""
 
     requirement: Requirement
     input: str
@@ -462,6 +469,7 @@ class Contribution:
     records: int = 0
     kept: int = 0
     dropped: collections.Counter[Dropped] = field(default_factory=collections.Counter)
+    wrapped: list[WrappedCounter] = field(default_factory=list)
     attribution: Lines = field(default_factory=Lines)
 
     def covered(self, path: str, number: int) -> bool:
@@ -472,6 +480,7 @@ class Contribution:
         return {
             **self.requirement.describe(), "input": self.input, "report": self.report,
             **self.identity, "records": {"read": self.records, "kept": self.kept, "dropped": dropped},
+            "wrapped": [wrapped.describe() for wrapped in self.wrapped],
             "lines": self.attribution.describe(),
         }
 
@@ -1010,9 +1019,15 @@ class FullCoverage:
 
     @staticmethod
     def counters(contribution: Contribution, located: Tracked, lines: Iterable[str]) -> None:
+        """Read a record's line counters. A counter that wrapped below zero counts no executions, so
+        it is listed instead of summed, and a line only such counters count is not measured."""
         counters = contribution.lines.setdefault(located.path, {})
         for line in lines:
             if not line.startswith(DA_PREFIX):
+                continue
+            wrapped = WrappedCounter.of(line, located.path)
+            if wrapped is not None:
+                contribution.wrapped.append(wrapped)
                 continue
             fields = line[len(DA_PREFIX):].rstrip("\n").split(",")
             number = int(fields[0])
@@ -1104,6 +1119,7 @@ class FullCoverage:
             "full": {"files": full.files, "executable": full.executable, "covered": full.covered},
             "beyond_ordinary": {"files": beyond.files, "covered": beyond.covered},
             "executable_beyond_ordinary": added,
+            "wrapped_counters": sum(len(contribution.wrapped) for contribution in self.contributions),
         }
 
     # Publication.
@@ -1145,7 +1161,7 @@ class FullCoverage:
             "problems": self.problems,
             "policy": {
                 "lines": LINE_POLICY, "functions_and_branches": FUNCTION_POLICY, "harness": HARNESS_POLICY,
-                "ordinary": ORDINARY_POLICY, "kept": KEPT_POLICY,
+                "ordinary": ORDINARY_POLICY, "kept": KEPT_POLICY, "wrapped": WRAPPED_POLICY,
                 "dropped": {str(dropped): meaning for dropped, meaning in DROPPED_POLICY.items()},
                 "unavailable": list(UNAVAILABLE),
             },
@@ -1192,6 +1208,15 @@ class FullCoverage:
             f"{f' ({by_mode})' if by_mode else ''}; {self.totals['executable_beyond_ordinary']:,} executable lines "
             "only other configurations compile."
         )
+        wrapped = [
+            f"{contribution.requirement.producer} {len(contribution.wrapped):,}"
+            for contribution in self.contributions if contribution.wrapped
+        ]
+        if wrapped:
+            lines.append(
+                f"Counters that wrapped below zero, left out of the sum: {self.totals['wrapped_counters']:,} "
+                f"({', '.join(wrapped)})."
+            )
         if "skipped" in self.fuzz:
             lines.append(f"Fuzzing: {self.fuzz['skipped']}.")
         elif self.fuzz:

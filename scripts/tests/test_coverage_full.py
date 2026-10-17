@@ -327,6 +327,35 @@ class UnionTests(unittest.TestCase):
         self.assertIn("TN:test-primitives-shuttle\nSF:src/lib.rs\nDA:2,5\nLF:1\nLH:1\nend_of_record\n", beyond)
         self.assertEqual(record["members"], {"measured": ["alpha", "server"], "unmeasured": []})
 
+    def test_a_counter_that_wrapped_below_zero_counts_nothing_and_is_listed(self) -> None:
+        # llvm-cov exports a count difference that concurrent threads drove below zero as its unsigned
+        # wrap, here -1. Line 2 of the alpha crate is executable but never run in the ordinary report,
+        # and line 4 of the runtime module is counted by the wrapped counter alone.
+        wrapped = 2**64 - 1
+        run = Run(self)
+        run.complete()
+        turmoil = next((run.inputs / "coverage-native-extras").rglob("test-primitives-turmoil/**/lcov.info"))
+        turmoil.write_text(lcov({
+            f"{CI_ROOT}/crates/alpha/src/lib.rs": {1: 1, 2: wrapped},
+            f"{CI_ROOT}/src/runtime/mod.rs": {4: wrapped},
+        }))
+        status, record, stdout, _ = run.union()
+        self.assertEqual(status, 0, problems(record))
+        report = run.report()
+        self.assertEqual(counters(report, "crates/alpha/src/lib.rs"), {1: 4, 2: 0})
+        self.assertEqual(counters(report, "src/runtime/mod.rs"), {1: 1, 2: 0})
+        by_producer = {contribution["producer"]: contribution for contribution in record["contributions"]}
+        self.assertEqual(by_producer["test-primitives-turmoil"]["wrapped"], [
+            {"source": "crates/alpha/src/lib.rs", "line": 2, "count": wrapped},
+            {"source": "src/runtime/mod.rs", "line": 4, "count": wrapped},
+        ])
+        self.assertEqual(by_producer["test-primitives-turmoil"]["lines"]["executable"], 1)
+        self.assertEqual(by_producer["ordinary"]["wrapped"], [])
+        self.assertEqual(record["totals"]["wrapped_counters"], 2)
+        self.assertEqual(record["totals"]["full"], {"files": 4, "executable": 9, "covered": 7})
+        self.assertEqual(record["policy"]["wrapped"], coverage_full.WRAPPED_POLICY)
+        self.assertIn("Counters that wrapped below zero, left out of the sum: 2 (test-primitives-turmoil 2).", stdout)
+
     def test_input_order_and_repeated_identical_artifacts_change_nothing(self) -> None:
         run = Run(self)
         run.complete()
