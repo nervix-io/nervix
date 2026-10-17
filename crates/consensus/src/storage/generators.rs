@@ -49,8 +49,8 @@ use crate::{
     TransactionScheduleEligibility, TransactionState, TransactionStatement,
     TransactionStatementRequest, TransactionStepEffect, TransactionStepResult, UserCredentials,
     command_execution::CommandExecutionRecords, domain_mutation::DomainMutationLease,
-    restore::DomainRestoreInstallation, transaction_plan::TransactionCommitPlanRecords,
-    transaction_report::TransactionReportRecords,
+    restore::DomainRestoreInstallation, transaction::AcceptedTransactionStatement,
+    transaction_plan::TransactionCommitPlanRecords, transaction_report::TransactionReportRecords,
 };
 
 /// The most records of one family a generated revision holds, and the most items of one list a
@@ -802,12 +802,14 @@ fn withdrawn(
 
 /// `opened` finished after queuing up to three statements: committed with every step applied,
 /// failed at a step it applied or by a refused commit admission, reverted, or expired. Finishing
-/// cleared its queue, and only a commit admission recorded a plan.
+/// emptied its queue and kept what an exact repetition needs of each statement it accepted, and
+/// only a commit admission recorded a plan.
 fn finished_transaction(
     arbitrary: &mut Arbitrary<'_>,
     opened: ReplicatedTransaction,
 ) -> ReplicatedTransaction {
-    let statement_count = arbitrary.entropy().count(QUEUED);
+    let statements = queued_statements(arbitrary, &opened.id);
+    let statement_count = statements.len();
     let steps = commit_steps(arbitrary, statement_count);
     let preview = transaction_preview(arbitrary, &opened.id, statement_count);
     let ending = match NonZeroUsize::new(steps.len()) {
@@ -834,11 +836,16 @@ fn finished_transaction(
     };
     let outcome_revision = arbitrary.entropy().any_u64();
     let finished_at = instant_from(arbitrary, opened.created_at);
+    let accepted = statements
+        .into_iter()
+        .map(AcceptedTransactionStatement::accepted)
+        .collect();
     let state = TransactionState::Finished(FinishedTransaction {
         outcome: ending.outcome,
         outcome_revision,
         finished_at,
         results: ending.results,
+        accepted,
     });
     ReplicatedTransaction::generated(
         opened,
@@ -2120,7 +2127,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 45] = [
+const EXPECTED_RECORDS: [&str; 46] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2135,6 +2142,7 @@ const EXPECTED_RECORDS: [&str; 45] = [
     "TransactionCommitProgress::domain_mutation",
     "TransactionState::Finished",
     "FinishedTransaction::results",
+    "FinishedTransaction::accepted",
     "TransactionOutcome::Committed",
     "TransactionOutcome::Failed",
     "TransactionOutcome::PlanningInputsChanged",
@@ -2205,7 +2213,8 @@ impl RecordWalk {
     }
 
     /// Statements sit at the positions they were appended at, commit progress never runs past
-    /// them, and a finished transaction queues nothing.
+    /// them, and a finished transaction queues nothing and keeps one accepted statement for each
+    /// statement it accepted, at the position it was appended at.
     fn transaction(&mut self, transaction: &ReplicatedTransaction) {
         if transaction.mutation_owner().is_transaction() {
             self.see("ReplicatedTransaction::session");
@@ -2244,6 +2253,14 @@ impl RecordWalk {
                 self.see("TransactionState::Finished");
                 assert!(transaction.statements.is_empty());
                 assert_eq!(transaction.queued_source_bytes, 0);
+                assert_eq!(finished.accepted.len(), transaction.statement_count);
+                for (position, accepted) in finished.accepted.iter().enumerate() {
+                    self.see("FinishedTransaction::accepted");
+                    assert_eq!(accepted.expected_position(), position);
+                    for diagnostic in &accepted.admission().diagnostics {
+                        self.transaction_diagnostic(diagnostic);
+                    }
+                }
                 if !finished.results.is_empty() {
                     self.see("FinishedTransaction::results");
                 }
