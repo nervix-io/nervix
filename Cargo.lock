@@ -6842,6 +6842,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "async-trait",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
@@ -6887,6 +6888,7 @@ dependencies = [
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "rdkafka",
  "thiserror 2.0.21",
  "tracing",
@@ -6967,12 +6969,12 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
- "humantime",
- "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -7124,8 +7126,10 @@ name = "nervix-connector-sentry"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
@@ -7135,6 +7139,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -7458,6 +7463,7 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
+ "toml 0.8.2",
  "url",
  "uuid",
 ]
@@ -7807,6 +7813,7 @@ dependencies = [
  "nervix-recovery",
  "reqwest 0.13.5",
  "serde_json",
+ "sqlx",
  "strum 0.26.3",
  "tempfile",
  "testcontainers",

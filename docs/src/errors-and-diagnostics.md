@@ -225,7 +225,7 @@ subsections after the boundary table follow this order.
 | Primitives | Modeled adapters keep the error types of the library they stand in for, such as the watch channel's `RecvError` and `SendError` | The library's own error shape, never a report |
 | Vocabulary | Model alteration errors, `CanonicalNsplError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
-| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError` and `SinkPublishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
+| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError`, `SinkPublishError` and `SinkFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
 | Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
@@ -253,6 +253,16 @@ subsections after the boundary table follow this order.
 | Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
+
+Forced ownership installation retires changing relay channels before its dispatch fence waits.
+The remote delivery owner maps a cancelled or unconfirmed admission through its existing typed
+delivery failure and fails the record ACKs it retained, rather than reporting successful processing
+or a codec/message error. The acknowledged source can then retry through the newly published route.
+An already admitted result keeps its record-ACK obligations; uncertainty can produce replay
+duplicates. Cancellation reconciliation keeps its five-second attempt budget independently of the
+entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+owns the admission verdict and [Execution Plans](./execution-plans.md#incremental-changes-and-rebuilds) owns
+installation and publication.
 
 ### Cluster Availability Reports
 
@@ -481,8 +491,12 @@ A connector reports through the contract's own contexts and keeps its integratio
 them. `SourceError` names the connector and the operation that failed: opening, reading,
 acknowledging, rejecting, suspending, resuming or closing. `SinkStartError` separates an invalid
 configuration and a missing external entity from a failed initialization. `SinkPublishError`
-separates a failed publish, finish or commit, which the host retries on its backoff, from a
-misconfiguration, which it does not retry. A record the destination refuses for good is none of
+separates a failed publish or commit, which the host retries on its backoff, from a
+misconfiguration, which it does not retry. `SinkFinishError` reports a finish that did not send
+everything the sink's client still held when the emitter stopped: `Unsent` when the deadline passed,
+with the count of records the client still held, and `Flush` when the client failed while it sent
+them. The host does not retry a finish; a stop that asked for it fails, and teardown records it as
+the emitter's transient error. A record the destination refuses for good is none of
 these errors: it is a rejection in the write's per-record outcome, with the structured message
 error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
@@ -569,6 +583,15 @@ leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the c
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
+MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
+ingestor, above the connector's `MqttSourceError::RetireInstance` and instance index. The report
+keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
+deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
+its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
+events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
+the replacement's changed sessions remains an installation failure. Neither path rejects a record
+or confirms payload delivery.
+
 A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
 refuses to take a record for a reason that is not the record's own, a full producer queue included,
 and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
@@ -578,7 +601,21 @@ TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A deliver
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
 `ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
 `SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
-hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`.
+hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`. A
+finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
+beneath `SinkFinishError::Unsent`, which counts the records still queued; a flush that fails
+otherwise, or whose blocking task does not complete, keeps that cause beneath
+`SinkFinishError::Flush`.
+
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
+the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
+does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaSourceError::CommitTask`. The
+commit of an acknowledged batch fails beneath `SourceError::Acknowledge`, so the ingestor's
+transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
+the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
+`MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
+`SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
@@ -610,6 +647,16 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
+
+A NATS source whose client loses its connection to the server reports
+`NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
+received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
+`SourceError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
+NATS JetStream publish keeps the driver's `PublishError` beneath `SinkPublishError::Publish` when the
+client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
+connector's description of the failure for the emitter's transient error. A message above the
+server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
+missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
 ### Connector Status Observation
 
@@ -828,6 +875,12 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
+The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
+absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
+before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
+conversion error beneath that context. The check compares names and nested types after narrowing
+UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
@@ -945,8 +998,12 @@ or leaves a handed-over row unanswered. Either fails the attempt without a retry
 emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
 rows then follow `ON MESSAGE ERROR` as a failed publish.
 
-The Sentry sink rejects a final serialized event above its decompressed event limit before sending
-the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+The Sentry sink prepares its envelope before the host retains the payload. Invalid event JSON,
+invalid event fields and a final serialized event above its decompressed limit become definitive
+payload rejections at that boundary. The full typed preparation report is projected into the
+external message error once; all source members share its reference while keeping their own
+execution times. No refused envelope is sent or retained for a transport retry. The Syslog sink
+rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
 A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
 its requests from mapped rows, measure each request they would send. If halving still leaves one
@@ -1136,6 +1193,10 @@ truncation or digest failure; none can publish or acknowledge a partial checkpoi
 handoff destination converts the same fetch failure to a checkpoint preparation failure before
 persisting or activating the candidate state. Diagnostics include the revision and lengths when
 useful, never guest bytes.
+Forced-recovery preparation treats an absent destination execution during startup as an installation
+wait within its current operation deadline. Its `ScheduleInstallationDeadline` context carries the
+typed domain and node when that wait expires. An installed fingerprint mismatch remains a schedule
+validation failure. Neither diagnostic includes checkpoint contents.
 Kafka offset replica catch-up uses the same typed envelope for its revision description. A
 subsequent bulk stream failure remains a transport request failure, with the target, placement and
 typed staging, admission, verification or native conversion cause retained beneath it. The
@@ -1178,8 +1239,9 @@ reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. In
 units remain available to continue, and a subsequent attempt can retry the stalled unit. A gate
 that expires during engagement reports `EntityGateOperationError::EngagementExpired` and releases
 its partial intake and relay holds. The preparation deadline bounds engagement, drain and capture
-independently of the activation lease. A typed reply timeout can retry the same engagement identity
-and scope within that budget; rejection and other request failures keep their classification.
+independently of the activation lease. A typed reply timeout, or a transport failure that broke the request's
+stream, can retry the same engagement identity and scope within that budget; rejection and other
+request failures keep their classification.
 
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct
@@ -1950,10 +2012,16 @@ payload, observe the receiver's successful exit, or retain its helper evidence r
 sender, receiver, address and port. Its adjacent probe record preserves readiness, transfer
 deadline, both helpers' outcomes, received byte count and cleanup outcomes, with raw helper logs.
 A timeout of the Docker client also ends the exact sender container; it does not leave a live
-transfer to alter a later measurement. A failed required attempt remains evidence even after a
-subsequent successful qualification. The controller's measurement budget does not extend the
-product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
-commands, measurement interpretation and retained artifact paths.
+transfer to alter a later measurement. A directed-link ICMP probe that fails names its sender,
+receiver and address and the stage that took the time: Docker's start of its helper outlasting
+the launch bound, its sample outlasting the sample bound, ping's own exit, or a failed log read
+or removal. Docker control time has its own launch bound, so a held container start does not
+consume the sample's bound. The probe record keeps each stage's outcome and the launch and sample
+times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
+Docker's state and events for it before its removal. A failed required attempt remains evidence
+even after a subsequent successful qualification. The controller's measurement budget does not extend the
+product's recovery budget. [External Cluster Chaos](./cluster-chaos.md#link-degradation) owns
+the commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact
 arguments and bound, elapsed time, helper identities and both raw streams. The operation record
 exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the

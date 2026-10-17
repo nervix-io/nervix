@@ -16,6 +16,13 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
+A forced-recovery destination that has not installed its execution schedule yet retains that
+absence as an installation wait, rather than inferring that its checkpoints are missing. The
+installation publication and application sequence establish the execution before its fingerprint
+and node are validated. Expiry carries the typed domain and node in an installation deadline
+context; an installed identity mismatch remains a validation failure. The detailed recovery
+outcomes stay in [Shutdown And Recovery](./shutdown.md#when-the-former-owner-is-gone).
+
 ## A State Has One Owner
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
@@ -99,6 +106,16 @@ distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed
 identifier access and verifies offsets and counts before constructing owned values.
 
 ## Absence And Distinct States
+
+**MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
+replacement plan. Absence means the declaration is removed; stopping an execution whose input
+is unchanged creates no retirement. A connector session catalog has a private constructor that
+validates each configured endpoint and effective client identity once and borrows its immutable
+plan. It represents each broker session once even if an invalid explicit identity is repeated.
+Cleanup failure at a preceding endpoint is reported separately from failure to prepare the
+replacement. A failed preceding configuration supplies no preservation proof: the explicit
+replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
+default, with an instance suffix when needed.
 
 **Consensus append input.** `None` from the caller's request stream means that input has ended;
 the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed

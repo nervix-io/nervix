@@ -724,6 +724,7 @@ impl Runtime {
             dynamic_updates,
             state_purges,
             gate_relays,
+            forced_recovery_relays,
         } = change;
         let activation_plan = &revision.activation;
         let resource_plans = &revision.resources;
@@ -744,6 +745,8 @@ impl Runtime {
         )
         .into_vec();
         let entities = entities.as_slice();
+        let mut retiring_ingestors =
+            self.retiring_ingestor_inputs(domain, Some(&revision), local_node_id);
         for entity in entities {
             if entity.kind != ModelKind::WasmProcessor {
                 continue;
@@ -789,6 +792,14 @@ impl Runtime {
             Instant::now() + self.inner.entity_gate_deadline,
             "local scheduled node swap",
         );
+        if let Some(local_node_id) = local_node_id {
+            self.fence_forced_recovery_routes(
+                domain,
+                &revision,
+                forced_recovery_relays,
+                local_node_id,
+            );
+        }
         if !local_gate_hold.wait_quiescent().await {
             return Err(Report::new(ExecutionBuildError::GateFenceTimeout).change_context(build()));
         }
@@ -968,6 +979,9 @@ impl Runtime {
                     self.stop_ingestor(domain, &ingestor)
                         .await
                         .change_context_lazy(build)?;
+                }
+                if let Some(retirement) = retiring_ingestors.remove(&ingestor) {
+                    Box::pin(self.retire_ingestor_input(retirement)).await?;
                 }
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
                     self.start_ingestor(&desired_plan)
@@ -1473,6 +1487,40 @@ impl Runtime {
         }
         local_gate_hold.release();
         Ok(())
+    }
+
+    /// Close only changing routing generations selected by the forced-recovery plan. Closing
+    /// precedes the gate wait: otherwise a remote admission held by the former owner retains the
+    /// very permit that installation needs. The normal publication below opens new generations.
+    fn fence_forced_recovery_routes(
+        &self,
+        domain: &DomainName,
+        desired: &ExecutionRevision,
+        relays: &[RelayName],
+        local_node_id: &ClusterNodeName,
+    ) {
+        if relays.is_empty() {
+            return;
+        }
+        let consumers = Self::remote_runtime_consumers_for_revision(desired, local_node_id);
+        let Some(execution) = self.inner.executions.get(domain) else {
+            return;
+        };
+        for relay in relays {
+            let Some(services) = execution.relay_services.get(relay) else {
+                continue;
+            };
+            let node = NodeRef::new(ModelKind::Relay, ModelName::from(relay));
+            let owner = match desired.nodes.get(&node) {
+                Some(node) => node.execution_node(),
+                None => None,
+            };
+            let destinations = match consumers.get(relay) {
+                Some(destinations) => destinations.as_slice(),
+                None => &[],
+            };
+            services.fence_routing_change(owner, destinations);
+        }
     }
 
     pub(super) async fn apply_dynamic_schedule_update(
@@ -2424,6 +2472,7 @@ mod tests {
                     dynamic_updates: Vec::new(),
                     state_purges: BTreeMap::new(),
                     gate_relays: Vec::new(),
+                    forced_recovery_relays: Vec::new(),
                 },
             )
             .await
@@ -2598,6 +2647,7 @@ mod tests {
                     dynamic_updates: Vec::new(),
                     state_purges: BTreeMap::new(),
                     gate_relays: Vec::new(),
+                    forced_recovery_relays: Vec::new(),
                 },
             )
             .await

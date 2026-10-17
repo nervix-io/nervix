@@ -382,6 +382,163 @@ Feature: Iceberg emission
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: An Iceberg emitter that declares BATCH commits every row at its data-file and commit boundaries
+    Given Iceberg dependencies are running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "batched_{{test_id}}" exists at "s3://nervix-iceberg/tables/batched_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        action STRING
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer,
+        action string
+      );
+      CREATE CODEC notification_codec
+      FROM WIRE JSON SCHEMA notification_wire
+      TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-batch-{{test_id}}.example.com;
+      CREATE ENDPOINT notification_ingress
+      ON edge
+      PATH '/notifications'
+      TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR notification_source
+      FROM notification_ingress MODE NO ACK
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT s3_main
+      TYPE S3
+      CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE CLIENT iceberg_catalog
+      TYPE ICEBERG_REST
+      CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE batched_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/batched_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "iceberg-batch-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":41,"action":"OPEN"}
+      """
+    And http payload is posted to host "iceberg-batch-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":42,"action":"UPDATE"}
+      """
+    And http payload is posted to host "iceberg-batch-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":43,"action":"CLOSE"}
+      """
+    Then the Iceberg table "batched_{{test_id}}" eventually contains a row
+      """
+      {"user_id":41,"action":"OPEN"}
+      """
+    And the Iceberg table "batched_{{test_id}}" eventually contains a row
+      """
+      {"user_id":42,"action":"UPDATE"}
+      """
+    And the Iceberg table "batched_{{test_id}}" eventually contains a row
+      """
+      {"user_id":43,"action":"CLOSE"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Iceberg emitter commits nested datetime lists at microsecond precision
+    Given MQTT is running
+    And Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "nested_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/nested_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      observed <table_type>
+      """
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (user_id I64, observed <nested_type>);
+      CREATE CODEC notification_codec FROM JSON TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-iceberg-nested-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'iceberg_nested_in_{{test_id}}' MODE NO ACK
+      ON QUIESCE DROP DECODE USING notification_codec
+      TO notifications INHERIT ALL UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT s3_main TYPE S3 CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE nested_notifications_{{test_id}}
+      VALUES { 'user_id' = input.user_id, 'observed' = input.observed }
+      LOCATION 's3://nervix-iceberg/tables/nested_notifications_{{test_id}}'
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    And MQTT message is published to topic "iceberg_nested_in_{{test_id}}"
+      """
+      {"user_id":42,"observed":[["1970-01-01T00:00:00.000001234Z","1969-12-31T23:59:59.999999999Z"],["1970-01-01T00:00:01.000001999Z"]]}
+      """
+    Then the Iceberg table "nested_notifications_{{test_id}}" eventually contains a row
+      """
+      {"user_id":42,"observed":[[1,-1],[1000001]]}
+      """
+
+    Examples:
+      | cluster_size | table_type           | nested_type        |
+      | 1            | LIST<LIST<DATETIME>> | VEC<VEC<DATETIME>> |
+      | 3            | LIST<LIST<DATETIME>> | VEC<VEC<DATETIME>> |
+
   Scenario Outline: Iceberg emitter requires an existing catalog table
     Given MQTT is running
     And Iceberg dependencies are running
@@ -461,6 +618,51 @@ Feature: Iceberg emission
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: Iceberg emitter refuses a mapped column the table cannot write at open
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "incompatible_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/incompatible_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      """
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (user_id STRING);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT s3_main TYPE S3 CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE incompatible_notifications_{{test_id}}
+      VALUES { 'user_id' = input.user_id }
+      LOCATION 's3://nervix-iceberg/tables/incompatible_notifications_{{test_id}}'
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "5s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      mapped column 'user_id' has Iceberg type string, but the table requires long
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Iceberg emitters use explicitly provisioned catalog tables
     Given MQTT is running

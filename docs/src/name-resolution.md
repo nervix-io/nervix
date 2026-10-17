@@ -302,7 +302,7 @@ name again for every new connection it opens.
 | OTEL gRPC sinks | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
 | Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the thirty-second connection timeout the pool sets on the driver | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | Redis Pub/Sub sources | The connector resolves and dials a dedicated stream, then hands it to Redis's `PubSub::new` | Thirty seconds shared with the attempts, TLS, Redis setup and `SUBSCRIBE` | [DNS for Redis](./connector-contract.md#dns-for-redis) |
-| MQTT sources and sinks | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout | [DNS for MQTT](./connector-contract.md#dns-for-mqtt) |
+| MQTT sources, sinks and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
 
 Two interconnect uses are resolved once, when the node starts: the address that identifies the
@@ -330,7 +330,7 @@ before any IPv6 answer and no attempt races another:
 | Syslog TLS sender | Thirty seconds | TCP connection and TLS | No further step |
 | WebSocket client source | Thirty seconds | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
 | Redis Pub/Sub source | Thirty seconds | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
-| MQTT source or sink | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout |
+| MQTT source, sink or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
 
 Syslog UDP has no connection to confirm, so a sender binds a socket in the family of each answer in
 turn and sends to the first answer whose socket setup succeeds. The HTTP request emitter tries the
@@ -454,6 +454,13 @@ is assumed to be covered:
 | Kafka sources and sinks, `rdkafka` 0.39.0 with librdkafka 2.12.1 | librdkafka resolves bootstrap and broker hosts in its own native threads | librdkafka's resolver callback is not exposed by the Rust binding |
 | ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))` | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
+
+Postgres observation clients in the test harness use that same SQLx resolution path. Their suite
+environment retains the plaintext and TLS pools and their certificate-authority files through
+client closure. MQTT fixture publishers retain their native driver through publication completion;
+the broker operation timeout of 10 seconds also bounds connection setup. [Integration Test
+Lifecycle](./integration-test-lifecycle.md) owns fixture readiness, connection capacity, operation
+budgets and teardown.
 
 Tokio's `lookup_host` and `TcpStream::connect` with a host name, and `Url::socket_addrs`, resolve
 through the C library on a thread of Tokio's blocking pool, and librdkafka calls it on its own

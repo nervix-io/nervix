@@ -830,10 +830,20 @@ its assignment, and retries that seek. It cannot commit a later offset while the
 position remains unresolved. Replays after a crash or assignment change may repeat records whose
 output was already written.
 
+Under `OFFSET BY CONSUMER GROUP` in an ACK mode, the ingestor commits each acknowledged batch's
+positions and reports progress for the batch only once the group's coordinator answered the commit.
+That costs one commit round trip per batch, which `ACK PARALLEL` spreads over every message of a
+batch. A commit the broker refuses, or does not answer within thirty seconds, is the ingestor's
+transient status in `DESCRIBE INGESTOR`, and the ingestor reads the batch again, so its output can
+repeat; the status clears once a later commit is answered. A graceful stop or an ownership move
+waits for the answer to every commit of the work it drains, within the drain timeout.
+
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
-commits the positions it has read on its own schedule, without waiting for downstream
-acknowledgement, so a failure can lose records whose positions were committed before their
-downstream work completed.
+commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
+for downstream acknowledgement, so a failure can lose records whose positions were committed before
+their downstream work completed. Suspending or stopping the ingestor commits the positions it has
+read since the last of those commits, and waits for the broker's answer before the consumer leaves
+its group.
 
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
@@ -976,6 +986,24 @@ Delivery constraints:
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
+Without a `client_id` in the client configuration, one instance connects as
+`<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
+zero-based instance indices. An explicit identity shared by multiple instances must contain
+`{{instance}}`. Identities remain stable across node ownership changes.
+
+`DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
+opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
+and sends `DISCONNECT` with session expiry zero. Cleanup is best-effort: an unreachable broker is
+reported and does not prevent the drop. Its retained state can remain until the broker expires it
+or the operator clears it.
+
+Changing the input with `ALTER MQTT TOPIC INGESTOR ... SET FROM ...` retires the preceding filter
+and prepares the changed sessions at the new endpoint before the replacement starts. A failure to
+clean up the preceding endpoint does not prevent moving to a reachable new endpoint. Sessions
+whose broker, identity, filter, session mode and QoS still match are retained, including across
+an instance-count change. Changing a filter discards the retired filter's broker queue.
+Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
+
 `SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. It disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the
 session expires, resume establishes a fresh session and the interim is lost. `BUFFER` and `DROP`
@@ -1010,6 +1038,13 @@ are mandatory; use `INSTANCES 1` for a single queue member.
 Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
+
+A lost connection to the server ends the instance's subscription. `DESCRIBE INGESTOR` shows the
+loss, and then each failed reconnect, as its transient error, and the instance connects and
+subscribes again on the host's reconnect cadence: the delay starts at 250 ms, doubles after each
+failed attempt up to 30 s, and `DESCRIBE INGESTOR` shows it as the reconnect backoff. Messages the
+client received before the loss are still delivered. Core NATS retains nothing for a subscription
+that is not connected, so messages published while the instance reconnects never reach it.
 
 ### ZeroMQ
 

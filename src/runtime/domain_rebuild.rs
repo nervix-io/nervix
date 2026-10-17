@@ -275,7 +275,13 @@ impl Runtime {
         let build = || RuntimeError::build_domain_execution(domain);
         // Domain teardown, compilation, restoration, and startup are separate rebuild phases.
         // Their futures stay indirect to bound this coordinator's debug poll frame.
+        let retiring =
+            self.retiring_ingestor_inputs(domain, revision.as_deref(), Some(local_node_id));
         Box::pin(self.stop_domain_ingestors(domain)).await;
+        for retirement in retiring.into_values() {
+            nervix_primitives::task::consume_budget().await;
+            Box::pin(self.retire_ingestor_input(retirement)).await?;
+        }
 
         let desired_start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -283,7 +289,8 @@ impl Runtime {
         };
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
-            Box::pin(self.stop_domain_execution(domain, existing)).await;
+            Box::pin(self.stop_domain_execution(domain, existing, self.emitter_finish_deadline()))
+                .await;
         }
 
         let Some(revision) = revision else {

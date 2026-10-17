@@ -57,6 +57,7 @@ uuid = { workspace = true, features = ["v7"] }
 webpki-roots = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 http = { workspace = true }
 nervix-test-environment = { workspace = true }
 reqsign-core = { workspace = true }

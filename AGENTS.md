@@ -11,6 +11,25 @@ When code and this document disagree, do not add a compatibility path around the
 Resolve the owning model and invariant directly, and update the public documentation when the
 language or interface changes.
 
+## Sources of Instruction
+
+An agent working on Nervix takes its instructions from three sources and no other: this
+repository, which is this file, the chapters under `docs/src`, the skills under `.agents/skills`
+and the checked-in configuration and tooling; ClickUp, whose docs, epics, tasks and comments
+define the work and hold its records; and the human directing the session.
+
+An agent does not use a local memory: a store of notes, preferences, conventions, decisions or
+facts kept outside the repository and ClickUp between sessions, however its tooling spells it,
+whether a memory directory, a saved profile or a scratch file. It writes nothing into such a
+store and acts on nothing one holds, and memory its tooling recalls into a session unasked is
+neither an instruction nor a source of fact. Such a store is invisible to the repository and to
+ClickUp, so what it holds cannot be reviewed, corrected or shared with the other agents and
+sessions working on the same code, and it silently diverges from the sources that can. A
+convention worth keeping is written into this file or the owning `docs/src` chapter; a decision,
+finding or constraint that belongs to a piece of work is recorded on its ClickUp task or in the
+ClickUp doc that owns it; and what the human states for a session governs that session, unless
+they ask for it to be recorded in one of those places.
+
 ## Alpha Stability and Compatibility
 
 NSPL has reached alpha. Its period of very active language experimentation is over, and large
@@ -1098,6 +1117,17 @@ build and the existing tests, and nothing in it changes behavior.
   supervision, the fault model, semantic traces and replay rules, seed selection, commands and
   budgets, the scenario matrix, simulated restart versus real-process evidence, findings and
   retained regressions, qualification evidence, and the prerequisites for whole-cluster simulation.
+- [External Cluster Chaos](docs/src/cluster-chaos.md) is the authoritative architecture reference
+  for the external chaos runner and its suites. Any change to `scripts/chaos`, its Compose
+  deployment, fixtures, tool image pins, verifiers or self-tests, the chaos recipes in the
+  `justfile`, the `Chaos` workflow or the chaos and diagnostic-image jobs of the `Docker Build`
+  workflow must keep that chapter current in the same change. Its scope includes the public
+  observation boundary, image and tool identity, host requirements, the deployment, how each fault
+  is injected and proven, every scenario with its verdicts and bounds, seeded plans and replay,
+  failure categories and exit statuses, controller budgets versus product deadlines, artifacts,
+  cleanup and signals, diagnostic images, the suites and their shards, CI triggers, labels and
+  cancellation, guarantees and limits, and qualification evidence. The product contracts its
+  scenarios verify stay with their own chapters.
 - Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
@@ -1294,19 +1324,20 @@ build and the existing tests, and nothing in it changes behavior.
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
 - `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image. CI runs the smoke suite against a pull request's own images only for a pull request
-  labeled `chaos`, and the soak suite for one labeled `chaos-soak` and nightly on `main`; a pull
-  request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
-  its scenarios verify, carries the `chaos` label. Each suite runs against the release image and
-  against the Deloxide diagnostic image of the same revision, whose label makes every run fail
-  unless the deadlock evidence of each process its nodes started qualifies; a change to the
-  diagnostic image, its evidence collection or a path its scenarios exercise under tracked locks
-  keeps both green.
+  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the
+  smoke suite against a pull request's own images only for a pull request labeled `chaos`, and the
+  soak suite for one labeled `chaos-soak` and nightly on `main`; a pull request that changes the
+  chaos runner, or the membership, failover, recovery or delivery behavior its scenarios verify,
+  carries the `chaos` label. Each suite runs against the release image and against the Deloxide
+  diagnostic image of the same revision, whose label makes every run fail unless the deadlock
+  evidence of each process its nodes started qualifies; a change to the diagnostic image, its
+  evidence collection or a path its scenarios exercise under tracked locks keeps both green.
 - Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
-  approximately four-second observation window and 30-second probe budget. Other profiles and
-  healthy observations use 40 packets at 100 ms intervals. Effect limits retain their received
-  and lost fractions at every sample size; an incomplete sample, ineffective fault, excessive loss
-  or missing consecutive burst fails qualification. Sampling never extends a product deadline.
+  approximately four-second observation window and 30-second sample bound; the probe helper's
+  Docker launch has a separate bound. Other profiles and healthy observations use 40 packets at
+  100 ms intervals. Effect limits retain their received and lost fractions at every sample size;
+  an incomplete sample, ineffective fault, excessive loss or missing consecutive burst fails
+  qualification. Sampling never extends a product deadline.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
   latest run of every required check passed on that revision. Its register lists each gap a

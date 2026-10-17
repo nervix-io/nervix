@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ClientProducerSource, ClientSourceEntity, CodecName, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSource, IngestSourceKind, ModelKind, ModelName,
+    IngestSource, IngestSourceKind, ModelKind, ModelName, SourceEntity,
 };
 
 /// The only quiesce mode a client source honors: admission stops and the producer keeps its
@@ -142,10 +142,13 @@ impl IngestorInput {
         }
     }
 
+    /// Whether this input can honor `quiesce`, as its entity declares.
     pub fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
         match self {
             Self::Transport(input) => input.source.supports_quiesce(quiesce),
-            Self::Client(_) => matches!(quiesce, IngestQuiesceMode::Suspend),
+            Self::Client(_) => ClientProducerSource::CAPABILITIES
+                .declared_quiesce(quiesce.kind())
+                .is_some(),
         }
     }
 

@@ -2428,7 +2428,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2529,7 +2529,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2690,6 +2690,12 @@ test-nspl-backup-completion:
 validate-nspl-docs:
     cargo test -p nervix-nspl --test documentation -- --nocapture
 
+# Hold tests/connector-capability-inventory.toml to the connector entities' declarations and the
+# scenario suite: every capability an entity declares names a scenario that observes it at run
+# time, every entry names a declared capability once, and every scenario it names exists.
+validate-connector-capabilities:
+    cargo test -p nervix-models --test capability_inventory
+
 # Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
 # job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
@@ -2836,6 +2842,10 @@ coverage-chaos-network-preflight image="":
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
+
+# Judge mixed-instability holds over a lossy link from retained public statuses without a product image.
+test-chaos-hold-quorum:
+    exec bash scripts/chaos/tests/hold-quorum-self-test.sh
 
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:

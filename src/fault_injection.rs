@@ -111,6 +111,11 @@ struct FaultInjectionState {
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
+    /// One-shot, domain-scoped transport failures of the next ownership-handoff gate engagement
+    /// request a coordinator sends to a remote node. Each keeps whether it was delivered, so a
+    /// scenario proves the failure happened instead of assuming it.
+    handoff_engagement_transport_failures:
+        DashMap<DomainName, HandoffEngagementTransportFailure, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -319,11 +324,20 @@ enum RemoteAcknowledgementLoss {
     Lost,
 }
 
+/// Whether the transport failure a scenario armed for a domain's next ownership-handoff gate
+/// engagement request was delivered yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandoffEngagementTransportFailure {
+    Armed,
+    Delivered,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
     RuntimeInstallation(ClusterNodeName),
+    ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
@@ -394,6 +408,7 @@ impl Default for FaultInjection {
                 stalled_emitter_sinks: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
+                handoff_engagement_transport_failures: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
@@ -1060,6 +1075,23 @@ impl FaultInjection {
         self.inner.failed_entity_gate_engagements.insert(domain, ());
     }
 
+    /// Fails the next ownership-handoff gate engagement request a coordinator sends to a remote
+    /// node in `domain` in transport, as a broken interconnect stream would, without sending it.
+    pub fn break_next_handoff_engagement_transport(&self, domain: DomainName) {
+        self.inner
+            .handoff_engagement_transport_failures
+            .insert(domain, HandoffEngagementTransportFailure::Armed);
+    }
+
+    /// Whether the transport failure armed for `domain`'s next ownership-handoff gate engagement
+    /// request was delivered.
+    pub fn handoff_engagement_transport_failure_delivered(&self, domain: &DomainName) -> bool {
+        let Some(failure) = self.inner.handoff_engagement_transport_failures.get(domain) else {
+            return false;
+        };
+        *failure == HandoffEngagementTransportFailure::Delivered
+    }
+
     /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
     /// complete status observation. The one-shot seam lets timeout recovery tests exercise that
     /// outcome without making successful cluster work race a short duration.
@@ -1335,6 +1367,34 @@ impl FaultInjection {
 
     pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
+    /// Resume a held initial installation only after forced recovery observes its missing
+    /// schedule. The observation precedes release, so the fixture never races two scenario steps
+    /// against the recovery budget.
+    pub fn resume_installation_after_missing_recovery_schedule(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ForcedRecoveryMissingSchedule(node_id));
+    }
+
+    pub async fn wait_for_missing_recovery_schedule(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ForcedRecoveryMissingSchedule(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub(crate) fn missing_recovery_schedule_if_armed(&self, node_id: &ClusterNodeName) {
+        let point = CommandPausePoint::ForcedRecoveryMissingSchedule(node_id.clone());
+        let pause = match self.inner.command_pauses.get(&point) {
+            Some(pause) => pause.value().clone(),
+            None => return,
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        self.release_runtime_installation_pause(node_id);
+        // Keep the one-shot observation until the scenario observes it or finishes cleanup.
     }
 
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
@@ -2063,6 +2123,23 @@ impl FaultInjection {
             .failed_entity_gate_engagements
             .remove(domain)
             .is_some()
+    }
+
+    /// Delivers the armed transport failure of `domain`'s next ownership-handoff gate engagement
+    /// request once, and records that it was delivered.
+    pub(crate) fn take_handoff_engagement_transport_failure(&self, domain: &DomainName) -> bool {
+        let Some(mut failure) = self
+            .inner
+            .handoff_engagement_transport_failures
+            .get_mut(domain)
+        else {
+            return false;
+        };
+        if *failure != HandoffEngagementTransportFailure::Armed {
+            return false;
+        }
+        *failure = HandoffEngagementTransportFailure::Delivered;
+        true
     }
 
     /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
