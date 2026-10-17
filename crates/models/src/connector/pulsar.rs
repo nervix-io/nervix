@@ -121,7 +121,8 @@ impl SourceEntity for PulsarTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,
-        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        // In an `ACK` mode; `MODE NO ACK` acknowledges without waiting for the broker.
+        acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[
             DeclaredDelivery::NO_ACK,
             DeclaredDelivery::ACK_SEQUENTIAL,
