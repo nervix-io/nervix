@@ -108,6 +108,7 @@ use crate::common::{
         WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
+    command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
@@ -127,8 +128,8 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{
-        TestUpload, TestUploadPart, WireOutcome as _, flatten_command_messages,
-        fresh_execution_reference, outcome_not_leader, outcome_succeeded, outcome_unknown,
+        SessionScope, TestUpload, TestUploadPart, WireOutcome as _, command_output,
+        fresh_execution_reference, outcome_awaits_leader,
     },
     runner_lag::RunnerLagObserver,
     scenario_phase::{
@@ -7504,11 +7505,11 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         "#
     );
     let commands = expand_placeholders(world, &commands);
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let started = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("the WASM reset graph must start");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(started.session);
+    world.active_session_node = Some(started.node);
     world.active_session_has_subscription = true;
 
     if !placement_commands.is_empty() {
@@ -13016,85 +13017,124 @@ async fn execute_nspl_commands_on_node(
     Ok(session)
 }
 
-/// A session that ran a step's commands on the leader, and the node it ended on.
-struct LeaderSession {
-    session: TestSession,
-    node: String,
+/// Learns the outcome of `command`, whose attempt under `reference` on a session of `scope` returned
+/// `first`, from the node that leads now, and logs which node answered.
+async fn learn_command_outcome(
+    routes: &LeaderRoutes,
+    scope: &SessionScope,
+    command: &str,
+    reference: &str,
+    first: nervix_client_wire::CommandOutcome,
+) -> LearnedOutcome {
+    append_cucumber_log_line(&format!(
+        "execution reference {reference} awaits the current leader ({}); sending it to the nodes",
+        first.message
+    ));
+    let learned = routes.learn_outcome(scope, command, reference, first).await;
+    match &learned.answered_on {
+        Some(answered) => append_cucumber_log_line(&format!(
+            "node {} answered execution reference {reference}: {:?}",
+            answered.node, learned.outcome.disposition
+        )),
+        None => {
+            append_cucumber_log_line(&format!("no node answered execution reference {reference}"))
+        }
+    }
+    learned
 }
 
-/// How long one command may take, in all, to learn an outcome that leadership changes left
-/// unknown. A test cluster elects a leader within its two-second election timeout; the rest is
-/// slack for a loaded machine.
-const UNKNOWN_OUTCOME_RECOVERY: Duration = Duration::from_secs(60);
+/// Runs `command` on `session`, which stays where it is because it may hold subscriptions or a
+/// transaction. When the node it reached does not lead, or leadership moved before the outcome was
+/// known, another session of the same user learns the outcome from the node that leads now,
+/// provided the command leaves what `session` holds alone. Returns the command's messages when it
+/// completed, and otherwise the failure a raw session reports.
+async fn run_command_on_held_session(
+    routes: &LeaderRoutes,
+    session: &mut TestSession,
+    command: &str,
+) -> Result<String, String> {
+    let reference = fresh_execution_reference();
+    let mut outcome = session
+        .run_command_result_with_reference(command, &reference)
+        .await
+        .map_err(|error| error.to_string())?;
+    if outcome_awaits_leader(&outcome) && session.outcome_learnable_elsewhere(command) {
+        let scope = session.scope();
+        let learned = learn_command_outcome(routes, &scope, command, &reference, outcome).await;
+        outcome = learned.outcome;
+    }
+    command_output(&outcome).map_err(|error| error.to_string())
+}
 
-/// Runs `commands` on the current leader in one session. When leadership moves before a command
-/// reached the leader, or after the leader admitted it and before its outcome was known, the command
-/// is sent again with the same execution reference to the current leader, as the client protocol
-/// requires, and the step goes on there once the outcome is known. The session moves with the
-/// command only while it holds no subscription and no transaction, which no other session could
-/// continue; a command whose outcome stays unknown past that point fails the step as before.
+/// Runs `commands` on the current leader in one session, and returns that session and the node it
+/// ended on.
+///
+/// When leadership moves before a command reached the leader, or after the leader admitted it and
+/// before its outcome was known, the step learns the outcome by sending the command again with the
+/// same execution reference to the node that leads now, as the client protocol requires. While the
+/// session holds no subscription and no transaction, it moves to that node with the command and
+/// the step goes on there. Once it holds one it stays where it is, as
+/// [`run_command_on_held_session`] describes.
 async fn execute_nspl_commands_on_leader(
     world: &mut ScenarioWorld,
     commands: &str,
-) -> Result<LeaderSession, String> {
-    let mut node = current_leader_node(world).await;
+) -> Result<NodeSession, String> {
+    let node = current_leader_node(world).await;
     if !requires_persistent_session(commands) || subscription_graph_statements(commands).is_some() {
         // The client library sends each command and recovers its outcome itself, the server
         // statements of a subscription graph included.
         let session = execute_nspl_commands_on_node(world, &node, commands).await?;
-        return Ok(LeaderSession { session, node });
+        return Ok(NodeSession { node, session });
     }
     record_avro_wire_optional_fields(world, commands);
     append_cucumber_log_line(&format!(
         "nspl commands on node {node}: {}",
         commands.replace('\n', "\\n")
     ));
-    let mut session = world
+    let routes = world.cluster().leader_routes();
+    let session = world
         .cluster()
         .open_session(&node, &world.domain)
         .await
         .map_err(|error| error.to_string())?;
+    let mut current = NodeSession { node, session };
     let mut session_bound = false;
     for command in nspl_statements(commands) {
         nervix_primitives::task::consume_budget().await;
-        append_cucumber_log_line(&format!("nspl command on session {node}: {command}"));
-        let reference = fresh_execution_reference();
-        let deadline = Instant::now() + UNKNOWN_OUTCOME_RECOVERY;
-        let outcome = loop {
-            nervix_primitives::task::consume_budget().await;
-            let outcome = session
-                .run_command_result_with_reference(&command, &reference)
-                .await
-                .map_err(|error| error.to_string())?;
-            let awaits_leader = outcome_unknown(&outcome) || outcome_not_leader(&outcome);
-            if !awaits_leader || session_bound || Instant::now() >= deadline {
-                break outcome;
-            }
-            node = current_leader_node(world).await;
-            append_cucumber_log_line(&format!(
-                "leadership moved before execution reference {reference} reached a known outcome; \
-                 sending it to node {node}"
-            ));
-            session = world
-                .cluster()
-                .open_session(&node, &world.domain)
-                .await
-                .map_err(|error| error.to_string())?;
-        };
-        if !outcome_succeeded(&outcome) {
-            return Err(format!(
-                "command failed: {}\ndiagnostics: {:?}",
-                outcome.message, outcome.diagnostics
-            ));
+        append_cucumber_log_line(&format!(
+            "nspl command on session {}: {command}",
+            current.node
+        ));
+        if session_bound {
+            let output =
+                run_command_on_held_session(&routes, &mut current.session, &command).await?;
+            world.last_command_output = Some(output);
+            continue;
         }
-        world.last_command_output = Some(flatten_command_messages(&outcome));
+        let reference = fresh_execution_reference();
+        let mut outcome = current
+            .session
+            .run_command_result_with_reference(&command, &reference)
+            .await
+            .map_err(|error| error.to_string())?;
+        if outcome_awaits_leader(&outcome) {
+            let scope = current.session.scope();
+            let learned =
+                learn_command_outcome(&routes, &scope, &command, &reference, outcome).await;
+            outcome = learned.outcome;
+            if let Some(answered) = learned.answered_on {
+                current = answered;
+            }
+        }
+        let output = command_output(&outcome).map_err(|error| error.to_string())?;
+        world.last_command_output = Some(output);
         let statement = command.trim().to_ascii_uppercase();
         if command_updates_subscription_state(false, &command) || statement == "BEGIN;" {
             session_bound = true;
         }
     }
     record_mqtt_ingestors(world, commands);
-    Ok(LeaderSession { session, node })
+    Ok(current)
 }
 
 #[given(expr = "the active domain is {string}")]
@@ -13161,15 +13201,13 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
         .open_session(&leader, &world.domain)
         .await
         .expect("failed to open background NSPL session");
+    let routes = world.cluster().leader_routes();
     world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let mut last_output = String::new();
             for command in statements {
                 nervix_primitives::task::consume_budget().await;
-                last_output = session
-                    .run_command(&command)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                last_output = run_command_on_held_session(&routes, &mut session, &command).await?;
             }
             Ok(last_output)
         },
@@ -13429,10 +13467,19 @@ async fn execute_command_request_with_reference_on_leader(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
-    let result = session
+    let mut result = session
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    if outcome_awaits_leader(&result) {
+        // The step's session holds nothing and ends with the step, so whichever session learns the
+        // outcome stands in for it.
+        let routes = world.cluster().leader_routes();
+        let scope = session.scope();
+        let learned =
+            learn_command_outcome(&routes, &scope, &query, execution_reference, result).await;
+        result = learned.outcome;
+    }
     world.last_command_disposition = Some(result.disposition.clone());
     if result.succeeded() {
         world.last_command_error = None;
@@ -13778,16 +13825,16 @@ async fn run_nspl_commands_on_active_session(
         "nspl commands on active session: {}",
         commands.replace('\n', "\\n")
     ));
-    let session = world
-        .active_session
-        .as_mut()
-        .expect("an active session must exist");
+    let routes = world.cluster().leader_routes();
     for command in nspl_statements(commands) {
+        nervix_primitives::task::consume_budget().await;
         append_cucumber_log_line(&format!("nspl command on active session: {command}"));
-        match session.run_command(&command).await {
-            Ok(output) => world.last_command_output = Some(output),
-            Err(error) => return Err(error.to_string()),
-        }
+        let session = world
+            .active_session
+            .as_mut()
+            .expect("an active session must exist");
+        let output = run_command_on_held_session(&routes, session, &command).await?;
+        world.last_command_output = Some(output);
         world.active_session_has_subscription =
             command_updates_subscription_state(world.active_session_has_subscription, &command);
     }
@@ -13840,12 +13887,11 @@ async fn when_a_new_session_executes_these_nspl_commands(
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL commands on a new session");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -13983,11 +14029,11 @@ async fn when_these_nspl_commands_are_executed(world: &mut ScenarioWorld, #[step
             .expect("failed to execute NSPL command on active session");
         return;
     }
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL setup command");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -16572,12 +16618,11 @@ async fn when_the_unacknowledged_source_ingestor_is_created(
     let source = UnacknowledgedSourceFixture::parse(&source);
     source.prepare(world).await;
     let commands = expand_placeholders(world, &source.commands());
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let created = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to create the unacknowledged source's models on the leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(created.session);
+    world.active_session_node = Some(created.node);
     world.active_session_has_subscription = true;
 }
 
@@ -16700,13 +16745,12 @@ async fn given_the_leader_node_is_configured_with_these_nspl_commands(
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
-    let leader = current_leader_node(world).await;
     let commands = expand_placeholders(world, docstring(step));
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let configured = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL setup command on leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(configured.session);
+    world.active_session_node = Some(configured.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -16725,8 +16769,7 @@ async fn when_these_nspl_commands_fail_with(
 
     let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail with {:?}", expected_error),
         Err(error) => {
             assert!(
@@ -16788,8 +16831,7 @@ async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: 
     world.active_session_has_subscription = false;
 
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail"),
         Err(error) => {
             append_cucumber_log_line(&format!("expected command failure observed: {error}"));
@@ -16817,10 +16859,13 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), true),
     );
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let started = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to start ingestor logic fixture on leader");
+    let NodeSession {
+        node: leader,
+        session,
+    } = started;
     if transport.executes_on_scheduled_owner() {
         let placement = PhaseDeadline::after(Duration::from_secs(5));
         let mut last_output = None;
@@ -16896,8 +16941,7 @@ async fn when_the_ingestor_logic_fixture_fails_to_start_with_output_schema_and_p
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), false),
     );
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected ingestor logic fixture to fail during leader validation"),
         Err(error) => {
             append_cucumber_log_line(&format!("logic fixture start failure observed: {error}"));

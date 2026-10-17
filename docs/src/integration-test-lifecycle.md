@@ -68,6 +68,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Command outcome recovery | On the task of the step, or of its background execution, whose raw wire command left its outcome to the current leader: one session at a time, opened to each node in turn and dropped once that node answers | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -451,12 +452,26 @@ The boundary between them is kept in four places.
   after failover. The large materialized backup workload submits
   each graph statement through the production client so a leadership change during its many relay
   definitions recovers that statement by reference; its Row subscription opens on a raw session
-  after the graph is ready. A leader setup step whose other commands need one session, because
-  they create a subscription or open a transaction, runs them over a raw wire session; when
-  leadership moves before one of them reached the leader, or after the leader admitted it and
-  before its outcome was known, the step sends that command again with the same execution
-  reference to the current leader, as a client must, and goes on there, within 60 seconds per
-  command and only while the session holds no subscription or transaction yet.
+  after the graph is ready. A step that sends commands to the leader over a raw wire session,
+  because they create a subscription or open a transaction, learns a command's outcome the way a
+  client must when leadership moves before the command reached the leader, or after the leader
+  admitted it and before its outcome was known. It sends the command again with the same
+  execution reference, on a session of the same user and domain, to each node in turn until the
+  node that leads answers with an outcome only a leader knows. A follower refuses the command
+  before admitting anything, a stopped node refuses the connection, and a node that still believes
+  it leads answers with another unknown outcome, so recovery reads no status to find the leader,
+  and a step's background execution recovers the same way. No new round starts once 60 seconds
+  have passed for one command, and a repeated command that joins an execution still applying waits
+  for its reply. While the step's session holds no subscription and no transaction, it moves to the
+  node that answered and the step goes on there. A session that holds one stays where it is, so
+  its subscriptions keep delivering. For the active session a later step reuses, for a background
+  execution's session, and for a setup session once it opened a subscription, another session of
+  the same user learns the outcome of a command that leaves what the session holds alone. A
+  command sent while the session is bound to a transaction keeps its unknown outcome and fails the
+  step, and so does a command that begins or ends a transaction, opens or deletes a subscription,
+  attaches a clock or changes the domain on a session that cannot move. A request a step sends once
+  under a scenario-chosen execution reference learns its outcome the same way before the step
+  records its disposition.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   retain the protocol's received dispositions. A paced-driver file fixture writes only the
