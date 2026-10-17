@@ -6842,6 +6842,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "async-trait",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
@@ -6968,12 +6969,12 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
- "humantime",
- "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -7125,8 +7126,10 @@ name = "nervix-connector-sentry"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
@@ -7136,6 +7139,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -9493,7 +9497,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-max-message-size#37f70aa16d3a6cc0493d25e0ca73c0e7b0c07f80"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#1545163035670abe8996be7bd2610e45421c47ce"
 dependencies = [
  "async-channel",
  "async-trait",

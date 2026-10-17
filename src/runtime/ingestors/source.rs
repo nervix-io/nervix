@@ -1629,7 +1629,7 @@ enum BatchDisposition<P> {
 struct BatchSettlement {
     position_class: PositionClass,
     /// How long the loop waits before it retries the batch, which the transient status of a
-    /// confirmation that failed states.
+    /// confirmation or a rejection that failed states.
     retry_after: Duration,
 }
 
@@ -1749,6 +1749,8 @@ pub(super) async fn run_source_instance_with_retry<C>(
         // resume discards a broker-redelivered one and a source without positions never keeps one.
         if let Some(positions) = pending_rejection.take() {
             if let Err(error) = source.reject(&positions).await {
+                let delay = source_retry_delay(retry_delay);
+                host.record_transient_error(source_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
                 pending_rejection = Some(positions);
                 if let Err(error) = source.suspend().await {
@@ -1756,7 +1758,6 @@ pub(super) async fn run_source_instance_with_retry<C>(
                 }
                 ready = false;
                 host.mark_unready();
-                let delay = source_retry_delay(retry_delay);
                 if !wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
@@ -1920,7 +1921,7 @@ where
                 Ok(acknowledgement) => acknowledgement,
                 Err(error) => {
                     host.report_error(format!("{error:#}"));
-                    return reject_batch(source, host, settlement.position_class, positions).await;
+                    return reject_batch(source, host, settlement, positions).await;
                 }
             };
             settle_acknowledged_batch(
@@ -1960,7 +1961,7 @@ where
         }
         SourceAcknowledgementOutcome::NoAck(reason) => {
             host.handle_ack_failure(reason);
-            reject_batch(source, host, settlement.position_class, positions).await
+            reject_batch(source, host, settlement, positions).await
         }
         SourceAcknowledgementOutcome::Shutdown => {
             host.record_unconfirmed_stop(positions.len());
@@ -1991,15 +1992,18 @@ where
     };
     host.record_transient_error(source_failure_reason(&error), settlement.retry_after);
     host.report_error(format!("{error:#}"));
-    reject_batch(source, host, settlement.position_class, positions).await
+    reject_batch(source, host, settlement, positions).await
 }
 
 /// Rejects `positions` so the source presents them again, and decides by the source's position
 /// class what a rejection that failed leaves pending.
+///
+/// A rejection that fails is the ingestor's transient status, as a confirmation that fails is,
+/// until a later confirmation succeeds.
 async fn reject_batch<C>(
     source: &mut C,
     host: &mut SourceHost,
-    position_class: PositionClass,
+    settlement: BatchSettlement,
     positions: Vec<C::Position>,
 ) -> BatchDisposition<C::Position>
 where
@@ -2008,8 +2012,9 @@ where
     let Err(error) = source.reject(&positions).await else {
         return BatchDisposition::Retry;
     };
+    host.record_transient_error(source_failure_reason(&error), settlement.retry_after);
     host.report_error(format!("{error:#}"));
-    match position_class {
+    match settlement.position_class {
         PositionClass::Replayable | PositionClass::BrokerRedelivered => {
             BatchDisposition::RetryRejection(positions)
         }

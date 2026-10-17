@@ -290,6 +290,24 @@ pub(crate) enum SourceStartPlan {
 }
 
 impl IngestorStartPlan {
+    /// Whether replacing this input retires external state that outlives its execution.
+    /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
+    pub(crate) fn requires_source_retirement(&self, replacement: Option<&Self>) -> bool {
+        let IngestorInputPlan::Transport(input) = &self.input else {
+            return false;
+        };
+        let SourceStartPlan::Mqtt(source) = &input.source else {
+            return false;
+        };
+        if let Some(replacement) = replacement
+            && let IngestorInputPlan::Transport(input) = &replacement.input
+            && let SourceStartPlan::Mqtt(replacement) = &input.source
+        {
+            return source != replacement;
+        }
+        true
+    }
+
     /// Decides the start plan of one scheduled ingestor from the node its input resolved to: the
     /// client or endpoint a transport reads through, or the schema a client source's batches
     /// carry.
@@ -1345,6 +1363,35 @@ mod tests {
             SourceStartPlan::Kafka(source) if source.offsets == domain_offsets
         ));
         assert!(plan.keeps_domain_offsets());
+    }
+
+    #[test]
+    fn retirement_follows_the_mqtt_input_and_preserves_codec_only_changes() {
+        let case = mqtt_case();
+        let plans = planned_entrypoints(domain_models(case.source, case.source_model))
+            .assured("a matching source and ingestor produce a plan");
+        let previous = start_plan(&plans);
+        assert!(previous.requires_source_retirement(None));
+        assert!(!previous.requires_source_retirement(Some(previous)));
+
+        let mut input = transport_plan(previous).clone();
+        input.codec = named("alternate_json");
+        let mut replacement = previous.clone();
+        replacement.input = IngestorInputPlan::Transport(input.clone());
+        assert!(!previous.requires_source_retirement(Some(&replacement)));
+
+        let SourceStartPlan::Mqtt(source) = &mut input.source else {
+            panic!("the MQTT fixture produces a typed MQTT source");
+        };
+        source.topic = nervix_models::MqttTopicFilter::parse("replacement/#")
+            .assured("the replacement topic filter is valid");
+        replacement.input = IngestorInputPlan::Transport(input.clone());
+        assert!(previous.requires_source_retirement(Some(&replacement)));
+
+        input.source = http_case().plan;
+        replacement.input = IngestorInputPlan::Transport(input);
+        assert!(previous.requires_source_retirement(Some(&replacement)));
+        assert!(!replacement.requires_source_retirement(None));
     }
 
     #[test]

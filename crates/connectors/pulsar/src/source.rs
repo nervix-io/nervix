@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** The Pulsar client a source configuration declares, its TLS options, topic
 //!   qualification, the shared-subscription consumer each instance reads through, message
-//!   properties as ingest headers, and per-message acknowledgement and negative acknowledgement.
+//!   properties as ingest headers, acknowledgements the broker answers, redelivery requests, and
+//!   the classification of an acknowledgement or a redelivery request that did not take effect.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio and `pulsar`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
@@ -21,7 +22,7 @@
     )
 )]
 
-use std::num::NonZeroUsize;
+use std::{collections::BTreeMap, fmt, io, num::NonZeroUsize};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -38,12 +39,72 @@ use pulsar::{
     Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
     SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
     consumer::{InitialPosition as PulsarInitialPosition, Message as PulsarMessage},
+    error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
+    message::proto::ServerError as PulsarServerError,
     proto::MessageIdData,
 };
 use thiserror::Error;
 use tracing::warn;
 
 const PULSAR: &str = "pulsar";
+
+/// What a Pulsar broker answered when it refused a request: its server error, absent when the
+/// client does not know the error's code, and the reason it gave, absent when it gave none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulsarRefusal {
+    pub error: Option<PulsarServerError>,
+    pub reason: Option<String>,
+}
+
+impl fmt::Display for PulsarRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.error {
+            Some(error) => formatter.write_str(error.as_str_name())?,
+            None => formatter.write_str("a server error this client does not know")?,
+        }
+        if let Some(reason) = &self.reason {
+            write!(formatter, ": {reason}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Why a request of a Pulsar consumer has no outcome it can rely on: the broker may or may not
+/// have applied it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PulsarUnresolvedRequest {
+    /// Nothing answered within the client's operation timeout, such as while its connection is
+    /// stalled or a reconnection holds the consumer back.
+    #[error("the client's operation timeout passed first")]
+    OperationTimeout,
+    /// The connection closed before the request was answered or sent.
+    #[error("the connection closed first")]
+    ConnectionClosed,
+    /// The consumer stopped before the request was answered or sent.
+    #[error("the consumer stopped first")]
+    ConsumerStopped,
+}
+
+impl PulsarUnresolvedRequest {
+    /// What `error` leaves unresolved, when it says the request went unanswered rather than that
+    /// the broker refused it or the client failed otherwise.
+    fn of(error: &PulsarConsumerError) -> Option<Self> {
+        match error {
+            PulsarConsumerError::Connection(PulsarConnectionError::Io(source))
+                if source.kind() == io::ErrorKind::TimedOut =>
+            {
+                Some(Self::OperationTimeout)
+            }
+            PulsarConsumerError::Connection(
+                PulsarConnectionError::Disconnected
+                | PulsarConnectionError::Canceled
+                | PulsarConnectionError::Shutdown,
+            ) => Some(Self::ConnectionClosed),
+            PulsarConsumerError::Closed => Some(Self::ConsumerStopped),
+            _ => None,
+        }
+    }
+}
 
 /// Why a Pulsar source could not connect, consume, or settle a message.
 #[derive(Debug, Error)]
@@ -62,8 +123,23 @@ pub enum PulsarSourceError {
     Receive,
     #[error("Pulsar consumer closed")]
     ConsumerClosed,
+    /// The broker refused an acknowledgement, so the messages it named stay unacknowledged on the
+    /// subscription.
+    #[error("the Pulsar broker refused an acknowledgement with {refusal}")]
+    AcknowledgementRefused { refusal: PulsarRefusal },
+    /// The broker did not confirm an acknowledgement, so whether it applied it is unknown.
+    #[error("the Pulsar broker did not confirm an acknowledgement: {unresolved}")]
+    AcknowledgementUnconfirmed { unresolved: PulsarUnresolvedRequest },
+    /// The consumer did not confirm that it sent a redelivery request. The broker answers none,
+    /// and it redelivers an unacknowledged message once the connection that delivered it is gone.
+    #[error("the Pulsar consumer did not confirm sending a redelivery request: {unresolved}")]
+    RedeliveryRequestUnsent { unresolved: PulsarUnresolvedRequest },
+    /// An acknowledgement failed in a way this source does not classify; the client's error is the
+    /// cause beneath.
     #[error("failed to acknowledge a Pulsar message")]
     Acknowledge,
+    /// A redelivery request failed in a way this source does not classify; the client's error is
+    /// the cause beneath.
     #[error("failed to negatively acknowledge a Pulsar message")]
     NegativelyAcknowledge,
     #[error("failed to close the Pulsar consumer")]
@@ -72,16 +148,72 @@ pub enum PulsarSourceError {
     BatchDeadline,
 }
 
+impl PulsarSourceError {
+    /// What a failed acknowledgement means: the refusal the broker answered with, an answer the
+    /// client could not get, or a failure this source does not classify, which keeps the client's
+    /// error beneath it.
+    fn unsettled_acknowledgement(error: PulsarConsumerError) -> Report<Self> {
+        if let PulsarConsumerError::Connection(PulsarConnectionError::PulsarError(code, reason)) =
+            &error
+        {
+            return Report::new(Self::AcknowledgementRefused {
+                refusal: PulsarRefusal {
+                    error: *code,
+                    reason: reason.clone(),
+                },
+            });
+        }
+        if let Some(unresolved) = PulsarUnresolvedRequest::of(&error) {
+            return Report::new(Self::AcknowledgementUnconfirmed { unresolved });
+        }
+        Report::new(error).change_context(Self::Acknowledge)
+    }
+
+    /// What a failed redelivery request means: a request the consumer could not confirm sending,
+    /// or a failure this source does not classify, which keeps the client's error beneath it.
+    fn unsent_redelivery_request(error: PulsarConsumerError) -> Report<Self> {
+        if let Some(unresolved) = PulsarUnresolvedRequest::of(&error) {
+            return Report::new(Self::RedeliveryRequestUnsent { unresolved });
+        }
+        Report::new(error).change_context(Self::NegativelyAcknowledge)
+    }
+}
+
 type PulsarSourceResult<T> = Result<T, Report<PulsarSourceError>>;
 
+/// Whether acknowledging a Pulsar source's positions waits for the broker's answer, which the
+/// ingestor's acknowledgement mode decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PulsarAckReceipts {
+    /// `MODE NO ACK`: acknowledging returns once the client queued the acknowledgements. A mode
+    /// that holds no acknowledgement tree reads one message at a time, and waiting for the broker
+    /// would add a round trip to every read.
+    Unawaited,
+    /// An `ACK` mode: acknowledging returns once the broker answered the acknowledgements, which
+    /// is the progress the host reports for the batch.
+    Awaited,
+}
+
+impl PulsarAckReceipts {
+    /// Whether the client sends acknowledgements with a request id and waits for their answer.
+    fn enabled(self) -> bool {
+        match self {
+            Self::Unawaited => false,
+            Self::Awaited => true,
+        }
+    }
+}
+
 /// What one Pulsar source subscribes with: its resolved client entries, the topic it reads, the
-/// shared subscription it joins, and the name its consumers register under.
+/// shared subscription it joins, the name its consumers register under, and whether acknowledging
+/// waits for the broker.
 pub struct PulsarSourceSettings<'a> {
     pub config: &'a [ClientConfigEntry],
     pub topic: &'a PulsarTopicName,
     pub subscription: PulsarSubscriptionName,
     /// Each instance's consumer registers under this name suffixed with its instance index.
     pub consumer_name: String,
+    pub ack_receipts: PulsarAckReceipts,
 }
 
 /// One Pulsar source's client and the shared subscription every instance consumes from.
@@ -93,6 +225,7 @@ pub struct PulsarSourcePlan {
     topic: String,
     subscription: PulsarSubscriptionName,
     consumer_name: String,
+    ack_receipts: PulsarAckReceipts,
 }
 
 impl PulsarSourcePlan {
@@ -102,6 +235,7 @@ impl PulsarSourcePlan {
             topic,
             subscription,
             consumer_name,
+            ack_receipts,
         } = settings;
         let client = Self::client_from_config(config).await?;
         Ok(Self {
@@ -109,6 +243,7 @@ impl PulsarSourcePlan {
             topic: Self::topic_from_config(config, topic.as_str()),
             subscription,
             consumer_name,
+            ack_receipts,
         })
     }
 
@@ -193,7 +328,8 @@ impl PulsarSourcePlan {
             .with_subscription_type(PulsarSubType::Shared)
             .with_options(
                 PulsarConsumerOptions::default()
-                    .with_initial_position(PulsarInitialPosition::Earliest),
+                    .with_initial_position(PulsarInitialPosition::Earliest)
+                    .with_ack_receipt_enabled(self.ack_receipts.enabled()),
             )
             .build()
             .await
@@ -387,26 +523,35 @@ impl BrokerSourceConnector for PulsarSource {
         Ok(SourceBatch::Messages(messages))
     }
 
+    /// The positions of each topic are acknowledged in one command. Under an `ACK` mode
+    /// acknowledging returns once the broker answered every one of them, within the client's
+    /// operation timeout; under `MODE NO ACK`, once the client queued them.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Err(Report::new(PulsarSourceError::ConsumerClosed)
                 .change_context(SourceError::Acknowledge { connector: PULSAR }));
         };
+        let mut by_topic: BTreeMap<&str, Vec<MessageIdData>> = BTreeMap::new();
         for position in positions {
+            by_topic
+                .entry(position.topic.as_str())
+                .or_default()
+                .push(position.message_id.clone());
+        }
+        for (topic, message_ids) in by_topic {
             nervix_primitives::task::consume_budget().await;
             consumer
-                .ack_with_id(&position.topic, position.message_id.clone())
+                .ack_with_ids(topic, message_ids)
                 .await
-                .map_err(|source| {
-                    Report::new(PulsarSourceError::Acknowledge).attach_printable(source.to_string())
-                })
+                .map_err(PulsarSourceError::unsettled_acknowledgement)
                 .change_context(SourceError::Acknowledge { connector: PULSAR })?;
         }
         Ok(())
     }
 
     /// A rejected message is negatively acknowledged, which asks the broker to redeliver it on the
-    /// shared subscription.
+    /// shared subscription. Rejecting returns once the consumer sent the request; the broker does
+    /// not answer it.
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Err(Report::new(PulsarSourceError::ConsumerClosed)
@@ -417,15 +562,20 @@ impl BrokerSourceConnector for PulsarSource {
             consumer
                 .nack_with_id(&position.topic, position.message_id.clone())
                 .await
-                .map_err(|source| {
-                    Report::new(PulsarSourceError::NegativelyAcknowledge)
-                        .attach_printable(source.to_string())
-                })
+                .map_err(PulsarSourceError::unsent_redelivery_request)
                 .change_context(SourceError::Reject { connector: PULSAR })?;
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_tests.rs"]
+mod settlement_tests;
 
 #[cfg(test)]
 #[cfg_attr(

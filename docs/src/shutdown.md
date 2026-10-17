@@ -658,6 +658,12 @@ reaches its completion point before the process ends.
 
 ### Sources
 
+An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
+Removing or changing the declared input retires its external state separately, after its exact
+source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
+[MQTT session retirement](./connector-contract.md#mqtt-session-retirement) for cleanup budgets,
+best-effort failures and replacement preparation. Node shutdown does not retire an unchanged input.
+
 An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
 waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
 is reported and the socket is released; the shutdown deadline still bounds the surrounding
@@ -668,13 +674,15 @@ acknowledged through the graph stays outstanding admitted work until its source 
 batch's positions on its transport, so the drain waits for that confirmation as it waits for any
 other acknowledgement root, within the drain timeout. What a source's confirmation means is the
 acknowledgement confirmation its entity declares; see
-[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion
-and a Kafka offset commit are answered, and a RabbitMQ acknowledgement is written to the connection,
-before the drain moves on, while a Pulsar acknowledgement and an MQTT `PUBACK` are only queued by
-their clients, so the drain does not wait for their brokers to answer them. A Kafka consumer group
+[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
+a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
+acknowledgement is written to the connection, before the drain moves on, while an MQTT `PUBACK` is
+only queued by its client, so the drain does not wait for its broker to answer it. A Pulsar
+acknowledgement the broker does not answer within the client's 30-second operation timeout fails,
+and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer group
 in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
 driver delivered since the driver's last commit, and waits for the answer before the consumer
-leaves the group.
+leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the source's own redelivery contract applies. A source instance that stops while it still waits

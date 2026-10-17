@@ -263,6 +263,10 @@ relay. Do not use them to scan across branches.
   shortening or lengthening a real retry wait.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
+- Provision Iceberg table columns with names and nested types matching the emitter's `VALUES`.
+  Opening the emitter rejects an incompatible mapped schema before staging records. UTC
+  `DATETIME` values, including values inside lists and nested structures, use the containing
+  microsecond in Iceberg; a table changed after open can still fail a later commit.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO_ACK`.
@@ -289,6 +293,10 @@ relay. Do not use them to scan across branches.
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
   PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+- MQTT source client identities default to the domain and ingestor, with an instance suffix for
+  multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
+  retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
+  session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The

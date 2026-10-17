@@ -2020,6 +2020,46 @@ impl Cluster {
         limit_pulsar_topic_message_size(&self.dependencies, topic, max_message_size).await
     }
 
+    /// The number of messages the broker holds for `subscription` of `topic` that no consumer has
+    /// acknowledged, as its admin API reports the subscription's backlog.
+    pub(crate) async fn pulsar_subscription_backlog(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<u64> {
+        pulsar_subscription_backlog(&self.dependencies, topic, subscription).await
+    }
+
+    /// Waits until the backlog of `subscription` of `topic` holds `expected` messages, as the
+    /// acknowledgements a consumer sends reach the broker.
+    pub(crate) async fn wait_for_pulsar_subscription_backlog(
+        &self,
+        topic: &str,
+        subscription: &str,
+        expected: u64,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed =
+                pulsar_subscription_backlog(&self.dependencies, topic, subscription).await;
+            if let Ok(backlog) = &observed
+                && *backlog == expected
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Pulsar subscription '{subscription}' of topic \
+                     '{topic}' to hold {expected} unacknowledged messages; last observation: \
+                     {observed:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn publish_kafka(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_kafka(&self.dependencies, topic, payload).await
     }
@@ -2120,6 +2160,21 @@ impl Cluster {
         expected: &str,
     ) -> io::Result<()> {
         wait_for_nats_stream_payload(&self.dependencies, stream, subject, expected).await
+    }
+
+    /// How many messages JetStream `stream` holds.
+    pub(crate) async fn nats_stream_message_count(&self, stream: &str) -> io::Result<u64> {
+        nats_stream_message_count(&self.dependencies, stream).await
+    }
+
+    /// The integer `field` of the JSON payload of every message JetStream `stream` holds, in the
+    /// order the stream stored them.
+    pub(crate) async fn nats_stream_field_values(
+        &self,
+        stream: &str,
+        field: &str,
+    ) -> io::Result<Vec<i64>> {
+        nats_stream_field_values(&self.dependencies, stream, field).await
     }
 
     pub(crate) async fn publish_nats_payloads(
@@ -4956,6 +5011,34 @@ async fn limit_pulsar_topic_message_size(
     }
 }
 
+/// The backlog the Pulsar admin API reports for `subscription` of `topic`: the messages the broker
+/// holds for it that no consumer acknowledged, delivered or not.
+async fn pulsar_subscription_backlog(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<u64> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/stats");
+    let stats: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(io::Error::other)?
+        .error_for_status()
+        .map_err(io::Error::other)?
+        .json()
+        .await
+        .map_err(io::Error::other)?;
+    let Some(backlog) = stats["subscriptions"][subscription]["msgBacklog"].as_u64() else {
+        return Err(io::Error::other(format!(
+            "the stats of Pulsar topic '{topic}' report no backlog for subscription \
+             '{subscription}': {stats}"
+        )));
+    };
+    Ok(backlog)
+}
+
 /// The body the admin API answers `url` with, or what kept it from answering.
 async fn read_pulsar_admin_value(client: &reqwest::Client, url: &str) -> String {
     let response = match client.get(url).send().await {
@@ -6023,6 +6106,75 @@ async fn wait_for_nats_stream_payload(
         }
         sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn nats_stream_message_count(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+) -> io::Result<u64> {
+    let client = nats_client(dependencies).await?;
+    let mut stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let info = stream_handle.info().await.map_err(io::Error::other)?;
+    Ok(info.state.messages)
+}
+
+/// Reads every message JetStream `stream` holds when the read begins, through an ordered consumer
+/// of its own, and returns the integer `field` of each message's JSON payload in the order the
+/// stream stored them.
+async fn nats_stream_field_values(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    field: &str,
+) -> io::Result<Vec<i64>> {
+    let client = nats_client(dependencies).await?;
+    let mut stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let held = stream_handle
+        .info()
+        .await
+        .map_err(io::Error::other)?
+        .state
+        .messages;
+    let mut values = Vec::new();
+    if held == 0 {
+        return Ok(values);
+    }
+    let consumer = stream_handle
+        .create_consumer(async_nats::jetstream::consumer::pull::OrderedConfig::default())
+        .await
+        .map_err(io::Error::other)?;
+    let mut messages = consumer.messages().await.map_err(io::Error::other)?;
+    for read in 0..held {
+        nervix_primitives::task::consume_budget().await;
+        let Ok(next) = timeout(BROKER_TIMEOUT, messages.next()).await else {
+            return Err(io::Error::other(format!(
+                "timed out reading message {read} of the {held} NATS JetStream stream '{stream}' \
+                 held"
+            )));
+        };
+        let Some(message) = next else {
+            return Err(io::Error::other(format!(
+                "the ordered consumer of NATS JetStream stream '{stream}' ended after {read} of \
+                 its {held} messages"
+            )));
+        };
+        let message = message.map_err(io::Error::other)?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&message.payload).map_err(io::Error::other)?;
+        let Some(value) = payload.get(field).and_then(serde_json::Value::as_i64) else {
+            return Err(io::Error::other(format!(
+                "a message of NATS JetStream stream '{stream}' carries no integer '{field}': \
+                 {payload}"
+            )));
+        };
+        values.push(value);
+    }
+    Ok(values)
 }
 
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

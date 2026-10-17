@@ -140,16 +140,17 @@ Each entity accepts only the modes it can honor, and completion offers only thos
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
-In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and
-error delivery the message unfolded into has completed, and it reports that progress only once
-the transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
-broker's answer to its deletion, a `RABBITMQ QUEUE` for its acknowledgement to be written to the
-connection, and a `KAFKA TOPIC`, `PULSAR TOPIC` or `MQTT TOPIC` only for its client to queue the
-acknowledgement. An acknowledgement the transport fails to confirm is a source error that
+In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and error
+delivery the message unfolded into has completed, and it reports that progress only once the
+transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
+broker's answer to its deletion, a `KAFKA TOPIC` for the answer to its consumer-group commit, or
+under `OFFSET BY DOMAIN` for its offsets' state replicas, a `PULSAR TOPIC` for the broker's answer
+to its acknowledgement, a `RABBITMQ QUEUE` for its acknowledgement to be written to the connection,
+and an `MQTT TOPIC` only for its client to queue the acknowledgement. An acknowledgement the
+transport fails to confirm, or a rejection it fails to take back, is a source error that
 `DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
 messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
-confirmations before it closes them; see
-[Shutdown And Recovery](shutdown.md#connector-contracts).
+confirmations before it closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
 ## Altering Ingestors
 
@@ -933,6 +934,18 @@ Client config currently supports:
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
 
+In an `ACK` mode the ingestor acknowledges the messages a batch read from each topic in one
+acknowledgement and waits for the broker's answer, within the client's 30-second operation
+timeout. An acknowledgement the broker refuses shows its server error and reason as the transient
+error, as in `the Pulsar broker refused an acknowledgement with NotAllowedError: ...`, and one it
+does not answer in time, or whose connection closes first, shows `the Pulsar broker did not confirm
+an acknowledgement`. Either way the messages are rejected and delivered again. A rejection asks the
+broker to redeliver the messages and returns once the consumer sent that request, because the
+broker does not answer it; a request the consumer cannot send, such as while it reconnects to a
+broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
+and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
+each message without waiting for the broker's answer.
+
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
 expiry remain in force. If the subscription expires, resume creates it again at the broker's new
@@ -1027,6 +1040,24 @@ Delivery constraints:
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
+Without a `client_id` in the client configuration, one instance connects as
+`<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
+zero-based instance indices. An explicit identity shared by multiple instances must contain
+`{{instance}}`. Identities remain stable across node ownership changes.
+
+`DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
+opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
+and sends `DISCONNECT` with session expiry zero. Cleanup is best-effort: an unreachable broker is
+reported and does not prevent the drop. Its retained state can remain until the broker expires it
+or the operator clears it.
+
+Changing the input with `ALTER MQTT TOPIC INGESTOR ... SET FROM ...` retires the preceding filter
+and prepares the changed sessions at the new endpoint before the replacement starts. A failure to
+clean up the preceding endpoint does not prevent moving to a reachable new endpoint. Sessions
+whose broker, identity, filter, session mode and QoS still match are retained, including across
+an instance-count change. Changing a filter discards the retired filter's broker queue.
+Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
+
 `SUSPEND` is valid only with `SESSION PERSISTENT QOS 1`. It disconnects while asking the broker to
 retain the session; broker offline-queue bounds and session expiry limit what can return. If the
 session expires, resume establishes a fresh session and the interim is lost. `BUFFER` and `DROP`
@@ -1061,6 +1092,13 @@ are mandatory; use `INSTANCES 1` for a single queue member.
 Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
+
+A lost connection to the server ends the instance's subscription. `DESCRIBE INGESTOR` shows the
+loss, and then each failed reconnect, as its transient error, and the instance connects and
+subscribes again on the host's reconnect cadence: the delay starts at 250 ms, doubles after each
+failed attempt up to 30 s, and `DESCRIBE INGESTOR` shows it as the reconnect backoff. Messages the
+client received before the loss are still delivered. Core NATS retains nothing for a subscription
+that is not connected, so messages published while the instance reconnects never reach it.
 
 ### ZeroMQ
 

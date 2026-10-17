@@ -871,9 +871,18 @@ before admission permanently fences that delivery identity, including when cance
 receiver before the original grant request. If admission has already won, cancellation returns the
 known admitted result and does not undo work handed to the runtime.
 
-Removing or evicting a concrete branch cancels its unadmitted channel generation and releases its
-reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
-keeps a previous branch lifetime from being confused with the new runtime instance.
+Removing or evicting a concrete branch cancels the unadmitted generation of the channels that
+branch ends and releases their reserved work. A relay owner's branch ends the channels through
+which the owner routes that relay's branch. A processor's, ingestor's or reingestor's branch ends
+the channels of the relays it publishes through for its key; the producers of one relay on a node
+share that relay's channel for a key. The channels of every other relay keep their generation,
+even when another relay or processor holds a branch with the same key, because each ends only with
+its own branch's lifetime. If a branch appears again, its channels use a fresh channel incarnation
+and sequence. This keeps a previous branch lifetime from being confused with the new runtime
+instance. An ended channel's watermark stays on its receiver for the retention that
+[Ordering, Retry, And Reconciliation](#ordering-retry-and-reconciliation) describes and occupies a
+channel position in that peer's budget, so a burst of ended channels larger than the budget's free
+positions refuses the peer's new channels until those watermarks expire.
 
 A committed forced ownership change also retires changing relay routes' preceding channel
 generation before the local graph installer waits for dispatch quiescence. The sender interrupts

@@ -745,6 +745,8 @@ impl Runtime {
         )
         .into_vec();
         let entities = entities.as_slice();
+        let mut retiring_ingestors =
+            self.retiring_ingestor_inputs(domain, Some(&revision), local_node_id);
         for entity in entities {
             if entity.kind != ModelKind::WasmProcessor {
                 continue;
@@ -977,6 +979,9 @@ impl Runtime {
                     self.stop_ingestor(domain, &ingestor)
                         .await
                         .change_context_lazy(build)?;
+                }
+                if let Some(retirement) = retiring_ingestors.remove(&ingestor) {
+                    Box::pin(self.retire_ingestor_input(retirement)).await?;
                 }
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
                     self.start_ingestor(&desired_plan)
