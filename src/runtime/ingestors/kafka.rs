@@ -16,10 +16,10 @@
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use nervix_connector::{SourceAckPolicy, SourceConnector, SourcePlan};
+use nervix_connector::{SourceConnector, SourcePlan};
 use nervix_connector_kafka::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
     KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceOffsetMode, KafkaSourcePlan,
     TopicPartitionInspector,
 };
@@ -285,11 +285,10 @@ impl KafkaIngestorStartPlan {
             }));
         }
 
-        let enable_auto_commit = acknowledgement == SourceAckPolicy::None
-            && matches!(offsets, KafkaOffsetPlan::ConsumerGroup(_));
         let source_offset_mode = match offsets {
             KafkaOffsetPlan::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
                 group_id: group.as_str().to_string(),
+                commit: KafkaGroupCommit::for_acknowledgement(acknowledgement),
             },
             KafkaOffsetPlan::Domain(placement) => {
                 let Some(state) = runtime.kafka_offset_originator(ingestor, &placement) else {
@@ -326,7 +325,6 @@ impl KafkaIngestorStartPlan {
                 config: resolved_client.entries,
                 topic,
                 offset_mode: source_offset_mode,
-                enable_auto_commit,
             },
             capabilities: ingestor.source_capabilities(instances, acknowledgement.support()),
             acknowledgement,

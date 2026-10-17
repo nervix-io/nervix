@@ -25,6 +25,8 @@ use rustc_span::{
     def_id::{DefId, LocalDefId},
 };
 
+use crate::contracts::contract_attribute;
+
 pub struct Operation {
     pub name: String,
     pub span: Span,
@@ -1270,13 +1272,7 @@ fn forwarding_wrapper<'tcx>(
 }
 
 fn has_contract(cx: &LateContext<'_>, definition: DefId) -> bool {
-    ["context", "dispatch"].iter().any(|name| {
-        cx.tcx
-            .get_attrs_by_path(
-                definition,
-                &[Symbol::intern("nervix"), Symbol::intern(name)],
-            )
-            .next()
-            .is_some()
-    })
+    ["context", "dispatch"]
+        .iter()
+        .any(|name| contract_attribute(cx.tcx, definition, name).is_some())
 }

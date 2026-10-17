@@ -1177,7 +1177,10 @@ async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_
         .stop(Duration::from_secs(1))
         .await
         .expect("relay owner should drain");
-    owner.runtime.shutdown().await;
+    owner
+        .runtime
+        .shutdown(owner.runtime.domain_drain_timeout())
+        .await;
 }
 
 /// Watches the whole relay budget could never hold are refused before the rows are decoded, and
@@ -1223,7 +1226,10 @@ async fn acknowledgement_watches_larger_than_the_relay_budget_keep_their_typed_c
              {requested} bytes exceeds the whole relay memory budget of {capacity} bytes"
         )
     );
-    owner.runtime.shutdown().await;
+    owner
+        .runtime
+        .shutdown(owner.runtime.domain_drain_timeout())
+        .await;
 }
 
 /// A batch for `schema` with one row, acknowledged through `acks`.
@@ -1703,6 +1709,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
+            runtime.emitter_finish_deadline(),
         )
         .await;
 

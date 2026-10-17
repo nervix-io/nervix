@@ -34,9 +34,10 @@ use futures_util::FutureExt;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
-    optional_bool_client_config_value, optional_client_config_value, read_tls_file,
+    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
+    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
+    client_tls_paths, optional_bool_client_config_value, optional_client_config_value,
+    read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use nervix_primitives::time::{Instant, sleep};
@@ -494,7 +495,17 @@ impl PulsarSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for PulsarSink {}
+impl SinkLifecycle for PulsarSink {
+    /// A `NO_ACK` message is delivered once the producer accepts it, and the producer sends it
+    /// later, so it can still hold delivered messages, which closing it discards. A confirmed
+    /// message is delivered only once the broker answered for it.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        match self.mode {
+            BrokerPublishingMode::NoAck => Ok(SinkFinish::Discarded),
+            BrokerPublishingMode::Ack(_) => Ok(SinkFinish::NothingHeld),
+        }
+    }
+}
 
 #[async_trait]
 impl RecordSink for PulsarSink {
@@ -989,6 +1000,26 @@ mod tests {
             .iter()
             .map(|rejected| (rejected.id, rejected.error.message.clone()))
             .collect()
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_discards_only_what_an_unconfirmed_producer_may_still_hold() {
+        let unconfirmed_broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+        let mut unconfirmed = sink(&unconfirmed_broker, BrokerPublishingMode::NoAck).await;
+        let confirming_broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+        let mut confirming = sink(&confirming_broker, confirmed(1)).await;
+
+        let discarded = unconfirmed
+            .finish(Instant::now())
+            .await
+            .expect("an unconfirmed sink answers its finish");
+        let nothing_held = confirming
+            .finish(Instant::now())
+            .await
+            .expect("a confirming sink answers its finish");
+
+        assert_eq!(discarded, SinkFinish::Discarded);
+        assert_eq!(nothing_held, SinkFinish::NothingHeld);
     }
 
     #[nervix_primitives::test]
