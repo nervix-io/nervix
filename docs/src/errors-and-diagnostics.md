@@ -1979,8 +1979,14 @@ payload, observe the receiver's successful exit, or retain its helper evidence r
 sender, receiver, address and port. Its adjacent probe record preserves readiness, transfer
 deadline, both helpers' outcomes, received byte count and cleanup outcomes, with raw helper logs.
 A timeout of the Docker client also ends the exact sender container; it does not leave a live
-transfer to alter a later measurement. A failed required attempt remains evidence even after a
-subsequent successful qualification. The controller's measurement budget does not extend the
+transfer to alter a later measurement. A directed-link ICMP probe that fails names its sender,
+receiver and address and the stage that took the time: Docker's start of its helper outlasting
+the launch bound, its sample outlasting the sample bound, ping's own exit, or a failed log read
+or removal. Docker control time has its own launch bound, so a held container start does not
+consume the sample's bound. The probe record keeps each stage's outcome and the launch and sample
+times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
+Docker's state and events for it before its removal. A failed required attempt remains evidence
+even after a subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact

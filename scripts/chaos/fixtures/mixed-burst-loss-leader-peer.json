@@ -1,0 +1,30 @@
+{
+  "seed": 993081495,
+  "policy": "temporary-quorum-loss",
+  "nodes": 3,
+  "duration_seconds": 300,
+  "coverage": [
+    "degrade:leader"
+  ],
+  "steps": [
+    {
+      "index": 1,
+      "kind": "degrade",
+      "role": "leader",
+      "pick": 0,
+      "at_seconds": 0,
+      "estimated_seconds": 113,
+      "actions": [
+        {
+          "id": "1a",
+          "family": "degrade",
+          "node": "target",
+          "start_seconds": 0,
+          "hold_seconds": 23,
+          "to": "peer",
+          "profile": "burst-loss"
+        }
+      ]
+    }
+  ]
+}

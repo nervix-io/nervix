@@ -12,8 +12,17 @@ if ! chaos_jq_supported; then
     printf 'self-test failed: the chaos scripts need jq 1.8 or later, not %s\n' "$(chaos_jq_found)" >&2
     exit 1
 fi
+# A scenario's verifier self-check names the directory in which a failed self-test keeps its
+# evidence.
+if [[ "$#" -eq 2 && "$1" == --evidence && -n "$2" ]]; then
+    export CHAOS_SELF_TEST_EVIDENCE="$2"
+elif [[ "$#" -ne 0 ]]; then
+    printf 'usage: self-test.sh [--evidence DIRECTORY]\n' >&2
+    exit 2
+fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/hold-quorum-self-test.sh"
 "${script_dir}/output-boundary-self-test.sh"
 "${script_dir}/image-package-self-test.sh"
 "${script_dir}/startup-status-self-test.sh"

@@ -365,6 +365,10 @@ struct ScenarioWorld {
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
+    /// When the scenario first posted an HTTP payload to a node. An input collector's window
+    /// opens no earlier than the first record that reaches it, so a collection-delay assertion
+    /// measures its collected output from this instant.
+    first_http_post_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
     last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
@@ -15535,7 +15539,9 @@ async fn then_transaction_eventually_has_state(
     let leader = current_leader_node(world).await;
     let expected_id = format!("id={transaction_id}");
     let expected_state_fragment = format!("state={expected_state}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A state such as EXPIRED arrives only after a configured timer, and a loaded node reports it
+    // later still. The wait ends as soon as the state is listed, so its bound is generous.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_output = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -15969,7 +15975,11 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
     let transaction_id = expand_placeholders(world, &transaction_id);
     let leader = current_leader_node(world).await;
     let expected_id = format!("id={transaction_id}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A tombstone is removed only once the configured retention has passed, so the wait spans
+    // that retention and then leaves the cleanup a minute of its own.
+    let deadline = Instant::now()
+        + world.cluster_config.transaction_tombstone_retention
+        + Duration::from_secs(60);
     let mut last_output = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -24500,7 +24510,11 @@ async fn when_http_payload_is_posted_to_node(
     append_cucumber_log_line(&format!(
         "http publish: node={node_id} host={host} path={path} payload={payload}"
     ));
-    world.last_publish_at = Some(Instant::now());
+    let posted_at = Instant::now();
+    world.last_publish_at = Some(posted_at);
+    if world.first_http_post_at.is_none() {
+        world.first_http_post_at = Some(posted_at);
+    }
     world
         .cluster()
         .publish_http(&node_id, &host, &path, &payload)
@@ -25699,18 +25713,69 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
     #[step] step: &Step,
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let expected_fragments = expected_payload_fragments(world, step);
+    await_subscription_payloads(world, duration, &expected_fragments).await;
+}
+
+/// Measures an input collector's hold instead of asserting silence while its window runs. Each
+/// collector's window opens no earlier than the first record that reaches it, which was posted no
+/// earlier than the scenario's first HTTP post, so the collected payloads cannot be read sooner
+/// than the window after that post. This step must start while the window is still open: then it
+/// reads each payload as it arrives, and a step that starts late can only lengthen the measured
+/// delay.
+#[then(
+    expr = "within {string} the relay subscription receives payloads no sooner than {string} \
+            after the first http payload was posted"
+)]
+async fn then_within_duration_the_relay_subscription_receives_payloads_after_collection(
+    world: &mut ScenarioWorld,
+    duration: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let expected_delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let first_posted_at = world
+        .first_http_post_at
+        .expect("a collection-delay assertion must follow an http post");
+    let expected_fragments = expected_payload_fragments(world, step);
+
+    let first_read_at = await_subscription_payloads(world, duration, &expected_fragments).await;
+
+    let first_read_after = first_read_at.duration_since(first_posted_at);
+    append_cucumber_log_line(&format!(
+        "first collected subscription payload was read {first_read_after:?} after the first http \
+         post"
+    ));
+    assert!(
+        first_read_after >= expected_delay,
+        "expected the collected payloads no sooner than {expected_delay:?} after the first http \
+         post, but the first was read after {first_read_after:?}"
+    );
+}
+
+/// The payload fragments a step's docstring expects, one for each non-empty line.
+fn expected_payload_fragments(world: &ScenarioWorld, step: &Step) -> Vec<String> {
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| expand_placeholders(world, line))
         .collect::<Vec<_>>();
-
     assert!(
         !expected_fragments.is_empty(),
         "step docstring must contain at least one expected payload fragment"
     );
+    expected_fragments
+}
 
+/// Reads the active session's subscription until every expected fragment has arrived as often as
+/// it is listed, failing once `duration` has passed, and returns when the first payload was read.
+async fn await_subscription_payloads(
+    world: &mut ScenarioWorld,
+    duration: Duration,
+    expected_fragments: &[String],
+) -> Instant {
     let session = world
         .active_session
         .as_mut()
@@ -25723,6 +25788,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             counts
         });
     let mut observed = Vec::with_capacity(expected_fragments.len());
+    let mut first_read_at = None;
 
     while !remaining.is_empty() {
         let now = Instant::now();
@@ -25744,6 +25810,10 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
                     remaining, observed
                 )
             });
+        let read_at = Instant::now();
+        if first_read_at.is_none() {
+            first_read_at = Some(read_at);
+        }
         let payload = event.payload;
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
@@ -25762,6 +25832,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             }
         }
     }
+    first_read_at.expect("at least one expected fragment makes the loop read a payload")
 }
 
 #[then(
