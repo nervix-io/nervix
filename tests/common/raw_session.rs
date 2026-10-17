@@ -6,10 +6,12 @@
 //!   transfer reassembly, the subscriptions the session opened and the display text of their rows,
 //!   every frame about a subscription outside the lifetime its replies and events announced, the
 //!   notices it received, the domain clock replies and frames it read in their arrival order, raw
-//!   frames a scenario sends to probe the server's refusals, and backup downloads and restore
-//!   streams a scenario shapes itself.
+//!   frames a scenario sends to probe the server's refusals, backup downloads and restore streams a
+//!   scenario shapes itself, and whether another session of its user can learn the outcome of a
+//!   command it sent.
 //! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
-//!   to route subscription statements, and the shared TLS and credential fixtures.
+//!   to route subscription statements and to tell which statements change what a session holds,
+//!   and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
 //!   protocol.
 //!
@@ -162,6 +164,9 @@ impl Codec for RawFrameCodec {
 /// One native session a scenario drives.
 pub(crate) struct TestSession {
     domain: Option<DomainName>,
+    /// The credentials the session presented. An execution reference belongs to the user that
+    /// sent it, so a session that repeats one of this session's commands presents them too.
+    authorization: String,
     limits: SessionLimits,
     transaction: Option<TransactionStatus>,
     frames: mpsc::Sender<Bytes>,
@@ -277,6 +282,7 @@ pub(crate) async fn open_session_as(
     };
     Ok(Ok(TestSession {
         domain: parse_domain(domain),
+        authorization: authorization.to_string(),
         limits,
         transaction: None,
         frames,
@@ -614,6 +620,42 @@ pub(crate) fn outcome_not_leader(outcome: &CommandOutcome) -> bool {
     matches!(outcome.disposition, CommandDisposition::NotLeader(_))
 }
 
+/// The messages of a command that completed, or the failure of one that did not.
+pub(crate) fn command_output(outcome: &CommandOutcome) -> io::Result<String> {
+    if outcome_succeeded(outcome) {
+        return Ok(flatten_command_messages(outcome));
+    }
+    Err(io::Error::other(format!(
+        "command failed: {}\ndiagnostics: {:?}",
+        outcome.message, outcome.diagnostics
+    )))
+}
+
+/// Whether only the current leader can tell the command's outcome: the node that received it does
+/// not lead, or leadership moved before its outcome was known.
+pub(crate) fn outcome_awaits_leader(outcome: &CommandOutcome) -> bool {
+    outcome_unknown(outcome) || outcome_not_leader(outcome)
+}
+
+/// Whether running `statement` leaves alone everything a session holds for its user: the
+/// transaction it is bound to, its subscriptions, its domain clock attachments and its domain.
+fn statement_leaves_session_bindings(statement: &ClientStatement) -> bool {
+    match statement {
+        ClientStatement::Server(_)
+        | ClientStatement::ListDomains
+        | ClientStatement::UploadResource(_)
+        | ClientStatement::DescribeBackup(_) => true,
+        ClientStatement::UseDomain(_)
+        | ClientStatement::AttachDomainClock
+        | ClientStatement::DetachDomainClock
+        | ClientStatement::BeginTransaction
+        | ClientStatement::CommitTransaction
+        | ClientStatement::RevertTransaction
+        | ClientStatement::CreateSubscription(_)
+        | ClientStatement::DeleteSubscription(_) => false,
+    }
+}
+
 /// The questions scenarios ask of a wire outcome, spelled the way the native client spells them.
 pub(crate) trait WireOutcome {
     /// Whether the request completed.
@@ -647,6 +689,26 @@ pub(crate) fn flatten_command_messages(outcome: &CommandOutcome) -> String {
     messages.join("\n")
 }
 
+/// The user a session authenticates as and the domain it sends its commands in. A session that
+/// repeats another session's command under the same execution reference shares both, so the
+/// repetition is the same request: a reference belongs to its user, and its record binds the
+/// request's domain.
+#[derive(Clone)]
+pub(crate) struct SessionScope {
+    authorization: String,
+    domain: Option<DomainName>,
+}
+
+impl SessionScope {
+    /// Opens a session in this scope on `server`.
+    pub(crate) async fn open_session(&self, server: &str) -> io::Result<TestSession> {
+        let opened = open_session_as(server, "", &self.authorization).await?;
+        let mut session = opened.map_err(|status| io::Error::other(*status))?;
+        session.domain = self.domain.clone();
+        Ok(session)
+    }
+}
+
 /// How a command's text is sent.
 enum CommandRoute {
     Command,
@@ -657,6 +719,37 @@ enum CommandRoute {
 impl TestSession {
     pub(crate) fn set_domain(&mut self, domain: String) {
         self.domain = parse_domain(&domain);
+    }
+
+    /// The user this session authenticates as and the domain it sends its commands in.
+    pub(crate) fn scope(&self) -> SessionScope {
+        SessionScope {
+            authorization: self.authorization.clone(),
+            domain: self.domain.clone(),
+        }
+    }
+
+    /// Whether the session is bound to an active transaction, which no other session continues.
+    pub(crate) fn holds_transaction(&self) -> bool {
+        self.expected_position().is_some()
+    }
+
+    /// Whether another session of this session's user can learn the outcome of `query`, sent on
+    /// this session. That holds when this session is bound to no transaction and every statement
+    /// of `query` leaves what a session holds alone: repeating a statement that begins or ends a
+    /// transaction, opens or deletes a subscription, attaches a clock or changes the domain would
+    /// change the repeating session instead of this one. A query that does not parse is not known
+    /// to leave anything alone.
+    pub(crate) fn outcome_learnable_elsewhere(&self, query: &str) -> bool {
+        if self.holds_transaction() {
+            return false;
+        }
+        let Ok(statements) = parse_client_statement_sources(query) else {
+            return false;
+        };
+        statements
+            .iter()
+            .all(|parsed| statement_leaves_session_bindings(&parsed.statement))
     }
 
     fn next_request_id(&mut self) -> RequestId {
@@ -1095,13 +1188,7 @@ impl TestSession {
 
     pub(crate) async fn run_command(&mut self, query: &str) -> io::Result<String> {
         let result = self.run_command_result(query).await?;
-        if outcome_succeeded(&result) {
-            return Ok(flatten_command_messages(&result));
-        }
-        Err(io::Error::other(format!(
-            "command failed: {}\ndiagnostics: {:?}",
-            result.message, result.diagnostics
-        )))
+        command_output(&result)
     }
 
     pub(crate) async fn run_command_result(&mut self, query: &str) -> io::Result<CommandOutcome> {
