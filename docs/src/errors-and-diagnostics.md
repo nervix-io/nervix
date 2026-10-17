@@ -588,6 +588,16 @@ beneath `SinkFinishError::Unsent`, which counts the records still queued; a flus
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `SinkFinishError::Flush`.
 
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
+the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
+does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaSourceError::CommitTask`. The
+commit of an acknowledged batch fails beneath `SourceError::Acknowledge`, so the ingestor's
+transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
+the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
+`MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
+`SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -1186,8 +1196,9 @@ reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. In
 units remain available to continue, and a subsequent attempt can retry the stalled unit. A gate
 that expires during engagement reports `EntityGateOperationError::EngagementExpired` and releases
 its partial intake and relay holds. The preparation deadline bounds engagement, drain and capture
-independently of the activation lease. A typed reply timeout can retry the same engagement identity
-and scope within that budget; rejection and other request failures keep their classification.
+independently of the activation lease. A typed reply timeout, or a transport failure that broke the request's
+stream, can retry the same engagement identity and scope within that budget; rejection and other
+request failures keep their classification.
 
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct
@@ -1958,8 +1969,14 @@ payload, observe the receiver's successful exit, or retain its helper evidence r
 sender, receiver, address and port. Its adjacent probe record preserves readiness, transfer
 deadline, both helpers' outcomes, received byte count and cleanup outcomes, with raw helper logs.
 A timeout of the Docker client also ends the exact sender container; it does not leave a live
-transfer to alter a later measurement. A failed required attempt remains evidence even after a
-subsequent successful qualification. The controller's measurement budget does not extend the
+transfer to alter a later measurement. A directed-link ICMP probe that fails names its sender,
+receiver and address and the stage that took the time: Docker's start of its helper outlasting
+the launch bound, its sample outlasting the sample bound, ping's own exit, or a failed log read
+or removal. Docker control time has its own launch bound, so a held container start does not
+consume the sample's bound. The probe record keeps each stage's outcome and the launch and sample
+times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
+Docker's state and events for it before its removal. A failed required attempt remains evidence
+even after a subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact

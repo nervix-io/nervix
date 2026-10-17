@@ -1402,9 +1402,11 @@ stores unchanged, where schemaful JSON codecs write padded base64.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
-land and only poison rows follow `ON MESSAGE ERROR`. Isolation can reapply rows from the failed
-insert; use the sink's idempotent write facilities where available. Dividing a flush into inserts
-also means one flush is not an atomic database transaction.
+land and only poison rows follow `ON MESSAGE ERROR`. Postgres re-executes them on the connection the
+failed insert already holds, so the rejection is routed without waiting for the client's pool, as
+[Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
+reapply rows from the failed insert; use the sink's idempotent write facilities where available.
+Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
 SQLSTATE and code. Destination response text can quote a bound value, so it is not included in
 diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
