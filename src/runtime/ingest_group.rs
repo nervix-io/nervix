@@ -128,8 +128,10 @@ impl<T> SplitPayloads<T> {
     /// The same division, with every entry replaced by what `entry` makes of it.
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "the caller supplies the projection of each payload's entry, \
-                                   such as the metadata row its retained batch holds at its index")
+        nervix::dispatch(
+            reason = "the caller supplies the projection of each payload's entry, such as the \
+                      metadata row its retained batch holds at its index"
+        )
     )]
     pub(in crate::runtime) fn map<U>(self, mut entry: impl FnMut(T) -> U) -> SplitPayloads<U> {
         let mut decoded = Vec::with_capacity(self.decoded.len());
