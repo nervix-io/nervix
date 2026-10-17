@@ -31,13 +31,13 @@ use std::{net::SocketAddr, time::Duration};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    HttpRequestSink, PerRecordOutcome, RustlsClientConfigSource, SinkHost, SinkHttpRequest,
-    SinkLifecycle, SinkPublishError, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult,
-    client_config_value, physical_time::actual_utc_now,
+    HttpRequestSink, PerRecordOutcome, RustlsClientConfigSource, SinkFinish, SinkFinishResult,
+    SinkHost, SinkHttpRequest, SinkLifecycle, SinkPublishError, SinkRecordId, SinkRetryDelay,
+    SinkStartError, SinkStartResult, client_config_value, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::{net::TcpStream, sync::StdArc};
+use nervix_primitives::{net::TcpStream, sync::StdArc, time::Instant};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
 use thiserror::Error;
@@ -287,6 +287,12 @@ impl HttpSink {
 
 #[async_trait]
 impl SinkLifecycle for HttpSink {
+    /// Each request's response headers arrive before the publish returns, so the client holds
+    /// nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+
     /// The sink holds no connection or staged work between attempts, so keeping it loses
     /// nothing, and the emitter's retry sends the pending request without reopening a sink whose
     /// successful reopening would clear the failure the request is still waiting out.

@@ -72,14 +72,14 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkCommitReport, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError, SinkStartResult,
-    physical_time::actual_utc_now,
+    SinkAcknowledgements, SinkCommitReport, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError,
+    SinkStartResult, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
-use nervix_primitives::sync::StdArc;
+use nervix_primitives::{sync::StdArc, time::Instant};
 use parquet::file::properties::WriterProperties;
 use storage::DnsStorageFactory;
 use tempfile::TempDir;
@@ -706,6 +706,12 @@ impl Drop for IcebergSink {
 
 #[async_trait::async_trait]
 impl SinkLifecycle for IcebergSink {
+    /// The catalog and object-store clients hold nothing between writes. Rows wait staged for
+    /// the commit, which a stop asks for before it finishes the sink.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+
     /// A staged batch outlives its catalog client, so a publish failure keeps the client rather
     /// than reopening it and losing what is already on disk.
     fn keeps_client_on_publish_failure(&self) -> bool {

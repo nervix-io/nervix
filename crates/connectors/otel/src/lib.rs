@@ -41,12 +41,13 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
     HttpClientConfig, MappedSinkCarrier, MappedSinkRows, MeasuredRequest, PerRecordOutcome,
     PreparedRowRequest, RejectedSinkRecord, RowRequest, RowRequestLimits, RowRequestPreparation,
-    RowRequestSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecordId,
-    SinkRecordPosition, SinkRetryDelay, SinkRowRequest, SinkStartError, SinkStartResult,
-    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
+    RowRequestSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkPublishResult, SinkRecordId, SinkRecordPosition, SinkRetryDelay, SinkRowRequest,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, FieldPath, Timestamp};
-use nervix_primitives::sync::StdArc;
+use nervix_primitives::{sync::StdArc, time::Instant};
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::{ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse},
@@ -964,7 +965,12 @@ impl OtelSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for OtelSink {}
+impl SinkLifecycle for OtelSink {
+    /// Each Export request is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RowRequestSink for OtelSink {

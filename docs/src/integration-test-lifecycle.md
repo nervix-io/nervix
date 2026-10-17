@@ -184,6 +184,37 @@ up to three more times with a new port selection. It also removes the failed con
 attempts are exhausted, so a scenario retry does not collide with its name. Other startup failures
 reach the scenario directly.
 
+The Postgres image starts a temporary Unix-socket server to initialize its database, then starts
+the final TCP/TLS server. The fixture waits for both readiness messages before publishing either
+endpoint. Its plaintext and certificate-verified TLS observation clients belong to that same
+suite environment. Each transport shares one SQLx pool with a maximum of two connections for short
+setup and observation queries across all scenarios. A deliberate table-lock controller detaches
+its physical SQLx connection before waiting for release, returning the observation permit. Its
+scenario release handle owns that connection's lifetime, so concurrent lock holders cannot consume
+the permits their own observation queries need. The environment closes both observation pools before
+stopping their container, including when scenarios still retain client handles. The existing suite
+teardown budget bounds that cleanup.
+
+The Postgres fixture scenarios exercise 48 concurrent observers retaining three client handles
+each over plaintext and TLS, and compare every returned text, byte sequence and observer number.
+Every query also checks its actual transport through Postgres's connection statistics. Two further
+examples hold locks through the existing fixture controller while another observer queries, once
+over each transport.
+The database batch scenarios retain their one- and three-node row, field, write-size, conflict,
+rejection and ambiguous-write assertions. Fixture concurrency adds no scenario admission limit.
+
+MQTT fixture publishers keep their event loop alive through the driver's tracked
+publication completion: a socket write for QoS 0 and the broker acknowledgement for QoS 1. The
+existing broker-operation timeout bounds that wait, and cancellation drops the driver. Retained
+scenario inputs still use unique topics. Bursts queue all their messages before waiting for
+completion. The fixture regression pauses a real broker connection for 500 ms and compares every
+complete delivered payload for QoS 0 and QoS 1, as individual messages and bursts of five.
+
+The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
+admission and exact retry. Its reclamation wait includes the configured validity followed by
+60 seconds for reclamation. The assertions still require the identity to remain expired after a
+durable restart, with the schema and committed transaction report preserved.
+
 The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions through
 one follower that the suite-owned environment starts with the container. The follower streams both
 outputs from the container's start into an in-memory transcript of at most 1 GiB per output, and
