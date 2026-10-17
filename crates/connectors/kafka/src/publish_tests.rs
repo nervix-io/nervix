@@ -8,8 +8,8 @@ use std::{collections::BTreeSet, num::NonZeroUsize, path::PathBuf, time::Duratio
 
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, RecordSink, SinkAcknowledgements, SinkBoundedExecution,
-    SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkRecord, SinkRecordId,
-    SinkStagingDirectory, SinkTransientErrorStatus,
+    SinkEventReporter, SinkFinish, SinkFinishError, SinkGeneralErrorHandler, SinkHost,
+    SinkLifecycle, SinkRecord, SinkRecordId, SinkStagingDirectory, SinkTransientErrorStatus,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use nervix_primitives::time::{Instant, sleep};
@@ -34,6 +34,11 @@ const PARTITION_ONE_KEY: &str = "held-1";
 
 /// A producer queue of 1 KiB, the smallest librdkafka accepts.
 const ONE_KIB_QUEUE: (&str, &str) = ("queue.buffering.max.kbytes", "1");
+
+/// A producer that holds every record it takes for two minutes before it sends a batch, so a
+/// record a `NO ACK` publish delivered is still queued when the test finishes the sink. librdkafka
+/// refuses a record whose linger is not shorter than its default five-minute message timeout.
+const TWO_MINUTE_LINGER: (&str, &str) = ("linger.ms", "120000");
 
 /// Messages of 1000 bytes at most, the smallest `message.max.bytes` librdkafka accepts.
 const THOUSAND_BYTE_MESSAGES: (&str, &str) = ("message.max.bytes", "1000");
@@ -384,5 +389,103 @@ async fn a_full_producer_queue_ends_an_unconfirmed_publish_after_the_records_it_
     assert_eq!(
         failure.downcast_ref::<KafkaError>(),
         Some(&KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull))
+    );
+}
+
+#[nervix_primitives::test]
+async fn finishing_sends_the_records_a_lingering_producer_still_queues() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[TWO_MINUTE_LINGER], BrokerPublishingMode::NoAck);
+    let outcome = sink
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+            record(1, PARTITION_ZERO_KEYS[1], small_payload(1)),
+        ])
+        .await;
+    let parts = outcome.into_parts();
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "the lingering producer takes both records: {:?}",
+        parts.infrastructure_error
+    );
+    assert_eq!(
+        parts.delivered,
+        vec![SinkRecordId::new(0), SinkRecordId::new(1)]
+    );
+    assert_eq!(
+        sink.producer.in_flight_count(),
+        2,
+        "the lingering producer still queues both delivered records"
+    );
+
+    let finished = sink
+        .finish(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("the mock broker takes every queued record before the deadline");
+
+    assert_eq!(finished, SinkFinish::Flushed);
+    assert_eq!(
+        sink.producer.in_flight_count(),
+        0,
+        "the flush sends every queued record despite the linger"
+    );
+}
+
+#[nervix_primitives::test]
+async fn finishing_a_producer_that_queues_nothing_has_nothing_to_send() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[], confirmed(2, Duration::from_secs(60)));
+    let outcome = sink
+        .publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))])
+        .await;
+    assert_eq!(outcome.into_parts().delivered, vec![SinkRecordId::new(0)]);
+
+    let finished = sink
+        .finish(Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("a producer whose records were all answered has nothing to send");
+
+    assert_eq!(finished, SinkFinish::NothingHeld);
+}
+
+#[nervix_primitives::test]
+async fn finishing_after_its_deadline_counts_the_records_the_producer_still_queues() {
+    let cluster = cluster(1, 1);
+    cluster
+        .broker_down(1)
+        .expect("the mock cluster takes broker 1 down");
+    let mut sink = sink(&cluster, &[], BrokerPublishingMode::NoAck);
+    let outcome = sink
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+            record(1, PARTITION_ZERO_KEYS[1], small_payload(1)),
+            record(2, PARTITION_ZERO_KEYS[0], small_payload(2)),
+        ])
+        .await;
+    assert_eq!(
+        outcome.into_parts().delivered,
+        vec![
+            SinkRecordId::new(0),
+            SinkRecordId::new(1),
+            SinkRecordId::new(2)
+        ]
+    );
+
+    let unsent = sink
+        .finish(Instant::now())
+        .await
+        .expect_err("a broker that is down takes nothing before a deadline that already passed");
+
+    assert_eq!(
+        *unsent.current_context(),
+        SinkFinishError::Unsent {
+            sink: "kafka",
+            records: 3,
+        }
+    );
+    assert_eq!(
+        unsent.downcast_ref::<KafkaError>(),
+        Some(&KafkaError::Flush(RDKafkaErrorCode::OperationTimedOut)),
+        "the flush's own timeout stays beneath the count"
     );
 }
