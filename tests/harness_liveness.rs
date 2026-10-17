@@ -2,16 +2,18 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, node-startup, node-stop, phase-deadline,
-//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag and
-//!   runner-offload regressions with Rust's test runner, and the stand-in nodes and clients those
-//!   regressions talk to.
+//! - **Owns.** Registration of the focused node-liveness, readiness-history, node-startup,
+//!   node-stop, phase-deadline, status-request, port-pool, cluster-teardown, scenario-phase,
+//!   suite-watchdog, Redis-client, HTTP-receiver, materialized-state diagnostic, gRPC-receiver,
+//!   NATS-observer, runner-lag, runner-offload, server-executable and process-observation
+//!   regressions with Rust's test runner, and the stand-in nodes, clients, images and processes
+//!   those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   gRPC-receiver, NATS-observer, runner-lag, runner-offload and materialized-state diagnostic
-//!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
-//!   client wire session protocol the stand-in nodes answer status requests with.
+//!   gRPC-receiver, NATS-observer, runner-lag, runner-offload, server-executable,
+//!   process-observation and materialized-state diagnostic harness modules, the product's shutdown
+//!   coordinator a stopping node is read through, and the client wire session protocol the
+//!   stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -42,6 +44,12 @@ mod node_stop;
 mod phase_deadline;
 #[path = "common/port_pool.rs"]
 mod port_pool;
+#[path = "common/process_observation.rs"]
+mod process_observation;
+#[path = "common/process_observation_tests.rs"]
+mod process_observation_tests;
+#[path = "common/readiness_history_tests.rs"]
+mod readiness_history_tests;
 #[path = "common/redis_client.rs"]
 mod redis_client;
 #[path = "common/runner_lag.rs"]
@@ -64,6 +72,10 @@ mod scenario_phase;
     reason = "the scenario binary uses the admission APIs shared by this harness test"
 )]
 mod scenario_schedule;
+#[path = "common/server_executable.rs"]
+mod server_executable;
+#[path = "common/server_executable_tests.rs"]
+mod server_executable_tests;
 #[path = "common/status_request.rs"]
 mod status_request;
 #[path = "common/suite_watchdog.rs"]

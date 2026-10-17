@@ -3,8 +3,9 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Starting, killing and restarting every persisted voter, signalling, freezing and
-//!   restarting one of them, and observable membership and leader readiness before a scenario
-//!   sends commands.
+//!   restarting one of them, observable membership and leader readiness before a scenario sends
+//!   commands, and, in a diagnostic build, retaining the members' deadlock evidence and logs,
+//!   whether the cluster started or its start failed.
 //! - **Depends on.** The single-process fixture, its test certificate authority, and bounded
 //!   public cluster-status requests.
 //! - **Must not know.** Server state beyond the command and status surfaces each process exposes.
@@ -88,12 +89,21 @@ impl ServerProcessCluster {
     /// Retain evidence and logs before temporary process stores are deleted, including failures.
     #[cfg(feature = "deloxide")]
     pub(crate) fn retain_deadlock_diagnostics(&self) -> io::Result<()> {
+        self.retain_deadlock_diagnostics_in_directory()?;
+        Ok(())
+    }
+
+    /// Copies every member's evidence and log into a directory of its own under the diagnostic
+    /// evidence the run keeps, and returns that directory. A cluster that records no evidence, or
+    /// a run that keeps none, retains nothing.
+    #[cfg(feature = "deloxide")]
+    fn retain_deadlock_diagnostics_in_directory(&self) -> io::Result<Option<std::path::PathBuf>> {
         let Some(base) = std::env::var_os(crate::DEADLOCK_EVIDENCE_ENV) else {
-            return Ok(());
+            return Ok(None);
         };
         let evidence = self.deadlock_evidence();
         if !evidence.path().is_dir() {
-            return Ok(());
+            return Ok(None);
         }
         let base = std::path::PathBuf::from(base).join("process-clusters");
         std::fs::create_dir_all(&base)?;
@@ -108,7 +118,29 @@ impl ServerProcessCluster {
         for (node, process) in &self.nodes {
             std::fs::write(destination.join(format!("{node}.log")), process.log()?)?;
         }
-        Ok(())
+        Ok(Some(destination))
+    }
+
+    /// Retains what a cluster whose start failed leaves behind, before its processes are killed
+    /// and their stores deleted: every launched member's evidence and whole log, as for a cluster
+    /// that started, and the failure. The failure is returned either way, with the retention's own
+    /// failure added when the retention fails.
+    #[cfg(feature = "deloxide")]
+    fn retain_failed_start(&self, failure: io::Error) -> io::Error {
+        let retained = self.retain_deadlock_diagnostics_in_directory();
+        let written = match retained {
+            Ok(Some(destination)) => {
+                std::fs::write(destination.join("start-failure.txt"), failure.to_string())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        match written {
+            Ok(()) => failure,
+            Err(error) => io::Error::other(format!(
+                "{failure}\nthe failed start's diagnostics could not be retained: {error}"
+            )),
+        }
     }
 
     /// What one member logged since its current launch.
@@ -124,45 +156,66 @@ impl ServerProcessCluster {
     ) -> io::Result<Self> {
         assert!(matches!(node_count, 1 | NODE_COUNT));
         let certificate_authority = InterconnectTestCa::new(&root)?;
+        let mut cluster = Self {
+            nodes: BTreeMap::new(),
+            frozen: BTreeSet::new(),
+            _root: root,
+        };
+        let started = cluster
+            .start_members(&certificate_authority, node_count, options)
+            .await;
+        match started {
+            Ok(()) => Ok(cluster),
+            #[cfg(feature = "deloxide")]
+            Err(failure) => Err(cluster.retain_failed_start(failure)),
+            #[cfg(not(feature = "deloxide"))]
+            Err(failure) => Err(failure),
+        }
+    }
+
+    /// Launches the bootstrap member and then each joining member, waiting until each accepts
+    /// commands before launching the next, and then until all of them agree on their voters. A
+    /// member joins the cluster before its readiness wait, so a failed start still holds it.
+    async fn start_members(
+        &mut self,
+        certificate_authority: &InterconnectTestCa,
+        node_count: usize,
+        options: &[ServerProcessOption],
+    ) -> io::Result<()> {
         let bootstrap_root = tempfile::Builder::new()
             .prefix("node-1-")
-            .tempdir_in(root.path())?;
-        let mut bootstrap = ServerProcess::start_cluster_member(
+            .tempdir_in(self._root.path())?;
+        let bootstrap = ServerProcess::start_cluster_member(
             bootstrap_root,
-            &certificate_authority,
+            certificate_authority,
             "node-1",
             None,
             ServerProcessLaunch::Direct,
             options,
-        )?;
-        bootstrap.wait_until_ready().await?;
+        )
+        .await?;
         let bootstrap_host = bootstrap.interconnect_endpoint();
-        let mut nodes = BTreeMap::new();
-        nodes.insert("node-1".to_string(), bootstrap);
+        self.nodes.insert("node-1".to_string(), bootstrap);
+        self.member_mut("node-1")?.wait_until_ready().await?;
         for index in 2..=node_count {
             nervix_primitives::task::consume_budget().await;
             let node_id = format!("node-{index}");
             let node_root = tempfile::Builder::new()
                 .prefix(&format!("{node_id}-"))
-                .tempdir_in(root.path())?;
-            let mut process = ServerProcess::start_cluster_member(
+                .tempdir_in(self._root.path())?;
+            let process = ServerProcess::start_cluster_member(
                 node_root,
-                &certificate_authority,
+                certificate_authority,
                 &node_id,
                 Some(&bootstrap_host),
                 ServerProcessLaunch::Direct,
                 options,
-            )?;
-            process.wait_until_ready().await?;
-            nodes.insert(node_id, process);
+            )
+            .await?;
+            self.nodes.insert(node_id.clone(), process);
+            self.member_mut(&node_id)?.wait_until_ready().await?;
         }
-        let cluster = Self {
-            nodes,
-            frozen: BTreeSet::new(),
-            _root: root,
-        };
-        cluster.wait_for_voters().await?;
-        Ok(cluster)
+        self.wait_for_voters().await
     }
 
     pub(crate) fn node_ids(&self) -> Vec<String> {
@@ -249,7 +302,8 @@ impl ServerProcessCluster {
     /// and voter set through each process's public status endpoint.
     pub(crate) async fn restart_all(&mut self) -> io::Result<()> {
         for process in self.nodes.values_mut() {
-            process.restart_without_waiting()?;
+            nervix_primitives::task::consume_budget().await;
+            process.restart_without_waiting().await?;
         }
         for process in self.nodes.values_mut() {
             nervix_primitives::task::consume_budget().await;
