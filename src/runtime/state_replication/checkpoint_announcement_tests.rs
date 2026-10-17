@@ -556,7 +556,8 @@ async fn runtime_shutdown_cancels_an_in_flight_checkpoint_announcement() {
     );
     let announcing = runtime.inner.state_replication_tasks.spawn(announcing);
     let started = Instant::now();
-    let (_, joined) = futures_util::join!(runtime.shutdown(), announcing);
+    let (_, joined) =
+        futures_util::join!(runtime.shutdown(runtime.domain_drain_timeout()), announcing);
     joined.assured("the cancelled announcement exits without a task failure");
     assert_eq!(
         Instant::now(),

@@ -39,6 +39,7 @@ name = "nervix-interconnect"
 [[package]]
 checks = [
   "consumer::shuttle_tests::shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close",
+  "consumer::shuttle_tests::shuttle_a_read_starting_as_its_exchange_ends_reports_the_gap_before_restoring",
   "consumer::shuttle_tests::shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange",
@@ -100,6 +101,7 @@ checks = [
   "runtime::domain_clock::shuttle_lifecycle_tests::shuttle_delivery_sends_state_before_ticks_without_regressing_progress",
   "runtime::ingestor_quiesce::readiness::shuttle_tests::shuttle_retirement_racing_source_polling_is_final_and_instance_local",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slot",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_live_channel",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer",
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
@@ -175,6 +177,7 @@ checks = [
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_checkpoint_announcement_close_cancels_pending_dispatch",
   "runtime::state_replication::routing::shuttle_tests::shuttle_state_replacement_and_retirement_fence_frames_in_flight",
+  "runtime::state_replication::schedule_installation_tests::shuttle_recovery_never_misses_initial_schedule_installation",
   "runtime::state_replication::tasks::shuttle_tests::shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_written",
   "runtime::state_store::durability::shuttle_tests::shuttle_a_failed_synchronization_refuses_every_uncovered_writer",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_synchronization_frees_the_barrier",

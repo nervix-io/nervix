@@ -17,8 +17,8 @@ use indexmap::IndexMap;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
     KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, OwnershipStateComponent,
-    OwnershipTransition, ResolvedBranching, ScheduledNode, SchemaFingerprint, StatePurge,
-    WasmStateGenerations, WasmStateReset,
+    OwnershipStateRecoveryOutcome, OwnershipTransition, ResolvedBranching, ScheduledNode,
+    SchemaFingerprint, StatePurge, WasmStateGenerations, WasmStateReset,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -360,6 +360,8 @@ pub(crate) struct EntitySwapExecution {
     pub(crate) dynamic_updates: Vec<DynamicExecutionUpdate>,
     pub(crate) state_purges: BTreeMap<NodeRef, Vec<StatePurge>>,
     pub(crate) gate_relays: Vec<nervix_models::RelayName>,
+    /// Input routes whose preceding delivery generation must end before the local swap fence.
+    pub(crate) forced_recovery_relays: Vec<nervix_models::RelayName>,
 }
 
 pub(crate) enum DynamicExecutionUpdate {
@@ -429,9 +431,37 @@ impl ExecutionDelta {
                         }
                     }
                 }
+                let mut forced_recovery_relays = Vec::new();
                 let gate_relays = if let Some(schedule) = desired {
                     let mut gated = entities.clone();
                     gated.extend(reassignments.iter().cloned());
+                    let mut forced = Vec::new();
+                    for entity in &reassignments {
+                        let Some(node) = schedule.nodes.get(entity) else {
+                            continue;
+                        };
+                        let Some(previous) = existing else {
+                            continue;
+                        };
+                        let Some(before) = previous.nodes.get(entity) else {
+                            continue;
+                        };
+                        // A completed transition remains in the schedule through later replica
+                        // changes. Only a new execution-owner move retires delivery channels.
+                        if before.execution_node() == node.execution_node() {
+                            continue;
+                        }
+                        if let Some(OwnershipTransition {
+                            state_recovery:
+                                OwnershipStateRecoveryOutcome::Unverified
+                                | OwnershipStateRecoveryOutcome::Reset,
+                            ..
+                        }) = &node.ownership_transition
+                        {
+                            forced.push(entity.clone());
+                        }
+                    }
+                    forced_recovery_relays = entity_pause_relays_for_schedule(schedule, &forced);
                     entity_pause_relays_for_schedule(schedule, &gated)
                 } else {
                     Vec::new()
@@ -442,6 +472,7 @@ impl ExecutionDelta {
                     dynamic_updates: dynamic_updates.into_iter().map(Into::into).collect(),
                     state_purges,
                     gate_relays,
+                    forced_recovery_relays,
                 })
             }
             ScheduleDelta::Rebuild => Self::Rebuild,
@@ -591,6 +622,59 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case(None, false)]
+    #[case(Some(OwnershipStateRecoveryOutcome::Complete), false)]
+    #[case(Some(OwnershipStateRecoveryOutcome::Unverified), true)]
+    #[case(Some(OwnershipStateRecoveryOutcome::Reset), true)]
+    fn reassignment_plans_routing_retirement_for_forced_recovery(
+        #[case] recovery: Option<OwnershipStateRecoveryOutcome>,
+        #[case] forced: bool,
+    ) {
+        let mut before = schedule(nonzero!(2usize));
+        let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
+        let source = named::<ClusterNodeName>("node-1");
+        let destination = named::<ClusterNodeName>("node-2");
+        let node = before
+            .nodes
+            .get_mut(&relay)
+            .assured("the fixture contains its relay");
+        node.primary_node = Some(source.clone());
+        node.assigned_nodes = vec![source.clone()];
+        let mut after = before.clone();
+        let node = after
+            .nodes
+            .get_mut(&relay)
+            .assured("the target contains the same relay");
+        node.primary_node = Some(destination.clone());
+        node.assigned_nodes = vec![destination.clone()];
+        if let Some(state_recovery) = recovery {
+            node.ownership_transition = Some(OwnershipTransition {
+                id: "forced-routing-test".into(),
+                source,
+                destination,
+                state_recovery,
+                resets: Vec::new(),
+            });
+        }
+        let ExecutionDelta::EntitySwap(change) =
+            ExecutionDelta::between(Some(&before), Some(&after))
+        else {
+            panic!("a reassignment is a typed entity swap");
+        };
+        let expected: Vec<nervix_models::RelayName> = if forced {
+            vec![named("events")]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(change.forced_recovery_relays, expected);
+        assert_eq!(change.reassignments, vec![relay]);
+        assert!(matches!(
+            ExecutionDelta::between(Some(&after), Some(&after)),
+            ExecutionDelta::Unchanged
+        ));
+    }
+
     #[test]
     fn a_missing_schema_fails_before_runtime_installation() {
         let complete = schedule(nonzero!(2usize));
@@ -608,5 +692,42 @@ mod tests {
             error.current_context(),
             ExecutionRevisionError::Activation { .. }
         ));
+    }
+
+    #[test]
+    fn replica_assignment_change_uses_ordinary_quiescence() {
+        let mut before = schedule(nonzero!(2usize));
+        let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
+        let owner = named::<ClusterNodeName>("node-1");
+        let node = before
+            .nodes
+            .get_mut(&relay)
+            .assured("the fixture contains its relay");
+        node.primary_node = Some(owner.clone());
+        node.assigned_nodes = vec![owner.clone()];
+        node.ownership_transition = Some(OwnershipTransition {
+            id: "retained-routing-transition".into(),
+            source: named("node-3"),
+            destination: owner,
+            state_recovery: OwnershipStateRecoveryOutcome::Unverified,
+            resets: Vec::new(),
+        });
+        let mut after = before.clone();
+        after
+            .nodes
+            .get_mut(&relay)
+            .assured("the target contains the relay")
+            .assigned_nodes
+            .push(named("node-2"));
+        let ExecutionDelta::EntitySwap(change) =
+            ExecutionDelta::between(Some(&before), Some(&after))
+        else {
+            panic!("a replica assignment change has a typed swap plan");
+        };
+        assert_eq!(
+            change.forced_recovery_relays,
+            Vec::<nervix_models::RelayName>::new()
+        );
+        assert_eq!(change.reassignments, vec![relay]);
     }
 }

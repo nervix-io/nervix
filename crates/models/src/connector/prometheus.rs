@@ -19,12 +19,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{configured_client::configured_client, entity_union::connector_sources};
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, DomainClockPeriod,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SourceBody,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass, SourceBody,
     SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
-configured_client!(Prometheus: unpooled CreateClientPrometheus => PrometheusConfigEntry);
+configured_client!(Prometheus: unpooled, config Nervix, CreateClientPrometheus => PrometheusConfigEntry);
 
 /// One PromQL query a Prometheus client evaluates on a cadence of domain time.
 #[derive(
@@ -46,6 +47,27 @@ impl SourceEntity for PrometheusQuerySource {
         reference: SourceReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
+        locator: None,
+        options: &[
+            OptionDeclaration {
+                keywords: "QUERY",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Text,
+                    example: "QUERY 'up'",
+                },
+            },
+            OptionDeclaration {
+                keywords: "EVERY",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Duration,
+                    example: "EVERY 15s",
+                },
+            },
+        ],
     };
 }
 
@@ -60,13 +82,6 @@ impl SourceBody for PrometheusQuerySource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. }
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {

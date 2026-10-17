@@ -238,6 +238,7 @@ writer.
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id or its authority UTC observation. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender for as long as its attachment lives, so removing the domain wakes it instead of closing its wait, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
 | Committed domain installation | Each node's runtime counts its installations of the committed domain states through a watch. An installation advances the count only after it has inserted, updated, or removed every domain. | A session attach waits for the first count before it looks up a domain, so a node that is still starting never refuses a domain the cluster has. Because the count advances after the domains are in place, the wait never releases before they are observable. |
+| Forced-recovery destination installation | A recovery subscribes to the domain installation watch before looking for its execution, and selects its matching node under the schedule application mutex. | The watch retains a publication racing the absence check; the mutex orders selection after graph construction, even when domain lifecycle publication occurred first. The existing preparation deadline bounds both waits. The mutex is released before checkpoint transfer and guest restoration. A production-owner Shuttle check explores installation racing selection; async mutex and watch waits remain outside Deloxide's detector. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. |
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
@@ -1070,6 +1071,27 @@ the engagement owns a lease and the protected mutation can proceed. The acquisit
 waiting for that fence; a successfully acquired lease remains engaged until its owner releases or
 drops it.
 
+Forced ownership recovery closes the affected dispatch gates, then cancels changing routes'
+preceding channel generations before waiting for their permits. Retirement retains that cancelled
+generation until the swap publishes its new owner and consumer routes. Retained channels and
+first-use bindings therefore both reject further deliveries through the preceding routes; cancelling
+and immediately publishing a fresh generation would let an existing fan-out acquire a new channel
+for a consumer it selected before the fence. Only relays selected by the typed forced-recovery plan
+and whose routing actually changes are retired. Completed planned handoffs keep their ordinary
+quiescence path. Remote admission uses its existing cancellation/reconciliation budget of five
+seconds per interrupted attempt, rather than retaining a permit until the former owner resumes or
+the entity gate deadline passes. Unconfirmed deliveries fail their record ACKs for source retry;
+already admitted work retains its existing ACK and silence contracts.
+
+The production channel-owner Shuttle check
+`shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication` races first-use
+binding against retirement and requires every preceding slot to remain cancelled across successor
+publication. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
+admission and runtime preparation, checks delivery and a later revision before releasing it, and
+runs in the active, order and lifecycle-stress Deloxide selections. Those selections observe the
+tracked gate, channel-ordering and ACK-owner locks; asynchronous cancellation, admission waits and
+network behavior retain the complementary Shuttle, public-scenario and external Chaos evidence.
+
 An owner buffer admits a batch before its fan-out begins. Fan-out therefore takes a nonwaiting
 dispatch permit before it reads any local or remote runtime-consumer route and holds the permit
 until fan-out has attached the consumer ACK shares and resolved the owner's share. A schedule swap
@@ -1228,7 +1250,9 @@ architectural assertions, not proofs of exclusive ownership, bounded waiting or 
 
 An explicit callable contract wins over defaults. An implementation inherits its trait method's
 contract before its impl/type or lexical defaults; a recurring trait method's override remains
-recurring or names a bounded protocol. A type contract applies to its implementations. Duplicate,
+recurring or names a bounded protocol. A type contract applies to its implementations. An `extern`
+block holds no contract, so a foreign function or static takes those of the module that holds its
+block, in its own crate and through crate metadata alike. Duplicate,
 conflicting, malformed and misplaced annotations fail. A binding whose initializer owns exactly one
 anonymous body can supply that body's context: use it when a constructor installs a recurring task. Nested task bodies
 still require their actual entry contract.

@@ -424,6 +424,9 @@ pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use nervix_models::{
         ClientIngestMode, ClientIngestorAlteration, ClientProducerSource, CodecName,

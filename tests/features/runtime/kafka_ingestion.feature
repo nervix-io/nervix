@@ -377,6 +377,63 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 1             |
 
+  @kafka_refused_commit
+  Scenario Outline: A Kafka ingestor on <cluster_size> nodes reports a commit its broker refuses as a transient status and reports progress only once the broker commits
+    Given a mock Kafka broker serves topic "refused_commit_{{test_id}}"
+    And the mock Kafka broker refuses every offset commit
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA refused_commit_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA refused_commit_wire MODE STRICT ( event_id integer );
+      CREATE CODEC refused_commit_codec
+        FROM WIRE JSON SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
+      CREATE RELAY refused_commit_records SCHEMA refused_commit_event UNBRANCHED;
+      CREATE CLIENT refused_commit_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR refused_commit_source
+        FROM refused_commit_kafka TOPIC 'refused_commit_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_commit_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING refused_commit_codec
+        TO refused_commit_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION refused_commit_subscription TO refused_commit_records;
+      START;
+      """
+    And mock Kafka message is published to topic "refused_commit_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "event_id":1
+      """
+    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+      """
+      transient error: GroupAuthorizationFailed (Broker: Group authorization failed)
+      """
+    And within "2s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "below 1"
+    When the mock Kafka broker accepts offset commits again
+    Then within "30s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "at least 1"
+    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

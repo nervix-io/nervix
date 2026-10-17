@@ -525,7 +525,9 @@ Frozen owners retain state until capture and activation finish. Preparation reta
 deadline, distinct from the activation lease. A pending-drain timeout reports its node and counts,
 releases every attempted hold, and leaves independent schedule units available for later moves.
 Repeated engagement requests use the same identity and scope; a bounded reply timeout creates
-no additional flush and restarts no lease.
+no additional flush and restarts no lease. A request whose interconnect stream broke is retried the
+same way within the preparation deadline, so one lost connection to any participant does not fail
+the unit while preparation time remains.
 
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated
@@ -588,6 +590,14 @@ missing or mismatched preparation does not imply a reset: without an exhaustive 
 schedule, activation fails and leaves every saved checkpoint unchanged. State is recreated only when
 the accepted decision either stages a recreated inventory or reports a reset for every state
 component the entity owns.
+
+The destination first waits for the execution schedule it validates to finish installing, within
+the existing five-second preparation deadline. Lifecycle state can be published before the graph,
+so recovery also orders its schedule read after local application completes. A missing startup
+execution is a wait for installation, rather than evidence that the replica lacks checkpoints.
+An installed schedule with a different fingerprint still refuses preparation. Expiry identifies
+the domain and scheduled entity as an installation deadline failure; the existing failed-preparation
+recreation policy remains in effect.
 
 A forced recovery of a WASM processor starts a new guest-state generation for every branch in the
 same schedule publication, and activation publishes the staged checkpoints in that generation. The
@@ -659,9 +669,12 @@ batch's positions on its transport, so the drain waits for that confirmation as 
 other acknowledgement root, within the drain timeout. What a source's confirmation means is the
 acknowledgement confirmation its entity declares; see
 [Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion
-is answered by the broker and a RabbitMQ acknowledgement is written to the connection before the
-drain moves on, while a Kafka consumer-group commit, a Pulsar acknowledgement and an MQTT `PUBACK`
-are only queued by their clients, so the drain does not wait for their brokers to answer them.
+and a Kafka offset commit are answered, and a RabbitMQ acknowledgement is written to the connection,
+before the drain moves on, while a Pulsar acknowledgement and an MQTT `PUBACK` are only queued by
+their clients, so the drain does not wait for their brokers to answer them. A Kafka consumer group
+in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
+driver delivered since the driver's last commit, and waits for the answer before the consumer
+leaves the group.
 
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the source's own redelivery contract applies. A source instance that stops while it still waits
@@ -715,11 +728,19 @@ Once the graph drain budget ends, terminal teardown cancels an emitter task wait
 attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
 a record-specific success or rejection.
 
-Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
-batches are published, the emitter host calls the sink contract's finish hook with the remaining
-stop deadline. Kafka implements that hook by flushing the producer's local queue within the same
-deadline. Other sinks hold no such queue, so their default finish hook completes immediately and
-the publish itself is the completion point.
+A `NO_ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
+takes a record, so the drain can end while the client still holds records it has not sent. Every
+emitter therefore finishes its sink when it stops: the host calls the sink contract's finish hook
+once the emitter will publish nothing more, and records what the hook did. An emitter that the
+drain moves to another node finishes as part of that stop, by the stop's deadline. An emitter that
+stops in place finishes at terminal teardown, which ends the emitter task wherever it is and gives
+the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flushes its
+producer's local queue within that time, ignoring `linger.ms`; records still queued when it ends are
+lost, and the emitter logs at `warn` how many and reports them as its transient error and an error
+event. Pulsar and MQTT QoS 0 discard what their clients still hold, which the emitter logs at
+`warn`. Every other sink holds nothing once a publish returns, so the publish itself is the
+completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
+holds and does.
 
 A sink that stages what it accepts and publishes it later reaches its completion point at its
 commit instead. After the buffered batches are written into such a sink, the drain calls the sink
@@ -761,7 +782,10 @@ sessions and commands started until the shutdown deadline and cancels whatever s
 stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
 releases the node's storage.
 
-Runtime teardown stops one domain at a time. It publishes the domain's stop to its processors,
+Runtime teardown stops one domain at a time. Before it publishes the domain's stop, it gives every
+emitter the deadline by which the emitter finishes its sink once the stop ends its task: the domain
+drain timeout from the start of runtime teardown, cut short by the shutdown deadline, and the same for
+every domain. It then publishes the domain's stop to its processors,
 emitters, generators, reingestors, and placement tasks at once, and then waits for the domain's
 tasks kind by kind: relay owners and materialized relay state, each of which is told to stop when
 its turn comes, then processors, emitters, generators, reingestors, and the placement tasks that
@@ -1159,6 +1183,16 @@ A source instance that stops before its transport confirmed positions it read re
 `source instance stopped before its transport confirmed positions it read; the transport presents
 them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
 `positions`.
+
+An emitter records what finishing its sink did when it stopped, with the `domain`, the `emitter`,
+the `sink` and the `ending`: `stop` for a stop that drained it, `teardown` for terminal teardown,
+and `interaction_stopped` when its relay interaction ended without either:
+`emitter sent the records its transport client held` at `info`,
+`emitter closed a transport client that may still hold records it delivered` at `warn` for a
+Pulsar or MQTT QoS 0 client, and
+`emitter stopped before its transport client sent every record it held` at `warn` with the
+`error`, which counts the records the client still held. That failure is also the emitter's
+transient error and an error event.
 
 Runtime teardown records every domain task it had to abort, at `warn`:
 `shutdown task exceeded grace period; aborting` carries the `domain`, the task's entity as

@@ -81,7 +81,8 @@ paths.
   algorithm, header and metadata mapping, and acknowledgement operation through its production
   owner. Include successful delivery and the supported rejection, transient and unanswered
   outcomes, partial confirmations, ordering and bounds where the path has those states. Exercise
-  source polling, reads and close when the connector owns them. A path the connector does not
+  source polling, reads and close when the connector owns them, and a sink's finish where its
+  client can hold records once a publish returns. A path the connector does not
   implement needs no fictional test. Unit tests complement the public Cucumber scenarios and
   concurrency checks required by the behavior; they do not replace them.
 - **Properties cover encodings and measures.** Each connector-owned encoding or encoded-size
@@ -349,9 +350,11 @@ Arrow IPC files on the filesystem storage workers, so a node that cannot take th
 publish or the commit, which the host retries as it retries any other.
 
 A driver call that parks its thread while it waits on the network computes nothing, and admitting
-it would hold a worker idle for the whole wait. librdkafka's producer flush and metadata fetch are
-such calls, so the Kafka connector runs them on the runtime's blocking pool as declared owners
-outside the executor, bounded by the host's flush deadline and a per-request metadata timeout.
+it would hold a worker idle for the whole wait. librdkafka's producer flush, metadata fetch and
+synchronous offset commit are such calls, so the Kafka connector runs them on the runtime's blocking
+pool as declared owners outside the executor, bounded by the host's flush deadline, a per-request
+metadata timeout, and one commit in flight per source instance that the source waits for at most
+thirty seconds.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -364,6 +367,68 @@ callback dispatch is documented at its owning callable, and local callback bodie
 These annotations describe this chapter's existing lifecycle; they supply no runtime admission or
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
+
+## Entity declarations
+
+Every connector entity declares, once in the vocabulary, everything a statement can say about it
+and what the entity does with what a statement says. The declaration is the oracle the other layers
+read: the grammar takes each external name's completion label from it, the vocabulary's own checks
+read it, generated conformance tests hold the grammar and completion to it, and an inventory holds
+the scenario suite to its runtime capabilities. Each example a declaration carries is a complete
+clause the grammar accepts, so documentation can show it and generated statements write it.
+
+| Side | What the entity declares |
+| --- | --- |
+| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Emitter | Header writes; the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. |
+
+A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
+`SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
+source answers which choices its statement made. Whether a source can honor a quiesce mode, whether
+a sink accepts a publishing mode, whether its body needs a codec, and the batching contract with its
+maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
+registry, the planner and the console keep their own copies of some of these facts until the work
+that owns those layers reads the declaration instead.
+
+### Generated conformance tests
+
+Tests generated from the declarations check every entity through the composed statement grammar, as
+a REPL or a client meets it, so a grammar module that accepts more or less than its entity declares
+fails them. They cover the three statement families:
+
+- Ingestors. Every declared delivery and quiesce mode, together with the choices it requires, parses
+  into its kind. So does every form of every option. A mode, a quiesce mode or an option that only
+  another entity declares is refused. So is a mode written without its required choices, a statement
+  that leaves a required option out, and an empty external name. Completion at the locator, the
+  options, `MODE` and `ON QUIESCE` offers exactly the declared items.
+- Emitters. Every declared publishing mode, body and batching choice parses into its kind, every
+  optional option parses, and every declared object store names its storage client. A batch above
+  the declared maximum breaks the batching contract. An undeclared publishing mode, body, batching
+  clause, option, envelope clause or `PROPERTIES` block is refused. Completion at `MODE` and after
+  the destination offers exactly the declared items.
+- Clients. `POOL SIZE` is written exactly where the client declares a pool, and only the declared
+  options parse.
+
+An emitter's head does not name its entity yet, so the words that open its destination after `TO`
+come from the test generator; the locator, the options and everything after them come from the
+declaration.
+
+### Capability inventory
+
+`tests/connector-capability-inventory.toml` registers, for every entity and every capability it
+declares, the scenarios that observe that capability at run time. The capabilities are each delivery
+or publishing mode, each option and each choice of an option, each typed metadata field, batching
+where it is available, and each envelope clause and property. `just validate-connector-capabilities`,
+which `just validate` runs, fails when a declared capability names no scenario, when an entry names a
+capability its entity does not declare or names it twice, and when a named scenario does not exist
+in its feature file. A scenario is identified by its feature file and its name exactly as the
+scenario line writes it.
+
+Quiesce modes and header access are not inventory capabilities. The host owns how a source is
+quiesced, the registry checks a program's header access against the declaration, and the generated
+tests hold the grammar to both. A connector that declares a new capability registers the scenario
+that observes it in the same change.
 
 ## Source boundary
 
@@ -580,10 +645,17 @@ it did not get:
 
 | Acknowledgement confirmation | Entities | When acknowledging returns |
 | --- | --- | --- |
-| `answered` | SQS | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. |
+| `answered` | SQS, Kafka | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. |
 | `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
-| `queued` | Kafka, Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Kafka consumer-group commit is never awaited, a Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `queued` | Pulsar, MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. A Pulsar acknowledgement returns once queued, and an MQTT `PUBACK` is written when the client's event loop is next polled. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+
+A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
+positions it delivered on its own cadence, `auto.commit.interval.ms`, so acknowledging such a batch
+confirms nothing. Suspending or closing that source commits what the cadence has not committed yet
+and waits for the coordinator's answer before the consumer leaves its group. A source in an `ACK`
+mode has nothing outstanding at that point, because each acknowledged batch's commit was answered
+before acknowledging it returned.
 
 The host reports progress for a batch only once acknowledging it returns. Until then the
 ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
@@ -687,11 +759,63 @@ and metrics. The connector owns the external
 operation and its completion point. A receiver-requested delay, which a connector attaches to the
 attempt's failure, can extend, but cannot shorten, the host's retry backoff; the backoff sequence
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
-represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
-queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
+represent, so the backoff alone decides that wait. A sink may keep its client after a
 publish failure when reopening it would discard staged work or a persistent session, or, as the
 HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
 transient failure its pending work is still waiting out.
+
+### Finishing a sink
+
+Every sink implements `finish`, and no sink inherits a default. A publish reports a record
+delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
+QoS 0 that point is the client taking the record, so the client can still hold delivered records
+when the emitter stops. `finish` sends what the client still holds by the deadline the host gives
+it and answers with one of three outcomes:
+
+- **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
+- **Flushed.** The client held records and sent every one of them before the deadline.
+- **Discarded.** The client can still hold records a publish reported delivered, and the sink
+  closes it without sending them.
+
+A finish that cannot send everything is a `SinkFinishError`: `Unsent` when the deadline passes with
+records still held, counting them, and `Flush` when the client fails while it sends them, with the
+driver's cause beneath. The host retries neither.
+
+The host calls `finish` once the emitter will publish nothing more through the sink. A stop drains
+the emitter's buffer, publishes and commits everything it holds, and then finishes the sink by the
+stop's own deadline; an alteration, placement move or ownership handoff that replaces the emitter
+stops it this way. A failed finish fails that stop, so the emitter keeps running and the stop can be
+asked again. Terminal teardown of a domain execution, when the domain stops, its execution is
+rebuilt or the node shuts down, ends the emitter task wherever it is, including in the middle of a
+publish, and then finishes the sink. The stopping execution gives every emitter its deadline before
+it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
+shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
+a teardown drains its buffer and finishes the sink by the stop deadline it holds; a task that holds
+none, because its execution was dropped without stopping, leaves the sink unfinished. Teardown can cancel a publish before it reports its
+records: their acknowledgements end unresolved, so an acknowledged source delivers them again, and
+a finish that flushes the client also sends the ones the client had already taken, which the
+destination then receives twice.
+
+The host records every outcome on the emitter: a flush at `info`, a discard at `warn`, and a failed
+finish at `warn`, as the emitter's transient error that `DESCRIBE EMITTER` shows and as an error
+event. What a stop leaves to a finish, and what the finish does with it, differs by sink:
+
+| Sink | What the client holds once a publish returns | What finishing does with it |
+| --- | --- | --- |
+| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts what is still queued when the deadline passes |
+| Pulsar | `NO_ACK`: messages the producer accepted and has not sent. `ACK`: nothing | Discards them with the producer |
+| MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
+| NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
+| ZeroMQ | Nothing: each send writes and flushes its frame to a peer's socket | Nothing to send |
+| RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
+| Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
+
+librdkafka sends lingering records at once only while a call to its flush is waiting: each broker
+thread checks that state when it next serves its partitions. rust-rdkafka's `flush` calls
+librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss
+that instant and the records linger past the deadline. The Kafka finish therefore waits inside
+librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
+the delivery reports that end the flush.
 
 A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
@@ -788,6 +912,14 @@ source's acknowledgement and recovery contract then decides whether the record r
 entity-pause swap uses the stop request instead and cannot install the replacement until its old
 task drains successfully.
 
+Forced ownership recovery treats the unavailable former owner separately: after closing local
+dispatch gates, the host retires changing relay routes' preceding delivery generation before
+waiting for quiescence. An unresolved admission to the former owner uses the existing bounded
+cancellation path and fails unconfirmed record ACKs, allowing an acknowledged source to retry on
+the replacement route. Already admitted work keeps its ACK obligations and can replay after an
+uncertain outcome. The connector receives the same source and sink plans and retains its external
+commit boundary; a successful planned handoff still completes its drain before replacement.
+
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in
@@ -866,8 +998,10 @@ prepends, or each upsert's filter and update documents, and rejects a row whose 
 the server's 16 MiB document limit before any write, because the driver would refuse the whole write
 for it. A record-specific failure of a multi-row SQL write is isolated by writing its rows one at a
 time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` refuses one insert that
-carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
-isolation pass.
+carries a key twice, is isolated the same way. Postgres writes the isolated rows on the connection
+the refused insert borrowed, and runs a write's metadata lookup on its first insert's connection, so
+an insert borrows once and its per-record outcome never waits for the shared pool again. MongoDB
+answers per document, so it needs no isolation pass.
 
 Registered Bolero properties hold these rules against their owners, with measures that grow and
 shrink with a candidate: `connector-row-request-division` the division rule and both limits,
@@ -1013,6 +1147,16 @@ sequenceDiagram
 ## Integration-specific boundaries
 
 - **Kafka source.** The driver inspects topic partitions and reads or commits Kafka offsets.
+  Under `OFFSET BY CONSUMER GROUP` in an `ACK` mode, the source commits the latest offset of each
+  partition of an acknowledged batch and waits for the coordinator's answer, one round trip per
+  batch, which `ACK PARALLEL` amortizes over the batch. A commit the coordinator refuses fails the
+  acknowledgement with the driver's typed cause, so the host shows it as the ingestor's transient
+  status and rejects the positions. librdkafka keeps retrying a commit it could not send for as
+  long as the group has no reachable coordinator, so the source waits for an answer at most thirty
+  seconds and then fails the acknowledgement the same way. Such a commit stays in flight until
+  librdkafka answers it, and the source's next commit waits for it first, so an instance never
+  parks more than one blocking-pool thread on commits. In `MODE NO ACK` the driver commits on its
+  own cadence, and suspending or closing the source commits what it delivered since.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
   unacknowledged record. A consumer-group rebalance can move a partition to another group member
   while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.
@@ -1265,22 +1409,27 @@ drain boundary. This chapter does not redefine those output formats.
 
 ## Adding an integration
 
-1. Declare each entity it serves in the vocabulary: one Model per entity with its capabilities,
-   its delivery modes, and a typed name, checked by the entity's own rule, for each external name
-   its statement writes. The connector and entity together name the statement's head, such as
-   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
-   and its completion. Keep external driver configuration raw only where pass-through is its
-   intentional contract.
+1. Declare each entity it serves in the vocabulary: one Model per entity with its
+   [declaration](#entity-declarations), which states its modes, quiesce modes, locator, options,
+   body, batching and every other fact a statement can say about it, and a typed name, checked by
+   the entity's own rule, for each external name its statement writes. The connector and entity
+   together name the statement's head, such as `KAFKA TOPIC INGESTOR`. Then add the connector's
+   grammar module, which owns each entity's body, and its completion; the generated conformance
+   tests hold both to the declaration. Keep external driver configuration raw only where
+   pass-through is its intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
    source or sink contract implementation. A brokered sink that awaits its broker's answers in
-   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. Add
+   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. A
+   sink answers `finish` for what its client can still hold once a publish returns, as
+   [Finishing a sink](#finishing-a-sink) describes, and adds its row to that table. Add
    its composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
-   three-node execution and failure paths. Confirm the crate boundary and run the repository's
-   validation and connector tests.
+   three-node execution and failure paths, and register the scenarios that observe each declared
+   capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
+   run the repository's validation and connector tests.
 5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
    metric documentation, and the [NSPL skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/nspl/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.

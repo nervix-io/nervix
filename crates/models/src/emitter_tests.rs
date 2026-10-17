@@ -181,19 +181,24 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
             }],
         })
         .expect_err("an HTTP emitter sends one request per record");
+    let unavailable = EmitterBatchContractError::Unavailable {
+        sink: "HTTP",
+        reason: crate::BatchUnavailability::OneRequestPerRecord,
+    };
     assert_eq!(
         error.current_context(),
-        &AlterEmitterError::Batch(EmitterBatchContractError::HttpUnsupported)
+        &AlterEmitterError::Batch(unavailable.clone())
+    );
+    assert_eq!(
+        error.current_context().to_string(),
+        "HTTP emitters send one request per record and do not support BATCH"
     );
     assert_eq!(emitter, before);
     let batched = CreateEmitter {
         batch: Some(batch_policy(10, "64KiB")),
         ..emitter
     };
-    assert_eq!(
-        batch_violation(&batched),
-        Some(EmitterBatchContractError::HttpUnsupported)
-    );
+    assert_eq!(batch_violation(&batched), Some(unavailable));
 }
 
 fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {

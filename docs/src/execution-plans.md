@@ -99,6 +99,12 @@ predecessor for a retry, including after a local WASM reset operation. A node st
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
 
+Forced-recovery preparation subscribes to domain installation before checking for its execution,
+and takes the runtime's application sequence while selecting that execution. This waits for a
+startup installation whose lifecycle is already visible but whose graph is still being built.
+The same preparation deadline bounds the wait. A completed installation must match the requested
+schedule fingerprint; the sequence is released before transferring checkpoints or restoring guests.
+
 A full running build binds the domain clock, pinned resources, codecs, relay boundaries, state
 placements, processor and error plans, connectors, and node tasks from the revision. Its
 `DomainExecution` retains the revision and node-local task ownership. The domain routing snapshot
@@ -179,6 +185,29 @@ change keeps its task; a moved owner rebinds only its affected runtime and state
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
 the fence, or fails its record ACKs so its source retries under the published consumer set.
+
+A forced ownership change additionally identifies the input relays of its reassigned nodes. Once
+their local dispatch gates close, installation retires the preceding channel generation of each
+selected relay whose owner or remote-consumer routes change, before waiting for existing dispatch
+permits. It leaves the preceding routes published and creates no successor channel until normal
+post-swap publication. A dispatch already using a retired channel cancels its unresolved remote
+admission; another destination or branch selected during the fence cannot open a fresh delivery
+under the preceding routes. Unchanged routing and completed planned handoffs retain their ordinary
+drain path.
+
+The decision requires an actual execution-owner change: retained recovery metadata on a later
+replica-only assignment change does not retire delivery channels.
+
+This removes the remote admission wait on a paused or partitioned former owner from graph
+installation. Admission reconciliation retains its existing five-second budget per interrupted
+attempt, independently of the entity gate deadline and the remote admission's longer total budget.
+Other local preparation and drain work retain their own bounds. Admission that already won keeps
+its record-ACK obligations; an unconfirmed outcome fails those obligations and the acknowledged
+source retries using the replacement channel. Recovery can replay records already processed, so
+this is not an exactly-once guarantee. Prepared forced-recovery checkpoints still activate under
+the desired placement before its tasks start. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+owns cancellation and its uncertainty; [Data-Plane Concurrency](./data-plane-concurrency.md#dispatch-gate-engagement)
+owns the local routing-generation fence.
 
 Dynamic processor revisions reuse unchanged prepared plans, while a changed node gets a new
 typed plan identity. [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)

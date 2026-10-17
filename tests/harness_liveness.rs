@@ -101,7 +101,7 @@ mod tests {
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
     use nervix_primitives::{
-        net::TcpListener,
+        net::{TcpListener, TcpSocket},
         stream::wrappers::{ReceiverStream, TcpListenerStream},
         sync::{
             Arc, CancellationToken, Notify, StdArc,
@@ -1089,14 +1089,28 @@ mod tests {
         CommandDisposition::NotLeader(LeaderRedirect { leader: None })
     }
 
-    /// A loopback address nothing listens on, so connecting to it is refused.
-    async fn refused_address() -> SocketAddr {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the loopback interface accepts a test listener");
-        listener
-            .local_addr()
-            .assured("a bound listener has an address")
+    /// A loopback address that refuses connections for as long as it is held.
+    ///
+    /// Its socket stays bound, so no other test or process can take the port while a probe
+    /// expects the refusal, and it never listens, so the kernel refuses every connection to it.
+    /// A port released before the probe could be taken by anything else on a busy runner.
+    struct RefusedAddress {
+        _socket: TcpSocket,
+        address: SocketAddr,
+    }
+
+    impl RefusedAddress {
+        fn bind() -> Self {
+            let socket = TcpSocket::new_v4().assured("the test can open a loopback TCP socket");
+            socket
+                .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .assured("the loopback interface accepts a test socket");
+            let address = socket.local_addr().assured("a bound socket has an address");
+            Self {
+                _socket: socket,
+                address,
+            }
+        }
     }
 
     /// A self-signed certificate authority for a TLS status endpoint.
@@ -1340,7 +1354,8 @@ mod tests {
         let rejecting = StandInNode::serve(StandInBehavior::RejectSession).await;
         let failing = StandInNode::serve(StandInBehavior::FailResponse).await;
         let ending = StandInNode::serve(StandInBehavior::EndSession).await;
-        let refused = plaintext_endpoint(refused_address().await);
+        let refused_address = RefusedAddress::bind();
+        let refused = plaintext_endpoint(refused_address.address);
         let phase = PhaseDeadline::after(STALLED_REQUEST_GUARD);
 
         assert!(matches!(
@@ -1666,12 +1681,13 @@ mod tests {
             HEALTHY_STATUS,
         )))
         .await;
+        let refused_address = RefusedAddress::bind();
         let endpoints = BTreeMap::from([
             ("node-1".to_string(), healthy.endpoint()),
             ("node-2".to_string(), stalled.endpoint()),
             (
                 "node-3".to_string(),
-                plaintext_endpoint(refused_address().await),
+                plaintext_endpoint(refused_address.address),
             ),
         ]);
         let (cleanup_tx, cleanup_rx) = oneshot::channel();
