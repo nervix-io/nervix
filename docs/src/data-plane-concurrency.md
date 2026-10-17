@@ -880,6 +880,20 @@ finds no entry. A terminal outcome, the delivery's own failure, and the sweep ea
 out of the registry with one removal, so exactly one of them resolves it. The atomics establish no
 ordering across locations; the shard lock orders the recheck against every earlier report.
 
+Brokered sinks keep each publish's pending answers in the shared `ConfirmationWindow`. When a
+publish fails, the window polls every remaining answer once without waiting and settles the
+confirmed and rejected records before returning the failure. Unanswered or failed answers keep
+their records unresolved for the host's retry. The read uses
+`nervix_primitives::task::unconstrained`: Tokio's exhausted cooperative budget can otherwise make an
+already delivered channel answer appear pending. This pass is bounded by the configured `MAX`
+window size.
+
+The window's Shuttle checks exercise settlement racing broker answers, window admission and
+deadline expiry through the production owner. Shuttle does not model Tokio's cooperative budget;
+ordinary primitive and window tests deliver more answers than one budget permits and verify that
+every given answer is settled. [Execution Primitives](execution-primitives.md) owns the adapter's
+behavior in each mode, and [Connector Contract](connector-contract.md) owns the publish outcomes.
+
 ### Client ingestor endpoints
 
 Each client ingestor a node executes has one endpoint task that owns every producer attached to it:

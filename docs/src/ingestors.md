@@ -1039,6 +1039,13 @@ Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance r
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
 
+A lost connection to the server ends the instance's subscription. `DESCRIBE INGESTOR` shows the
+loss, and then each failed reconnect, as its transient error, and the instance connects and
+subscribes again on the host's reconnect cadence: the delay starts at 250 ms, doubles after each
+failed attempt up to 30 s, and `DESCRIBE INGESTOR` shows it as the reconnect backoff. Messages the
+client received before the loss are still delivered. Core NATS retains nothing for a subscription
+that is not connected, so messages published while the instance reconnects never reach it.
+
 ### ZeroMQ
 
 ```nspl,ignore

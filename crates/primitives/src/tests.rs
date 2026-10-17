@@ -368,6 +368,15 @@ mod ordinary {
     async fn an_abort_on_drop_handle_keeps_its_contract() {
         super::tasks::abort_on_drop_handles_end_their_tasks().await;
     }
+
+    /// Tokio keeps a cooperative budget, so the control shows the pass spends it before the
+    /// unconstrained pass reads every value it would refuse.
+    #[cfg(feature = "native")]
+    #[crate::test]
+    async fn an_unconstrained_read_is_never_refused_by_the_cooperative_budget() {
+        super::tasks::a_spent_budget_leaves_delivered_values_unread().await;
+        super::tasks::unconstrained_reads_take_every_delivered_value().await;
+    }
 }
 
 #[cfg(feature = "shuttle")]
@@ -555,6 +564,21 @@ mod shuttle_mode {
         shuttle::check_random(
             || shuttle::future::block_on(super::tasks::abort_on_drop_handles_end_their_tasks()),
             16,
+        );
+    }
+
+    /// Shuttle keeps no cooperative budget, so an unconstrained read forwards the poll and reads
+    /// every delivered value as Tokio's does.
+    #[cfg(feature = "native")]
+    #[test]
+    fn an_unconstrained_read_takes_every_delivered_value_under_shuttle() {
+        shuttle::check_random(
+            || {
+                shuttle::future::block_on(
+                    super::tasks::unconstrained_reads_take_every_delivered_value(),
+                )
+            },
+            1,
         );
     }
 

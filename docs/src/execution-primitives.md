@@ -48,7 +48,7 @@ native targets and none of them is compiled there.
 | Barriers, `Once` and the synchronous channel | `sync::blocking` | The standard library's | Modeled: Shuttle's | Real: the standard library's, outside every model |
 | `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Real: the standard library's, outside every model |
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
-| Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
+| Task spawning, joining, yielding, aborting, tracking, the cooperative budget, and polling a future outside it with `unconstrained` | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle; Shuttle keeps no cooperative budget, so `unconstrained` only forwards the poll | Real: Tokio's and Tokio Util's, outside every model |
 | Blocking the runtime worker thread that calls it: the declared owners outside the executor | `task::block_in_place` | Tokio's | Unavailable | Real: Tokio's, outside every model |
 | Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Running a job on the blocking pool itself: the executor's storage jobs, and the declared owners outside the executor | `task::spawn_blocking` | Tokio's blocking pool | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
@@ -134,7 +134,14 @@ which runs only inside a Shuttle execution.
 
 Every async loop whose body performs async work calls `nervix_primitives::task::consume_budget`
 once per iteration near its beginning. The selected scheduler owns that yield opportunity;
-callers do not add their own backend choice. `std::time::Duration` remains a value in every mode.
+callers do not add their own backend choice. `nervix_primitives::task::unconstrained` polls a
+future outside the cooperative budget. Once a task has spent its budget, Tokio's channels and
+timers read as not ready even when their value has arrived. An owner that must learn what has
+already arrived, without waiting for anything, reads through it: the confirmation window settles
+every answer its broker gave before a publish failed this way. A future polled outside the budget
+is never made to yield, so its owner bounds how much it polls. Shuttle keeps no cooperative budget,
+and there `unconstrained` only forwards the poll. `std::time::Duration` remains a value in every
+mode.
 The bounded executor still owns job admission, class isolation, memory charges and cooperative
 cancellation; choosing a task primitive grants none of those permissions by itself.
 
