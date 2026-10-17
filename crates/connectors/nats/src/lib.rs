@@ -3,10 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The NATS connection a client configures, its reconnect delay, the queue
-//!   subscription a source reads through, core and JetStream publication, header mapping
-//!   in both directions, and per-record rejection classification.
-//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
-//!   `async-nats`.
+//!   subscription a source reads through, core and JetStream publication, the JetStream answer
+//!   each record's `PubAck` gives the confirmation window, header mapping in both directions, and
+//!   per-record rejection classification.
+//! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
+//!   `error-stack`, Tokio and `async-nats`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
@@ -22,37 +23,42 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod scripted_server;
 mod source;
 
-use std::{collections::VecDeque, future::Future, pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
     PublishErrorKind as NatsPublishErrorKind, Subject,
     jetstream::{
         Context as NatsJetStream,
-        context::{PublishError as JetStreamPublishError, PublishErrorKind},
+        context::{PublishAckFuture, PublishError as JetStreamPublishError, PublishErrorKind},
         publish::PublishAck,
     },
     message::OutboundMessage,
 };
 use async_trait::async_trait;
 use error_stack::Report;
-use futures_util::{FutureExt, SinkExt};
-use meticulous::OptionExt as _;
+use futures_util::SinkExt;
 use nervix_connector::{
-    AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
-    client_tls_paths,
+    AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, ParsedRetryPolicy,
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    client_config_value, client_tls_paths,
 };
-use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
+use nervix_models::{ClientConfigEntry, SubjectName};
 use nervix_primitives::{
     sync::{
         StdArc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Instant, sleep},
+    time::Instant,
 };
 pub use source::{
     NatsMessageHeaders, NatsSource, NatsSourceError, NatsSourceMessage, NatsSourcePlan,
@@ -98,22 +104,18 @@ enum NatsDelivery {
     },
 }
 
-type NatsConfirmation =
-    Pin<Box<dyn Future<Output = Result<PublishAck, JetStreamPublishError>> + Send>>;
+/// JetStream's answer for one record, which resolves when the record's `PubAck` arrives or the
+/// client gives the record up.
+type NatsAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
 
-struct PendingNatsConfirmation {
-    record: SinkRecordId,
-    occurred_at: Timestamp,
-    deadline: Instant,
-    confirmation: NatsConfirmation,
-}
-
-impl NatsSink {
-    pub async fn new(config: NatsSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let client = Self::client_from_config(&config.config, config.retry_policy).await?;
-        let delivery = match config.mode {
-            NatsPublishingMode::Core => NatsDelivery::Core,
-            NatsPublishingMode::JetStream(confirmation) => NatsDelivery::JetStream {
+impl NatsDelivery {
+    /// How a sink publishes through `client` in `mode`. JetStream gets a context that awaits each
+    /// record's `PubAck` for at most the declared `ACK TIMEOUT` and holds at most `MAX` records
+    /// awaiting one.
+    fn new(mode: NatsPublishingMode, client: &NatsClient) -> Self {
+        match mode {
+            NatsPublishingMode::Core => Self::Core,
+            NatsPublishingMode::JetStream(confirmation) => Self::JetStream {
                 context: Box::new(
                     async_nats::jetstream::ContextBuilder::new()
                         .timeout(confirmation.timeout)
@@ -124,7 +126,14 @@ impl NatsSink {
                 ),
                 confirmation,
             },
-        };
+        }
+    }
+}
+
+impl NatsSink {
+    pub async fn new(config: NatsSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let client = Self::client_from_config(&config.config, config.retry_policy).await?;
+        let delivery = NatsDelivery::new(config.mode, &client);
         Ok(Self {
             client,
             delivery,
@@ -251,22 +260,24 @@ impl NatsSink {
         outcome
     }
 
+    /// Publishes `records` to JetStream and awaits each record's `PubAck` through the
+    /// confirmation window `settings` declare.
+    ///
+    /// Every way the publish can fail ends it through the window, which first settles each answer
+    /// JetStream already gave, so the host's retry never resends a record the stream confirmed.
     async fn publish_jetstream(
         &self,
         jetstream: &NatsJetStream,
-        AckConfirmation {
-            max_in_flight,
-            timeout,
-        }: AckConfirmation,
+        settings: AckConfirmation,
         records: Vec<SinkRecord>,
     ) -> PerRecordOutcome<SinkRecordId> {
-        let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
+        let mut window: ConfirmationWindow<NatsAnswer> =
+            ConfirmationWindow::new(NATS, settings, records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
-            let confirmation = if record.headers.is_empty() {
+            let handed_over = if record.headers.is_empty() {
                 jetstream
                     .publish(self.subject.clone(), record.payload.into())
                     .await
@@ -279,137 +290,61 @@ impl NatsSink {
                     )
                     .await
             };
-            let confirmation = match confirmation {
-                Ok(confirmation) => confirmation,
+            let pending = match handed_over {
+                Ok(pending) => pending,
                 Err(error) if Self::is_jetstream_record_rejection(&error) => {
-                    outcome.reject(RejectedSinkRecord::external(
+                    window.reject(RejectedSinkRecord::external(
                         record_id,
                         occurred_at,
                         format!("nats JetStream rejected record: {error}"),
                     ));
                     continue;
                 }
-                Err(error) => {
-                    outcome.fail(Self::publish_error(error));
-                    return outcome;
-                }
+                Err(error) => return window.fail(Self::refused_hand_over(error)),
             };
-            let Some(deadline) = Instant::now().checked_add(timeout) else {
-                outcome.fail(Self::publish_error(
-                    "nats ACK TIMEOUT exceeds the monotonic clock range",
-                ));
-                return outcome;
-            };
-            pending.push_back(PendingNatsConfirmation {
-                record: record_id,
-                occurred_at,
-                deadline,
-                confirmation: Box::pin(confirmation.into_future()),
-            });
-            if pending.len() >= max_in_flight.get()
-                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
-            {
-                outcome.fail(error);
-                return outcome;
+            let answer: NatsAnswer = Box::pin(Self::await_answer(pending));
+            if let Err(failure) = window.admit(record_id, occurred_at, answer).await {
+                return window.fail(failure);
             }
         }
-        while !pending.is_empty() {
-            nervix_primitives::task::consume_budget().await;
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
-                outcome.fail(error);
-                return outcome;
-            }
-        }
-        outcome
+        window.finish().await
     }
 
-    async fn confirm_oldest(
-        pending: &mut VecDeque<PendingNatsConfirmation>,
-        timeout: Duration,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) -> SinkPublishResult<()> {
-        let Some(oldest) = pending.front_mut() else {
-            return Err(Self::publish_error(
-                "NATS JetStream acknowledgment window unexpectedly became empty",
-            ));
-        };
-        let remaining = oldest
-            .deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO);
-        if remaining.is_zero() {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(Self::confirm_timeout_error(timeout));
-        }
-        let result = nervix_primitives::select! {
-            biased;
-            result = &mut oldest.confirmation => Some(result),
-            _ = sleep(remaining) => None,
-        };
-        let Some(result) = result else {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(Self::confirm_timeout_error(timeout));
-        };
-        let record_id = oldest.record;
-        let occurred_at = oldest.occurred_at;
-        match result {
-            Ok(_ack) => {
-                pending.pop_front();
-                outcome.deliver(record_id);
-                Ok(())
-            }
+    /// Waits for the `PubAck` of the record `pending` tracks and reads JetStream's answer from it.
+    async fn await_answer(pending: PublishAckFuture) -> BrokerAnswer {
+        let acknowledgement = pending.await;
+        Self::broker_answer(acknowledgement)
+    }
+
+    /// JetStream's answer for a record whose wait for its `PubAck` ended as `acknowledgement`.
+    ///
+    /// A `PubAck` confirms the record, and a message above the server's `max_payload` is refused
+    /// for good. Any other ending leaves the record's outcome unknown: no stream captures the
+    /// subject, the `PubAck` did not arrive, or the client or its connection failed.
+    fn broker_answer(acknowledgement: Result<PublishAck, JetStreamPublishError>) -> BrokerAnswer {
+        match acknowledgement {
+            Ok(_ack) => Ok(BrokerVerdict::Confirmed),
             Err(error) if Self::is_jetstream_record_rejection(&error) => {
-                pending.pop_front();
-                outcome.reject(RejectedSinkRecord::external(
-                    record_id,
-                    occurred_at,
-                    format!("nats JetStream rejected record: {error}"),
-                ));
-                Ok(())
+                Ok(BrokerVerdict::Rejected {
+                    message: format!("nats JetStream rejected record: {error}"),
+                })
             }
             Err(error) => {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                Err(Self::publish_error(error))
+                let description = format!("nats JetStream publish failed: {error}");
+                Err(Report::new(error)
+                    .change_context(SinkPublishError::Publish { sink: NATS })
+                    .attach_printable(description))
             }
         }
     }
 
-    /// Collects the records behind the oldest one whose confirmation already resolved.
-    ///
-    /// The caller reached here because the oldest record failed or timed out, and it is about to
-    /// return that failure for the whole publish. Records behind it that already succeeded or were
-    /// individually rejected are recorded so the retry does not send them again. Anything else is
-    /// deliberately left in neither list: its failure is the same infrastructure failure the
-    /// caller is returning, and classifying it per record would report one outage many times.
-    fn harvest_ready_after_oldest_failure(
-        pending: &mut VecDeque<PendingNatsConfirmation>,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) {
-        let mut index = 1;
-        while index < pending.len() {
-            let ready = pending
-                .get_mut(index)
-                .and_then(|confirmation| (&mut confirmation.confirmation).now_or_never());
-            let Some(result) = ready else {
-                index += 1;
-                continue;
-            };
-            let confirmation = pending.remove(index).verified(
-                "the index came from scanning this same pending window, which nothing else \
-                 removes from",
-            );
-            match result {
-                Ok(_ack) => outcome.deliver(confirmation.record),
-                Err(error) if Self::is_jetstream_record_rejection(&error) => {
-                    outcome.reject(RejectedSinkRecord::external(
-                        confirmation.record,
-                        confirmation.occurred_at,
-                        format!("nats JetStream rejected record: {error}"),
-                    ));
-                }
-                Err(_) => {}
-            }
-        }
+    /// The failure that ends a publish whose record the client did not take for a reason that is
+    /// not the record's own, such as a client that could not queue it within `ACK TIMEOUT`.
+    fn refused_hand_over(error: JetStreamPublishError) -> Report<SinkPublishError> {
+        let description = format!("nats JetStream client did not take the record: {error}");
+        Report::new(error)
+            .change_context(SinkPublishError::Publish { sink: NATS })
+            .attach_printable(description)
     }
 
     fn header_map(headers: &[(String, String)]) -> async_nats::HeaderMap {
@@ -431,13 +366,6 @@ impl NatsSink {
     #[cfg(test)]
     fn jetstream_error_is_missing_stream(error: &JetStreamPublishError) -> bool {
         matches!(error.kind(), PublishErrorKind::StreamNotFound)
-    }
-
-    fn confirm_timeout_error(timeout: Duration) -> Report<SinkPublishError> {
-        Self::publish_error(format!(
-            "NATS JetStream PubAck exceeded ACK TIMEOUT {}",
-            humantime::format_duration(timeout)
-        ))
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
@@ -513,7 +441,241 @@ impl RecordSink for NatsSink {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroUsize;
+
+    use nervix_models::Timestamp;
+
     use super::*;
+    use crate::scripted_server::ScriptedServer;
+
+    /// A JetStream sink publishing to subject `events` through the server at `addr`, with at most
+    /// `max_in_flight` records awaiting their `PubAck` at once.
+    async fn jetstream_sink(addr: &str, max_in_flight: usize) -> NatsSink {
+        let policy = ParsedRetryPolicy {
+            backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        };
+        let config = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: addr.to_string(),
+        }];
+        let client = NatsSink::client_from_config(&config, policy)
+            .await
+            .expect("the sink connects to the scripted server");
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::new(max_in_flight).expect("a window holds a record"),
+            timeout: Duration::from_secs(30),
+        };
+        NatsSink {
+            delivery: NatsDelivery::new(NatsPublishingMode::JetStream(confirmation), &client),
+            client,
+            subject: Subject::from("events"),
+        }
+    }
+
+    fn record(index: usize, payload: &[u8], headers: &[(&str, &str)]) -> SinkRecord {
+        let headers = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        SinkRecord::new(
+            SinkRecordId::new(index),
+            None,
+            payload.to_vec(),
+            headers,
+            Timestamp::from_unix_nanos(0),
+        )
+    }
+
+    const CONFIRMED: &str = r#"{"stream":"events","seq":1}"#;
+
+    #[nervix_primitives::test]
+    async fn jetstream_confirms_each_record_and_refuses_one_above_max_payload() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(64).await;
+            let plain = connection.expect_publish().await;
+            let tagged = connection.expect_publish().await;
+            connection.reply(&plain, CONFIRMED).await;
+            connection.reply(&tagged, CONFIRMED).await;
+            (plain.message, tagged.message, connection)
+        });
+        let mut sink = jetstream_sink(&addr, 8).await;
+
+        let outcome = sink
+            .publish(vec![
+                record(0, b"plain", &[]),
+                record(1, &[b'x'; 128], &[]),
+                record(2, b"tagged", &[("trace", "a")]),
+            ])
+            .await
+            .into_parts();
+
+        assert_eq!(
+            outcome.delivered,
+            vec![SinkRecordId::new(0), SinkRecordId::new(2)]
+        );
+        let rejected = outcome
+            .rejected
+            .iter()
+            .map(|rejected| rejected.id)
+            .collect::<Vec<_>>();
+        assert_eq!(rejected, vec![SinkRecordId::new(1)]);
+        assert!(outcome.infrastructure_error.is_none());
+        let (plain, tagged, _connection) = script.await.expect("the scripted server ran");
+        assert_eq!(plain, b"plain");
+        assert_eq!(tagged, b"NATS/1.0\r\ntrace: a\r\n\r\ntagged");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_failed_pub_ack_ends_the_publish_after_settling_the_answers_already_given() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let mut publishes = Vec::new();
+            for _ in 0..4 {
+                publishes.push(connection.expect_publish().await);
+            }
+            // The fourth record's PubAck arrives before the third record's failure, so the
+            // window holds a given answer when the failure ends the publish.
+            for (index, reply) in [
+                (0, CONFIRMED),
+                (1, CONFIRMED),
+                (3, CONFIRMED),
+                (
+                    2,
+                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
+                ),
+            ] {
+                let publish = publishes
+                    .get(index)
+                    .expect("the client published four records");
+                connection.reply(publish, reply).await;
+            }
+            connection
+        });
+        let mut sink = jetstream_sink(&addr, 8).await;
+
+        let outcome = sink
+            .publish((0..4).map(|index| record(index, b"event", &[])).collect())
+            .await
+            .into_parts();
+
+        assert_eq!(
+            outcome.delivered,
+            vec![
+                SinkRecordId::new(0),
+                SinkRecordId::new(1),
+                SinkRecordId::new(3)
+            ],
+            "the publish settles every PubAck JetStream gave before the failure"
+        );
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("the failed PubAck ends the publish");
+        let description = printable_description(&failure).expect("the failure describes itself");
+        assert!(
+            description.starts_with("nats JetStream publish failed: "),
+            "{description}"
+        );
+        let _connection = script.await.expect("the scripted server ran");
+    }
+
+    /// A window of one waits for each record's `PubAck` before it takes the next record, so a
+    /// failed `PubAck` ends the publish while the window admits its record.
+    #[nervix_primitives::test]
+    async fn a_window_of_one_ends_the_publish_on_a_failed_pub_ack() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(64).await;
+            let publish = connection.expect_publish().await;
+            connection
+                .reply(
+                    &publish,
+                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
+                )
+                .await;
+            connection
+        });
+        let mut sink = jetstream_sink(&addr, 1).await;
+
+        let outcome = sink
+            .publish(vec![record(0, b"first", &[]), record(1, b"second", &[])])
+            .await
+            .into_parts();
+
+        assert!(outcome.delivered.is_empty());
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("the failed PubAck ends the publish");
+        let description = printable_description(&failure).expect("the failure describes itself");
+        assert!(
+            description.starts_with("nats JetStream publish failed: "),
+            "{description}"
+        );
+        let _connection = script.await.expect("the scripted server ran");
+    }
+
+    /// JetStream answers every record but the oldest, then fails the oldest's `PubAck`: the
+    /// publish settles every `PubAck` it was given, more of them than one cooperative budget lets
+    /// a task read, so the host's retry resends none of the records the stream confirmed.
+    #[nervix_primitives::test]
+    async fn a_failure_settles_more_pub_acks_than_one_cooperative_budget() {
+        const RECORDS: usize = 300;
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let mut publishes = Vec::with_capacity(RECORDS);
+            for _ in 0..RECORDS {
+                nervix_primitives::task::consume_budget().await;
+                publishes.push(connection.expect_publish().await);
+            }
+            for publish in publishes.iter().skip(1) {
+                nervix_primitives::task::consume_budget().await;
+                connection.reply(publish, CONFIRMED).await;
+            }
+            let oldest = publishes
+                .first()
+                .expect("the client published every record");
+            connection
+                .reply(
+                    oldest,
+                    r#"{"error":{"code":500,"err_code":10049,"description":"stream store failed"}}"#,
+                )
+                .await;
+            connection
+        });
+        let mut sink = jetstream_sink(&addr, 1024).await;
+
+        let outcome = sink
+            .publish(
+                (0..RECORDS)
+                    .map(|index| record(index, b"event", &[]))
+                    .collect(),
+            )
+            .await
+            .into_parts();
+
+        let confirmed = (1..RECORDS).map(SinkRecordId::new).collect::<Vec<_>>();
+        assert_eq!(
+            outcome.delivered.len(),
+            confirmed.len(),
+            "every PubAck JetStream gave is settled"
+        );
+        assert_eq!(outcome.delivered, confirmed);
+        assert!(outcome.rejected.is_empty());
+        assert!(
+            outcome.infrastructure_error.is_some(),
+            "the oldest record's failed PubAck ends the publish"
+        );
+        let _connection = script.await.expect("the scripted server ran");
+    }
 
     #[test]
     fn only_core_max_payload_is_a_record_rejection() {
@@ -536,6 +698,82 @@ mod tests {
         let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
         assert!(NatsSink::is_jetstream_record_rejection(&error));
         assert!(!NatsSink::jetstream_error_is_missing_stream(&error));
+    }
+
+    /// The first printable attachment of `failure`: the description an emitter shows as its
+    /// transient error.
+    fn printable_description(failure: &Report<SinkPublishError>) -> Option<String> {
+        for frame in failure.frames() {
+            if let error_stack::FrameKind::Attachment(error_stack::AttachmentKind::Printable(
+                attachment,
+            )) = frame.kind()
+            {
+                return Some(attachment.to_string());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_pub_ack_confirms_the_record() {
+        let ack = serde_json::from_str::<PublishAck>(r#"{"stream":"events","seq":7}"#)
+            .expect("a PubAck names its stream and sequence");
+        let answer = NatsSink::broker_answer(Ok(ack));
+        assert!(matches!(answer, Ok(BrokerVerdict::Confirmed)));
+    }
+
+    #[test]
+    fn an_oversized_message_is_refused_for_good() {
+        let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
+        let answer = NatsSink::broker_answer(Err(error));
+        let Ok(BrokerVerdict::Rejected { message }) = answer else {
+            panic!("a message above max_payload is refused for good");
+        };
+        assert_eq!(
+            message,
+            "nats JetStream rejected record: max payload size exceeded"
+        );
+    }
+
+    #[test]
+    fn a_failed_pub_ack_leaves_the_record_unresolved_with_its_typed_cause() {
+        let error = JetStreamPublishError::new(PublishErrorKind::StreamNotFound);
+        let Err(failure) = NatsSink::broker_answer(Err(error)) else {
+            panic!("a missing stream leaves the record's outcome unknown");
+        };
+        assert!(matches!(
+            failure.current_context(),
+            SinkPublishError::Publish { sink: NATS }
+        ));
+        let cause = failure
+            .downcast_ref::<JetStreamPublishError>()
+            .expect("the failure keeps the driver's typed cause");
+        assert_eq!(cause.kind(), PublishErrorKind::StreamNotFound);
+        assert_eq!(
+            printable_description(&failure).as_deref(),
+            Some("nats JetStream publish failed: no stream found for given subject")
+        );
+    }
+
+    #[test]
+    fn a_refused_hand_over_describes_the_client_failure() {
+        let failure =
+            NatsSink::refused_hand_over(JetStreamPublishError::new(PublishErrorKind::TimedOut));
+        assert!(matches!(
+            failure.current_context(),
+            SinkPublishError::Publish { sink: NATS }
+        ));
+        let cause = failure
+            .downcast_ref::<JetStreamPublishError>()
+            .expect("the failure keeps the driver's typed cause");
+        assert_eq!(cause.kind(), PublishErrorKind::TimedOut);
+        assert_eq!(
+            printable_description(&failure).as_deref(),
+            Some(
+                "nats JetStream client did not take the record: timed out: didn't receive ack in \
+                 time"
+            )
+        );
     }
 
     #[test]

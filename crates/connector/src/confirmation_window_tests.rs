@@ -26,7 +26,10 @@ use std::{
 use error_stack::{AttachmentKind, FrameKind, Report};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{MessageErrorCode, MessageErrorOperation, Timestamp};
-use nervix_primitives::time::{Instant, Sleep, sleep, sleep_until};
+use nervix_primitives::{
+    sync::oneshot,
+    time::{Instant, Sleep, sleep, sleep_until},
+};
 
 use super::{BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError};
 use crate::sink::{
@@ -699,6 +702,61 @@ async fn a_driver_failure_settles_every_answer_the_broker_already_gave() {
         Duration::from_millis(50),
     );
     assert_eq!(held.get(), 0);
+}
+
+/// More given answers than Tokio's cooperative budget lets one task poll read.
+const ANSWERS_BEYOND_ONE_BUDGET: usize = 300;
+
+/// A window larger than the publish, so taking its records never waits for an answer.
+const WINDOW_LARGER_THAN_THE_PUBLISH: usize = 512;
+
+const _: () = assert!(WINDOW_LARGER_THAN_THE_PUBLISH > ANSWERS_BEYOND_ONE_BUDGET);
+
+/// An answer a driver gives through a runtime channel, as broker drivers answer their publishes.
+type ChannelAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
+
+/// The answer `receiver` carries, which its sender gave before the window reads it.
+fn channel_answer(receiver: oneshot::Receiver<BrokerVerdict>) -> ChannelAnswer {
+    Box::pin(async move {
+        let verdict = receiver
+            .await
+            .assured("each sender gives its answer before the publish fails");
+        Ok(verdict)
+    })
+}
+
+/// A failure settles every answer a driver already gave through a runtime channel, even when there
+/// are more of them than one cooperative budget lets a task read: the runtime never refuses the
+/// window an answer that has arrived, so the host's retry never resends a confirmed record.
+#[nervix_primitives::test]
+async fn a_failure_settles_more_given_answers_than_one_cooperative_budget() {
+    let mut window = ConfirmationWindow::new(
+        SINK,
+        settings(WINDOW_LARGER_THAN_THE_PUBLISH, Duration::from_secs(30)),
+        ANSWERS_BEYOND_ONE_BUDGET,
+    );
+    for index in 0..ANSWERS_BEYOND_ONE_BUDGET {
+        nervix_primitives::task::consume_budget().await;
+        let record = SinkRecordId::new(index);
+        let (give, receiver) = oneshot::channel();
+        give.send(BrokerVerdict::Confirmed)
+            .assured("the window holds the receiver as the record's answer");
+        window
+            .admit(record, occurred_at(record), channel_answer(receiver))
+            .await
+            .verified("a window larger than the publish never waits while it takes the records");
+    }
+
+    let outcome = window.fail(driver_refused()).into_parts();
+
+    assert_eq!(
+        outcome.delivered.len(),
+        ANSWERS_BEYOND_ONE_BUDGET,
+        "every answer the driver gave is settled"
+    );
+    let every_record: Vec<usize> = (0..ANSWERS_BEYOND_ONE_BUDGET).collect();
+    assert_eq!(sorted_delivered(&outcome), record_ids(&every_record));
+    assert!(outcome.rejected.is_empty());
 }
 
 /// A full window waits for its oldest answer until the oldest's own deadline, not a full timeout

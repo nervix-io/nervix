@@ -648,6 +648,16 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
+A NATS source whose client loses its connection to the server reports
+`NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
+received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
+`SourceError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
+NATS JetStream publish keeps the driver's `PublishError` beneath `SinkPublishError::Publish` when the
+client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
+connector's description of the failure for the emitter's transient error. A message above the
+server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
+missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
+
 ### Connector Status Observation
 
 An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;

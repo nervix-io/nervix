@@ -6968,12 +6968,12 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
- "humantime",
- "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
