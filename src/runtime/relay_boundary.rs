@@ -1748,28 +1748,6 @@ impl RelayBoundaryBuilder {
 }
 
 impl Runtime {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "retained relay handles route each admitted record and keep channel ordering \
-                      and fences"
-        )
-    )]
-    pub(in crate::runtime) fn invalidate_branch_relay_generation(
-        &self,
-        domain: &DomainName,
-        key: &Option<BranchKey>,
-    ) {
-        let Some(routing) = self.domain_routing(domain) else {
-            return;
-        };
-        let routing = routing.load();
-        for services in routing.relay_services.values() {
-            services.remove_branch_slots(key);
-        }
-    }
-
     /// Whether this node owns the relay `services` serve. A relay whose schedule names no owner is
     /// owned wherever it runs.
     #[cfg_attr(
@@ -1833,7 +1811,7 @@ impl Runtime {
             None => branches.global_metrics.clone(),
         };
         for (evicted_key, _) in admission.evicted {
-            self.invalidate_branch_relay_generation(domain, &Some(evicted_key));
+            services.remove_branch_slots(&Some(evicted_key));
         }
         metrics.observe_batch(
             batch.message_count(),
@@ -2013,7 +1991,7 @@ impl Runtime {
                             now,
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
-                            runtime.invalidate_branch_relay_generation(&domain, &Some(expired_key));
+                            services.remove_branch_slots(&Some(expired_key));
                         }
                         next_expiration_scan = Instant::now() + expiration_scan_interval;
                     }
@@ -2130,7 +2108,6 @@ impl Runtime {
                     };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         nervix_primitives::task::consume_budget().await;
-                        runtime.invalidate_branch_relay_generation(&domain, &key);
                         if let Err(error) = runtime.delete_materialized_stream_key(&mut state, &key)
                         {
                             warn!(
@@ -2236,7 +2213,6 @@ impl Runtime {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
                         nervix_primitives::task::consume_budget().await;
-                        runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
                             runtime.delete_materialized_stream_key(&mut state, &evicted_key)
                         {

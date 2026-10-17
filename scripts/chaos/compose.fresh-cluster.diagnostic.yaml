@@ -1,0 +1,37 @@
+# Added to the fresh cluster of a restore-fresh-cluster run when its Nervix image declares a
+# Deloxide diagnostic selection, as compose.diagnostic.yaml is to the original cluster: every fresh
+# node records its deadlock evidence in a directory of the run's own, which the controller
+# qualifies before it removes anything.
+x-deadlock-environment: &deadlock-environment
+  NERVIX_DEADLOCK_EVIDENCE: /var/lib/nervix-deadlock
+
+services:
+  nervix-fresh-1:
+    environment:
+      <<: *deadlock-environment
+    volumes:
+      - type: bind
+        source: ${CHAOS_DEADLOCK_DIR:?CHAOS_DEADLOCK_DIR is required}/fresh-1
+        target: /var/lib/nervix-deadlock
+        bind:
+          create_host_path: false
+
+  nervix-fresh-2:
+    environment:
+      <<: *deadlock-environment
+    volumes:
+      - type: bind
+        source: ${CHAOS_DEADLOCK_DIR:?CHAOS_DEADLOCK_DIR is required}/fresh-2
+        target: /var/lib/nervix-deadlock
+        bind:
+          create_host_path: false
+
+  nervix-fresh-3:
+    environment:
+      <<: *deadlock-environment
+    volumes:
+      - type: bind
+        source: ${CHAOS_DEADLOCK_DIR:?CHAOS_DEADLOCK_DIR is required}/fresh-3
+        target: /var/lib/nervix-deadlock
+        bind:
+          create_host_path: false

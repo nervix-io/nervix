@@ -11192,6 +11192,51 @@ async fn when_command_durable_admission_pause_is_released(
         .release_command_durable_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "command finalization on node {string} pauses before its outcome is recorded")]
+async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_finalization_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command finalization pause on node {string} is reached")]
+async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let task = world.background_command_result.as_mut();
+    // A leader resumes an applying execution on its own, so the finalization a scenario holds may
+    // belong to no request of the scenario. A loaded node takes long to get there, and the wait
+    // ends once the pause is reached, so its bound is generous.
+    nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        let Some(task) = task else {
+            fault_injection
+                .wait_for_command_finalization_pause(&node_name)
+                .await;
+            return;
+        };
+        nervix_primitives::select! {
+            () = fault_injection.wait_for_command_finalization_pause(&node_name) => {},
+            result = task => panic!(
+                "command on '{node_id}' returned before its finalization pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("command finalization pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the command finalization pause on node {string} is released")]
+async fn when_command_finalization_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_finalization_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "relocation publication for domain {string} pauses after planning")]
 async fn given_relocation_publication_pauses_after_planning(
     world: &mut ScenarioWorld,
@@ -13711,6 +13756,27 @@ async fn then_background_command_request_reports_conflict_or_unknown_leadership(
             nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
         )
     ));
+}
+
+#[then("the background command request reports an unknown outcome because leadership moved")]
+async fn then_background_command_request_reports_leadership_lost(world: &mut ScenarioWorld) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        ),
+        "background command request did not report that leadership moved: {}",
+        result.message
+    );
 }
 
 #[then("the last command request reports an execution reference content conflict")]
@@ -22798,6 +22864,53 @@ async fn given_pulsar_topic_accepts_messages_of_at_most(
         .unwrap_or_else(|error| {
             panic!("failed to limit the message size of Pulsar topic '{topic}': {error}")
         });
+}
+
+/// What the broker holds for the subscription now: messages no acknowledgement reached it for.
+#[then(
+    expr = "Pulsar subscription {string} of topic {string} holds {int} unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    let backlog = world
+        .cluster()
+        .pulsar_subscription_backlog(&topic, &subscription)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the backlog of Pulsar subscription '{subscription}': {error}")
+        });
+    assert_eq!(
+        backlog, expected,
+        "Pulsar subscription '{subscription}' of topic '{topic}' holds {backlog} unacknowledged \
+         messages"
+    );
+}
+
+#[then(
+    expr = "within {string} Pulsar subscription {string} of topic {string} holds {int} \
+            unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_eventually_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .wait_for_pulsar_subscription_backlog(&topic, &subscription, expected, duration)
+        .await
+        .expect("Pulsar subscription backlog assertion failed");
 }
 
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
