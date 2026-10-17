@@ -197,7 +197,7 @@ async fn then_cli_recovers_archive_to_stdout(world: &mut ScenarioWorld) {
     assert_eq!(report["output"], "-");
 }
 
-#[when(expr = "an Plexus cluster backup crosses two delayed cuts into {string}")]
+#[when(expr = "a Plexus cluster backup crosses two delayed cuts into {string}")]
 async fn when_plexus_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld, file: String) {
     let archive = archive_path(world, &file);
     let leader = current_leader_node(world).await;

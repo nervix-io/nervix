@@ -1,5 +1,7 @@
 # HTTP Emitter Architecture
 
+*Plexus, the Nervix graph definition language.*
+
 An HTTP emitter turns each eligible relay record into one outbound request. Its method, target,
 application headers, and optional codec body are evaluated for that record. Complete, valid final
 `2xx` response headers are the external delivery boundary. The endpoint can still apply a request

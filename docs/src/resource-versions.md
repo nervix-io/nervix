@@ -1,5 +1,7 @@
 # Resource Versions And Bindings
 
+*Plexus, the Nervix graph definition language.*
+
 A resource version is an immutable directory tree that the cluster verifies and installs on every
 live node before anything can use it. A binding is the part of a model that selects one of those
 versions: a TLS VHOST, a protobuf codec or signaling protocol, an inferencer, a WASM processor, a

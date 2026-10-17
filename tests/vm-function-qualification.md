@@ -1,7 +1,7 @@
 # VM function public qualification matrix
 
 This ledger maps the function contracts in [Expression Functions](../docs/src/filter-map-functions.md)
-to public Cucumber scenarios. A family scenario proves its values and failures through an Plexus
+to public Cucumber scenarios. A family scenario proves its values and failures through a Plexus
 graph and session subscription. The context and client scenarios below exercise the common
 compiler, execution, and transport boundaries. Scenario outlines run on one and three nodes unless
 the cited feature explicitly tests a topology-specific event.

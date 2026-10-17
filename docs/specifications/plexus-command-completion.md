@@ -1,5 +1,7 @@
 # Plexus command completion
 
+*Plexus, the Nervix graph definition language.*
+
 Status: implemented. This document defines the current command-completion contract.
 
 ## Required outcome

@@ -1,5 +1,7 @@
 # Data Plane
 
+*Plexus, the Nervix graph definition language.*
+
 The data plane is the runtime execution engine.
 
 It executes the typed revision of a committed schedule. [Execution Plans](./execution-plans.md)

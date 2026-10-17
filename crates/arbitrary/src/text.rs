@@ -565,7 +565,7 @@ impl Arbitrary<'_> {
         text
     }
 
-    /// The text of a name [`Self::name`] would build: an Plexus keyword, one letter, a letter and an
+    /// The text of a name [`Self::name`] would build: a Plexus keyword, one letter, a letter and an
     /// underscore followed by more, or an underscore followed by more, so the length reaches the
     /// vocabulary's bound.
     ///

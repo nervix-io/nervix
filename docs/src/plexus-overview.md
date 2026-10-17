@@ -1,5 +1,7 @@
 # Plexus Overview
 
+*Plexus, the Nervix graph definition language.*
+
 Plexus is the language used to define the Nervix graph.
 
 ## Language Stability

@@ -1,5 +1,7 @@
 # JAQ codec unfolding
 
+*Plexus, the Nervix graph definition language.*
+
 Status: implemented. This document defines the current contract for decoding one payload through a
 JAQ-backed codec into a stream of messages.
 

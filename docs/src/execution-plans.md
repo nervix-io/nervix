@@ -1,5 +1,7 @@
 # Execution Plans
 
+*Plexus, the Nervix graph definition language.*
+
 An execution plan is the in-memory boundary between a committed domain schedule and the tasks
 that run it. Plexus becomes a semantic Model, registry validation establishes its contracts, and
 scheduling commits the graph and its placement. The decision layer then converts the committed

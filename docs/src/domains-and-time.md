@@ -1,5 +1,7 @@
 # Domains And Time
 
+*Plexus, the Nervix graph definition language.*
+
 Every runtime graph in Nervix runs inside a domain.
 
 This chapter describes the public language and runtime behavior. See

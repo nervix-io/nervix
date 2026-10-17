@@ -1,5 +1,7 @@
 # Paced Simulation Drivers
 
+*Plexus, the Nervix graph definition language.*
+
 `examples/paced-simulation` holds two runnable applications that drive a paced simulation through
 a Nervix graph. Each one follows the domain clock, submits sensor readings stamped with the tick
 centers that clock reaches through a [client ingestor](ingestors.md#client-ingestors), and applies
@@ -84,7 +86,7 @@ nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 ```
 
 Check the printed command dispositions: ordinary `--command` currently prints a refusal without
-a nonzero exit status. `USE` must run on its own when entered as an Plexus command.
+a nonzero exit status. `USE` must run on its own when entered as a Plexus command.
 
 ## Running The Drivers
 

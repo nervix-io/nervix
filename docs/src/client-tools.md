@@ -1,5 +1,7 @@
 # Client Tools
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix ships two interactive clients, and both speak the same language to the same place: they open
 a session against the cluster's session API and submit Plexus to the leader. Almost every statement in
 this book can be typed into either one, and neither is required — a Nervix cluster is administered

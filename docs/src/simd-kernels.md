@@ -1,5 +1,7 @@
 # SIMD Kernels
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix applies explicit SIMD to contiguous typed buffers where generated-instruction inspection
 and measurement justify it. The optimization includes the caller: decoding into Arrow builders,
 resolving a column once, retaining bitmaps, or folding a whole run removes the per-row structural

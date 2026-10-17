@@ -1,5 +1,7 @@
 # Cargo Install From GitHub
 
+*Plexus, the Nervix graph definition language.*
+
 Install the Nervix server, the interactive CLI, and the Plexus formatter directly from the
 [Nervix GitHub repository](https://github.com/nervix-io/nervix):
 

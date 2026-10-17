@@ -1,5 +1,7 @@
 # Command Line Client
 
+*Plexus, the Nervix graph definition language.*
+
 `nervix-cli` is the interactive Plexus client. It is installed alongside `nervix-server`
 ([Cargo Install From GitHub](installation-cargo.md)) and is also present in the container image
 ([Docker](installation-docker.md)).

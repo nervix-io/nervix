@@ -1,5 +1,7 @@
 # Your First Pipeline: Kafka To Redis
 
+*Plexus, the Nervix graph definition language.*
+
 The first graph is deliberately trivial: JSON order records arrive on a Kafka topic, Nervix
 decodes them, and an emitter publishes them to a Redis Pub/Sub channel. Along the way you meet
 every building block that later steps reuse: domains, schemas, codecs, relays, clients, ingestors,

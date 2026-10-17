@@ -1,12 +1,12 @@
 ---
 name: plexus
-description: Design, author, explain, review, and troubleshoot Nervix configurations written in the Nervix Stream Processing Language (Plexus). Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, placement policies, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid Plexus and identify required external provisioning.
+description: Design, author, explain, review, and troubleshoot Nervix configurations written in Plexus, the Nervix graph definition language. Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, placement policies, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid Plexus and identify required external provisioning.
 license: FCL-1.0-ALv2
 ---
 
 # Configure Nervix with Plexus
 
-Turn a user's streaming requirements into an explicit, deployable Nervix graph. Open the public
+Use Plexus, the Nervix graph definition language, to turn a user's streaming requirements into an explicit, deployable Nervix graph. Open the public
 [Nervix Plexus documentation index](https://docs.nervix.io/llms.txt), then read the linked Markdown
 needed for the request. Treat that versioned documentation as the authority; never reconstruct
 clause order or connector options from memory.

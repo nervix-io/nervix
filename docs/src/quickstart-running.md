@@ -1,5 +1,7 @@
 # Running Nervix
 
+*Plexus, the Nervix graph definition language.*
+
 This page starts everything the tutorial needs on your local machine: one Nervix node, a Kafka
 broker, and a Redis server.
 

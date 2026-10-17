@@ -1,5 +1,7 @@
 # WASM State And Recovery
 
+*Plexus, the Nervix graph definition language.*
+
 A WASM processor runs one guest instance per concrete branch, and each guest keeps computation state
 that Nervix makes durable. The host checkpoints that state at the end of every guest callback,
 confirms it with the processor's replicas, restores it into every instance it recreates, and
@@ -37,7 +39,7 @@ Nodes](./processors.md#wasm-processor) owns the Plexus statements.
 | Data plane | The processor supervisor | Fencing the scope of an unfinished reset, and preparing, aborting, and committing a reset on the owner. |
 | Control plane | The reset coordinator on the leader | Validating a reset, gating its scope, preparing it, and publishing it through its `Publishing` and `Ready` phases. |
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
-| Edges | The session service and clients | Admitting an Plexus reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
+| Edges | The session service and clients | Admitting a Plexus reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
 
 During normal execution, guest bytes stay in the data plane and state store. A backup is an
 explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
@@ -561,7 +563,7 @@ See [Execution-Time Snapshots](./domain-clock.md#execution-time-snapshots).
 A failure before `Publishing` reports an ordinary reset failure, and the previous lifetime stays
 usable. A failure after it reports that the reset was committed but its new lifetime is not usable.
 Retrying the same request reference resumes the missing initial checkpoints and `Ready` publication
-without advancing the generation again. An Plexus reset completes only at `Ready`; its transaction
+without advancing the generation again. A Plexus reset completes only at `Ready`; its transaction
 step is recovered with its original execution reference after a leader change, a lost reply returns
 the retained outcome, and an expired reference cannot start another reset. See [Coordinated WASM
 Reset Publications](./consensus-storage-and-replication.md#coordinated-wasm-reset-publications),

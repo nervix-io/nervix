@@ -1,5 +1,7 @@
 # Optional emitter batching
 
+*Plexus, the Nervix graph definition language.*
+
 Status: specified, with implementation progressing by task. This document defines the complete
 contract for combining several records into one externally observable batch, for every emitter kind
 and every wire format.

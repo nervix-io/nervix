@@ -1,5 +1,7 @@
 # Errors And Diagnostics
 
+*Plexus, the Nervix graph definition language.*
+
 The [architecture rule matrix](architecture-enforcement.md) records the compiler contracts for
 failure signatures, discarded outcomes, canonical panic operations and Option/Result control
 flow. Expanding an error projection into an explicit Result branch preserves its complete report,

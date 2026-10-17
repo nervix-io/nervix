@@ -72,7 +72,7 @@ Feature: Coordinated WASM processor state reset
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Retrying an Plexus reset keeps the selected branch's new lifetime
+  Scenario Outline: Retrying a Plexus reset keeps the selected branch's new lifetime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"

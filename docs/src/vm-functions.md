@@ -1,5 +1,7 @@
 # VM Functions
 
+*Plexus, the Nervix graph definition language.*
+
 Every Plexus expression runs through one expression VM. That covers a route's `SET`, `WHERE`, and
 `INVOKE`, a source or processor filter, a key or ordering expression, an emitter mapping, and a
 window aggregate's arguments. This chapter is the implementation reference for that VM and its

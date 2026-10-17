@@ -1,5 +1,7 @@
 # Manual
 
+*Plexus, the Nervix graph definition language.*
+
 This section is the user-facing guide to Nervix. If you are new to Nervix, the
 [Quickstart](./quickstart.md) builds a first graph step by step; this section is the full
 reference behind it.

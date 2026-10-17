@@ -1,5 +1,7 @@
 # Resources
 
+*Plexus, the Nervix graph definition language.*
+
 `RESOURCE` is Nervix's versioned file-distribution primitive.
 
 A resource is an uploaded directory tree that is stored and replicated across the cluster. It is used for binary or multi-file assets that runtime nodes need locally, such as:

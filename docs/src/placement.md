@@ -1,5 +1,7 @@
 # Placement Policies
 
+*Plexus, the Nervix graph definition language.*
+
 Placement policies control where a domain's schedulable work executes. Use them to keep a
 latency-sensitive processing corridor on one machine, prefer locality without forcing it, or bias
 expensive stages across machines.

@@ -1,5 +1,7 @@
 # Client Session Protocol
 
+*Plexus, the Nervix graph definition language.*
+
 The client session protocol is the public boundary between a client and a Nervix node. It carries
 Plexus commands and their outcomes, transaction attachment and inspection, completion and choice
 lookups, domain selection and the observations that follow it, Row subscriptions, domain clock

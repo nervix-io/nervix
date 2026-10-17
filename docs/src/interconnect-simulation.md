@@ -1,5 +1,7 @@
 # Deterministic Interconnect Simulation
 
+*Plexus, the Nervix graph definition language.*
+
 The interconnect has a seeded network simulation built on [Turmoil](https://docs.rs/turmoil/0.7.2).
 Each Nervix transport runs on a simulated host with its own Tokio runtime, virtual clock, TCP stack,
 and DNS name. The hosts talk over simulated links that the test can delay, partition, hold, and

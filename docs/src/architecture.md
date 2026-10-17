@@ -1,5 +1,7 @@
 # Architecture Overview
 
+*Plexus, the Nervix graph definition language.*
+
 At a high level, Nervix has two major halves:
 
 - a control plane that owns definitions, scheduling, lifecycle, and coordination

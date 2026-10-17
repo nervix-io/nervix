@@ -223,7 +223,7 @@ to the [JAQ v{version} release]({release_url}). This page only summarizes the Ne
   JAQ command-line options and file loading are not part of the codec contract.
 
 See [JAQ transformations](schemas-and-codecs.md#jaq-transformations) for directionality, supported
-formats, exact output rules, and Plexus syntax, and
+formats, exact output rules, and syntax in Plexus, the Nervix graph definition language, and
 [Unfolding Payloads](schemas-and-codecs.md#unfolding-payloads) for how one payload becomes several
 messages.
 

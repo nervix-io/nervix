@@ -1,5 +1,7 @@
 # Expression Functions
 
+*Plexus, the Nervix graph definition language.*
+
 This chapter is the reference for Plexus expressions: the operators, conversions, builtin functions,
 and window aggregates they can use, with each one's exact types, null handling, errors, and limits.
 Expressions appear on ingestors, processors, routes, and emitters, most often in route

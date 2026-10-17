@@ -1,10 +1,12 @@
 # Introduction
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix is experimental software in active development. It is intended for evaluation, local testing, and design exploration. It is not suitable for real production workloads.
 
 Nervix is a realtime stream processing system with a robust declarative DSL for defining data-flow graphs.
 
-Nervix stream processing Language (Plexus) is used to declare the schemas, connections, runtime nodes, and external integrations that make up a Nervix graph:
+Plexus declares the schemas, connections, runtime nodes, and external integrations that make up a Nervix graph:
 
 - schemas
 - wire schemas

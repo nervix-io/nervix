@@ -1,5 +1,7 @@
 # Syslog
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix separates the syslog message format from syslog network transport:
 
 - the predefined singleton `SYSLOG` wire schema represents the fixed syslog message format

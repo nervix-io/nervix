@@ -1,5 +1,7 @@
 # Client Implementation Manual
 
+*Plexus, the Nervix graph definition language.*
+
 This manual is the normative contract for a program that speaks the Nervix client session protocol.
 It states what an implementation must do to frame and verify messages, correlate requests, recover
 commands exactly, follow the leader, hold a transaction, read subscriptions without misreading a

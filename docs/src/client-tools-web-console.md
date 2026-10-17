@@ -1,7 +1,9 @@
 # Web Console
 
+*Plexus, the Nervix graph definition language.*
+
 Every Nervix node serves a browser console. It combines a live drawing of the running execution
-graph with an Plexus command line, so the same session can be used to read a graph and to change it.
+graph with a Plexus command line, so the same session can be used to read a graph and to change it.
 
 ![The Nervix web console: entity sidebar, live execution graph, and Plexus REPL](images/console-overview.png)
 

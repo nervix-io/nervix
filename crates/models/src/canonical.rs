@@ -3891,7 +3891,7 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
 }
 
 /// Renders a duration as one whole number of the largest unit that divides it
-/// exactly, the only form an Plexus duration literal reads.
+/// exactly, the only form a Plexus duration literal reads.
 ///
 /// A duration's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
 /// hold, so `1500ms` would otherwise render as text that no longer parses. Zero is written in seconds.
@@ -3961,7 +3961,7 @@ fn dollar_quote(value: &str, tag: &str) -> String {
     format!("{delimiter}{value}{delimiter}")
 }
 
-/// Renders `value` as an Plexus string literal.
+/// Renders `value` as a Plexus string literal.
 ///
 /// Single quotes are preferred, double quotes carry an embedded apostrophe, and anything the quoted
 /// forms cannot express verbatim -- a newline, or both quote styles at once -- falls back to

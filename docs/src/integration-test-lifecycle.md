@@ -1,5 +1,7 @@
 # Integration Test Lifecycle
 
+*Plexus, the Nervix graph definition language.*
+
 ## Paced Interconnect Fixture
 
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped

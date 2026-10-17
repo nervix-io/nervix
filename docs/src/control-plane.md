@@ -1,5 +1,7 @@
 # Control Plane
 
+*Plexus, the Nervix graph definition language.*
+
 The control plane is where Nervix applies strong consistency.
 
 It is responsible for:

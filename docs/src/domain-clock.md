@@ -1,5 +1,7 @@
 # Domain Clock
 
+*Plexus, the Nervix graph definition language.*
+
 The domain clock is the time boundary between Nervix's control plane and data plane. The control
 plane commits what time means for a domain; every data-plane node installs that definition and
 uses a capability bound to the exact domain lifecycle generation. Expression engines, processors,
@@ -527,7 +529,7 @@ or advancing the logical frontier. A reported checkpoint revision and reset gene
 durability and lifetime identity, not domain time; neither may establish or alter the clock used
 by a later guest callback.
 
-An Plexus reset uses this same clock contract. Repeating its durable command reference resumes the
+A Plexus reset uses this same clock contract. Repeating its durable command reference resumes the
 same guest-state lifetime replacement without changing the domain clock mapping.
 
 Generated records use the snapshot assigned to their generating operation. Buffered emitter

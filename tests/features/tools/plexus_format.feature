@@ -19,7 +19,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: An unformatted Plexus file is rewritten in place
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       use    demo  ;begin;
       """
@@ -32,7 +32,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: An already formatted file is left untouched
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       USE demo;
       BEGIN;
@@ -42,7 +42,7 @@ Feature: Plexus file formatting
     And the Plexus file "pipeline.plexus" is unchanged
 
   Scenario: Check mode reports an unformatted file without rewriting it
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       use    demo  ;
       """
@@ -55,7 +55,7 @@ Feature: Plexus file formatting
     And the Plexus file "pipeline.plexus" is unchanged
 
   Scenario: Check mode accepts an already formatted file
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       USE demo;
       """
@@ -63,7 +63,7 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
 
   Scenario: Comments between statements survive formatting
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       // header
 
@@ -89,7 +89,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A statement holding a comment is left exactly as written
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       use    demo;
 
@@ -107,7 +107,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A pooled client is rewritten with its pool clause between the type and the mount
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create client postgres_main type postgres pool size min 2 max 8 mount dev_tls version 1
         config { 'addr' = 'postgresql://HOST:5432/DATABASE?sslmode=verify-full' };
@@ -126,7 +126,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: HTTP emitters keep their attachment, request expressions and explicit body selection when formatted
-    Given an Plexus file "http_emitters.plexus" containing
+    Given a Plexus file "http_emitters.plexus" containing
       """
       create attached emitter deliver_event from outgoing to http api method input.request_method
         path input.request_path mode ack retry policy backoff 250ms max 30s
@@ -167,15 +167,15 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
 
   Scenario: A directory is searched recursively for Plexus files
-    Given an Plexus file "top.plexus" containing
+    Given a Plexus file "top.plexus" containing
       """
       use    demo  ;
       """
-    And an Plexus file "nested/deep/inner.plexus" containing
+    And a Plexus file "nested/deep/inner.plexus" containing
       """
       begin;
       """
-    And an Plexus file "nested/notes.txt" containing
+    And a Plexus file "nested/notes.txt" containing
       """
       use    demo  ;
       """
@@ -192,7 +192,7 @@ Feature: Plexus file formatting
     And the Plexus file "nested/notes.txt" is unchanged
 
   Scenario: Check mode reports unformatted files found by searching a directory
-    Given an Plexus file "nested/deep/inner.plexus" containing
+    Given a Plexus file "nested/deep/inner.plexus" containing
       """
       use    demo  ;
       """
@@ -205,7 +205,7 @@ Feature: Plexus file formatting
     And the Plexus file "nested/deep/inner.plexus" is unchanged
 
   Scenario: A file that cannot be parsed is reported and left untouched
-    Given an Plexus file "broken.plexus" containing
+    Given a Plexus file "broken.plexus" containing
       """
       CREATE RELAY;
       """
@@ -218,7 +218,7 @@ Feature: Plexus file formatting
     And the Plexus file "broken.plexus" is unchanged
 
   Scenario: A duration longer than any clock can hold is reported and left untouched
-    Given an Plexus file "broken.plexus" containing
+    Given a Plexus file "broken.plexus" containing
       """
       create paced domain simulation with period 18446744073709551615.5s500000000ns skew 1s;
       """
@@ -231,7 +231,7 @@ Feature: Plexus file formatting
     And the Plexus file "broken.plexus" is unchanged
 
   Scenario: A later statement that cannot be parsed is reported at its own line
-    Given an Plexus file "broken.plexus" containing
+    Given a Plexus file "broken.plexus" containing
       """
       USE demo;
       CREATE RELAY;
@@ -249,7 +249,7 @@ Feature: Plexus file formatting
     And the Plexus file "broken.plexus" is unchanged
 
   Scenario: An expression a statement embeds is reported at its own offending token
-    Given an Plexus file "broken.plexus" containing
+    Given a Plexus file "broken.plexus" containing
       """
       create subscription readings to metrics where input.value = = 1;
       """
@@ -266,7 +266,7 @@ Feature: Plexus file formatting
     And the Plexus file "broken.plexus" is unchanged
 
   Scenario: A number split at its dot is not a float in a statement's expression
-    Given an Plexus file "broken.plexus" containing
+    Given a Plexus file "broken.plexus" containing
       """
       create subscription readings to metrics where input.value = 1 .5;
       """
@@ -283,7 +283,7 @@ Feature: Plexus file formatting
     And the Plexus file "broken.plexus" is unchanged
 
   Scenario: A file that cannot be lexed is reported at the lex stage and left untouched
-    Given an Plexus file "unlexable.plexus" containing
+    Given a Plexus file "unlexable.plexus" containing
       """
       USE 'demo;
       """
@@ -307,7 +307,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: An MQTT topic keeps its exact case through formatting
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create mqtt topic ingestor sensor_readings
         from mqtt_main topic 'Sensors' mode no ack on quiesce drop
@@ -324,7 +324,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A dollar-quoted value ending in part of its delimiter keeps its value
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create user auditor with password $p$it's "quoted"$s$p$;
       """
@@ -336,7 +336,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A configuration value holding a comma and a line break stays one entry
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create client kafka_main type kafka config { 'bootstrap.servers' = 'localhost:9092', 'sasl.jaas.config' = $v$first,
       second$v$ };
@@ -350,7 +350,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A Protobuf message name holding a closing brace keeps its value
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create codec notification_codec from protobuf using resource proto_bundle version 2
         config { 'file' = 'notification.proto' } message 'nervix.test.Notification}'
@@ -364,7 +364,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A domain clock period is written as one duration
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create paced domain simulation with period 1500ms skew 250ms;
       """
@@ -376,7 +376,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A leap second in a start time is written as the instant it reads as
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       start at '2016-12-31T23:59:60.5Z';
       """
@@ -388,7 +388,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: An SQS queue longer than a name stays unquoted
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create emitter order_events from orders to sqs sqs_main queue orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
       """
@@ -400,7 +400,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: An array in a VALUES map is one column value
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create emitter to_ch from notifications
         to clickhouse clickhouse_client insert to table my_table
@@ -417,7 +417,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A carriage return inside a literal survives formatting
-    Given an Plexus file "pipeline.plexus" containing the escaped text
+    Given a Plexus file "pipeline.plexus" containing the escaped text
       """
       create user auditor with password $p$first line\r\nsecond line$p$;\r\nuse demo;\r\n
       """
@@ -429,7 +429,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: A trailing comment ending in a carriage return is formatted in one pass
-    Given an Plexus file "pipeline.plexus" containing the escaped text
+    Given a Plexus file "pipeline.plexus" containing the escaped text
       """
       COMMIT; // done \r
       """
@@ -441,7 +441,7 @@ Feature: Plexus file formatting
       """
 
   Scenario: Clause keywords written as calls and field scopes stay in their expressions
-    Given an Plexus file "pipeline.plexus" containing
+    Given a Plexus file "pipeline.plexus" containing
       """
       create junction peaks from sensors where (max(input.readings) > 10) filter where (output.total > 0)
         unbranched to alerts inherit all flush immediate on message error log;
@@ -504,7 +504,7 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
 
   Scenario: Fields named like clause keywords stay in their expressions
-    Given an Plexus file "trips.plexus" containing
+    Given a Plexus file "trips.plexus" containing
       """
       create junction route_trips from trips where input.to > 0 and on > by
         filter where output.to != max unbranched
@@ -586,7 +586,7 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
 
   Scenario: Names spelled like reserved words are written between backticks
-    Given an Plexus file "spans.plexus" containing
+    Given a Plexus file "spans.plexus" containing
       """
       create junction closed_spans from spans where input.end > input.from and `end` > 0
         unbranched using materialized state limits default { `end` = 1 }

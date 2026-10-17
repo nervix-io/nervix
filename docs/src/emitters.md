@@ -1,5 +1,7 @@
 # Emitters
 
+*Plexus, the Nervix graph definition language.*
+
 Emitters publish relay records to external systems or to application consumers through a client
 session.
 

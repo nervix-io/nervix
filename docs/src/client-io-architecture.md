@@ -1,5 +1,7 @@
 # Client Ingestors And Emitters
 
+*Plexus, the Nervix graph definition language.*
+
 Authenticated applications participate in a Nervix graph through persisted, domain-owned
 `CLIENT PRODUCER` ingestors and `TO CLIENT` emitters. Producers submit native Arrow batches;
 consumers receive constructed Arrow output and explicitly acknowledge, retry, or reject each

@@ -20,7 +20,7 @@ preferred-dark-theme = "navy"
 
 [output.llms]
 command = "../scripts/mdbook_llms.py"
-description = "Public Plexus configuration reference for Nervix."
+description = "Plexus, the Nervix graph definition language: configuration reference."
 include = [
   "plexus-overview.md",
   "control-plane.md",

@@ -1,5 +1,7 @@
 # Common
 
+*Plexus, the Nervix graph definition language.*
+
 Common guides document features that cross several Plexus surfaces and are easiest to use when their
 pieces are explained together. They complement the entity-focused manual chapters; they do not
 introduce another model category.

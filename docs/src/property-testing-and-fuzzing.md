@@ -1,5 +1,7 @@
 # Property Testing And Fuzzing
 
+*Plexus, the Nervix graph definition language.*
+
 Bolero is Nervix's default property-test engine for representation correctness. Each property is
 an ordinary Rust test beside its production owner and a registered custom libFuzzer target. The
 generator, production path and assertion are the same in both modes.

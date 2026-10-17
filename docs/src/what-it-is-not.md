@@ -1,5 +1,7 @@
 # What It Is Not
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix is not an exactly-once transactional engine.
 
 With ACK-based ingestion modes, Nervix behaves as an at-least-once system. Without ACK tracking, it behaves as at-most-once. That is an intentional design choice: Nervix prioritizes throughput and low latency over transactional persistence on every action.

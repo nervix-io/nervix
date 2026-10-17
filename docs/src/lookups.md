@@ -1,5 +1,7 @@
 #  Lookups
 
+*Plexus, the Nervix graph definition language.*
+
 Lookups are resource-backed reference data models that can be queried directly or used inside
 structured Plexus expressions.
 

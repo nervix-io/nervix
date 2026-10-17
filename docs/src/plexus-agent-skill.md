@@ -1,5 +1,7 @@
 # Plexus Agent Skill
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix publishes a portable [Agent Skills](https://agentskills.io) package that teaches compatible
 AI coding agents how to design, explain, review, and troubleshoot Nervix configurations written in
 Plexus. The maintained source is

@@ -1,5 +1,7 @@
 # HTTP emitter
 
+*Plexus, the Nervix graph definition language.*
+
 Status: implemented. This document defines the current contract of the HTTP emitter.
 [The acceptance ledger](../../tests/http-emitter-acceptance-ledger.md) maps every criterion below to
 its owning task and records the public evidence that qualified it.

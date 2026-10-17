@@ -1,5 +1,7 @@
 # Architecture And Internals
 
+*Plexus, the Nervix graph definition language.*
+
 This section explains how Nervix is built and how it behaves internally.
 
 Use it for:

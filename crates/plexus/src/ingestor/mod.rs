@@ -66,7 +66,7 @@ pub fn show_ingestors_parser<'src>()
 /// The keyword that spells one word of a phrase the vocabulary declares.
 fn keyword(word: &'static str) -> Identifier {
     Identifier::from_str(word).assured(
-        "every connector and entity keyword of a source pair is an Plexus keyword, as the \
+        "every connector and entity keyword of a source pair is a Plexus keyword, as the \
          every_pair_keyword_is_an_plexus_keyword test checks for every pair",
     )
 }
@@ -477,7 +477,7 @@ mod tests {
             for word in [kind.connector().keyword(), kind.entity_keyword()] {
                 assert!(
                     Identifier::from_str(word).is_ok(),
-                    "{word} of {kind} is not an Plexus keyword"
+                    "{word} of {kind} is not a Plexus keyword"
                 );
             }
         }

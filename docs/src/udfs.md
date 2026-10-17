@@ -1,5 +1,7 @@
 # User-Defined Functions
 
+*Plexus, the Nervix graph definition language.*
+
 Plexus user-defined functions (UDFs) are domain-owned functions written in
 [Roto](roto-language-reference.md) and invoked anywhere
 an ordinary expression function can be used. They execute in process over Arrow columns: one UDF
@@ -122,7 +124,7 @@ the node's relay, control and bulk work keeps its own workers throughout.
 
 Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. The
 extension class runs one job per available CPU but one, shared with JAQ transformations, and is not
-an Plexus setting. Limit concurrent UDF-bearing paths or isolate them onto separate Nervix processes
+a Plexus setting. Limit concurrent UDF-bearing paths or isolate them onto separate Nervix processes
 when one workload could hold every extension worker. See
 [Capacity Planning For Branched Graphs](capacity-planning.md).
 

@@ -1,5 +1,7 @@
 # Processors
 
+*Plexus, the Nervix graph definition language.*
+
 Processors consume relay records and create one or more route-local outputs. Relay names identify
 graph edges; expressions use language-defined scopes instead of relay-qualified fields.
 

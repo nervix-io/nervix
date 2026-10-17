@@ -1,5 +1,7 @@
 # Ingestors
 
+*Plexus, the Nervix graph definition language.*
+
 Ingestors are the entry points into the runtime graph.
 
 A typical ingestor:

@@ -1,5 +1,7 @@
 # Command Completion
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix treats a successful Plexus administrative response as a completion boundary. When a command
 returns `OK`, its declared effect is durable, applied, and usable through every current live node
 that participates in that effect. A caller can issue the dependent command immediately through

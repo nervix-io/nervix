@@ -1,5 +1,7 @@
 # Developing Nervix
 
+*Plexus, the Nervix graph definition language.*
+
 This section is for working on Nervix itself. Everything here assumes a clone of the Nervix
 repository and uses its `just` recipes; none of it is required to use Nervix.
 

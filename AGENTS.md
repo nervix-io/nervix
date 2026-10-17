@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Nervix is a domain-owned streaming system whose public language is Plexus. This file records the
+Nervix is a domain-owned streaming system configured with Plexus, the Nervix graph definition language. This file records the
 repository's durable architecture and correctness rules. It intentionally does not mirror the
 current module tree, enumerate parser helpers, or restate the complete Plexus grammar; those details
 belong in the code, public specification, and tests.
@@ -1128,7 +1128,7 @@ build and the existing tests, and nothing in it changes behavior.
   cleanup and signals, diagnostic images, the suites and their shards, CI triggers, labels and
   cancellation, guarantees and limits, and qualification evidence. The product contracts its
   scenarios verify stay with their own chapters.
-- Unit tests support but do not replace cucumber coverage for behavior observable through an Plexus
+- Unit tests support but do not replace cucumber coverage for behavior observable through a Plexus
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
   unit tests unless the user explicitly approves the exception for the current task.

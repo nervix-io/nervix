@@ -1,5 +1,7 @@
 #  Sessions
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix supports session-local commands over its session protocol.
 
 These commands are not persisted in the registry:
@@ -447,7 +449,7 @@ replace the choices for a newer edit or connection.
 
 ## Transaction Binding
 
-An Plexus transaction is replicated control-plane state, but its binding to a live session is
+A Plexus transaction is replicated control-plane state, but its binding to a live session is
 leader-local soft state. A session may bind one transaction, and a transaction may be bound to at
 most one session. The session protocol can attach by transaction id; the authenticated user must
 match the transaction owner. A later attach takes over the binding and the displaced session gets

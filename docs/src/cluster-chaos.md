@@ -1,5 +1,7 @@
 # External Cluster Chaos
 
+*Plexus, the Nervix graph definition language.*
+
 The external chaos suite qualifies a packaged Nervix image by running it as a real cluster of
 containers on one Docker host. It disturbs that cluster with real process, pause and network faults,
 and it judges the outcome only from what the cluster shows through its public interfaces. The entry

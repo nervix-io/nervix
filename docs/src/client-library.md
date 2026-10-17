@@ -1,5 +1,7 @@
 #  Rust Client Library
 
+*Plexus, the Nervix graph definition language.*
+
 The workspace includes `nervix-client-core`, a native Rust client library built on the same session
 gRPC API used by `nervix-cli`. It is the reference implementation of the [Client Implementation
 Manual](./client-implementation-manual.md), and [Client Session

@@ -1,5 +1,7 @@
 # Transaction Quiescence And Impact Inspection
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix plans the effect of a transaction before it changes the running graph. One typed impact
 report explains what each accepted operation contributes, what each atomic execution step requires,
 and what the transaction requires as a whole. The same report follows the transaction through

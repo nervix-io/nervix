@@ -271,7 +271,7 @@ fn rejects_a_documented_plexus_block_with_a_parse_error() {
     let block = extract_plexus_blocks("```plexus\nCREATE DOMAIN;\n```\n")
         .expect("fences should be balanced")
         .pop()
-        .expect("an Plexus block should be extracted");
+        .expect("a Plexus block should be extracted");
 
     assert!(block.parse().is_err());
 }

@@ -4820,7 +4820,7 @@ fn record_formatter_output(world: &mut ScenarioWorld, output: std::process::Outp
         Some(String::from_utf8(output.stderr).expect("formatter errors must be UTF-8"));
 }
 
-#[given(regex = r#"^an Plexus file "([^"]+)" containing$"#)]
+#[given(regex = r#"^a Plexus file "([^"]+)" containing$"#)]
 fn given_an_plexus_file_containing(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
     let root = formatter_root(world);
     let path = root.join(&name);
@@ -4857,7 +4857,7 @@ fn unescaped_step_text(text: &str) -> String {
     output
 }
 
-#[given(regex = r#"^an Plexus file "([^"]+)" containing the escaped text$"#)]
+#[given(regex = r#"^a Plexus file "([^"]+)" containing the escaped text$"#)]
 fn given_an_plexus_file_containing_escaped_text(
     world: &mut ScenarioWorld,
     name: String,

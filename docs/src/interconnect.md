@@ -1,5 +1,7 @@
 # Cluster Interconnect
 
+*Plexus, the Nervix graph definition language.*
+
 The cluster interconnect is the authenticated transport between Nervix nodes. It carries cluster
 membership, consensus traffic, control-plane requests, domain-clock progress, relay batches,
 replicated runtime state, resources, and snapshots. It is present on every live node and remains

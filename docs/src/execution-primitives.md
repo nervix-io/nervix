@@ -1,5 +1,7 @@
 # Execution Primitives
 
+*Plexus, the Nervix graph definition language.*
+
 This chapter owns the execution primitive boundary: its layer, governed API families, backend
 selection, target capabilities, permissions, and build contracts. [Data-Plane Concurrency](./data-plane-concurrency.md)
 owns the protocols callers build from those primitives, source-owned synchronization contracts,

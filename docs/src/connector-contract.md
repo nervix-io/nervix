@@ -1,5 +1,7 @@
 # Connector Crates And The Connector Contract
 
+*Plexus, the Nervix graph definition language.*
+
 An external integration meets Nervix at a data-plane boundary. The [ingestor](./ingestors.md)
 and [emitter](./emitters.md) manuals define its Plexus surface and delivery options. This chapter
 defines who owns the work after validation: the shared connector contract, each integration's

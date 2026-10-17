@@ -1,5 +1,7 @@
 # Shutdown And Recovery
 
+*Plexus, the Nervix graph definition language.*
+
 Shutdown is the ordered transition from a running node to a stopped process. It has one owner, three
 phases, and one deadline. The owner establishes that the node is terminating, stops new intake,
 keeps the services that admitted work depends on alive until that work finishes, and only then tears

@@ -802,7 +802,7 @@ mod tests {
 
     #[test]
     fn lexes_verbatim_multiline_dollar_quoted_strings() {
-        let source = "$roto$fn f() {\n  \"quoted\" // not an Plexus comment\n}$roto$";
+        let source = "$roto$fn f() {\n  \"quoted\" // not a Plexus comment\n}$roto$";
         let tokens = lex(source).expect("dollar-quoted string should lex");
         assert_eq!(
             tokens
@@ -810,7 +810,7 @@ mod tests {
                 .map(|token| token.token)
                 .collect::<Vec<_>>(),
             vec![Token::StringLiteral(
-                "fn f() {\n  \"quoted\" // not an Plexus comment\n}".to_string()
+                "fn f() {\n  \"quoted\" // not a Plexus comment\n}".to_string()
             )]
         );
     }

@@ -1,5 +1,7 @@
 # Plexus Formatter
 
+*Plexus, the Nervix graph definition language.*
+
 `nervix-plexus-format` puts Plexus files into their canonical shape. It is an offline tool: it never
 opens a session, contacts a cluster, or executes anything it reads. It parses a file, renders every
 statement canonically, writes the result back, and can instead report which files would change.

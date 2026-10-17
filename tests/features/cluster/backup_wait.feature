@@ -151,7 +151,7 @@ Feature: Bounded multi-domain backup waits and exact recovery
       | 1            |
       | 3            |
 
-  Scenario Outline: An Plexus cluster backup waits across independent domain cut budgets
+  Scenario Outline: A Plexus cluster backup waits across independent domain cut budgets
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
@@ -168,7 +168,7 @@ Feature: Bounded multi-domain backup waits and exact recovery
       """
     Given the backup cut for domain "{{backup_base}}_a" will pause after draining
     And the backup cut for domain "{{backup_base}}_b" will pause after draining
-    When an Plexus cluster backup crosses two delayed cuts into "cluster-wait.nvxb"
+    When a Plexus cluster backup crosses two delayed cuts into "cluster-wait.nvxb"
     Then backup archive "cluster-wait.nvxb" contains both delayed quiesced domain cuts
 
     Examples:

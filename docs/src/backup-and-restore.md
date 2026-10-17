@@ -1,5 +1,7 @@
 # Backup And Restore
 
+*Plexus, the Nervix graph definition language.*
+
 A backup writes a whole cluster, or one domain, into one archive file on the
 machine of the client that ran it. The archive holds each domain's committed models as Plexus, each
 domain's lifecycle and clock, its resource catalog with the original bytes of every resource
