@@ -225,11 +225,40 @@ expect_result uncovered '.category == "controller" and .recording_covered == fal
 nodes=1 judge one-node 0 "${tmp_dir}/recording.ndjson" <(clean_qualification | jq -c 'select(.node == "node-1")')
 expect_result one-node '.verdict == "passed" and (.nodes | map(.node)) == ["node-1"]'
 
+# A run that also started a fresh cluster owes evidence for every fresh node it names as well.
+{
+    three_node_recording
+    node_event nervix-fresh-1 start 2000
+    node_event nervix-fresh-2 start 2100
+    node_event nervix-fresh-3 start 2200
+} >"${tmp_dir}/fresh-recording.ndjson"
+fresh_nodes=(--extra-node fresh-1=nervix-fresh-1 --extra-node fresh-2=nervix-fresh-2
+    --extra-node fresh-3=nervix-fresh-3)
+{
+    clean_qualification
+    evidence_file fresh-1 deadlock-9-1.rkyv 0 "${clean_summary}"
+    evidence_file fresh-2 deadlock-9-1.rkyv 0 "${clean_summary}"
+    evidence_file fresh-3 deadlock-9-1.rkyv 0 "${clean_summary}"
+} >"${tmp_dir}/fresh.ndjson"
+judge fresh 0 "${tmp_dir}/fresh-recording.ndjson" "${tmp_dir}/fresh.ndjson" "${fresh_nodes[@]}"
+expect_result fresh '.verdict == "passed" and .totals.process_starts == 7 and .totals.evidence_files == 7
+    and (.nodes | map(.node)) == ["node-1", "node-2", "node-3", "fresh-1", "fresh-2", "fresh-3"]'
+grep -v '"node":"fresh-2"' "${tmp_dir}/fresh.ndjson" >"${tmp_dir}/fresh-missing.ndjson"
+judge fresh-missing 1 "${tmp_dir}/fresh-recording.ndjson" "${tmp_dir}/fresh-missing.ndjson" "${fresh_nodes[@]}"
+expect_result fresh-missing '.verdict == "failed" and .category == "diagnostic"
+    and any(.problems[]; .node == "fresh-2" and (.reason | test("started 1 process.*recorded 0 evidence")))'
+
 # Usage errors.
 status=0
 "${verify}" --recording "${tmp_dir}/recording.ndjson" --recording-covered true \
     --qualification "${tmp_dir}/clean.ndjson" --selection ordinary --nodes 3 \
     --max-files-per-node 64 --max-bytes 1 --output "${tmp_dir}/usage.json" >/dev/null 2>&1 || status=$?
 [[ "${status}" -eq 2 ]] || fail "an unknown selection returned ${status}, expected 2"
+status=0
+"${verify}" --recording "${tmp_dir}/recording.ndjson" --recording-covered true \
+    --qualification "${tmp_dir}/clean.ndjson" --selection deloxide-order --nodes 3 \
+    --extra-node fresh-1 --max-files-per-node 64 --max-bytes 1 \
+    --output "${tmp_dir}/usage.json" >/dev/null 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "an extra node without its service returned ${status}, expected 2"
 
 printf 'diagnostic evidence self-test passed\n'

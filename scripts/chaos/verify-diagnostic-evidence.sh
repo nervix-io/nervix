@@ -12,6 +12,9 @@
 #   deadlock (3) or a failed diagnostic execution (4);
 # - the evidence fits the run's bounds.
 #
+# The nodes are the run's numbered nodes, node-N serving the Compose service nervix-N, and every node
+# an --extra-node NAME=SERVICE names, such as the fresh cluster a restore-fresh-cluster run starts.
+#
 # It writes the verdict and the counts to OUTPUT and exits 0 when the evidence qualifies, 1 when it
 # does not, and 2 for a usage error.
 set -euo pipefail
@@ -20,7 +23,7 @@ usage() {
     cat >&2 <<'EOF'
 usage: verify-diagnostic-evidence.sh --recording EVENTS_NDJSON --recording-covered true|false
          --qualification QUALIFICATION_NDJSON --selection SELECTION --nodes 1|3
-         --max-files-per-node N --max-bytes N --output RESULT_JSON
+         [--extra-node NAME=SERVICE]... --max-files-per-node N --max-bytes N --output RESULT_JSON
 EOF
     exit 2
 }
@@ -33,6 +36,7 @@ node_count=""
 max_files_per_node=""
 max_bytes=""
 output=""
+extra_nodes=()
 while [[ "$#" -gt 0 ]]; do
     [[ "$#" -ge 2 ]] || usage
     case "$1" in
@@ -41,6 +45,10 @@ while [[ "$#" -gt 0 ]]; do
         --qualification) qualification="$2" ;;
         --selection) selection="$2" ;;
         --nodes) node_count="$2" ;;
+        --extra-node)
+            [[ "$2" =~ ^[a-z0-9][a-z0-9-]*=[a-z0-9][a-z0-9-]*$ ]] || usage
+            extra_nodes+=("$2")
+            ;;
         --max-files-per-node) max_files_per_node="$2" ;;
         --max-bytes) max_bytes="$2" ;;
         --output) output="$2" ;;
@@ -66,6 +74,8 @@ esac
 
 [[ -e "${recording}" ]] || recording=/dev/null
 [[ -e "${qualification}" ]] || qualification=/dev/null
+extra_nodes_json="$(printf '%s\n' ${extra_nodes[@]+"${extra_nodes[@]}"} \
+    | jq -R 'select(length > 0) | split("=") | {node: .[0], service: .[1]}' | jq -s .)"
 
 jq -n \
     --slurpfile events "${recording}" \
@@ -74,6 +84,7 @@ jq -n \
     --arg selection "${selection}" \
     --arg evidence_selection "${evidence_selection}" \
     --argjson nodes "${node_count}" \
+    --argjson extra_nodes "${extra_nodes_json}" \
     --argjson max_files "${max_files_per_node}" \
     --argjson max_bytes "${max_bytes}" '
     # The key=value counts of a `qualify` summary line, as numbers.
@@ -92,10 +103,10 @@ jq -n \
                             and .Actor.Attributes["io.nervix.chaos.role"] == "node"
                             and .Actor.Attributes["com.docker.compose.service"] == $service)];
 
-    [range(1; $nodes + 1)] as $numbers
-    | [$numbers[] as $number
-       | "nervix-\($number)" as $service
-       | "node-\($number)" as $node
+    ([range(1; $nodes + 1) | {node: "node-\(.)", service: "nervix-\(.)"}] + $extra_nodes) as $members
+    | [$members[]
+       | .service as $service
+       | .node as $node
        | node_events($service) as $node_events
        | [$files[] | select(.node == $node)] as $node_files
        | [$node_files[] | select(.kind == "evidence")] as $evidence
