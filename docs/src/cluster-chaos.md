@@ -329,7 +329,7 @@ take.
 | Option | Applies to | Range and default |
 | --- | --- | --- |
 | `--image IMAGE` | Every scenario | Required |
-| `--nodes 1\|3` | Every scenario. One node only for `baseline`, `backup`, `rolling-restart`, `leader-crash`, `cluster-restart`, `stateful` and `domain-time` | Default 3 |
+| `--nodes 1\|3` | Every scenario. Only `baseline`, `backup`, `rolling-restart`, `leader-crash`, `cluster-restart`, `stateful` and `domain-time` accept `--nodes 1` | Default 3 |
 | `--records N` | Every scenario | 1 to 1,000; mixed instability 1 to 20,000. Defaults are in the [catalog](#scenario-catalog) |
 | `--timeout SECONDS` | Every scenario | 120 to 3,600; mixed instability from its duration plus 600 through 21,600. Defaults are in the catalog |
 | `--artifacts DIR` | Every scenario | Default `target/chaos` |
@@ -1150,9 +1150,9 @@ The run proceeds in order:
 
    Its readiness and the schedule its own status reports are recorded. The survivors must keep
    delivering throughout the window.
-6. Healing must restore default rules and an open matrix. The former owner must then log runtime
-   admission no earlier than the start of the heal, after logging that it waited for linearizable
-   consensus catch-up.
+6. Healing must restore default rules and an open matrix. Within 90 seconds, the former owner must
+   then log runtime admission, no earlier than the start of the heal and after logging that it
+   waited for linearizable consensus catch-up.
 7. Within 150 seconds, every node must agree on a caught-up leader with every peer connected, and
    the former owner must report the changed owners through `DESCRIBE` and its own schedule. The
    consumer group must run only on the scheduled ingestor owner, output must advance, and a canary
@@ -1350,7 +1350,8 @@ just chaos run domain-time --image nervix:debian --nodes 1 --fault cluster-resta
 order:
 
 - `voter-crash` kills the voter and starts it again after `--outage-seconds` (default 8)
-- `voter-pause` pauses it for `--outage-seconds` (default 30), under the pause deployment
+- `voter-pause` pauses it for `--outage-seconds` (default 30, from 16 to 99), under the pause
+  deployment
 - `voter-partition` isolates it with peer-side rules for at least `--outage-seconds` (default 30)
 - `voter-stop` stops it gracefully and requires a completed drain, so the voter hands the paced graph
   to another node through the leader before it exits. It starts the voter again after
