@@ -22,6 +22,7 @@ elif [[ "$#" -ne 0 ]]; then
 fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/pause-delivery-self-test.sh"
 "${script_dir}/hold-quorum-self-test.sh"
 "${script_dir}/output-boundary-self-test.sh"
 "${script_dir}/image-package-self-test.sh"

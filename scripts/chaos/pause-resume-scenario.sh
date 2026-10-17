@@ -3,6 +3,15 @@
 
 # shellcheck source=crash-scenario.sh
 source "${script_dir}/crash-scenario.sh"
+# shellcheck source=consumer-group.sh
+source "${script_dir}/consumer-group.sh"
+
+# Kafka's group coordinator keeps a paused consumer in the source group until that member's session
+# expires, session.timeout.ms after its last heartbeat, which precedes the pause. The baseline
+# graph's client keeps librdkafka's default.
+pause_group_session_timeout_seconds=45
+# The rebalance the coordinator then completes, and one read of the group through the broker's CLI.
+pause_group_handoff_allowance_seconds=15
 
 pause_fail() {
     failure_category="$1"
@@ -109,10 +118,44 @@ peer_status_during_pause() {
 }
 
 # Requires sink progress on the surviving owners after a failover-length pause relocated them, while
-# the target stays paused. Sets pause_output_during and pause_delivery_ms for the round's result.
+# the target stays paused. When the paused node ran the ingestor, its consumer remains a member of
+# the source group, and the group coordinator gives the partition to the relocated ingestor's
+# consumer only when that member's session expires. The sink's window then opens at this handoff
+# rather than at the relocation. Sets pause_group_handoff_ms, pause_output_during and
+# pause_delivery_ms for the round's result.
 pause_delivery_during_pause() {
     local container_id="$1"
     local requested_ms="$2"
+    local round_dir="$3"
+    pause_group_handoff_ms=null
+    local paused_node ingestor_owner_before
+    paused_node="$(jq -r '.target_node' "${round_dir}/immediately-before/role.json")" || return 1
+    ingestor_owner_before="$(jq -r '.ingestor_owner' "${round_dir}/immediately-before/role.json")" || return 1
+    if [[ "${ingestor_owner_before}" == "${paused_node}" ]]; then
+        local relocated_owner
+        relocated_owner="$(owner_from_description "${round_dir}/ingestor-survivor.attempt.txt")"
+        local handoff_deadline_ms
+        handoff_deadline_ms=$((requested_ms
+            + (pause_group_session_timeout_seconds + pause_group_handoff_allowance_seconds) * 1000))
+        local handoff_remaining_ms
+        handoff_remaining_ms=$((handoff_deadline_ms - $(epoch_ms)))
+        # The wait takes whole seconds, rounded up. A relocation observed after the deadline still
+        # gets one read of the group.
+        local handoff_bound_seconds=$(((handoff_remaining_ms + 999) / 1000))
+        if ((handoff_bound_seconds < 1)); then
+            handoff_bound_seconds=1
+        fi
+        if ! wait_for 'source consumer group moved to the relocated ingestor during long pause' \
+            "${handoff_bound_seconds}" ingestion_on "${round_dir}/group-handoff" "${relocated_owner}"; then
+            pause_fail product 'the source consumer group did not move to the relocated ingestor during the pause'
+            return 1
+        fi
+        if ! pause_target_is "${container_id}" true; then
+            pause_fail product 'the source consumer group moved only after unpause'
+            return 1
+        fi
+        pause_group_handoff_ms="$(( $(epoch_ms) - requested_ms ))"
+    fi
     local output_before_progress
     output_before_progress="$(topic_end_offset chaos_output)"
     if ! wait_for 'sink traffic progressed with target paused' 20 \
@@ -257,7 +300,7 @@ pause_one_node() {
         peer_status_during_pause "${peer}" "${round_dir}/peer-status-during.txt"
     fi
 
-    local election_ms=null placement_ms=null delivery_ms=null
+    local election_ms=null placement_ms=null group_handoff_ms=null delivery_ms=null
     if [[ "${duration}" -gt 1 ]]; then
         failure_category=product
         wait_for 'survivors elected and caught up during long pause' 35 \
@@ -274,7 +317,8 @@ pause_one_node() {
         pause_target_is "${container_id}" true \
             || pause_fail product 'placement was observed only after unpause'
         placement_ms="$(( $(epoch_ms) - requested_ms ))"
-        pause_delivery_during_pause "${container_id}" "${requested_ms}"
+        pause_delivery_during_pause "${container_id}" "${requested_ms}" "${round_dir}"
+        group_handoff_ms="${pause_group_handoff_ms}"
         output_during="${pause_output_during}"
         delivery_ms="${pause_delivery_ms}"
         control_attempt "${during_canary}" "${peer}" "${round_dir}" 12
@@ -409,6 +453,7 @@ pause_one_node() {
         --argjson requested_seconds "${duration}" \
         --argjson election_ms "${election_ms}" \
         --argjson placement_ms "${placement_ms}" \
+        --argjson group_handoff_ms "${group_handoff_ms}" \
         --argjson delivery_ms "${delivery_ms}" \
         --argjson recovery_ms "${settled_ms}" \
         --argjson source_before "${source_before}" \
@@ -418,7 +463,7 @@ pause_one_node() {
         --argjson output_during "${output_during}" \
         --argjson output_at_resume "${output_at_resume}" \
         --argjson output_after "${output_after}" \
-        '{role:$role[0],target_host:$target_host,container_id:$target_id,requested_pause_seconds:$requested_seconds,actual_pause:$duration[0],recovered_leader:$recovered_leader,election_ms:$election_ms,placement_ms:$placement_ms,delivery_during_pause_ms:$delivery_ms,recovery_after_unpause_ms:$recovery_ms,source_offsets:{before:$source_before,during:$source_during,after:$source_after},output_offsets:{before:$output_before,during:$output_during,at_resume:$output_at_resume,after:$output_after},control:"control-results.json",observer:"observer.log",public_status:"recovered/status-nervix-1.attempt.txt",node_events:"all-node-events.ndjson",node_event_recording:"all-node-events.recording.json"}' \
+        '{role:$role[0],target_host:$target_host,container_id:$target_id,requested_pause_seconds:$requested_seconds,actual_pause:$duration[0],recovered_leader:$recovered_leader,election_ms:$election_ms,placement_ms:$placement_ms,group_handoff_ms:$group_handoff_ms,delivery_during_pause_ms:$delivery_ms,recovery_after_unpause_ms:$recovery_ms,source_offsets:{before:$source_before,during:$source_during,after:$source_after},output_offsets:{before:$output_before,during:$output_during,at_resume:$output_at_resume,after:$output_after},control:"control-results.json",observer:"observer.log",public_status:"recovered/status-nervix-1.attempt.txt",node_events:"all-node-events.ndjson",node_event_recording:"all-node-events.recording.json"}' \
         >"${round_dir}/result.json"
 }
 
@@ -470,7 +515,8 @@ run_pause_resume() {
         || pause_fail product 'accepted-input ledger did not cover the final source boundary'
     jq -s \
         --argjson source_end "${input_end}" \
-        '{configured_liveness:{raft_heartbeat_interval:"250ms",raft_election_timeout_min:"10s",raft_election_timeout_max:"12s",node_unavailability_timeout:"15s"},source_final_boundary:$source_end,rounds:.}' \
+        --arg group_session_timeout "${pause_group_session_timeout_seconds}s" \
+        '{configured_liveness:{raft_heartbeat_interval:"250ms",raft_election_timeout_min:"10s",raft_election_timeout_max:"12s",node_unavailability_timeout:"15s",kafka_consumer_session_timeout:$group_session_timeout},source_final_boundary:$source_end,rounds:.}' \
         "${artifact_dir}"/pauses/[1-4]-*/result.json \
         >"${artifact_dir}/results/pause-progress.json"
 }

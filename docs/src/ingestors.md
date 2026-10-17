@@ -839,6 +839,15 @@ transient status in `DESCRIBE INGESTOR`, and the ingestor reads the batch again,
 repeat; the status clears once a later commit is answered. A graceful stop or an ownership move
 waits for the answer to every commit of the work it drains, within the drain timeout.
 
+Under `OFFSET BY CONSUMER GROUP`, a consumer that stops heartbeating without leaving its group,
+because its node was killed, paused or cut off from the broker, keeps its partitions until the group
+coordinator expires its session, `session.timeout.ms` after its last heartbeat. librdkafka's default
+is 45 seconds; the client's pass-through configuration can change it. When the ingestor moves to
+another node, the new owner's consumer joins the group as soon as it starts, but receives those
+partitions, and records flow again, only after that expiry. A graceful stop or an ownership move
+leaves the group first, so its partitions move without that wait. `OFFSET BY DOMAIN` assigns
+partitions through the domain schedule and waits for no group session.
+
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
 commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
 for downstream acknowledgement, so a failure can lose records whose positions were committed before
