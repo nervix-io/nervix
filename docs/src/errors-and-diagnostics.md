@@ -2016,8 +2016,8 @@ consume the sample's bound. The probe record keeps each stage's outcome and the 
 times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
 Docker's state and events for it before its removal. A failed required attempt remains evidence
 even after a subsequent successful qualification. The controller's measurement budget does not extend the
-product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
-commands, measurement interpretation and retained artifact paths.
+product's recovery budget. [External Cluster Chaos](./cluster-chaos.md#link-degradation) owns
+the commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact
 arguments and bound, elapsed time, helper identities and both raw streams. The operation record
 exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the

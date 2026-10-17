@@ -85,6 +85,7 @@
   - [Shutdown And Recovery](./shutdown.md)
   - [Integration Test Lifecycle](./integration-test-lifecycle.md)
   - [Deterministic Interconnect Simulation](./interconnect-simulation.md)
+  - [External Cluster Chaos](./cluster-chaos.md)
   - [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
 - [Developing Nervix](./developing-nervix.md)
 - [License](./license.md)
