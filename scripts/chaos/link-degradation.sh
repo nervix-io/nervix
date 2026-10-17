@@ -24,9 +24,46 @@ link_degradation_effect() {
     esac
 }
 
+# Docker occasionally holds a container's start for about 30 seconds: twice among the 518,723
+# container launches that chaos runs on the GitHub-hosted workers recorded, while every other start
+# took under 5.5 seconds. Launching a probe helper or a Pumba container is Docker control time with
+# this bound of its own, outside the bound of the work the container does.
+link_degradation_launch_seconds=60
+
+# Prints the kernel uptime clock that the controller shares with the helpers it starts, in
+# milliseconds at its ten-millisecond resolution, or null where the controller cannot read it.
+link_probe_uptime_ms() {
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime 2>/dev/null || printf 'null\n'
+}
+
+# Keeps Docker's state of the failed ping helper HELPER_ID beside EVIDENCE before it is removed.
+# Sets link_ping_state_status.
+link_ping_keep_state() {
+    local evidence="$1" helper_id="$2"
+    link_ping_state_status=0
+    run_bounded 20 docker inspect --format '{{json .State}}' "${helper_id}" \
+        >"${evidence}.helper-state.json" 2>&1 || link_ping_state_status=$?
+}
+
+# Keeps the daemon's events for the failed ping helper HELPER_ID since REQUESTED_MS, through its
+# removal, beside EVIDENCE. Sets link_ping_events_status.
+link_ping_keep_events() {
+    local evidence="$1" helper_id="$2" requested_ms="$3"
+    local removed_ns
+    removed_ns="$(date +%s%N)"
+    link_ping_events_status=0
+    run_bounded 20 docker events --format '{{json .}}' --filter "container=${helper_id}" \
+        --since "$((requested_ms / 1000))" --until "$((removed_ns / 1000000000 + 1))" \
+        >"${evidence}.helper-events.ndjson" 2>&1 || link_ping_events_status=$?
+}
+
 # Samples RECEIVER from SENDER's network namespace in approximately four seconds, and summarizes
 # the complete packet count as JSON beside OUTPUT. Correlated burst loss needs more observations
-# in that same window; every other profile and healthy observation uses forty packets.
+# in that same window; every other profile and healthy observation uses forty packets. The helper
+# starts under the launch bound and its sample ends under the probe's own 30-second bound. The
+# helper reports when its sample began and ended on the uptime clock the controller reads too, so
+# the probe's record tells Docker control time apart from the sample. A failed helper keeps its
+# raw streams and Docker's own state and events for it before it is removed.
 link_ping() {
     [[ "$#" -eq 4 ]] || {
         link_degradation_fail observation 'link ping needs output, sender, receiver and profile'
@@ -36,7 +73,7 @@ link_ping() {
     local sender="$2"
     local receiver="$3"
     local profile="$4"
-    local probe_count=40 probe_interval=0.1
+    local probe_count=40 probe_interval=0.1 sample_seconds=30
     case "${profile}" in
         burst-loss) probe_count=400; probe_interval=0.01 ;;
         baseline | healed | delay | jitter | random-loss | rate-limit | combined) ;;
@@ -45,17 +82,141 @@ link_ping() {
             return 1
             ;;
     esac
-    local sender_id address
+    local evidence="${output%.txt}"
+    local helper_script sender_id address
+    helper_script="$(cat "$(dirname "${BASH_SOURCE[0]}")/link-ping-helper.sh")"
     sender_id="$(owned_service_container "${sender}")"
     address="$(node_address "${receiver}")"
-    local ping_status=0
-    run_bounded 30 docker run --rm \
+    local controller_boot_id="" controller_boottime_offset=""
+    controller_boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || controller_boot_id=""
+    controller_boottime_offset="$(awk '$1 == "boottime" {printf "%s %s", $2, $3}' \
+        /proc/self/timens_offsets 2>/dev/null)" || controller_boottime_offset=""
+    local requested_ns requested_uptime launched_uptime waited_uptime helper_id=""
+    local launch_status=0 wait_status=null exit_code="" logs_status=null removal_status=null
+    requested_ns="$(date +%s%N)"
+    requested_uptime="$(link_probe_uptime_ms)"
+    run_bounded "${link_degradation_launch_seconds}" docker run --detach --cidfile "${evidence}.helper-id.txt" \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=link-probe \
-        --network "container:${sender_id}" "${CHAOS_PROBE_IMAGE}" \
-        ping -c "${probe_count}" -i "${probe_interval}" -W 1 "${address}" >"${output}" 2>&1 || ping_status=$?
-    [[ "${ping_status}" -eq 0 || "${ping_status}" -eq 1 ]] \
-        || link_degradation_fail observation "ping helper failed with ${ping_status}"
+        --network "container:${sender_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
+        -c "${helper_script}" -- -c "${probe_count}" -i "${probe_interval}" -W 1 "${address}" \
+        >"${evidence}.launch.log" 2>&1 || launch_status=$?
+    launched_uptime="$(link_probe_uptime_ms)"
+    if [[ -s "${evidence}.helper-id.txt" ]]; then
+        helper_id="$(cat "${evidence}.helper-id.txt")"
+    fi
+    if [[ "${launch_status}" -eq 0 && -n "${helper_id}" ]]; then
+        wait_status=0
+        run_bounded "${sample_seconds}" docker wait "${helper_id}" \
+            >"${evidence}.helper-exit.txt" 2>&1 || wait_status=$?
+        if [[ "${wait_status}" == 0 ]]; then
+            exit_code="$(tr -d '[:space:]' <"${evidence}.helper-exit.txt")"
+        fi
+    fi
+    waited_uptime="$(link_probe_uptime_ms)"
+    link_ping_state_status=null
+    link_ping_events_status=null
+    local helper_failed=false
+    if [[ "${launch_status}" -ne 0 || "${wait_status}" != 0 ]]; then
+        helper_failed=true
+    fi
+    if [[ -n "${helper_id}" ]]; then
+        if [[ "${helper_failed}" == true ]]; then
+            link_ping_keep_state "${evidence}" "${helper_id}"
+        fi
+        logs_status=0
+        run_bounded 20 docker logs "${helper_id}" >"${output}" 2>"${evidence}.helper.log" \
+            || logs_status=$?
+        removal_status=0
+        run_bounded 20 docker container rm --force "${helper_id}" \
+            >"${evidence}.helper-removal.log" 2>&1 || removal_status=$?
+        if [[ "${helper_failed}" == true ]]; then
+            link_ping_keep_events "${evidence}" "${helper_id}" "$((requested_ns / 1000000))"
+        fi
+    fi
+    local docker_state=null docker_events='[]'
+    if [[ "${link_ping_state_status}" == 0 ]]; then
+        docker_state="$(jq -c '{status:.Status,running:.Running,exit_code:.ExitCode,error:.Error,
+            started_at:.StartedAt,finished_at:.FinishedAt}' "${evidence}.helper-state.json")" \
+            || docker_state=null
+    fi
+    if [[ "${link_ping_events_status}" == 0 ]]; then
+        docker_events="$(jq -sc 'map({action:.Action,time_unix_ns:.timeNano})' \
+            "${evidence}.helper-events.ndjson")" || docker_events='[]'
+    fi
+    touch "${evidence}.helper.log"
+    jq -Rn --arg sender "${sender}" --arg receiver "${receiver}" --arg address "${address}" \
+        --arg profile "${profile}" --argjson packets "${probe_count}" \
+        --argjson interval_seconds "${probe_interval}" \
+        --argjson launch_seconds "${link_degradation_launch_seconds}" --argjson sample_seconds "${sample_seconds}" \
+        --arg sender_container_id "${sender_id}" --arg helper_id "${helper_id}" \
+        --argjson launch_status "${launch_status}" --argjson wait_status "${wait_status}" \
+        --arg exit_code "${exit_code}" --argjson logs_status "${logs_status}" \
+        --argjson removal_status "${removal_status}" --argjson requested_unix_ns "${requested_ns}" \
+        --argjson requested_uptime_ms "${requested_uptime}" --argjson launched_uptime_ms "${launched_uptime}" \
+        --argjson waited_uptime_ms "${waited_uptime}" \
+        --arg controller_boot_id "${controller_boot_id}" \
+        --arg controller_boottime_offset "${controller_boottime_offset}" \
+        --argjson docker_state "${docker_state}" --argjson docker_events "${docker_events}" \
+        --argjson state_status "${link_ping_state_status}" \
+        --argjson events_status "${link_ping_events_status}" '
+        def count: if test("^[0-9]+$") then tonumber else null end;
+        [inputs | fromjson? | objects] as $reports
+        | ($reports | map(select(.started_uptime_ms | type == "number")) | first) as $start
+        | ($reports | map(select(.finished_uptime_ms | type == "number")) | first) as $finish
+        | ($start != null and $requested_uptime_ms != null and $controller_boot_id != ""
+           and $start.boot_id == $controller_boot_id
+           and $start.boottime_offset == $controller_boottime_offset) as $shared_clock
+        | ($docker_events | map(select(.action == "start")) | first) as $docker_start
+        | {sender:$sender,receiver:$receiver,address:$address,profile:$profile,packets:$packets,
+           interval_seconds:$interval_seconds,launch_seconds:$launch_seconds,
+           sample_seconds:$sample_seconds,sender_container_id:$sender_container_id,
+           helper_id:$helper_id,launch_status:$launch_status,wait_status:$wait_status,
+           helper_exit_code:($exit_code | count),ping_status:$finish.ping_status,
+           logs_status:$logs_status,removal_status:$removal_status,
+           requested_unix_ns:$requested_unix_ns,requested_uptime_ms:$requested_uptime_ms,
+           launched_uptime_ms:$launched_uptime_ms,waited_uptime_ms:$waited_uptime_ms,
+           sample_started_uptime_ms:$start.started_uptime_ms,
+           sample_finished_uptime_ms:$finish.finished_uptime_ms,clock_resolution_ms:10,
+           shared_clock:$shared_clock,
+           launch_ms:(if $shared_clock then $start.started_uptime_ms - $requested_uptime_ms else null end),
+           sample_ms:(if $start != null and $finish != null
+                      then $finish.finished_uptime_ms - $start.started_uptime_ms else null end),
+           docker_start_after_ms:(if $docker_start == null then null
+                                  else ($docker_start.time_unix_ns - $requested_unix_ns) / 1000000 | floor end),
+           docker_state:$docker_state,docker_events:$docker_events,
+           helper_state_status:$state_status,helper_events_status:$events_status}' \
+        <"${evidence}.helper.log" >"${evidence}.probe.json"
+    local stage=""
+    if [[ "${launch_status}" -eq 124 || "${launch_status}" -eq 137 ]]; then
+        stage="$(jq -r '
+            "Docker did not start it within its \(.launch_seconds) s launch bound (launch exited "
+            + "\(.launch_status)); " + (if .docker_start_after_ms == null then "Docker recorded no start of it"
+              else "Docker recorded its start \(.docker_start_after_ms / 1000) s after the launch" end)
+            ' "${evidence}.probe.json")"
+    elif [[ "${launch_status}" -ne 0 || -z "${helper_id}" ]]; then
+        # A detached client prints the helper's identity before Docker answers its start.
+        local refusal
+        refusal="$(grep -m 1 -i 'error' "${evidence}.launch.log" || tail -n 1 "${evidence}.launch.log")"
+        stage="Docker refused its launch (launch exited ${launch_status}: ${refusal})"
+    elif [[ "${wait_status}" != 0 ]]; then
+        stage="$(jq -r '
+            "its sample did not end within its \(.sample_seconds) s bound (wait exited \(.wait_status)); "
+            + (if .launch_ms == null then "the sample began at an unknown time"
+               else "the sample began \(.launch_ms / 1000) s after the launch" end)
+            ' "${evidence}.probe.json")"
+    elif [[ "${exit_code}" != 0 && "${exit_code}" != 1 ]]; then
+        stage="ping exited ${exit_code:-without a status}"
+    elif [[ "${logs_status}" != 0 ]]; then
+        stage="its output could not be read (logs exited ${logs_status})"
+    elif [[ "${removal_status}" != 0 ]]; then
+        stage="it could not be removed (removal exited ${removal_status})"
+    fi
+    if [[ -n "${stage}" ]]; then
+        link_degradation_fail observation \
+            "ping helper ${sender} -> ${receiver} (${address}): ${stage}; see ${evidence}.probe.json"
+        return 1
+    fi
     "${script_dir}/verify-degraded-evidence.sh" ping "${output}" "${output%.txt}.json" "${probe_count}"
 }
 
@@ -74,7 +235,7 @@ link_rate_probe() {
     receiver_id="$(owned_service_container "${receiver}")"
     receiver_ip="$(node_address "${receiver}")"
     local server_start_status=0 ready=false
-    server_id="$(run_bounded 30 docker run --detach \
+    server_id="$(run_bounded "${link_degradation_launch_seconds}" docker run --detach \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=link-probe \
         --network "container:${receiver_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
@@ -254,7 +415,7 @@ link_degradation_start() {
     sender_name="${sender_name#/}"
     link_degradation_effect "${profile}"
     local common=(--interface eth0 --tc-image "${CHAOS_NETTOOLS_IMAGE}" --pull-image=false --target "${address}")
-    run_bounded 30 docker run --rm \
+    run_bounded "${link_degradation_launch_seconds}" docker run --rm \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=fault \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
@@ -271,7 +432,7 @@ link_degradation_start() {
     fi
     local arguments=(netem --duration "${lifetime}s" "${common[@]}" "${link_degradation_effect[@]}")
     printf '%s\n' "${arguments[@]}" | jq -R . | jq -s . >"${case_dir}/pumba-arguments.json"
-    link_degradation_injector_id="$(run_bounded 30 docker run --detach \
+    link_degradation_injector_id="$(run_bounded "${link_degradation_launch_seconds}" docker run --detach \
         --name "${name}" \
         --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=fault \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
