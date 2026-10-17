@@ -810,7 +810,12 @@ mod tests {
         preparations: usize,
     }
 
-    impl SinkLifecycle for PreparingSink {}
+    #[async_trait]
+    impl SinkLifecycle for PreparingSink {
+        async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+            self.publisher.finish(deadline).await
+        }
+    }
 
     #[async_trait]
     impl RecordSink for PreparingSink {
