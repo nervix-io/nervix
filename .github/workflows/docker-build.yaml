@@ -270,6 +270,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       - name: Run benchmarks
         run: >-
           just benchmark-ci
