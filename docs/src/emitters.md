@@ -1028,6 +1028,9 @@ still verifies the configured hostname and uses its configured CA and optional c
 
 ### MQTT
 
+The default client identity is `<domain>~<emitter>`. A `client_id` in the client configuration
+overrides that identity.
+
 ```nspl,ignore
 TO MQTT <client> TOPIC <topic>
   MODE QOS 0 RETRY POLICY BACKOFF <duration> MAX <duration>
@@ -1067,6 +1070,14 @@ TO NATS <client> SUBJECT <subject>
 `NO_ACK` publishes through Core NATS and acknowledges after the connection flush. `JETSTREAM`
 waits for one `PubAck` per record. The stream must already exist and capture the subject; a missing
 stream is an infrastructure error that remains under backpressure until an operator provisions it.
+
+`JETSTREAM` hands records to the client one after another, with at most `MAX <n>` of them awaiting
+their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
+hand-over. A publish that fails, because a `PubAck` failed or did not arrive in time, or because the
+client did not take a record within `ACK TIMEOUT` while its connection stopped draining, first
+settles every `PubAck` JetStream already returned: a confirmed record is delivered and never sent
+again. The retry sends the records whose `PubAck` never arrived, which JetStream may already hold,
+so delivery is at least once.
 
 ### ZeroMQ
 
@@ -1402,9 +1413,9 @@ stores unchanged, where schemaful JSON codecs write padded base64.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
-land and only poison rows follow `ON MESSAGE ERROR`. Postgres re-executes them on the connection the
-failed insert already holds, so the rejection is routed without waiting for the client's pool, as
-[Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
+land and only poison rows follow `ON MESSAGE ERROR`. Postgres and MySQL re-execute them on the
+connection the failed insert already holds, so isolation does not wait for the client's pool again,
+as [Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
 reapply rows from the failed insert; use the sink's idempotent write facilities where available.
 Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
@@ -1489,6 +1500,9 @@ MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INS
 `MAX MESSAGES` records and no more than fit the 65,535 placeholders one statement binds, and its
 statement text and bound values measure at most `MAX SIZE` bytes, as
 [Database writes](#database-writes) describes. The insert result acknowledges those records.
+An insert and its row-by-row isolation use one borrowed connection, returned before the next
+insert. Isolation obtains each row's outcome without a second acquisition from the client's pool,
+even when other emitters are waiting. The host handles those outcomes when the write completes.
 Conflict clauses are the user's tool for bounding duplicates when poison isolation re-executes a
 failed insert. Declare a `MAX SIZE` no larger than the server's `max_allowed_packet`, 64 MiB by
 default on MySQL 8.x, which the client applies to every packet it sends.
@@ -1613,6 +1627,12 @@ CREATE EMITTER iceberg_notifications
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
 
+At open, the emitter checks each mapped column's name and Iceberg type against the loaded table's
+current schema. A missing or incompatible column is a typed configuration failure before any row
+is staged. Nervix narrows UTC `DATETIME` values from nanoseconds to the containing microsecond at
+every depth of a mapped list or nested value, including values before the Unix epoch. A table
+schema changed after open can still fail a later commit and enters the commit retry path.
+
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
@@ -1696,7 +1716,7 @@ commit sizes, the catalog retry backoff, and a drain remain independent of domai
 temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
-ACK boundary. Commit conflicts, incompatible table evolution, a dropped table, and unavailable
+ACK boundary. Commit conflicts, table evolution after open, a dropped table, and unavailable
 catalog or object storage are table-level infrastructure failures: Nervix reports them in runtime
 and drain status and retries all affected staged records with the declared policy and
 backpressure. Record-level expression and construction errors are attributed through `ON MESSAGE

@@ -172,6 +172,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `emitter-row-preparations` | `nervix-server` row request preparations kept unchanged or refused with the first violation | preparations of up to 12 selected rows spoiled by repeated, swapped, dropped, foreign and refused members and empty requests, v1 | 256 | 256 bytes |
 | `emitter-retained-payloads` | `nervix-server` retained payloads written unchanged in packing order and answered member by member | packing and write steps with delivered, rejected and unanswered records and failed writes over three buffered batches, v1 | 256 | 512 bytes |
 | `sqs-batch-requests` | `nervix-connector-sqs` measured record sizes, refusals above 256 KiB, and batch requests within every limit, ended only by a limit | small and near-limit bodies of one- to four-byte characters, attributes and FIFO groups, v1 | 256 | 1024 bytes |
+| `iceberg-nested-datetime-staging` | `nervix-connector-iceberg` staged nested-list schema and values against containing-microsecond division while preserving list boundaries | up to 16 generated UTC nanosecond timestamps in two list levels, including negative and boundary values, v1 | 256 | 160 bytes |
 | `mqtt-publish-packets` | `nervix-connector-mqtt` measured PUBLISH sizes against the packet the client writes, the protocol's largest packet and the broker maximum | topics up to 128 bytes, every quality of service, payloads beside every Remaining Length width and the protocol limit, v1 | 256 | 512 bytes |
 | `postgres-insert-measures` | `nervix-connector-postgres` measured inserts against the statement and the arrays the driver encodes, and the Bind message bound | up to four text columns of up to eight rows with NULLs, quotes and multi-byte characters, every run of rows, v1 | 256 | 1024 bytes |
 | `websocket-signaling-protobuf-values` | `nervix-connector-websockets` complete signaling JSON through the production protobuf conversions, with double and float bit equality | explicit scalar presence, absent defaults, full-width integers, booleans, UTF-8 strings and up to eight repeated doubles and floats, v1 | 256 | 256 bytes |
@@ -449,6 +450,13 @@ identity, advanced, stale and tampered bases, stale heads, other merges, shallow
 changes, renames, label events, reruns and strict gates; `just coverage-ci-selection` measures that
 Python contract without launching product campaigns. Selection does not claim a model-checker or
 public Cucumber result.
+
+The selection tests keep Git maintenance in the foreground in every temporary repository,
+including the bare origin and shallow checkouts. Those repository-local settings also cover
+selection's history fetches and the origin's receive process, so waiting for each Git command
+finishes its writers before temporary-directory cleanup. A regression forces commit-graph
+maintenance and uses Git's process trace to check that it never detaches; cleanup errors remain
+test failures.
 
 ### Sanitizer Shards
 

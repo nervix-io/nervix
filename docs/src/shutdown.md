@@ -658,6 +658,12 @@ reaches its completion point before the process ends.
 
 ### Sources
 
+An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
+Removing or changing the declared input retires its external state separately, after its exact
+source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
+[MQTT session retirement](./connector-contract.md#mqtt-session-retirement) for cleanup budgets,
+best-effort failures and replacement preparation. Node shutdown does not retire an unchanged input.
+
 An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
 waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
 is reported and the socket is released; the shutdown deadline still bounds the surrounding
