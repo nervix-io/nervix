@@ -1627,6 +1627,12 @@ CREATE EMITTER iceberg_notifications
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
 
+At open, the emitter checks each mapped column's name and Iceberg type against the loaded table's
+current schema. A missing or incompatible column is a typed configuration failure before any row
+is staged. Nervix narrows UTC `DATETIME` values from nanoseconds to the containing microsecond at
+every depth of a mapped list or nested value, including values before the Unix epoch. A table
+schema changed after open can still fail a later commit and enters the commit retry path.
+
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
@@ -1710,7 +1716,7 @@ commit sizes, the catalog retry backoff, and a drain remain independent of domai
 temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
-ACK boundary. Commit conflicts, incompatible table evolution, a dropped table, and unavailable
+ACK boundary. Commit conflicts, table evolution after open, a dropped table, and unavailable
 catalog or object storage are table-level infrastructure failures: Nervix reports them in runtime
 and drain status and retries all affected staged records with the declared policy and
 backpressure. Record-level expression and construction errors are attributed through `ON MESSAGE

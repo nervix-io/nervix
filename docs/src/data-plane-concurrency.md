@@ -154,9 +154,12 @@ A concrete producer retains its branch channel handle. The relay publishes branc
 persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
 publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
 outbound slots, including candidates created during replacement. Eviction cancels the exact branch
-before withdrawing its allocation. An independently expiring receiver branch permits a still-live
-producer to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended`
-and prevents rebinding. Domain terminal teardown cancels the relay publication itself.
+before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
+invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
+branches of the relays it publishes through for its key. Another relay's branch for the same key
+keeps its channels. An independently expiring receiver branch permits a still-live producer to
+bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
+prevents rebinding. Domain terminal teardown cancels the relay publication itself.
 
 Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
 select cancellation, and transport admission retains its existing physical deadline. They do not
@@ -1964,10 +1967,10 @@ report tool qualifies every file before cleanup. A run fails unless each node ho
 qualifying evidence file of the declared selection for every process start the recording shows,
 and no node ended with status `3` or `4`; an unreviewed potential cycle fails it as in the lane.
 The suite refuses an image whose labels name another kind or revision than its caller asks for.
-`scripts/chaos/README.md` owns the runner's contract and artifacts. The evidence observes each
-process up to its kill, pause, stop or the freeze, without an upstream flush barrier, and only its
-tracked thread-blocking locks; recovery, ledger and timing verdicts stay the scenarios' own, with
-the product's deadlines and the suite's budgets unchanged.
+[External Cluster Chaos](./cluster-chaos.md#diagnostic-images) owns the runner's contract and
+artifacts. The evidence observes each process up to its kill, pause, stop or the freeze, without an
+upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
+verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
 
 ## Deterministic Concurrency Verification
 
