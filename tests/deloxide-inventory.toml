@@ -121,6 +121,8 @@ tags = [
   "@shutdown_flush_before_freeze",
   "@shutdown_source_confirmation",
   "@shutdown_source_confirmation_handoff",
+  "@shutdown_emitter_finish",
+  "@emitter_finish_at_stop",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
@@ -584,6 +586,26 @@ id = "scenario.shutdown-source-confirmation-handoff"
 invariant = "A stopping node hands its Kafka ingestor over only after the transport confirmed the source offsets of the work it admitted, so the destination reads nothing twice."
 invocation = "scenarios"
 scenario = "A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A one-node graceful shutdown whose in-place drain ends while a NO ACK Kafka emitter's producer still queues records it delivered. Terminal teardown hands the emitter its finish deadline before the domain's stop and finishes the sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-emitter-finish"
+invariant = "A node that stops in place finishes every emitter's sink by its shutdown deadline, so a NO ACK Kafka emitter's producer sends the records it still queued before the node stops."
+invocation = "scenarios"
+scenario = "A single node sends the records its NO ACK Kafka emitter's producer holds before it stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "STOP on one and three nodes tears down a NO ACK Kafka emitter whose producer still queues records it delivered. The domain teardown hands every emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_emission.feature"
+id = "scenario.emitter-finish-at-stop"
+invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
+invocation = "scenarios"
+scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1627,6 +1649,26 @@ id = "stress.shutdown-source-confirmation"
 invariant = "A node that stops in place completes its drain only after the transport confirmed the source offsets of the work it admitted, so the offsets are committed when the stop ends."
 invocation = "stress-scenarios"
 scenario = "A node that stops in place keeps draining until its transport confirms the source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a one-node graceful shutdown whose in-place drain ends while a NO ACK Kafka emitter's producer still queues records it delivered. Terminal teardown hands the emitter its finish deadline before the domain's stop and finishes the sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-emitter-finish"
+invariant = "A node that stops in place finishes every emitter's sink by its shutdown deadline, so a NO ACK Kafka emitter's producer sends the records it still queued before the node stops."
+invocation = "stress-scenarios"
+scenario = "A single node sends the records its NO ACK Kafka emitter's producer holds before it stops"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes tears down a NO ACK Kafka emitter whose producer still queues records it delivered. The domain teardown hands every emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state. The stop-deadline watch, the producer flush and the Kafka client are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_emission.feature"
+id = "stress.emitter-finish-at-stop"
+invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
+invocation = "stress-scenarios"
+scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
 selections = ["deloxide-stress"]
 
 [[workload]]
