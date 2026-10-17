@@ -710,8 +710,8 @@ mod tests {
 
     use futures_util::FutureExt as _;
     use nervix_connector::{
-        PerRecordOutcome, PreparedRowRequest, RowRequestPreparation, SinkPublishError,
-        SinkPublishResult, SinkRecordId, SinkRowRequest,
+        PerRecordOutcome, PreparedRowRequest, RowRequestPreparation, SinkFinish, SinkFinishResult,
+        SinkPublishError, SinkPublishResult, SinkRecordId, SinkRowRequest,
     };
     use nervix_models::ClickHouseValueMapping;
     use nervix_primitives::sync::blocking::Mutex;
@@ -742,7 +742,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl SinkLifecycle for RecordingRowSink {}
+    impl SinkLifecycle for RecordingRowSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl RowSink for RecordingRowSink {
@@ -1079,7 +1083,12 @@ mod tests {
         answers: VecDeque<RequestAnswer>,
     }
 
-    impl SinkLifecycle for ScriptedRequestSink {}
+    #[async_trait]
+    impl SinkLifecycle for ScriptedRequestSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl RowRequestSink for ScriptedRequestSink {
@@ -1283,7 +1292,12 @@ mod tests {
     /// A row request sink whose preparation answers for a row it was never handed.
     struct ForeignRowSink;
 
-    impl SinkLifecycle for ForeignRowSink {}
+    #[async_trait]
+    impl SinkLifecycle for ForeignRowSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl RowRequestSink for ForeignRowSink {

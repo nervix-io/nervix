@@ -81,7 +81,8 @@ paths.
   algorithm, header and metadata mapping, and acknowledgement operation through its production
   owner. Include successful delivery and the supported rejection, transient and unanswered
   outcomes, partial confirmations, ordering and bounds where the path has those states. Exercise
-  source polling, reads and close when the connector owns them. A path the connector does not
+  source polling, reads and close when the connector owns them, and a sink's finish where its
+  client can hold records once a publish returns. A path the connector does not
   implement needs no fictional test. Unit tests complement the public Cucumber scenarios and
   concurrency checks required by the behavior; they do not replace them.
 - **Properties cover encodings and measures.** Each connector-owned encoding or encoded-size
@@ -524,6 +525,20 @@ class once:
 | `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
 
+The broker host applies the same retry backoff to a failed resume, a failed read and a requested
+reconnect. A successful connection alone does not reset it: the next accepted batch resets the
+backoff and clears the transient failure. This prevents a peer that accepts and immediately closes
+from keeping every reconnect at the floor delay. A source with no declared retry policy uses the
+host's 250 ms initial delay, doubling to at most 30 seconds. Stop and quiesce changes interrupt the
+wait.
+
+The outbound WebSocket source sends a Close frame on suspension or close and waits for the peer's
+Close within a one-second budget covering both the send and the reply. The transport is detached
+before waiting, so cancellation also drops that exact connection. Suspension retains accepted
+signaling payloads; terminal close clears them even if the handshake fails. A peer-initiated Close
+is answered before releasing the transport and becomes a typed transient read failure carrying
+its status code and reason. An EOF or transport failure also reaches the host's retry path.
+
 A transport acknowledgement that fails because the connection died is handled the same way: the
 host rejects the positions, that rejection fails on the same lost connection, and the class decides.
 A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
@@ -673,11 +688,63 @@ and metrics. The connector owns the external
 operation and its completion point. A receiver-requested delay, which a connector attaches to the
 attempt's failure, can extend, but cannot shorten, the host's retry backoff; the backoff sequence
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
-represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
-queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
+represent, so the backoff alone decides that wait. A sink may keep its client after a
 publish failure when reopening it would discard staged work or a persistent session, or, as the
 HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
 transient failure its pending work is still waiting out.
+
+### Finishing a sink
+
+Every sink implements `finish`, and no sink inherits a default. A publish reports a record
+delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
+QoS 0 that point is the client taking the record, so the client can still hold delivered records
+when the emitter stops. `finish` sends what the client still holds by the deadline the host gives
+it and answers with one of three outcomes:
+
+- **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
+- **Flushed.** The client held records and sent every one of them before the deadline.
+- **Discarded.** The client can still hold records a publish reported delivered, and the sink
+  closes it without sending them.
+
+A finish that cannot send everything is a `SinkFinishError`: `Unsent` when the deadline passes with
+records still held, counting them, and `Flush` when the client fails while it sends them, with the
+driver's cause beneath. The host retries neither.
+
+The host calls `finish` once the emitter will publish nothing more through the sink. A stop drains
+the emitter's buffer, publishes and commits everything it holds, and then finishes the sink by the
+stop's own deadline; an alteration, placement move or ownership handoff that replaces the emitter
+stops it this way. A failed finish fails that stop, so the emitter keeps running and the stop can be
+asked again. Terminal teardown of a domain execution, when the domain stops, its execution is
+rebuilt or the node shuts down, ends the emitter task wherever it is, including in the middle of a
+publish, and then finishes the sink. The stopping execution gives every emitter its deadline before
+it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
+shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
+a teardown drains its buffer and finishes the sink by the stop deadline it holds; a task that holds
+none, because its execution was dropped without stopping, leaves the sink unfinished. Teardown can cancel a publish before it reports its
+records: their acknowledgements end unresolved, so an acknowledged source delivers them again, and
+a finish that flushes the client also sends the ones the client had already taken, which the
+destination then receives twice.
+
+The host records every outcome on the emitter: a flush at `info`, a discard at `warn`, and a failed
+finish at `warn`, as the emitter's transient error that `DESCRIBE EMITTER` shows and as an error
+event. What a stop leaves to a finish, and what the finish does with it, differs by sink:
+
+| Sink | What the client holds once a publish returns | What finishing does with it |
+| --- | --- | --- |
+| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts what is still queued when the deadline passes |
+| Pulsar | `NO_ACK`: messages the producer accepted and has not sent. `ACK`: nothing | Discards them with the producer |
+| MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
+| NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
+| ZeroMQ | Nothing: each send writes and flushes its frame to a peer's socket | Nothing to send |
+| RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
+| Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
+
+librdkafka sends lingering records at once only while a call to its flush is waiting: each broker
+thread checks that state when it next serves its partitions. rust-rdkafka's `flush` calls
+librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss
+that instant and the records linger past the deadline. The Kafka finish therefore waits inside
+librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
+the delivery reports that end the flush.
 
 A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
@@ -711,10 +778,27 @@ invalid payload format) refuses it, and every other ending leaves it unresolved:
 connection or its session failed, or the reason code is not about the record. The client's request
 queue holds `MAX` requests, as many as the window awaits, and the event loop takes them in order,
 so the client can refuse a record only while the queue still holds an earlier failed attempt's
-requests, before the broker answered any record of the publish. The Kafka, Pulsar and NATS
-JetStream sinks still await their answers through windows of their own, which drop their in-flight
-records when the driver refuses to take one, so a retry can resend records their broker already
-confirmed; RabbitMQ settles its records when it loses a channel instead.
+requests, before the broker answered any record of the publish.
+
+The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
+hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
+invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
+unresolved, including a producer that drops the record without one. When the producer refuses to
+take a record for a reason that is not the record's own, such as a full producer queue, the publish
+ends through the window, so every record the broker already confirmed is delivered first and is not
+sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
+own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
+producer left at librdkafka's five-minute default would keep retrying a record after the publish
+stopped waiting for it, and could deliver that copy beside the one the host's retry sends.
+librdkafka checks message timeouts about once a second, so the producer gives a record up within
+about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 milliseconds librdkafka
+holds refuses the sink when it starts. In `MODE NO ACK` the producer taking a record into its queue
+delivers it, and the client's own delivery bound applies.
+
+The Pulsar and NATS JetStream sinks still await their answers through windows of their own, which
+drop their in-flight records when the driver refuses to take one, so a retry can resend records
+their broker already confirmed; RabbitMQ settles its records when it loses a channel instead.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
@@ -1245,7 +1329,9 @@ drain boundary. This chapter does not redefine those output formats.
    a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
    source or sink contract implementation. A brokered sink that awaits its broker's answers in
-   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. Add
+   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. A
+   sink answers `finish` for what its client can still hold once a publish returns, as
+   [Finishing a sink](#finishing-a-sink) describes, and adds its row to that table. Add
    its composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
    three-node execution and failure paths. Confirm the crate boundary and run the repository's

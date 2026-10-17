@@ -89,11 +89,7 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use sqlx::{
-    AssertSqlSafe as SqlxAssertSqlSafe, Row as _,
-    postgres::{
-        PgConnectOptions as SqlxPgConnectOptions, PgPool as SqlxPgPool,
-        PgPoolOptions as SqlxPgPoolOptions, PgSslMode as SqlxPgSslMode,
-    },
+    AssertSqlSafe as SqlxAssertSqlSafe, Connection as _, Row as _, postgres::PgPool as SqlxPgPool,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt as _;
@@ -109,16 +105,15 @@ use crate::common::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain,
+        WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
-        TestDependencies,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
+        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -126,6 +121,7 @@ use crate::common::{
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -163,11 +159,14 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod mqtt_fixtures;
 mod paced_replication;
 mod paced_simulation;
+mod postgres_fixtures;
 mod process_cluster;
 mod restarted_voter;
 mod session_protocol;
+mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -296,6 +295,9 @@ struct CliClockProcess {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
+    postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
+    postgres_fixture_observations: Option<postgres_fixtures::Observations>,
     scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
@@ -305,6 +307,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
     paced_simulation: paced_simulation::PacedSimulation,
@@ -454,6 +457,9 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
+    /// shared test broker.
+    kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
@@ -577,6 +583,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
@@ -5843,36 +5850,6 @@ async fn clickhouse_post_for_world(world: &ScenarioWorld, query: &str) -> Result
     }
 }
 
-/// A verification client for the Postgres the scenario wrote to.
-///
-/// The same driver the product uses, so a scenario cannot pass against a connection contract the
-/// runtime does not actually speak.
-async fn postgres_client(
-    dependencies: &DependencyEndpoints,
-    tls: bool,
-) -> Result<SqlxPgPool, String> {
-    let addr = if tls {
-        dependencies.get(POSTGRES_TLS_ADDR)
-    } else {
-        dependencies.get(POSTGRES_ADDR)
-    }
-    .map_err(|error| error.to_string())?;
-    let mut options: SqlxPgConnectOptions = addr.parse().map_err(|source| format!("{source}"))?;
-    if tls {
-        let ca_file = dependencies
-            .tls_ca_path()
-            .map_err(|error| error.to_string())?;
-        options = options
-            .ssl_mode(SqlxPgSslMode::VerifyFull)
-            .ssl_root_cert(ca_file);
-    }
-    SqlxPgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options)
-        .await
-        .map_err(|source| source.to_string())
-}
-
 fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool, String> {
     let addr = if tls {
         dependencies.get(MYSQL_TLS_ADDR)
@@ -10605,6 +10582,41 @@ async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: 
         .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[when(
+    expr = "node {string} resumes its runtime installation when forced recovery finds no schedule"
+)]
+async fn when_runtime_installation_resumes_after_missing_recovery_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .resume_installation_after_missing_recovery_schedule(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+#[then(expr = "forced recovery on node {string} observes its missing schedule")]
+async fn then_forced_recovery_observes_missing_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observation = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_missing_recovery_schedule(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await;
+    assert!(
+        observation.is_ok(),
+        "forced recovery did not observe node '{node_id}' before its initial schedule \
+         installation: {observation:?}"
+    );
+}
+
 #[then(expr = "node {string} reaches its runtime preparation pause")]
 async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -13523,7 +13535,10 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // The leader reclaims a reference only once its retry window has passed, so the wait spans
+    // the configured window and then leaves the reclamation a minute of its own.
+    let deadline =
+        Instant::now() + world.cluster_config.command_retry_validity + Duration::from_secs(60);
     loop {
         nervix_primitives::task::consume_budget().await;
         assert!(
@@ -15239,6 +15254,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
 }
 
 #[when("these NSPL commands are executed on the leader node")]
+#[when("these Plexus statements are executed on the leader node")]
 async fn when_these_nspl_commands_are_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16712,6 +16728,7 @@ async fn then_nspl_commands_complete_on_leader_within(
 }
 
 #[given("the leader node is configured with these NSPL commands")]
+#[given("the leader node is configured with these Plexus statements")]
 async fn given_the_leader_node_is_configured_with_these_nspl_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -21449,6 +21466,96 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     }
 }
 
+/// What DESCRIBE EMITTER reports about an emitter's failed attempt and its next one.
+struct DescribedEmitterRetry {
+    /// The failure DESCRIBE reports, absent while there is none.
+    transient_error: Option<String>,
+    /// How long the emitter waits before its next attempt, absent while none is scheduled.
+    reconnect_wait: Option<Duration>,
+}
+
+impl DescribedEmitterRetry {
+    fn from_describe_output(output: &str) -> Self {
+        let mut described = Self {
+            transient_error: None,
+            reconnect_wait: None,
+        };
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(error) = line.strip_prefix("transient error: ") {
+                if error != "-" {
+                    described.transient_error = Some(error.to_string());
+                }
+                continue;
+            }
+            let Some(wait) = line.strip_prefix("reconnect wait: ") else {
+                continue;
+            };
+            let Some(millis) = wait.strip_suffix("ms") else {
+                continue;
+            };
+            let millis = millis
+                .parse::<u64>()
+                .expect("DESCRIBE EMITTER reports the reconnect wait in whole milliseconds");
+            described.reconnect_wait = Some(Duration::from_millis(millis));
+        }
+        described
+    }
+
+    /// Whether the emitter failed and its next attempt, which has not started yet, is at most
+    /// `wait` away.
+    ///
+    /// DESCRIBE keeps reporting a failure until a publish succeeds, so once the next attempt is
+    /// due it reports a wait of zero while that attempt runs.
+    fn retries_within(&self, wait: Duration) -> bool {
+        if self.transient_error.is_none() {
+            return false;
+        }
+        match self.reconnect_wait {
+            Some(reconnect_wait) => !reconnect_wait.is_zero() && reconnect_wait <= wait,
+            None => false,
+        }
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports a transient error with the emitter's next attempt at most
+/// `wait` away, so a scenario acts at a known point between a failed attempt and the next one.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports a transient \
+            error with its next attempt at most {string} away"
+)]
+async fn then_within_duration_describe_emitter_reports_transient_error_with_next_attempt_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    wait: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let wait =
+        parse_duration_text(&wait).expect("the next attempt's wait must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let deadline = Instant::now() + duration;
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if DescribedEmitterRetry::from_describe_output(&output).retries_within(wait) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report a transient error with \
+             its next attempt at most {wait:?} away. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "node {string} eventually reports status containing {string}")]
 async fn then_node_eventually_reports_status_containing(
     world: &mut ScenarioWorld,
@@ -22066,6 +22173,58 @@ async fn given_kafka_topic_exists_with_partitions(
         .expect("failed to create kafka topic");
 }
 
+/// Starts the scenario's own mock Kafka broker with `topic` and names its address
+/// `{{mock_kafka_addr}}`.
+#[given(expr = "a mock Kafka broker serves topic {string}")]
+fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let broker =
+        KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
+    broker
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+    world.placeholders.insert(
+        "mock_kafka_addr".to_string(),
+        broker.bootstrap_servers().to_string(),
+    );
+    world.kafka_mock_broker = Some(broker);
+}
+
+#[given(expr = "mock Kafka topic {string} is observed")]
+async fn given_mock_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before it is observed")
+        .client_config();
+    world.broker_observer = Some(
+        observe_kafka_through(client_config, &topic)
+            .await
+            .expect("failed to observe the mock kafka topic"),
+    );
+}
+
+#[given("the mock Kafka broker refuses every write")]
+fn given_mock_kafka_broker_refuses_every_write(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses writes")
+        .refuse_writes()
+        .expect("the mock Kafka broker refuses writes");
+}
+
+#[when("the mock Kafka broker accepts writes again")]
+fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts writes again")
+        .accept_writes()
+        .expect("the mock Kafka broker accepts writes again");
+}
+
 #[given(expr = "SQS queue {string} exists")]
 async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -22501,8 +22660,9 @@ async fn given_postgres_table_rejecting_poison_actions_exists(
         .postgres_table
         .as_ref()
         .expect("Postgres table should be recorded after preparation");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
@@ -22526,8 +22686,9 @@ async fn given_postgres_table_recording_insert_statement_sizes_exists(
         .clone();
     let audit_table = format!("{table}_insert_audit");
     let trigger_function = format!("{table}_record_insert");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "DROP TABLE IF EXISTS {audit_table};
@@ -22574,8 +22735,9 @@ async fn prepare_postgres_table_schema(
     primary_key: bool,
 ) {
     let table = expand_placeholders(world, &table);
-    let client = postgres_client(world.dependencies.endpoints(), tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(tls)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
         .execute(&client)
@@ -26903,8 +27065,9 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
 /// `application_name` is what distinguishes them from the harness's own connections and from any
 /// other application, which is how an operator checks a declared budget too.
 async fn postgres_application_connections(world: &ScenarioWorld, application: &str) -> i64 {
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     sqlx::query("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
         .bind(application)
@@ -26992,7 +27155,9 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         .as_ref()
         .expect("a Postgres table must be prepared before locking it")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+    let mut client = world
+        .dependencies
+        .postgres_lock_connection(world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
     let (release_tx, release_rx) = nervix_primitives::sync::oneshot::channel();
@@ -27011,7 +27176,7 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         locked_tx
             .send(())
             .expect("the locking step must still be waiting for its lock");
-        // Held until the scenario releases it, which is what keeps one pooled connection busy.
+        // This database lock keeps the product writer's pooled connection busy until release.
         // A dropped sender means the scenario ended without releasing, and the lock goes with it.
         release_rx
             .await
@@ -27049,8 +27214,9 @@ async fn then_postgres_table_eventually_contains_row(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27096,8 +27262,9 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27141,8 +27308,9 @@ async fn then_postgres_table_contains_exactly_one_row_for_each_user_id(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let rows = sqlx::query(SqlxAssertSqlSafe(format!(
         "SELECT postgres_user_id, count(*) FROM {table} GROUP BY postgres_user_id"
@@ -27184,8 +27352,9 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
         .expect("a Postgres table must be prepared before assertion")
         .clone();
     let audit_table = format!("{table}_insert_audit");
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -29087,6 +29256,9 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
 /// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
 /// end of cleanup.
 async fn stop_receivers(world: &mut ScenarioWorld) {
+    if let Some(peer) = world.websocket_peer.take() {
+        peer.stop().await;
+    }
     let http_receivers = std::mem::take(&mut world.http_receivers);
     let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
     world.otlp_receivers.clear();

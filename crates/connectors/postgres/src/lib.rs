@@ -38,11 +38,12 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult, client_tls_paths,
-    optional_client_config_value,
+    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    client_tls_paths, optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
+use nervix_primitives::time::Instant;
 use nonzero_ext::nonzero;
 use sqlx::{
     AssertSqlSafe, Executor as _, Row as _,
@@ -530,7 +531,12 @@ impl PostgresSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for PostgresSink {}
+impl SinkLifecycle for PostgresSink {
+    /// Each insert completes before the publish returns, so the pool holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RowSink for PostgresSink {

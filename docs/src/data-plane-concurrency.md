@@ -238,6 +238,7 @@ writer.
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id or its authority UTC observation. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender for as long as its attachment lives, so removing the domain wakes it instead of closing its wait, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
 | Committed domain installation | Each node's runtime counts its installations of the committed domain states through a watch. An installation advances the count only after it has inserted, updated, or removed every domain. | A session attach waits for the first count before it looks up a domain, so a node that is still starting never refuses a domain the cluster has. Because the count advances after the domains are in place, the wait never releases before they are observable. |
+| Forced-recovery destination installation | A recovery subscribes to the domain installation watch before looking for its execution, and selects its matching node under the schedule application mutex. | The watch retains a publication racing the absence check; the mutex orders selection after graph construction, even when domain lifecycle publication occurred first. The existing preparation deadline bounds both waits. The mutex is released before checkpoint transfer and guest restoration. A production-owner Shuttle check explores installation racing selection; async mutex and watch waits remain outside Deloxide's detector. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. |
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
@@ -1228,7 +1229,9 @@ architectural assertions, not proofs of exclusive ownership, bounded waiting or 
 
 An explicit callable contract wins over defaults. An implementation inherits its trait method's
 contract before its impl/type or lexical defaults; a recurring trait method's override remains
-recurring or names a bounded protocol. A type contract applies to its implementations. Duplicate,
+recurring or names a bounded protocol. A type contract applies to its implementations. An `extern`
+block holds no contract, so a foreign function or static takes those of the module that holds its
+block, in its own crate and through crate metadata alike. Duplicate,
 conflicting, malformed and misplaced annotations fail. A binding whose initializer owns exactly one
 anonymous body can supply that body's context: use it when a constructor installs a recurring task. Nested task bodies
 still require their actual entry contract.
@@ -1795,6 +1798,13 @@ modeled configurations retain their own feature selections. A record is a review
 the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
+
+The WebSocket source lifecycle workloads drop an ingestor, move its owner and recover from repeated
+peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
+locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's
+observation; public peer observations measure the delays, and a paused-clock host regression checks
+that successful upgrades keep backoff until a delivered batch resets it. Direct connector tests
+exercise suspension and close without claiming those socket waits are tracked locks.
 
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-

@@ -1170,6 +1170,12 @@ activate after a later one is committed. The control plane computes the exact fi
 committed schedule before runtime installation and carries it in the complete typed execution
 revision used for activation and reconciliation; a node does not reconstruct it from a second
 schedule view.
+Before forced-recovery checkpoint selection, the destination waits for its local execution schedule
+to finish installing within the existing preparation deadline. It still validates the request's
+base fingerprint and entity against that installed revision. A startup installation wait does not
+classify the replica's checkpoints as absent; expiry is an installation deadline failure carrying
+the domain and entity. The request, process-incarnation fence and response envelope are unchanged.
+
 WASM handoff and forced-recovery preparation on a passive revision validate and retain the complete
 checkpoint inventory without running guest callbacks or reading the stopped domain clock. The
 guest validates its saved bytes when `START` installs the active revision, so stopped time is not

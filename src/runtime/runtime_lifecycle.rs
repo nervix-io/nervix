@@ -297,6 +297,22 @@ impl Runtime {
         super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
+    /// When the emitters of a domain execution that stops now finish their sinks: the domain drain
+    /// timeout from now, the same bound a stop command gives an emitter.
+    pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
+        self.emitter_finish_deadline_within(self.inner.domain_drain_timeout)
+    }
+
+    /// When the emitters of a domain execution that stops now finish their sinks, no later than
+    /// `limit` from now.
+    fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
+        let budget = limit.min(self.inner.domain_drain_timeout);
+        Instant::now().checked_add(budget).assured(
+            "the domain drain timeout bounds the budget, and it is the sixty-second default or a \
+             scenario's own short drain, which end within the monotonic clock's range",
+        )
+    }
+
     pub(crate) fn entity_gate_deadline(&self) -> Duration {
         self.inner.entity_gate_deadline
     }
@@ -567,12 +583,18 @@ impl Runtime {
         self.inner.events.report_error(message);
     }
 
+    /// Stops `execution` and waits for its tasks. Every emitter task the stop ends finishes its
+    /// sink by `emitter_finish_deadline`, which it learns before the shutdown is signalled.
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,
         execution: DomainExecution,
+        emitter_finish_deadline: Instant,
     ) {
         self.inner.endpoint_intake_routes.withdraw_domain(domain);
+        for emitter_task in execution.emitter_tasks.values() {
+            emitter_task.finish_by(emitter_finish_deadline);
+        }
         execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
@@ -687,7 +709,8 @@ impl Runtime {
         self.stop_domain_ingestors(domain).await;
         if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
             execution.routing.deactivate();
-            self.stop_domain_execution(domain, execution).await;
+            self.stop_domain_execution(domain, execution, self.emitter_finish_deadline())
+                .await;
         }
     }
 
@@ -715,7 +738,11 @@ impl Runtime {
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    /// Stops every domain's execution and the runtime services behind them. `left` is the time the
+    /// node's shutdown leaves the runtime: an emitter finishes its sink within it, and within the
+    /// domain drain timeout.
+    pub(crate) async fn shutdown(&self, left: Duration) {
+        let emitter_finish_deadline = self.emitter_finish_deadline_within(left);
         self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
             .await;
         let domains = self
@@ -730,7 +757,8 @@ impl Runtime {
         for domain in &domains {
             if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
                 execution.routing.deactivate();
-                self.stop_domain_execution(domain, execution).await;
+                self.stop_domain_execution(domain, execution, emitter_finish_deadline)
+                    .await;
             }
             self.clear_domain_ingestor_quiescence(domain);
         }

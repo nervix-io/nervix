@@ -185,7 +185,10 @@ impl EmitterSink for PreparedRequestSink {
 mod tests {
     use std::collections::VecDeque;
 
-    use nervix_connector::{PerRecordOutcome, SinkHttpRequest, SinkPublishError, SinkRecordId};
+    use nervix_connector::{
+        PerRecordOutcome, SinkFinish, SinkFinishResult, SinkHttpRequest, SinkPublishError,
+        SinkRecordId,
+    };
     use nervix_models::{
         CodecWireFormat, CreateCodec, CreateWireSchema, HttpApplicationHeaders, HttpBodyMode,
         HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, JsonType, ResolvedCodecWireFormat,
@@ -225,7 +228,12 @@ mod tests {
         answers: VecDeque<Answer>,
     }
 
-    impl SinkLifecycle for ScriptedHttpSink {}
+    #[async_trait]
+    impl SinkLifecycle for ScriptedHttpSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl HttpRequestSink for ScriptedHttpSink {

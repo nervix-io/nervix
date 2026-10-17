@@ -1659,9 +1659,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
                         host.record_transport_redeliveries(positions.len());
                     }
                     if pending_rejection.is_none() {
-                        retry_delay = retry_policy.backoff;
                         host.mark_ready();
-                        host.clear_transient_error();
                     }
                     // A quiesce released while the source was resuming was not waited on by
                     // anything, so the iteration starts over and replays what it buffered
@@ -1712,9 +1710,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
                 retry_delay = next_retry_delay(retry_delay, retry_policy);
                 continue;
             }
-            retry_delay = retry_policy.backoff;
             host.mark_ready();
-            host.clear_transient_error();
         }
 
         let request = batch_request(acknowledgement);
@@ -1741,15 +1737,22 @@ pub(super) async fn run_source_instance_with_retry<C>(
             Ok(SourceBatch::ResumeRequired) => {
                 ready = false;
                 host.mark_unready();
+                let delay = source_retry_delay(retry_delay);
+                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                    break;
+                }
+                retry_delay = next_retry_delay(retry_delay, retry_policy);
                 continue;
             }
             Ok(SourceBatch::Closed) => break,
             Err(error) => {
-                host.record_transient_error(source_failure_reason(&error), SOURCE_ERROR_RETRY);
+                let delay = source_retry_delay(retry_delay);
+                host.record_transient_error(source_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
-                if !wait_for_retry(&mut host, &mut shutdown, SOURCE_ERROR_RETRY).await {
+                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
+                retry_delay = next_retry_delay(retry_delay, retry_policy);
                 continue;
             }
         };
