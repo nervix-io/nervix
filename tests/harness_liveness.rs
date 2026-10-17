@@ -151,12 +151,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_retry_runs_before_the_remaining_first_attempts() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         let slots = ScenarioRunSlots::new(1);
         let current = slots
             .admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "current",
                 ScenarioAttempt::First,
                 |_| {},
@@ -164,6 +167,7 @@ mod tests {
             .await;
         let mut first = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
             "queued first attempt",
             ScenarioAttempt::First,
             |_| {},
@@ -171,6 +175,7 @@ mod tests {
         assert!(futures_util::poll!(first.as_mut()).is_pending());
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
             "retry",
             ScenarioAttempt::Retry,
             |_| {},
@@ -188,7 +193,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_ready_retry_runs_before_first_attempts_of_limited_features() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         for limit in [FeatureLimit::WebConsole, FeatureLimit::WasmStateReset] {
             nervix_primitives::task::consume_budget().await;
@@ -196,6 +203,7 @@ mod tests {
             let current = slots
                 .admit_with(
                     FeatureLimit::Unlimited,
+                    ScenarioLength::Ordinary,
                     "current",
                     ScenarioAttempt::First,
                     |_| {},
@@ -203,6 +211,7 @@ mod tests {
                 .await;
             let mut first = Box::pin(slots.admit_with(
                 limit,
+                ScenarioLength::Ordinary,
                 "limited first attempt",
                 ScenarioAttempt::First,
                 |_| {},
@@ -210,6 +219,7 @@ mod tests {
             assert!(futures_util::poll!(first.as_mut()).is_pending());
             let mut retry = Box::pin(slots.admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "retry",
                 ScenarioAttempt::Retry,
                 |_| {},
@@ -227,12 +237,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_retry_waiting_for_its_feature_does_not_hold_a_free_run_slot() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         let slots = ScenarioRunSlots::new(3);
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "console",
                 ScenarioAttempt::First,
                 |_| {},
@@ -241,6 +254,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "console",
                 ScenarioAttempt::First,
                 |_| {},
@@ -248,6 +262,7 @@ mod tests {
             .await;
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::WebConsole,
+            ScenarioLength::Ordinary,
             "console retry",
             ScenarioAttempt::Retry,
             |_| {},
@@ -255,6 +270,7 @@ mod tests {
         assert!(futures_util::poll!(retry.as_mut()).is_pending());
         let mut ordinary = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
             "ordinary first attempt",
             ScenarioAttempt::First,
             |_| {},
@@ -270,7 +286,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_cancelled_retry_returns_its_feature_and_run_capacity() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         for limit in [
             FeatureLimit::WebConsole,
@@ -280,18 +298,30 @@ mod tests {
             nervix_primitives::task::consume_budget().await;
             let slots = ScenarioRunSlots::new(1);
             let current = slots
-                .admit_with(limit, "current", ScenarioAttempt::First, |_| {})
+                .admit_with(
+                    limit,
+                    ScenarioLength::Ordinary,
+                    "current",
+                    ScenarioAttempt::First,
+                    |_| {},
+                )
                 .await;
             let mut retry = Box::pin(slots.admit_with(
                 limit,
+                ScenarioLength::Ordinary,
                 "cancelled retry",
                 ScenarioAttempt::Retry,
                 |_| {},
             ));
             assert!(futures_util::poll!(retry.as_mut()).is_pending());
             drop(retry);
-            let mut successor =
-                Box::pin(slots.admit_with(limit, "successor", ScenarioAttempt::First, |_| {}));
+            let mut successor = Box::pin(slots.admit_with(
+                limit,
+                ScenarioLength::Ordinary,
+                "successor",
+                ScenarioAttempt::First,
+                |_| {},
+            ));
             assert!(futures_util::poll!(successor.as_mut()).is_pending());
             drop(current);
             assert!(futures_util::poll!(successor.as_mut()).is_ready());
@@ -300,12 +330,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_queued_web_console_scenario_does_not_hold_a_run_slot() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         let slots = StdArc::new(ScenarioRunSlots::new(3));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -314,6 +347,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -324,6 +358,7 @@ mod tests {
             waiting
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |_| {},
@@ -335,6 +370,7 @@ mod tests {
             Duration::from_millis(100),
             slots.admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "ordinary",
                 ScenarioAttempt::First,
                 |_| {},
@@ -355,13 +391,14 @@ mod tests {
     #[nervix_primitives::test]
     async fn the_next_limited_scenario_gets_a_slot_beside_bulk_work() {
         use crate::scenario_schedule::{
-            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
         };
 
         let slots = StdArc::new(ScenarioRunSlots::new(1));
         let current = slots
             .admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "ordinary",
                 ScenarioAttempt::First,
                 |_| {},
@@ -374,6 +411,7 @@ mod tests {
             ordinary_slots
                 .admit_with(
                     FeatureLimit::Unlimited,
+                    ScenarioLength::Ordinary,
                     "ordinary",
                     ScenarioAttempt::First,
                     |reason| {
@@ -398,6 +436,7 @@ mod tests {
             limited_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |reason| {
@@ -432,13 +471,14 @@ mod tests {
     #[nervix_primitives::test]
     async fn releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain() {
         use crate::scenario_schedule::{
-            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
         };
 
         let slots = StdArc::new(ScenarioRunSlots::new(2));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -447,6 +487,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -460,6 +501,7 @@ mod tests {
             next_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |reason| {
@@ -483,6 +525,7 @@ mod tests {
             ordinary_slots
                 .admit_with(
                     FeatureLimit::Unlimited,
+                    ScenarioLength::Ordinary,
                     "ordinary",
                     ScenarioAttempt::First,
                     |reason| {
@@ -517,13 +560,14 @@ mod tests {
     #[nervix_primitives::test]
     async fn each_web_console_feature_starts_before_one_feature_consumes_the_group() {
         use crate::scenario_schedule::{
-            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
         };
 
         let slots = StdArc::new(ScenarioRunSlots::new(2));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -532,6 +576,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -545,6 +590,7 @@ mod tests {
             graph_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |reason| {
@@ -568,6 +614,7 @@ mod tests {
             repl_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console NSPL REPL",
                     ScenarioAttempt::First,
                     |reason| {
@@ -591,6 +638,7 @@ mod tests {
             inspector_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console transaction inspector",
                     ScenarioAttempt::First,
                     |reason| {
@@ -626,6 +674,189 @@ mod tests {
         drop(repl_admission);
         drop(inspector_admission);
         graph.await.expect("graph successor eventually runs");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts() {
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
+
+        let slots = ScenarioRunSlots::new(1);
+        let current = slots
+            .admit_with(
+                FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
+                "current",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let mut ordinary = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
+            "ordinary first attempt queued earlier",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(ordinary.as_mut()).is_pending());
+        let mut long = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::LongRunning,
+            "long-running first attempt queued later",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(long.as_mut()).is_pending());
+
+        drop(current);
+        let std::task::Poll::Ready(long_admission) = futures_util::poll!(long.as_mut()) else {
+            panic!("the released run slot must go to the long-running scenario queued later");
+        };
+        assert!(futures_util::poll!(ordinary.as_mut()).is_pending());
+        drop(long_admission);
+        assert!(futures_util::poll!(ordinary.as_mut()).is_ready());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_retry_runs_before_a_declared_long_first_attempt() {
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
+
+        let slots = ScenarioRunSlots::new(1);
+        let current = slots
+            .admit_with(
+                FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
+                "current",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let mut long = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::LongRunning,
+            "long-running first attempt",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(long.as_mut()).is_pending());
+        let mut retry = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
+            "ordinary retry",
+            ScenarioAttempt::Retry,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(retry.as_mut()).is_pending());
+
+        drop(current);
+        let std::task::Poll::Ready(retried) = futures_util::poll!(retry.as_mut()) else {
+            panic!("an eligible retry must precede a long-running first attempt");
+        };
+        assert!(futures_util::poll!(long.as_mut()).is_pending());
+        drop(retried);
+        assert!(futures_util::poll!(long.as_mut()).is_ready());
+    }
+
+    /// Two run slots take up four ordinary attempts of ten seconds, queued in feature order before
+    /// a declared long-running attempt of thirty. In queue order the long attempt starts at twenty
+    /// seconds, once the four have ended, and runs on alone until fifty: the shape of the suite
+    /// tail in which one transaction-report attempt, admitted in the run's last quarter, outlasted
+    /// every other scenario. Admitted ahead of them, it runs beside them and the suite ends with
+    /// its bulk, at forty.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it() {
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
+
+        const ORDINARY_ATTEMPT: Duration = Duration::from_secs(10);
+        const LONG_ATTEMPT: Duration = Duration::from_secs(30);
+        const BULK_END: Duration = Duration::from_secs(40);
+
+        async fn attempt(
+            slots: &ScenarioRunSlots,
+            length: ScenarioLength,
+            time: Duration,
+            began: Instant,
+        ) -> Duration {
+            let admission = slots
+                .admit_with(
+                    FeatureLimit::Unlimited,
+                    length,
+                    "Suite tail",
+                    ScenarioAttempt::First,
+                    |_| {},
+                )
+                .await;
+            nervix_primitives::time::sleep(time).await;
+            drop(admission);
+            began.elapsed()
+        }
+
+        let slots = ScenarioRunSlots::new(2);
+        let began = Instant::now();
+        let mut attempts = Vec::new();
+        for _ in 0..4 {
+            attempts.push(Box::pin(attempt(
+                &slots,
+                ScenarioLength::Ordinary,
+                ORDINARY_ATTEMPT,
+                began,
+            )));
+        }
+        attempts.push(Box::pin(attempt(
+            &slots,
+            ScenarioLength::LongRunning,
+            LONG_ATTEMPT,
+            began,
+        )));
+        // Queue every attempt in feature order, the order in which Cucumber takes them up.
+        for queued in &mut attempts {
+            assert!(futures_util::poll!(queued.as_mut()).is_pending());
+        }
+
+        let ends = futures_util::future::join_all(attempts).await;
+        let suite_end = ends
+            .into_iter()
+            .max()
+            .verified("the suite above ran five attempts");
+        assert_eq!(
+            suite_end, BULK_END,
+            "the long-running attempt must run beside the bulk instead of after it"
+        );
+    }
+
+    #[test]
+    fn long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature() {
+        use crate::scenario_schedule::ScenarioLength;
+
+        assert_eq!(
+            ScenarioLength::declared_by(["transaction_quiesce_qualification", "long_running"]),
+            ScenarioLength::LongRunning
+        );
+        assert_eq!(
+            ScenarioLength::declared_by(["transaction_quiesce_qualification"]),
+            ScenarioLength::Ordinary
+        );
+        assert_eq!(
+            ScenarioLength::declared_by(std::iter::empty::<&str>()),
+            ScenarioLength::Ordinary
+        );
+    }
+
+    #[test]
+    fn an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running() {
+        use crate::scenario_schedule::{LONG_RUNNING_ATTEMPT, ScenarioLength};
+
+        let shorter = LONG_RUNNING_ATTEMPT
+            .checked_sub(Duration::from_millis(1))
+            .verified("the long-running bound is two minutes");
+        assert!(ScenarioLength::Ordinary.lacks_declaration_for(LONG_RUNNING_ATTEMPT));
+        assert!(!ScenarioLength::Ordinary.lacks_declaration_for(shorter));
+        assert!(!ScenarioLength::LongRunning.lacks_declaration_for(LONG_RUNNING_ATTEMPT));
     }
 
     #[test]
@@ -2638,10 +2869,13 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn the_finished_phase_is_published_only_once_cleanup_has_completed() {
+        use crate::scenario_schedule::ScenarioLength;
+
         let scenario = Arc::new(ActiveScenarioRegistration::start(
             "Harness liveness",
             "cleanup publishes truthful phases",
             STAND_IN_SCENARIO_LINE,
+            ScenarioLength::Ordinary,
         ));
         let log = Arc::new(CleanupLog::default());
         let mut nodes = [
@@ -2668,10 +2902,13 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn an_active_scenario_publishes_its_phase_and_the_age_of_that_phase() {
+        use crate::scenario_schedule::ScenarioLength;
+
         let scenario = ActiveScenarioRegistration::start(
             "Harness liveness",
             "phase ages",
             STAND_IN_SCENARIO_LINE,
+            ScenarioLength::Ordinary,
         );
         let queued = published(&scenario);
         assert_eq!(&queued.identity, scenario.identity());
@@ -3426,8 +3663,14 @@ mod tests {
             phase: ScenarioPhase,
             nodes: &[(&str, StandInStopBehavior)],
         ) -> Self {
-            let scenario =
-                ActiveScenarioRegistration::start("Harness liveness", scenario_name, line);
+            use crate::scenario_schedule::ScenarioLength;
+
+            let scenario = ActiveScenarioRegistration::start(
+                "Harness liveness",
+                scenario_name,
+                line,
+                ScenarioLength::Ordinary,
+            );
             scenario.enter(phase);
             let identity = scenario.identity().clone();
             let cluster = LiveClusterRegistration::start(identity.clone());
@@ -3710,15 +3953,25 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_retried_scenario_publishes_which_attempt_is_running() {
-        use crate::scenario_schedule::ScenarioAttempt;
+        use crate::scenario_schedule::{ScenarioAttempt, ScenarioLength};
 
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
-        let first = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        let first = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a retried scenario",
+            50,
+            ScenarioLength::Ordinary,
+        );
         assert_eq!(published(&first).attempt, 1);
         assert_eq!(first.attempt(), ScenarioAttempt::First);
         drop(first);
 
-        let retry = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        let retry = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a retried scenario",
+            50,
+            ScenarioLength::Ordinary,
+        );
         assert_eq!(retry.attempt(), ScenarioAttempt::Retry);
         assert_eq!(
             published(&retry).attempt,
@@ -3728,8 +3981,12 @@ mod tests {
 
         // An outline expands into one scenario per example row, and those rows share the outline's
         // name. They are separate scenarios, so neither counts as a retry of the other.
-        let example =
-            ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 51);
+        let example = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a retried scenario",
+            51,
+            ScenarioLength::Ordinary,
+        );
         assert_eq!(published(&example).attempt, 1);
         assert_eq!(example.attempt(), ScenarioAttempt::First);
         assert_ne!(published(&retry).identity, published(&example).identity);

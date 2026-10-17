@@ -69,7 +69,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Element | Where it runs | Owner |
 | --- | --- | --- |
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
-| Scenario admission and timing | Feature permits, prioritized run slots, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
+| Scenario admission and timing | Feature permits, prioritized run slots, the long-running declaration, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
@@ -308,6 +308,26 @@ available to other work. Ordinary and WASM-reset queues retain FIFO order within
 the web-console group retains its feature fairness. The finite retry count bounds this priority;
 first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
 capacities before dispatch continues.
+
+A scenario whose attempts run for minutes declares itself with the `@long_running` tag, on the
+scenario, its outline's examples, its rule, or its feature. A free run slot takes a declared first
+attempt before any ordinary first attempt, after retries and the limited chains, so the scenario
+runs beside the bulk of the suite rather than after it. Without the declaration, feature order
+decides when a long scenario starts. It admitted the multi-mebibyte transaction-report scenario of
+a late feature in the run's last quarter: in one canonical producer of 17 October 2026, at
+1,650.8 seconds, and it then ran alone for the last 22.7 seconds; in another, at 1,465.0 seconds,
+where its attempt failed after 329.1 seconds, so the attempt and its retry ran alone from
+1,739.2 seconds to 1,937.7 seconds. That run needed 1,725.8 seconds at full occupancy and took
+1,939.5, at 89.0% utilization. When a run's work fills its budget, as in the overrun at
+116,962.9 of the 118,080 slot-seconds that 48 slots supply in 41 minutes, no order can end it in
+time; a declared scenario keeps the order from adding a tail to a run that would otherwise fit.
+
+A scenario declares itself long-running when its attempts reach two minutes in a canonical
+producer. In the first run above, 34 attempts outside the limited features reached two minutes,
+about one in a hundred, while the median attempt took 25 seconds. The suite summary lists every
+attempt that reached two minutes without the declaration. The declaration orders admission only. A declared scenario takes one run slot like
+any other and runs beside the rest of the suite, and its retries, deadlines and budgets are
+unchanged.
 
 The CI jobs divide the work at the scenario boundary:
 
@@ -1870,7 +1890,7 @@ artifact carries `tests/logs`.
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
 | Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the NSPL commands scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
-| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, and the ten longest attempts; captured at watchdog expiry before cleanup on a timed-out run |
+| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 
@@ -2024,6 +2044,7 @@ tasks, most of them on a paused clock. The `tests` job runs them beside the sepa
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
+| A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and an undeclared attempt of two minutes is named | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
