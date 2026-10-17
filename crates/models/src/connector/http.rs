@@ -23,15 +23,16 @@ use super::{
     entity_union::{connector_sinks, connector_sources},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, DomainClockPeriod,
-    EmitSinkCapabilities, EmitterBatchRequirement, EmitterPublishingMode, EndpointIngestMode,
-    EndpointName, EndpointType, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    AcknowledgementConfirmation, BatchUnavailability, ClientName, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchLegality,
+    EmitterBodyForm, EmitterPublishingModeKind, EndpointIngestMode, EndpointName, EndpointType,
+    Expression, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
-configured_client!(Http: unpooled CreateClientHttp => HttpConfigEntry);
+configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfigEntry);
 
 /// The request an HTTP client sends on a cadence of domain time, whose response is the payload.
 #[derive(
@@ -52,6 +53,10 @@ impl SourceEntity for HttpRequestSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Http),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
+        locator: None,
+        options: &[OptionDeclaration::EVERY],
     };
 }
 
@@ -66,13 +71,6 @@ impl SourceBody for HttpRequestSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. }
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -116,6 +114,10 @@ impl SourceEntity for HttpEndpointSource {
         reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        locator: None,
+        options: &[],
     };
 }
 
@@ -130,10 +132,6 @@ impl SourceBody for HttpEndpointSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        self.mode.supports_quiesce(quiesce)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -168,15 +166,35 @@ pub struct HttpRequestSink {
 impl SinkEntity for HttpRequestSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        reference: SinkReferenceKind::Client(ConnectorKind::Http),
+        body: EmitterBodyForm::CodecOrWithoutBody,
+        batch: EmitterBatchLegality::Unavailable {
+            reason: BatchUnavailability::OneRequestPerRecord,
+        },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: None,
+        options: &[
+            OptionDeclaration {
+                keywords: "METHOD",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Expression,
+                    example: "METHOD 'POST'",
+                },
+            },
+            OptionDeclaration {
+                keywords: "PATH",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Expression,
+                    example: "PATH '/events'",
+                },
+            },
+        ],
+        envelope: &[],
+        properties: &[],
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for HttpRequestSink {

@@ -31,12 +31,9 @@ pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], PulsarTopicSource, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Topic))
-        .then(external_name("pulsar_topic", PulsarTopicName::parse))
+        .then(external_name::<PulsarTopicName>())
         .then_ignore(kw(Identifier::Subscription))
-        .then(external_name(
-            "pulsar_subscription",
-            PulsarSubscriptionName::parse,
-        ))
+        .then(external_name::<PulsarSubscriptionName>())
         .then(optional_instances())
         .then_ignore(kw(Identifier::Mode))
         .then(kafka::mode())

@@ -206,6 +206,7 @@ class InventoryTests(unittest.TestCase):
             "models-name-validation",
             "models-external-names",
             "models-external-name-validation",
+            "models-connector-declarations",
             "models-timestamps",
             "models-timestamp-text",
             "models-domain-clock",
@@ -378,7 +379,10 @@ class InventoryTests(unittest.TestCase):
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
-            self.assertIn(target.test_target, {"lib", "test:representations", "bin:nervix-web-console"})
+            self.assertIn(
+                target.test_target,
+                {"lib", "test:representations", "test:connectors", "bin:nervix-web-console"},
+            )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 
