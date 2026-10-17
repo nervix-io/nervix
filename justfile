@@ -575,7 +575,8 @@ test-primitives-compile:
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
 # tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The
-# lane builds each invocation for the selection under target/deloxide, so the diagnostic server
+# lane builds every selected executable first under its build budget, then starts the workload
+# budget. Builds use target/deloxide, so the diagnostic server
 # binary never replaces the ordinary one, and refuses a registered workload that is missing or
 # ignored and a probe, conformance check, owner test or tagged scenario that is not registered. The
 # probes of nervix-deadlock run every workload in a disposable child that must report its cycle,
@@ -588,7 +589,7 @@ test-primitives-compile:
 # scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
-# in a session of its own within its bound and the inventory's budget, and the lane fails on an
+# in a session of its own within its bound and its stage's budget, and the lane fails on an
 # active deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget
 # (124), a leftover process, incomplete accounting, and missing, partly written or nonqualifying
 # evidence. A fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact,
@@ -618,6 +619,11 @@ test-deloxide-stress: tests-deps test-deloxide-stress-workloads
 # with a budget of its own, because the stressed scenarios of both selections together would take
 # most of one lane's budget.
 test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
+
+# Measure a selection's diagnostic builds without running workloads. The retained record has the
+# verdict `built`, so it cannot qualify as completed workload or native coverage evidence.
+build-deloxide-lane selection="deloxide": tests-deps
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build {{ quote(selection) }}
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
