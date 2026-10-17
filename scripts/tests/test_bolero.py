@@ -326,6 +326,7 @@ class InventoryTests(unittest.TestCase):
             "emitter-retained-payloads",
             "sqs-batch-requests",
             "iceberg-nested-datetime-staging",
+            "sentry-prepared-envelopes",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "websocket-signaling-protobuf-values",
@@ -374,6 +375,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-postgres",
             "nervix-connector-websockets",
             "nervix-connector-otel",
+            "nervix-connector-sentry",
             "nervix-web-console",
         })
         for target in inventory.targets:

@@ -583,6 +583,15 @@ leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the c
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
+MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
+ingestor, above the connector's `MqttSourceError::RetireInstance` and instance index. The report
+keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
+deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
+its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
+events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
+the replacement's changed sessions remains an installation failure. Neither path rejects a record
+or confirms payload delivery.
+
 A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
 refuses to take a record for a reason that is not the record's own, a full producer queue included,
 and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
@@ -975,8 +984,12 @@ or leaves a handed-over row unanswered. Either fails the attempt without a retry
 emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
 rows then follow `ON MESSAGE ERROR` as a failed publish.
 
-The Sentry sink rejects a final serialized event above its decompressed event limit before sending
-the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+The Sentry sink prepares its envelope before the host retains the payload. Invalid event JSON,
+invalid event fields and a final serialized event above its decompressed limit become definitive
+payload rejections at that boundary. The full typed preparation report is projected into the
+external message error once; all source members share its reference while keeping their own
+execution times. No refused envelope is sent or retained for a transport retry. The Syslog sink
+rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
 A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
 its requests from mapped rows, measure each request they would send. If halving still leaves one
