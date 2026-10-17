@@ -1,6 +1,6 @@
 Feature: Model alteration quiesce classification
   Background:
-    Given schema change drain timeout is configured as "5s"
+    Given schema change drain timeout is configured as "120s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And the leader node is configured with these NSPL commands

@@ -49,12 +49,13 @@ use nervix_columnar_json::{
 };
 use nervix_connector::{
     MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, RustlsClientConfigSource, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult, client_config_value,
-    optional_client_config_value,
+    RowRequest, RowRequestLimits, RowSink, RustlsClientConfigSource, SinkFinish, SinkFinishResult,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult,
+    client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupError, DnsResolver};
 use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, TableName};
+use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
 
 const CLICKHOUSE: &str = "clickhouse";
@@ -371,7 +372,12 @@ impl ClickHouseSink {
 }
 
 #[async_trait::async_trait]
-impl SinkLifecycle for ClickHouseSink {}
+impl SinkLifecycle for ClickHouseSink {
+    /// Each insert is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait::async_trait]
 impl RowSink for ClickHouseSink {

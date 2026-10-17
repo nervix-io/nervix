@@ -158,34 +158,54 @@ EOF
     expected_probe_interval=0.01
     owned_service_container() { printf 'sender-control\n'; }
     node_address() { printf '10.213.1.13\n'; }
+    # The probe launches its helper under the launch bound, waits for its sample under the probe's
+    # own bound and then reads and removes it; the helper's logs carry the sample this generates.
     run_bounded() {
-        [[ "$1" -eq 30 ]] || fail 'link probe changed its total deadline'
+        local limit="$1"
         shift
-        local count=0 interval=0
-        while [[ "$#" -gt 0 ]]; do
-            case "$1" in
-                -c) count="$2"; shift ;;
-                -i) interval="$2"; shift ;;
-            esac
-            shift
-        done
-        [[ "${count}" -eq "${expected_probe_count}" && "${interval}" == "${expected_probe_interval}" ]] \
-            || fail 'link probe changed the profile packet count or interval'
-        awk -v count="${count}" -v interval="${interval}" '
-            BEGIN {
-                if (count * interval > 4) exit 2
-                print "PING 10.213.1.13: 56 data bytes"
-                received = 0
-                for (seq = 0; seq < count; seq++) {
-                    if (seq < 40 && seq != 10 && seq != 17 && seq != 26 && seq != 30) continue
-                    if (seq >= 40 && seq % 5 < 2) continue
-                    printf "64 bytes from 10.213.1.13: seq=%d ttl=64 time=0.060 ms\n", seq
-                    received++
-                }
-                printf "%d packets transmitted, %d packets received, %.1f%% packet loss\n", count, received, (count - received) * 100 / count
-                print "round-trip min/avg/max = 0.050/0.060/0.067 ms"
-            }
-        '
+        case "$1 $2" in
+            'docker run')
+                [[ "${limit}" -eq "${link_degradation_launch_seconds}" ]] \
+                    || fail 'link probe changed its launch bound'
+                local cidfile=""
+                # The helper passes everything after its script's -- separator to ping.
+                while [[ "$#" -gt 0 && "$1" != -- ]]; do
+                    [[ "$1" != --cidfile ]] || cidfile="$2"
+                    shift
+                done
+                [[ "$#" -eq 8 && "$2 $4 $6 $7" == '-c -i -W 1' && "$8" == 10.213.1.13 ]] \
+                    || fail 'link probe changed its ping arguments'
+                sampled_count="$3"
+                sampled_interval="$5"
+                [[ "${sampled_count}" -eq "${expected_probe_count}" \
+                    && "${sampled_interval}" == "${expected_probe_interval}" ]] \
+                    || fail 'link probe changed the profile packet count or interval'
+                printf 'helper-control\n' | tee "${cidfile}"
+                ;;
+            'docker wait')
+                [[ "${limit}" -eq 30 ]] || fail 'link probe changed its sample bound'
+                printf '0\n'
+                ;;
+            'docker logs')
+                awk -v count="${sampled_count}" -v interval="${sampled_interval}" '
+                    BEGIN {
+                        if (count * interval > 4) exit 2
+                        print "PING 10.213.1.13: 56 data bytes"
+                        received = 0
+                        for (seq = 0; seq < count; seq++) {
+                            if (seq < 40 && seq != 10 && seq != 17 && seq != 26 && seq != 30) continue
+                            if (seq >= 40 && seq % 5 < 2) continue
+                            printf "64 bytes from 10.213.1.13: seq=%d ttl=64 time=0.060 ms\n", seq
+                            received++
+                        }
+                        printf "%d packets transmitted, %d packets received, %.1f%% packet loss\n", count, received, (count - received) * 100 / count
+                        print "round-trip min/avg/max = 0.050/0.060/0.067 ms"
+                    }
+                '
+                ;;
+            'docker container') [[ "$3 $4 $5" == 'rm --force helper-control' ]] || fail "unexpected removal: $*" ;;
+            *) fail "link probe ran an unexpected command: $*" ;;
+        esac
     }
     link_ping "${tmp_dir}/burst-sample.txt" sender receiver burst-loss
     "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/burst-sample.json" \

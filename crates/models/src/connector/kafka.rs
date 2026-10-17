@@ -91,7 +91,7 @@ impl SourceEntity for KafkaTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
-        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[
             DeclaredDelivery::NO_ACK,
             DeclaredDelivery::ACK_SEQUENTIAL,

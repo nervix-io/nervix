@@ -372,14 +372,13 @@ pub enum PositionClass {
 #[strum(serialize_all = "snake_case")]
 pub enum AcknowledgementConfirmation {
     /// The transport answers every acknowledgement or commit, and acknowledging returns once the
-    /// answer arrived, such as an SQS `DeleteMessage` response.
+    /// answer arrived, such as an SQS `DeleteMessage` response or a Kafka consumer-group commit.
     Answered,
     /// The protocol does not answer an acknowledgement, and acknowledging returns once it is
     /// written to the connection, such as a RabbitMQ `basic.ack`.
     Written,
     /// Acknowledging returns once the client queued the acknowledgement, before the transport
-    /// answered it and possibly before it reached the connection, such as a Kafka consumer-group
-    /// commit that is never awaited.
+    /// answered it and possibly before it reached the connection, such as a Pulsar acknowledgement.
     Queued,
     /// The source acknowledges nothing on its transport.
     None,

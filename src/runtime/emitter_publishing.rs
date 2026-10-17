@@ -19,8 +19,8 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkLifecycle, SinkPublishError, SinkRecordPosition,
-    SinkStagedCommit,
+    PerRecordOutcome, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkLifecycle,
+    SinkPublishError, SinkRecordPosition, SinkStagedCommit,
 };
 
 use super::{emitter_supervision::EmitterConfirmationWaitGuard, *};
@@ -358,15 +358,12 @@ impl EmitterSinkState {
         }
     }
 
-    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> EmitterRuntimeResult<()> {
+    /// Finishes the open connector's transport client by `deadline`. An emitter without an open
+    /// connector has no client, so it holds nothing.
+    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> SinkFinishResult {
         match self {
-            Self::Open(open) => open
-                .sink
-                .lifecycle_mut()
-                .finish(deadline)
-                .await
-                .map_err(sink_publish_failure),
-            Self::Unavailable { .. } => Ok(()),
+            Self::Open(open) => open.sink.lifecycle_mut().finish(deadline).await,
+            Self::Unavailable { .. } => Ok(SinkFinish::NothingHeld),
         }
     }
 
@@ -853,7 +850,6 @@ pub(super) fn sink_publish_failure(error: Report<SinkPublishError>) -> Report<Em
         }
         SinkPublishError::NotInitialized { .. }
         | SinkPublishError::Publish { .. }
-        | SinkPublishError::Finish { .. }
         | SinkPublishError::Commit { .. } => {
             error.change_context(EmitterRuntimeError::PublishBatch)
         }
@@ -1015,7 +1011,12 @@ mod tests {
     /// drives the publish path up to the connector and observes what the host keeps afterwards.
     struct UnencodableSink;
 
-    impl SinkLifecycle for UnencodableSink {}
+    #[async_trait]
+    impl SinkLifecycle for UnencodableSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl EmitterSink for UnencodableSink {
@@ -1057,6 +1058,10 @@ mod tests {
 
     #[async_trait]
     impl SinkLifecycle for StagingSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+
         fn staged_commit(&self) -> Option<SinkStagedCommit> {
             if self.staged == 0 {
                 return None;
