@@ -9497,7 +9497,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-max-message-size#37f70aa16d3a6cc0493d25e0ca73c0e7b0c07f80"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#1545163035670abe8996be7bd2610e45421c47ce"
 dependencies = [
  "async-channel",
  "async-trait",

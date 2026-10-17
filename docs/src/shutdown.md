@@ -676,13 +676,15 @@ acknowledged through the graph stays outstanding admitted work until its source 
 batch's positions on its transport, so the drain waits for that confirmation as it waits for any
 other acknowledgement root, within the drain timeout. What a source's confirmation means is the
 acknowledgement confirmation its entity declares; see
-[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion
-and a Kafka offset commit are answered, and a RabbitMQ acknowledgement is written to the connection,
-before the drain moves on, while a Pulsar acknowledgement and an MQTT `PUBACK` are only queued by
-their clients, so the drain does not wait for their brokers to answer them. A Kafka consumer group
+[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
+a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
+acknowledgement is written to the connection, before the drain moves on, while an MQTT `PUBACK` is
+only queued by its client, so the drain does not wait for its broker to answer it. A Pulsar
+acknowledgement the broker does not answer within the client's 30-second operation timeout fails,
+and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer group
 in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
 driver delivered since the driver's last commit, and waits for the answer before the consumer
-leaves the group.
+leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the source's own redelivery contract applies. A source instance that stops while it still waits

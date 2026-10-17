@@ -22812,6 +22812,53 @@ async fn given_pulsar_topic_accepts_messages_of_at_most(
         });
 }
 
+/// What the broker holds for the subscription now: messages no acknowledgement reached it for.
+#[then(
+    expr = "Pulsar subscription {string} of topic {string} holds {int} unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    let backlog = world
+        .cluster()
+        .pulsar_subscription_backlog(&topic, &subscription)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the backlog of Pulsar subscription '{subscription}': {error}")
+        });
+    assert_eq!(
+        backlog, expected,
+        "Pulsar subscription '{subscription}' of topic '{topic}' holds {backlog} unacknowledged \
+         messages"
+    );
+}
+
+#[then(
+    expr = "within {string} Pulsar subscription {string} of topic {string} holds {int} \
+            unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_eventually_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .wait_for_pulsar_subscription_backlog(&topic, &subscription, expected, duration)
+        .await
+        .expect("Pulsar subscription backlog assertion failed");
+}
+
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
 async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     initialize_scenario_identity(world);

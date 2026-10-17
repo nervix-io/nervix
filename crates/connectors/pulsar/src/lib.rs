@@ -49,8 +49,9 @@ use pulsar::{
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
 pub use source::{
-    PulsarMessageProperties, PulsarSource, PulsarSourceError, PulsarSourceMessage,
-    PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
+    PulsarAckReceipts, PulsarMessageProperties, PulsarRefusal, PulsarSource, PulsarSourceError,
+    PulsarSourceMessage, PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
+    PulsarUnresolvedRequest,
 };
 use thiserror::Error;
 

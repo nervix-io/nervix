@@ -1297,7 +1297,7 @@ impl BranchExecutionRuntime {
                     runtime_handle,
                     domain,
                     ingestor,
-                    template.branch.as_ref(),
+                    template,
                     max_instances,
                     instances,
                 )
@@ -1574,7 +1574,7 @@ impl BranchExecutionRuntime {
                         &runtime_handle,
                         &domain,
                         &ingestor,
-                        template.branch.as_ref(),
+                        &template,
                         max_instances,
                         &mut instances,
                     )
@@ -1634,7 +1634,7 @@ impl BranchExecutionRuntime {
                             &runtime_handle,
                             &domain,
                             &ingestor,
-                            template.branch.as_ref(),
+                            &template,
                             now,
                             branch_ttl,
                             &mut instances,
@@ -1964,7 +1964,7 @@ pub(super) async fn expire_branch_instance_instances(
     runtime: &Runtime,
     domain: &DomainName,
     ingestor: &IngestorName,
-    branch: Option<&BranchName>,
+    template: &BranchInstanceTemplate,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
@@ -1976,12 +1976,12 @@ pub(super) async fn expire_branch_instance_instances(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                branch,
+                template.branch.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Ttl),
             )
         );
-        runtime.invalidate_branch_relay_generation(domain, &key);
+        template.retire_branch_channels(&key);
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -2009,7 +2009,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
     runtime: &Runtime,
     domain: &DomainName,
     ingestor: &IngestorName,
-    branch: Option<&BranchName>,
+    template: &BranchInstanceTemplate,
     max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Vec<Option<BranchKey>> {
@@ -2020,12 +2020,12 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                branch,
+                template.branch.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Lru),
             )
         );
-        runtime.invalidate_branch_relay_generation(domain, &key);
+        template.retire_branch_channels(&key);
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
