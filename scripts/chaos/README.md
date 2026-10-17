@@ -22,3 +22,10 @@ just chaos replay target/chaos/<run-id>
 just chaos cleanup --run-id <run-id>
 just chaos self-test
 ```
+
+## Diagnostic images
+
+An image whose `io.nervix.diagnostic.selection` label declares a Deloxide selection runs every node
+as a diagnostic node. Every run then fails unless the deadlock evidence of each process its nodes
+started qualifies. [Diagnostic Images](../../docs/src/cluster-chaos.md#diagnostic-images) describes
+how a run collects and judges that evidence.
