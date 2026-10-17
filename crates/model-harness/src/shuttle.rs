@@ -266,6 +266,33 @@ where
     );
 }
 
+/// Explore `invariant` under 1,000 random schedules and 1,000 PCT schedules of depth three, for a
+/// model in which either of two threads can spin until the other moves.
+///
+/// The depth-first search of [`check_interleavings`] cannot explore such a model. It ignores yields
+/// and tries the lowest-numbered runnable thread first, so whichever of the two is numbered lower
+/// never leaves its spin, and its backtracking lengthens the other's spin by a step per schedule
+/// until a schedule exceeds the step limit. A random schedule chooses among the runnable threads at
+/// every step, and a PCT schedule moves a yielding thread to the lowest priority, so both leave
+/// such a spin and explore the model at the budget of [`check_interleavings`].
+pub fn check_spinning_interleavings<F>(invariant: F)
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    explore(
+        &[
+            Search::Random {
+                iterations: INTERLEAVING_ITERATIONS,
+            },
+            Search::Pct {
+                iterations: INTERLEAVING_ITERATIONS,
+                depth: PCT_DEPTH,
+            },
+        ],
+        invariant,
+    );
+}
+
 /// Explore `invariant` under `iterations` random schedules.
 pub fn check_random<F>(invariant: F, iterations: usize)
 where

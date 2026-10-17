@@ -59,6 +59,114 @@ both archive descriptions and the compared state inventories stay under `backup/
 workload exercises one-node and three-node publication; the large guest-save and post-START
 branch-isolation workloads run in the public Cucumber and diagnostic suites.
 
+Alternate eight backups and restores with continuous acknowledged Kafka traffic:
+
+```bash
+just chaos run backup-cycles --image nervix:debian
+just chaos run backup-cycles --image nervix:debian --nodes 1
+```
+
+Besides the backup graph, the run installs `fixtures/backup-state.nspl`: an attached deduplicator
+and a detached window processor on the graph's branched relay, each with its own output topic. The
+deduplicator keys each branch's records by their sequence modulo 30, so exactly the records below
+sequence 30 are unique and every later record repeats a key its branch has seen; the window closes
+over twelve consecutive records of a branch. Each cycle waits for new acknowledged output, takes a
+quiesced backup through the packaged CLI, verifies the archive offline, restores it as the stopped
+domain `chaos_cycle_N`, backs that domain up again and compares the public checkpoint identities,
+revisions, branch counts and exact Kafka positions of every lifecycle, offset, deduplicator and
+window checkpoint with its own cut. Every archive's acknowledged `chaos_input` offset must be at or
+past the previous cycle's, so a cut never moves the domain's committed position back. Each cycle's
+freeze, backup command, restore-and-compare time and archive size go to
+`backup-cycles/cycles.ndjson`, and `results/backup-cycles-progress.json` records the freeze's
+minimum, median and maximum. After the final source boundary, `verify-backup-state.sh` judges the
+deduplicator and window outputs against the accepted-input ledger: every unique record and every
+closed window must appear, every copy must equal its expected value, and nothing else may appear,
+so a cut that lost or doubled a key or a retained row fails the run. Its verdict goes to
+`results/backup-state.json`. The run then checks renewed traffic and the exact accepted-input
+ledger, counting identical replays separately.
+
+Inject one fault into a quiesced backup under acknowledged Kafka traffic:
+
+```bash
+just chaos run backup-fault --image nervix:debian --fault owner-crash
+just chaos run backup-fault --image nervix:debian --fault leader-crash
+just chaos run backup-fault --image nervix:debian --fault owner-partition
+just chaos run backup-fault --image nervix:debian --fault rolling-restart
+```
+
+The run places the backup graph so the Raft leader coordinates the backup, one follower owns the
+ingestor and its relay, the domain's Kafka offsets and branch lifecycle state, and the other
+follower runs the emitter. For the first three faults it closes an acknowledgement gate: Pumba
+netem on the broker drops every packet the broker sends to the emitter's node. The broker appends
+the batch the emitter publishes, but the emitter receives no acknowledgement, the ingestor's
+sequential acknowledgement holds every later record behind it, and the cut's drain waits for that
+admitted publish. The gate sits on the broker, so a node's interface carries only the fault itself
+and a partition plan never overlaps it. The run waits until the output stays unchanged across two
+observations while the source runs at least two records ahead, starts the backup through the
+emitter's node with a 30-second quiesce timeout, waits until `DESCRIBE INGESTOR` reports
+`status: quiesced` and `quiesce state: domain pause`, and only then injects the fault, so the fault
+always lands inside a held cut. While the fault holds, it records the source and output boundaries
+and lifts the gate, leaving the fault as the only obstacle; a cut the gate holds past its
+quiesce timeout fails, and a publish held past the graph's 30-second `ACK TIMEOUT` is retried,
+which the ledger admits as a replay.
+
+- `owner-crash` SIGKILLs the state owner and starts the same container again after the outage.
+- `leader-crash` SIGKILLs the leader, the backup's coordinator, and starts it again.
+- `owner-partition` isolates the state owner from both peers for 35 seconds, longer than the
+  quiesce timeout, with rules on the peers, and heals it.
+- `rolling-restart` uploads an incompressible 16 MiB resource, so the archive carries it, and
+  rate-limits the leader's packets to the CLI's container to 512 kbit/s before the CLI starts, so
+  the 256 KiB download frames take four seconds each and the stream lasts minutes. While the
+  archive streams, it stops each follower gracefully in turn and requires the download to keep
+  growing while each is down, then stops the leader, which holds the archive. The rate limit lived
+  in the network namespace the stopped leader container released, so its injector is killed rather
+  than asked to remove rules from a namespace that no longer exists, and the restarted leader's
+  interface must be back in its default state.
+
+The fault backup must end in one of the outcomes the backup contract allows. A refusal reports a
+`backup failed:` reason and leaves neither the destination nor the client's `.nervix-backup-`
+staging file behind. A completed archive must verify offline and restore and compare like the
+plain backup run; after a leader crash its cut must have been engaged after the crash, because a
+leader-tenure change refuses the archive of the cut it interrupts and the new leader runs the
+backup again under the same execution reference. A completed archive whose cut released before the
+gate began to lift breaks the drain contract, because the gate still withheld an admitted publish.
+After the interrupted download, the failure must carry the backup's execution reference, and
+recovering by that reference must report that the restarted holder no longer retains the archive.
+In every case the cluster must settle, the source and the sink must move past the records the
+fault found, and a fresh backup must verify offline and restore and compare. A product violation is
+a recovery finding: the run still reaches the final exact ledger and then fails with every finding.
+`results/backup-fault-progress.json` records the placement, the outcome, the execution reference
+and any failure code, and the timings of the backup's start, the observed cut, the fault, the gate's
+lifting, the backup's end, an isolation's installation, verification and heal, and the cluster's
+recovery. It also records the fresh backup's freeze, the time its command took to cut, assemble and
+download the archive, and the archive's size, which for `rolling-restart` carries the 16 MiB
+resource and so measures the archive's throughput to the client.
+
+Restore a backup taken under load into a fresh three-node cluster:
+
+```bash
+just chaos run restore-fresh-cluster --image nervix:debian
+```
+
+After a quiesced backup under acknowledged Kafka traffic, the run stops the original domain and
+waits until its output has not moved for five seconds. It then starts a second Compose project,
+`compose.fresh-cluster.yaml`, on the run's network: three nodes `fresh-1` to `fresh-3`, served by
+`nervix-fresh-1` to `nervix-fresh-3`, with their own cluster ID, volumes and certificates issued by
+the run's CA. Through the packaged CLI it restores the archive into that cluster with `RESUME`,
+requires the restored ingestor to run on a fresh node, and requires the fresh cluster to keep
+consuming the same topics. The first record the fresh cluster emits must be the source record at
+the archived offset, and the records it emits must be exactly the source records from that offset
+onward; the run's final ledger then covers both clusters' output, counting identical replays
+separately. The domain carries the deduplicator and window of `fixtures/backup-state.nspl`, so the
+restored keys must keep suppressing the keys seen before the backup, and each window the cut left
+partly filled must close in the fresh cluster over rows from both sides of the backup: the same
+`verify-backup-state.sh` verdict as `backup-cycles` judges both clusters' deduplicator and window
+outputs together. `results/restore-fresh-cluster-progress.json` records the archived offset, the
+original output boundary, the fresh cluster's leader and the startup, restore and
+restore-to-running times. On a Deloxide diagnostic image the fresh nodes record and qualify their
+deadlock evidence like the original nodes, and the exit trap captures the fresh project's Compose
+logs beside the original project's.
+
 Run graceful rolling restarts while Kafka traffic is flowing:
 
 ```bash
@@ -1500,6 +1608,18 @@ clause alone, and that a graph holding no such clause or two is refused. The ful
 too. `just coverage-chaos-backup-fixture` retains kcov's report of that owner and its controls;
 kcov stops attributing lines once a traced value holds the fixture's text, so that report
 under-counts the lines the test executes.
+`just test-chaos-backup-fault` checks the option rules of `backup-fault`, `restore-fresh-cluster` and
+`backup-cycles`, then judges synthetic fault backup reports: a clean refusal, a refusal that left
+the destination or a `.nervix-backup-` staging file, a failure without a JSON report or without a
+backup failure reason, an uncertain failure that keeps its execution reference, a success without
+an archive, leader-crash archives whose cut was engaged before and after the crash, and an archive
+whose cut released while the acknowledgement gate held. The full self-test runs it too, and
+`just coverage-chaos-backup-fault` retains kcov's report of the verdict.
+`just test-chaos-backup-state` feeds `verify-backup-state.sh` an exact set of deduplicator and
+window outputs, one with replayed copies, and outputs that a restore which lost deduplicator keys,
+lost or doubled a window's retained rows, changed a record, or dropped an output would produce,
+beside malformed and missing inputs. The full self-test runs it too, and
+`just coverage-chaos-backup-state` retains kcov's report of the verdict.
 `just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` measures the complete baseline
 controller against the supplied prebuilt image. It keeps coverage under
 `target/chaos-baseline-coverage/` and the actual run under
