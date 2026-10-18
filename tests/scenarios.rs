@@ -138,7 +138,9 @@ use crate::common::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
     },
-    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
+    scenario_schedule::{
+        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+    },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -696,6 +698,18 @@ impl ScenarioWorld {
         self.cluster
             .as_mut()
             .expect("cluster must be created before using it")
+    }
+
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
     }
 
     fn cluster(&self) -> &Cluster {
@@ -12295,16 +12309,26 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
+        .await
+        .expect("failed to restart cluster");
+}
+
+/// The node's runtime installation is held from its start, so whatever reaches it after the
+/// restart finds a node that has not installed its committed domains again.
+#[when(expr = "the cluster is restarted while runtime installation on node {string} waits")]
+async fn when_the_cluster_is_restarted_holding_runtime_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.forget_session_observations();
+    world
+        .cluster_mut()
+        .restart_holding_runtime_installation(&node_id)
         .await
         .expect("failed to restart cluster");
 }
@@ -30345,21 +30369,31 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(move |feature, _rule, scenario, world| {
+        .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
+            let rule_tags: &[String] = match rule {
+                Some(rule) => &rule.tags,
+                None => &[],
+            };
+            let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
+            let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                let registration =
-                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let registration = ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                    scenario_line,
+                    length,
+                );
                 let attempt = registration.attempt();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

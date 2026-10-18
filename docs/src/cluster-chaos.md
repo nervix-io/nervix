@@ -82,7 +82,7 @@ Bolero obligation, and none of those discharges a suite.
 | `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed and diagnostic evidence |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
-| `output-boundary.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
+| `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the source consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
 | `compose.yaml`, `compose.diagnostic.yaml` | The deployment and its diagnostic overlay |
@@ -355,6 +355,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
+| `just test-chaos-pause-delivery` | A failover-length pause's sink check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled sink; the window that opens at placement when the consumer stayed in place; and sink progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The preparation budget and the Kafka end-offset observations, without Docker |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
 | `just test-chaos-startup-status` | Bounded startup status publication |
@@ -1120,8 +1121,20 @@ target is still paused:
 
 - the survivors to agree on a caught-up leader other than the paused node, within 35 seconds
 - every graph node to be owned on a survivor, within 35 seconds
-- sink progress, within 20 seconds
+- when the paused node ran the ingestor, the source consumer group to have members only on the
+  relocated ingestor's node, one of which holds the partition, within 60 seconds of the pause
+  request
+- sink progress, within 20 seconds of that handoff, or of the relocation when the paused node did not
+  run the ingestor
 - a control canary through a peer to finish before the unpause
+
+A paused process neither leaves its consumer group nor answers for it, so the paused member keeps
+its partition until its session expires. The relocated consumer joins the group at once, but Kafka's
+group coordinator hands it the partition only after that expiry, `session.timeout.ms` after the
+member's last heartbeat ([Kafka ingestors](./ingestors.md#kafka)). The baseline graph keeps
+librdkafka's 45-second default. The 60-second bound adds 15 seconds for the rebalance and one read of
+the group through the broker's CLI. Placement usually completes 22 to 26 seconds into a leader pause,
+so a sink window opened at placement would close before the partition can move.
 
 After the long leader pause, the recovered leader must also differ from the paused one.
 
@@ -1129,6 +1142,8 @@ Broker load, listener observation, peer-side status and control canaries continu
 short pause can end before the listener observer samples it. The run records that limit and still
 requires the leader and owners to stay put and every listener to recover. `pauses/` and
 `results/pause-progress.json` keep per-case Docker, public, broker, observer and Pumba evidence.
+Each round records its election, placement, group handoff and delivery times, and its
+`group-handoff/` directory keeps the group read that showed the handoff.
 
 ### Partition And Recovery
 

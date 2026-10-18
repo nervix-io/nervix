@@ -286,7 +286,20 @@ impl io::Write for SharedFileWriter {
 /// what went wrong reaching it — and the failures that need them appear under whole-suite load,
 /// where re-running the feature alone does not reproduce them. They are per connection event
 /// rather than per message, so keeping them on costs a handful of lines per scenario.
-const TEST_TRACE_FILTER: &str = "nervix_interconnect=debug";
+///
+/// Native producers and consumers are restored the same way: a read that waits out its deadline
+/// after a restart is undiagnosable unless the log says which side stalled, whether the client
+/// waited out a refused restoration, the serving node refused or forwarded the open, or the
+/// executing endpoint never assigned the batch. Their decisions are logged at `debug`, once per
+/// open, refusal, attachment and attempt, so a scenario with endpoints costs a few dozen lines.
+const TEST_TRACE_FILTER: &str =
+    "nervix_interconnect=debug,nervix_client_core::restoration=debug,\
+     nervix_client_core::consumer=debug,nervix_client_core::producer=debug,\
+     nervix_server::application::session::consumers=debug,\
+     nervix_server::application::session::producers=debug,\
+     nervix_server::application::client_consumers=debug,\
+     nervix_server::application::client_producers=debug,\
+     nervix_server::runtime::client_emitter=debug,nervix_server::runtime::client_ingestor=debug";
 
 pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
