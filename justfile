@@ -2841,6 +2841,21 @@ test-chaos-rate-probe:
 test-chaos-hold-quorum:
     exec bash scripts/chaos/tests/hold-quorum-self-test.sh
 
+# Judge a failover-length pause's sink progress and source consumer-group handoff from retained
+# pause timelines without a product image.
+test-chaos-pause-delivery:
+    exec bash scripts/chaos/tests/pause-delivery-self-test.sh
+
+# Retain shell coverage of the failover-length pause's sink progress and consumer-group handoff controls.
+coverage-chaos-pause-delivery:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/pause-resume-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/consumer-group.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/pause-delivery-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-pause-delivery-coverage") }} scripts/chaos/tests/pause-delivery-self-test.sh
+
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
