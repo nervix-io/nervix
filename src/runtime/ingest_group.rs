@@ -91,26 +91,70 @@ impl PayloadDecodeFailure {
         }
         Self::NotAdmitted(error.change_context(UnfoldingNotAdmitted))
     }
-
-    /// The failure `ingestor`'s group reports for a payload that did not decode: the codec's
-    /// report beneath the payload's decode failure, or the refusal beneath the unfolding the node
-    /// did not admit.
-    pub(super) fn into_group_error(self, ingestor: &IngestorName) -> Report<IngestGroupError> {
-        match self {
-            Self::Codec(report) => report.change_context(IngestGroupError::DecodePayload {
-                ingestor: ingestor.clone(),
-            }),
-            Self::NotAdmitted(report) => report.change_context(IngestGroupError::Execution {
-                operation: IngestGroupAdmittedOperation::UnfoldPayload,
-            }),
-        }
-    }
 }
 
 /// The node's bounded execution did not take a payload's unfolding now.
 #[derive(Debug, Error)]
 #[error("the node's bounded execution did not unfold the payload")]
 pub(in crate::runtime) struct UnfoldingNotAdmitted;
+
+impl UnfoldingNotAdmitted {
+    /// The failure of the ingest group whose payload's unfolding the node refused, with the
+    /// executor's refusal beneath it.
+    pub(super) fn group_error(refusal: Report<Self>) -> Report<IngestGroupError> {
+        refusal.change_context(IngestGroupError::Execution {
+            operation: IngestGroupAdmittedOperation::UnfoldPayload,
+        })
+    }
+}
+
+/// One payload of a batch a source hands its host, and the entry that stays with it whatever its
+/// codec decides, such as the payload's metadata row.
+pub(in crate::runtime) struct BatchPayload<'p, T> {
+    pub(in crate::runtime) payload: &'p [u8],
+    pub(in crate::runtime) entry: T,
+}
+
+/// The entries of one batch's payloads, divided by whether their codec refused them.
+#[derive(Debug)]
+pub(in crate::runtime) struct SplitPayloads<T> {
+    /// The entries of the payloads that decoded, in batch order.
+    pub(in crate::runtime) decoded: Vec<T>,
+    /// The entries of the payloads their codec refused, in batch order.
+    pub(in crate::runtime) refused: Vec<RefusedEntry<T>>,
+}
+
+impl<T> SplitPayloads<T> {
+    /// The same division, with every entry replaced by what `entry` makes of it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the projection of each payload's entry, such as the \
+                      metadata row its retained batch holds at its index"
+        )
+    )]
+    pub(in crate::runtime) fn map<U>(self, mut entry: impl FnMut(T) -> U) -> SplitPayloads<U> {
+        let mut decoded = Vec::with_capacity(self.decoded.len());
+        for kept in self.decoded {
+            decoded.push(entry(kept));
+        }
+        let mut refused = Vec::with_capacity(self.refused.len());
+        for refusal in self.refused {
+            refused.push(RefusedEntry {
+                entry: entry(refusal.entry),
+                report: refusal.report,
+            });
+        }
+        SplitPayloads { decoded, refused }
+    }
+}
+
+/// The entry of one payload its codec refused, and the codec's report of the refusal.
+#[derive(Debug)]
+pub(in crate::runtime) struct RefusedEntry<T> {
+    pub(in crate::runtime) entry: T,
+    pub(in crate::runtime) report: Report<CodecError>,
+}
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum IngestGroupError {
@@ -260,8 +304,6 @@ pub(in crate::runtime) enum IngestGroupError {
         relay: RelayName,
         row: usize,
     },
-    #[error("failed to decode a payload for ingestor '{ingestor}'")]
-    DecodePayload { ingestor: IngestorName },
 }
 
 #[derive(Debug)]
@@ -392,7 +434,10 @@ pub(super) struct RawIngestAcceptance<'a> {
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
     pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    pub(super) payload: &'a BufferedIngestPayload,
+    /// One row for each payload that decoded, in the order they decoded.
+    pub(super) metadata: &'a [IngestMetadataRow<'a>],
+    /// When the payloads were observed.
+    pub(super) ingested_at: Timestamp,
     pub(super) collector: &'a mut IngestRouteCollector,
 }
 
@@ -2042,35 +2087,47 @@ impl Runtime {
     }
 
     /// Decodes every one of `payloads` into `collector`'s open group, their unfoldings admitted as
-    /// `admission` says.
+    /// `admission` says, and divides their entries by whether the codec refused the payload.
     ///
-    /// The payloads are delivered together or not at all, so a payload that fails to decode takes
-    /// the payloads decoded before it back out of the group. A caller that drops this future before
-    /// it completes discards what it decoded itself.
+    /// A payload its codec refuses leaves the group exactly as it was while the payloads around it
+    /// still decode, because the refusal is the codec's judgement of that payload alone and would
+    /// repeat. A payload the node could not unfold now was judged by nothing, so the batch is
+    /// delivered together or not at all: that refusal takes the payloads decoded before it back
+    /// out of the group, and its caller presents the batch again or refuses it whole. A caller that
+    /// drops this future before it completes discards what it decoded itself.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the caller's payload iterator selects the messages of one admitted batch"
         )
     )]
-    pub(in crate::runtime) async fn decode_raw_ingest_payload<'p>(
+    pub(in crate::runtime) async fn decode_raw_ingest_payload<'p, T>(
         &self,
         collector: &mut IngestRouteCollector,
         admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
-        payloads: impl IntoIterator<Item = &'p [u8]>,
-    ) -> Result<(), PayloadDecodeFailure> {
-        for source_payload in payloads {
+        payloads: impl IntoIterator<Item = BatchPayload<'p, T>>,
+    ) -> Result<SplitPayloads<T>, Report<UnfoldingNotAdmitted>> {
+        let payloads = payloads.into_iter();
+        let mut decoded = Vec::with_capacity(payloads.size_hint().0);
+        let mut refused = Vec::new();
+        for BatchPayload { payload, entry } in payloads {
             nervix_primitives::task::consume_budget().await;
-            if let Err(failure) = collector
-                .decode_payload(self.executor(), admission, codec, source_payload)
-                .await
-            {
-                collector.discard_undispatched_payloads();
-                return Err(failure);
+            let outcome = collector
+                .decode_payload(self.executor(), admission, codec, payload)
+                .await;
+            match outcome {
+                Ok(()) => decoded.push(entry),
+                Err(PayloadDecodeFailure::Codec(report)) => {
+                    refused.push(RefusedEntry { entry, report });
+                }
+                Err(PayloadDecodeFailure::NotAdmitted(refusal)) => {
+                    collector.discard_undispatched_payloads();
+                    return Err(refusal);
+                }
             }
         }
-        Ok(())
+        Ok(SplitPayloads { decoded, refused })
     }
 
     /// Accepts payloads that decoded into their group, giving every message the metadata row of
@@ -2086,10 +2143,10 @@ impl Runtime {
             timestamp_source,
             output_routes,
             filter_where,
-            payload,
+            metadata,
+            ingested_at,
             collector,
         } = acceptance;
-        let metadata = payload.metadata_rows();
         self.dispatch_ingested_records(IngestGroupDispatch {
             handles,
             collector,
@@ -2098,9 +2155,9 @@ impl Runtime {
             timestamp_source,
             output_routes,
             filter_where,
-            metadata: &metadata,
-            ingested_at: payload.observed_at(),
-            acks: vec![AckSet::empty(); payload.len()],
+            metadata,
+            ingested_at,
+            acks: vec![AckSet::empty(); metadata.len()],
         })
         .await
     }
