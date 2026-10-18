@@ -84,6 +84,10 @@ pub(crate) struct IngestorDescribe {
     /// Pending acknowledgements and rejections this node's source hosts discarded after a
     /// reconnect, because the broker redelivers them.
     pub(crate) transport_redeliveries_total: u64,
+    /// Payloads this node's intake of the ingestor consumed because its codec refused them.
+    pub(crate) decode_rejections_total: u64,
+    /// The latest of those payloads' decode rejections on this node.
+    pub(crate) last_decode_rejection: Option<DecodeRejection>,
     pub(crate) memory_backpressure_paused: bool,
     pub(crate) transient_error: Option<String>,
     pub(crate) reconnect_backoff: Option<String>,
@@ -509,7 +513,7 @@ impl Runtime {
                 .inner
                 .ingestor_statuses
                 .get(&key)
-                .and_then(|status| status.snapshot());
+                .and_then(|status| status.connection.snapshot());
             DataflowNodeTransientState::from_failure(failure, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
@@ -581,6 +585,13 @@ impl Runtime {
         Ok(())
     }
 
+    /// The latest decode rejection the ingestor `key` names published on this node.
+    fn last_decode_rejection(&self, key: &DomainNodeRef) -> Option<DecodeRejection> {
+        let status = self.inner.ingestor_statuses.get(key)?;
+        let rejection = status.last_decode_rejection()?;
+        Some(DecodeRejection::clone(&rejection))
+    }
+
     pub(crate) fn describe_local_ingestor(
         &self,
         domain: &DomainName,
@@ -607,7 +618,17 @@ impl Runtime {
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             )
             .get();
+        let decode_rejections_total = self
+            .inner
+            .metrics
+            .ingestor_decode_rejections(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let last_decode_rejection = self.last_decode_rejection(&key);
         if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
             // An ingestor that did not start describes its own start report. One that recorded no
             // failure of its own is not running because its domain's execution failed to build,
@@ -626,6 +647,8 @@ impl Runtime {
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 transport_redeliveries_total,
+                decode_rejections_total,
+                last_decode_rejection: last_decode_rejection.clone(),
                 memory_backpressure_paused,
                 transient_error,
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -641,6 +664,8 @@ impl Runtime {
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 transport_redeliveries_total,
+                decode_rejections_total,
+                last_decode_rejection: last_decode_rejection.clone(),
                 memory_backpressure_paused,
                 transient_error: transient.error.clone(),
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -681,6 +706,8 @@ impl Runtime {
             quiesce_state,
             quiesce_counters,
             transport_redeliveries_total,
+            decode_rejections_total,
+            last_decode_rejection,
             memory_backpressure_paused,
             transient_error: transient.error.clone(),
             reconnect_backoff: transient.reconnect_backoff.clone(),

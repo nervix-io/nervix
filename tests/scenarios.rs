@@ -12762,6 +12762,27 @@ async fn then_rabbitmq_queue_eventually_has_consumers(
         .expect("rabbitmq queue did not reach expected consumer count");
 }
 
+/// The messages a queue holds ready for delivery. Once the queue has no consumer, they include
+/// every delivery a consumer still held unacknowledged when it left, because the broker returns
+/// those to the queue as the consumer goes.
+#[then(expr = "RabbitMQ queue {string} holds {int} messages")]
+async fn then_rabbitmq_queue_holds_messages(
+    world: &mut ScenarioWorld,
+    queue: String,
+    expected: usize,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let actual = world
+        .cluster()
+        .rabbitmq_queue_messages(&queue)
+        .await
+        .expect("rabbitmq queue state could not be read");
+    assert_eq!(
+        actual, expected,
+        "RabbitMQ queue '{queue}' holds {actual} messages, expected {expected}"
+    );
+}
+
 #[then(expr = "Redis channel {string} eventually has {int} subscribers")]
 async fn then_redis_channel_eventually_has_subscribers(
     world: &mut ScenarioWorld,
@@ -27290,6 +27311,43 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
             return;
         }
         passed_over.push(event.message);
+    }
+}
+
+/// A server error that must never be raised. Every error the session receives within the window is
+/// read, including those it already held from earlier steps, and none of them may contain `text`.
+#[then(expr = "the active session observes no server error containing {string} within {string}")]
+async fn then_the_active_session_observes_no_server_error_containing(
+    world: &mut ScenarioWorld,
+    text: String,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let unexpected = expand_placeholders(world, &text);
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist");
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .try_next_server_error(remaining)
+            .await
+            .expect("failed while waiting for server error");
+        let Some(event) = event else {
+            return;
+        };
+        append_cucumber_log_line(&format!(
+            "observed runtime server error level={:?} message={}",
+            event.level, event.message
+        ));
+        assert!(
+            !event.message.contains(&unexpected),
+            "the session observed a server error containing {unexpected:?}: {}",
+            event.message
+        );
     }
 }
 
