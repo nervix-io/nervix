@@ -569,7 +569,7 @@ second module runs the operation, it is named after the owner.
 | A status wait: leadership, voters, a consistent leader, interconnect status, applied index, a status fragment | `status_request.rs`, run by `cluster.rs` | 40 seconds from the start of the wait | The step fails with the elapsed time, the last status text, and the last typed failure |
 | Status snapshots of every node, for teardown or for a failure message | `status_request.rs`, run by `cluster.rs` | 10 seconds for the whole cluster | Each node keeps its status, its typed failure, or the operation its request was in |
 | Readiness of one startup attempt | `node_startup.rs`, run by `node_liveness.rs` | 36 seconds, inside the node's startup budget | The attempt fails naming the node, attempt, elapsed time, task state, and last readiness outcome |
-| Cleanup after a failed startup attempt | `node_startup.rs` | 5 seconds, inside what the startup budget has left | The node keeps its task, and the startup ends rather than launching over a node that is still stopping |
+| Cleanup after a failed startup attempt | `node_startup.rs` | Whatever remains of the node's one 84-second startup budget | The node keeps its task, storage and listeners if the budget expires before it ends; a new launch requires that exact task to have ended |
 | One node's startup, every attempt included | `node_startup.rs` | 84 seconds | The startup fails with the typed record of every attempt |
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
 | A node a scenario stops itself | `cluster.rs`, recorded by `node_stop.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The step fails naming how long the node had been stopping and the shutdown phase it was in, and the node keeps its task and everything it holds |
@@ -633,7 +633,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Status request, 10 seconds | The 40-second status wait divided by the four requests it must outlast when none of them replies | The slowest healthy reply, 3.7 seconds, times a headroom of 2 fits in one request |
 | Status snapshots, 10 seconds | One request timeout, because every node is asked at once | None of its own |
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
-| Node startup, 84 seconds | Two full attempts, each 36 seconds of readiness, a 5-second cleanup slice, and a 1-second pause | Stays under a 90-second ceiling |
+| Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
 | Suite, 41 minutes | The 60-minute scenario job limit, less 14 minutes allowed for pre-suite work and a 5-minute reserve after it | Split-job runs took 11m37s and 10m08s before the suite, then 21m49s and 20m26s for the suite; the 22-minute ceiling leaves at least 15 minutes of slack |
 
@@ -642,8 +642,8 @@ The assertions keep these orderings, among others:
 - A status request is materially shorter than the waits and startup attempts that repeat it, and one
   attempt outlasts three readiness requests that never reply.
 - Status snapshots are shorter than the waits whose failures they explain.
-- A startup attempt outlasts the slowest healthy startup, a cleanup slice is short beside the
-  attempt it ends, and the node startup budget stays under its ceiling.
+- A startup attempt outlasts the measured healthy readiness, the cleanup allowance used to fund the
+  total is short beside readiness, and the node startup budget stays under its ceiling.
 - The cluster cleanup budget is shorter than the watchdog of a node a scenario stops itself, and the
   test shutdown timeout lies between the default shutdown phases and that watchdog.
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
@@ -818,51 +818,56 @@ every pause between attempts receives only what is left of it.
 ```text
            one startup budget: 84 s, fixed before the first launch
  |<------------------------------------------------------------------->|
- | readiness | cleanup | pause | readiness | cleanup | pause | launch 3  |
- |  <= 36 s  |  <= 5 s |  1 s  |  <= 36 s  |  <= 5 s |  1 s  | remainder |
- |<-------- attempt 1 -------->|<-------- attempt 2 -------->|
+ | readiness | cleanup to task end | pause | readiness | cleanup | ...   |
+ |  <= 36 s  | within remainder   |  1 s  |  <= 36 s  | within remainder |
 ```
 
-The budget pays for two attempts at their full length. A third launch is allowed because a launch
-that fails at once, such as one whose listen address another process took first, leaves most of the
-budget unspent; that launch receives whatever the earlier ones left.
+The budget is derived from two readiness attempts with cleanup and backoff allowances. The cleanup
+allowance funds that total; the actual wait for a node's ending shares the remaining absolute
+deadline. A cleanup that takes longer leaves a later readiness attempt less time. A third launch
+is allowed because an attempt that fails at once, such as a listener bind failure, leaves most of
+the budget unspent. Every launch receives only what the earlier ones left.
 
-After an attempt fails, the harness classifies the failure, cleans up, and records the attempt.
+After an attempt fails, the harness requests its stop, waits for the exact task it launched,
+classifies the failure using both observations, and records the attempt.
 
 | Failure | Classification |
 | --- | --- |
 | The harness could not launch the node: an address it could not parse, the test certificate authority, or the node's database directory | Terminal: the harness's own configuration, which the next launch repeats |
-| Readiness did not arrive before the attempt's deadline | Transient, selecting all listeners: the resource pressure the budget exists for |
+| Readiness did not arrive before the attempt's deadline, and the requested stop ended cleanly | Transient, selecting all listeners: the resource pressure the budget exists for |
 | The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient, selecting that listener family: another process took the port first, and its fresh addresses resolve it |
-| The task ended with any other application error, a clean exit, a panic, or a cancellation | Terminal: the node decided it from its configuration, its stored state, or its own code |
+| The task ended with any other application error, a panic, a cancellation, or a clean exit before cleanup requested stop | Terminal: the node decided it from its configuration, its stored state, or its own code |
 
-Cleanup requests the node's stop and waits for its task within a 5-second slice of what the budget
-has left. A node that never became ready has no drain to finish, so the product's shutdown deadline
-plays no part here. A node whose task ended inside the slice gives back its consensus fault
-registration, and after a transient failure it moves the selected listeners to freshly allocated
-ports. A bind failure preserves unrelated addresses; a readiness timeout selects all seven ports.
-The harness pauses one second before launching again.
+Cleanup can reveal an initialization failure while a status request was still establishing its
+session. That joined application error, panic or cancellation determines the retry decision, with
+its typed cause retained in the cleanup outcome. A late bind error selects only its listener
+family. A successful stop of a task whose readiness timed out retains that timeout as the retry
+cause.
 
-A node still stopping when the slice passes is never launched again. It still holds its database
-and its listeners, and it will until its own shutdown has finished, so a fresh launch into the same
-directory could only fail on the lock its predecessor holds. The node keeps its task, its shutdown
-coordinator and its fault registration, the startup ends, and whatever stops the cluster afterwards
-waits for the node or leaves it stopping.
+Cleanup receives the remaining node startup budget, and the product's shutdown deadline cannot
+restart it. Once the task ends, the node gives back its consensus fault registration. A transient
+failure may then move the selected listeners to fresh ports and pause one second before another
+launch, provided the same budget still has time. A bind failure preserves unrelated addresses; a
+readiness timeout selects all seven ports.
 
-The startup ends in one of five ways, each reported with the node, its budget, the time spent, and
+A node still stopping when that budget expires keeps its task, its shutdown coordinator, its fault
+registration, its database and its listeners until its own shutdown has finished. The startup
+reports exhaustion, and cluster teardown waits for that node or leaves it stopping under its
+keeper. It never launches a replacement into resources a running predecessor still holds.
+
+The startup ends in one of four ways, each reported with the node, its budget, the time spent, and
 the record of every attempt:
 
 - the last attempt failed for a terminal reason;
 - every launch the attempt limit allows was spent;
-- the budget ran out before another launch could start;
-- the node the last attempt launched had not stopped when its cleanup slice ended;
+- the budget ran out during readiness, cleanup, or the preparation for another launch;
 - fresh ports for the next launch could not be allocated.
 
 Each attempt's record names its number out of three, its classification, how much of the budget had
 been spent once it was cleaned up, its typed failure, and its cleanup: nothing was launched, the
 task stopped with its terminal outcome, or the node was still stopping at the cleanup deadline. A
-cleanup that the spent budget left no time for records the node as still stopping too, and that
-startup ends as the spent budget or the spent attempts rather than as a node that would not stop.
+cleanup that the spent budget left no time for records the node as still stopping too. Budget
+exhaustion preserves that pending task even when the launch limit has not been reached.
 
 The harness prints every transition to standard error as it happens, so a run heading for exhaustion
 is legible while it is still going:
@@ -2042,6 +2047,7 @@ tasks, most of them on a paused clock. The `tests` job runs them beside the sepa
 | A wait ends at its original deadline | `status_wait_ends_at_its_original_deadline_when_the_final_request_never_replies`, `nested_deadline_never_outlives_its_phase`, `startup_readiness_failure_reports_the_timed_out_status_operation` |
 | Node task outcomes are distinct, the task is joined once, and its owner never aborts it | `running_task_reports_the_last_failed_probe_at_the_deadline`, `clean_application_exit_before_readiness_is_terminal`, `application_error_before_readiness_is_retained`, `panic_and_cancellation_have_distinct_terminal_outcomes`, `stop_and_keeper_paths_use_the_task_inspected_for_diagnostics`, `a_wait_past_its_deadline_leaves_the_task_running_with_its_owner` |
 | One startup budget with classified retries | `repeated_readiness_failure_spends_one_budget_across_every_attempt`, `a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over`, `exhaustion_reports_every_attempt_with_its_typed_cause`, `ports_that_cannot_be_reallocated_end_the_startup`, `a_bound_address_is_retried_until_a_launch_becomes_ready`, `a_last_attempt_still_becomes_ready_with_what_the_budget_left`, `an_application_error_ends_the_startup_without_another_launch`, `a_panicking_node_ends_the_startup_without_another_launch`, `a_launch_failure_ends_the_startup_before_anything_is_cleaned_up`, `sequential_cluster_construction_stays_inside_its_derived_budget` |
+| Failed-attempt cleanup spends the remaining startup budget and its joined result determines retry and listener selection | `a_failed_attempt_finishes_its_owned_cleanup_before_retrying_with_the_remaining_budget`, `an_initialization_failure_observed_during_cleanup_keeps_its_terminal_cause`, `a_bind_failure_observed_during_cleanup_moves_only_its_own_listeners` |
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
