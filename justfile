@@ -575,7 +575,8 @@ test-primitives-compile:
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
 # tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The
-# lane builds each invocation for the selection under target/deloxide, so the diagnostic server
+# lane builds every selected executable first under its build budget, then starts the workload
+# budget. Builds use target/deloxide, so the diagnostic server
 # binary never replaces the ordinary one, and refuses a registered workload that is missing or
 # ignored and a probe, conformance check, owner test or tagged scenario that is not registered. The
 # probes of nervix-deadlock run every workload in a disposable child that must report its cycle,
@@ -588,7 +589,7 @@ test-primitives-compile:
 # scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
-# in a session of its own within its bound and the inventory's budget, and the lane fails on an
+# in a session of its own within its bound and its stage's budget, and the lane fails on an
 # active deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget
 # (124), a leftover process, incomplete accounting, and missing, partly written or nonqualifying
 # evidence. A fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact,
@@ -618,6 +619,11 @@ test-deloxide-stress: tests-deps test-deloxide-stress-workloads
 # with a budget of its own, because the stressed scenarios of both selections together would take
 # most of one lane's budget.
 test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
+
+# Measure a selection's diagnostic builds without running workloads. The retained record has the
+# verdict `built`, so it cannot qualify as completed workload or native coverage evidence.
+build-deloxide-lane selection="deloxide": tests-deps
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} build {{ quote(selection) }}
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
@@ -1158,6 +1164,37 @@ coverage-merge-runner:
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" --branch --source=scripts.coverage_merge,scripts.tests.test_coverage_merge -m unittest scripts.tests.test_coverage_merge
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
+
+# Record the selection the full coverage union is derived from in
+# target/coverage-full/selection.json: the run's event and pull request label snapshot, whether the
+# tested diff required the suites and the Bolero call, the run, its attempt, the tested revision and,
+# in CI, each producer job's result from the needs context. Without arguments it records a local
+# selection, whose labels name the label-enabled producers collected locally.
+coverage-full-select *args:
+    python3 -m scripts.coverage_full select --output {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} {{ quote(args) }}
+
+# Combine every coverage producer the recorded selection requires into one workspace line-coverage
+# union, target/coverage-full/lcov-full.info, with its record, its contributor breakdown and the lines
+# each contribution covered beyond the ordinary report. An input is a downloaded artifact directory,
+# an attempt directory, the ordinary lcov-workspace.info or one record; --selection <path> names a
+# retained selection instead. It reads reports and records only, so repeating it over retained
+# artifacts at the tested revision gives the same lines, and it fails, writing no report, when an
+# input is missing, stale, foreign, corrupt, incomplete or not selected.
+coverage-full *inputs:
+    python3 -m scripts.coverage_full union --selection {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} --directory {{ quote(cargo_target_dir + "/coverage-full") }} {{ quote(inputs) }}
+
+# Exercise the union's selection, validation, attribution and CI contract.
+test-coverage-full:
+    python3 -m unittest scripts.tests.test_coverage_full
+
+# Retain the union's own measured line coverage beside the other Python tooling reports.
+coverage-full-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/coverage-full"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" --branch --source=scripts.coverage_full,scripts.tests.test_coverage_full -m unittest scripts.tests.test_coverage_full
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" -o "{{ cargo_target_dir }}/coverage-full/python.lcov"
 
 # Report CRAP over the merged ordinary workspace report as the coverage job does: the pinned cargo-crap
 # scores the repository's Rust sources against the report and writes target/crap-report/crap.json

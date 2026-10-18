@@ -1724,9 +1724,9 @@ Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The
 state while a stopping follower repeats the remaining handoff through a new leader. Its leadership
 observation, transport waits and shared shutdown deadline remain outside the detector's observation.
 Both scenarios carry `@deloxide_stress`, with separate stress workload registrations that reach
-their owners under bounded scheduling disturbance. The inventory also bounds the lane: one real-time
-budget for a selection's
-diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
+their owners under bounded scheduling disturbance. The inventory also bounds the lane: separate
+real-time budgets for a selection's diagnostic builds and workloads after its prerequisites, a bound
+for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.
 
@@ -1739,7 +1739,8 @@ at their applicable boundaries.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
-For each invocation the lane builds the selection's executable, lists what the build holds or reads
+The lane builds all selected executables and diagnostic drivers before starting its workload clock.
+For each prepared invocation it lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no
 longer holds or holds ignored, a discovered probe, conformance check, owner test or tagged scenario
 that is not registered, a scenario whose example runs changed, and an invocation that selects
@@ -1813,7 +1814,11 @@ description of every finding with its source sites, and `lane.json`. The record 
 and whether the tree was modified, the toolchain, Cargo and Deloxide's locked version and source, the
 inventory's digest, the selection, the features of every build and the bounds, and for every launch
 its exact command, working directory, environment additions, bound, ending, duration, discovery and
-accounting, with the qualification of every evidence file. `just test-deloxide-replay <lane.json>
+accounting, with the qualification of every evidence file. All selected test executables and
+diagnostic drivers build in a bounded stage before the workload stage starts its own clock. Each
+stage records its budget, start, verdict and duration; a failed build starts no workload. A
+`just build-deloxide-lane <selection>` measurement records `built` and cannot qualify as a completed
+lane. `just test-deloxide-replay <lane.json>
 <launch>` runs one recorded launch again, exactly, in a fresh attempt. OS schedules and stress timing
 are not recorded, so a replay can take another interleaving; deterministic reproduction belongs to
 Shuttle and Loom.
@@ -1831,11 +1836,16 @@ Under `just coverage-native-extras test-deloxide`, `test-deloxide-order`, `test-
 feature its selection compiles, with instrumentation on workspace crates only, so dependencies such
 as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
 and shared client binding from the target its prerequisites built, starts every test executable
-through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
+through Cargo's configured runner, and measures initial and warm passes of every selected build
+under the same build budget and compiler context before any workload starts. It hands `lane.json`
+to the collector, which exports nothing
 unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
-coverage stays out of ordinary coverage and its CRAP report. The [Integration Test
+coverage stays out of ordinary coverage and its CRAP report. For a pull request labeled
+`deloxide`, Check's `coverage-full` job requires each selection's complete collection with its
+complete `lane.json`, and adds their lines to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). The [Integration Test
 Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
 reserves.
 
