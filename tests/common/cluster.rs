@@ -814,6 +814,29 @@ pub(crate) enum InterconnectCredentialFault {
     ExpiredCertificate,
 }
 
+/// What a whole-cluster restart arms after every node has stopped and before any starts again.
+#[derive(Debug, Clone, Copy)]
+enum RestartArrangement<'a> {
+    /// Every node starts again as it stopped.
+    Unchanged,
+    /// The bootstrap node holds the first heartbeat this voter relays and fails its health probes,
+    /// so the scenario observes scheduling while the voter looks unavailable.
+    RelayedVoter(&'a str),
+    /// The first runtime installation this node begins waits until the scenario releases it.
+    HeldRuntimeInstallation(&'a str),
+}
+
+impl<'a> RestartArrangement<'a> {
+    /// The voter whose relayed heartbeat the restart holds, which the cluster cannot wait to catch
+    /// up until the scenario releases it.
+    fn relayed_voter(self) -> Option<&'a str> {
+        match self {
+            Self::RelayedVoter(voter) => Some(voter),
+            Self::Unchanged | Self::HeldRuntimeInstallation(_) => None,
+        }
+    }
+}
+
 /// What every node of one cluster uses for as long as it runs. The cluster and each of its nodes
 /// share it, so a node that is still stopping when its cluster is dropped keeps its storage and
 /// stays published until its own task has ended.
@@ -1585,14 +1608,26 @@ impl Cluster {
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
-        self.restart_with_voter_heartbeat(None).await
+        self.restart_arranged(RestartArrangement::Unchanged).await
     }
 
     pub(crate) async fn restart_with_relayed_voter(&mut self, voter: &str) -> io::Result<()> {
-        self.restart_with_voter_heartbeat(Some(voter)).await
+        self.restart_arranged(RestartArrangement::RelayedVoter(voter))
+            .await
     }
 
-    async fn restart_with_voter_heartbeat(&mut self, voter: Option<&str>) -> io::Result<()> {
+    /// Restarts every node with the first runtime installation `node` begins held until the
+    /// scenario releases it, so the restarted cluster answers requests that reach `node` before it
+    /// has installed any committed domain again.
+    pub(crate) async fn restart_holding_runtime_installation(
+        &mut self,
+        node: &str,
+    ) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::HeldRuntimeInstallation(node))
+            .await
+    }
+
+    async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
 
@@ -1624,12 +1659,21 @@ impl Cluster {
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
         let bootstrap = self.node_id(1);
-        if let Some(voter) = voter {
-            self.fault_injection
-                .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
-            self.fault_injection
-                .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+        // Every node has stopped, so a fault armed here reaches only the nodes that start next.
+        match arrangement {
+            RestartArrangement::Unchanged => {}
+            RestartArrangement::RelayedVoter(voter) => {
+                self.fault_injection
+                    .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
+                self.fault_injection
+                    .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+            }
+            RestartArrangement::HeldRuntimeInstallation(node) => {
+                self.fault_injection
+                    .pause_runtime_installation_on(node_name(node));
+            }
         }
+        let voter = arrangement.relayed_voter();
         self.start_node_within(&bootstrap, construction).await?;
         for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
             if voter.is_some() {
@@ -1786,6 +1830,12 @@ impl Cluster {
             }
             sleep(POLL_INTERVAL).await;
         }
+    }
+
+    /// The messages `queue` holds ready for delivery now.
+    pub(crate) async fn rabbitmq_queue_messages(&self, queue: &str) -> io::Result<usize> {
+        let state = rabbitmq_queue_state(&self.dependencies, queue).await?;
+        Ok(state.messages)
     }
 
     pub(crate) async fn wait_for_redis_channel_subscribers(
@@ -4735,10 +4785,26 @@ async fn declare_rabbitmq_queue(channel: &lapin::Channel, queue: &str) -> io::Re
     Ok(())
 }
 
+/// What a passive declaration of a RabbitMQ queue reports about it.
+struct RabbitMqQueueState {
+    /// The messages ready for delivery. A delivery a consumer still holds unacknowledged is not one
+    /// of them until the consumer leaves.
+    messages: usize,
+    consumers: usize,
+}
+
 async fn rabbitmq_queue_consumer_count(
     dependencies: &DependencyEndpoints,
     queue: &str,
 ) -> io::Result<usize> {
+    let state = rabbitmq_queue_state(dependencies, queue).await?;
+    Ok(state.consumers)
+}
+
+async fn rabbitmq_queue_state(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<RabbitMqQueueState> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),
@@ -4760,7 +4826,10 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count().arch_into())
+    Ok(RabbitMqQueueState {
+        messages: declared.message_count().arch_into(),
+        consumers: declared.consumer_count().arch_into(),
+    })
 }
 
 async fn publish_redis(

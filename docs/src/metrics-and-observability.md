@@ -109,6 +109,9 @@ Nervix records these raw metric families:
 - `nervix_ingestor_transport_redeliveries_total`: pending acknowledgements and rejections an
   ingestor discarded after its RabbitMQ, SQS or MQTT source reconnected. The broker redelivers what
   the lost connection did not acknowledge, so each counted position is ingested again
+- `nervix_ingestor_decode_rejections_total`: payloads an ingestor consumed because its codec
+  refused them, each reported as a decode rejection under its `ON GENERAL ERROR` policy; see
+  [When The Codec Refuses A Payload](./ingestors.md#when-the-codec-refuses-a-payload)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -138,14 +141,15 @@ Histograms follow Prometheus conventions and include `_bucket`, `_sum`, and `_co
 
 Prometheus receives raw values only. The `/metrics` endpoint is encoded by the Prometheus client registry, not by Nervix internal summary state. Prometheus should compute external queries, alerts, and dashboards with normal PromQL aggregation.
 
-The four ingestor-quiesce families, `nervix_ingestor_unfolding_refused_total` and
-`nervix_ingestor_transport_redeliveries_total` use `domain`, `ingestor`, and `physical_node_id`
-labels. Buffer families are gauges; dropped, rejected, refused and redelivered families are
-monotonic counters. They are process-local: quiesce buffers do not migrate during
+The four ingestor-quiesce families, `nervix_ingestor_unfolding_refused_total`,
+`nervix_ingestor_transport_redeliveries_total` and `nervix_ingestor_decode_rejections_total` use
+`domain`, `ingestor`, and `physical_node_id` labels. Buffer families are gauges; dropped, rejected,
+refused, redelivered and decode-rejection families are monotonic counters. They are process-local: quiesce buffers do not migrate during
 termination or failover.
 
-Quiesce, refusal and redelivery children are registered when the ingestor starts, and
-`DESCRIBE INGESTOR` registers the redelivery child at zero on the node that runs the ingestor.
+Quiesce, refusal, redelivery and decode-rejection children are registered when the ingestor
+starts, and `DESCRIBE INGESTOR` registers the redelivery and decode-rejection children at zero on the
+node that runs the ingestor.
 Client-ingestor outcome children are registered when its endpoint starts, and subscription loss
 counters when delivery starts. These bounded series may therefore appear at zero before their
 first observation. Their labels and counting contracts are unchanged.
@@ -278,6 +282,13 @@ Relay admission:
   and their resolution
 - `nervix_interconnect_unresolved_outcome_age_seconds`: how long the oldest unacknowledged relay
   outcome has been waiting. A rising value means acknowledgements are not coming back
+- `nervix_interconnect_relay_channel_watermarks`: the relay channel watermarks this node retains for
+  the channels its peers opened, across every peer. Each peer has a fixed budget of 8,192
+- `nervix_interconnect_relay_channel_watermarks_evicted_total`: watermarks forgotten before their
+  ten-minute retention ended because their peer's budget needed the position for another channel.
+  A count that keeps rising means a peer opens more relay channels within ten minutes than the
+  budget holds; see
+  [Bounded Correlation And Peer Owners](./interconnect.md#bounded-correlation-and-peer-owners)
 
 Execution admission:
 
@@ -349,10 +360,11 @@ see [Database Client Connection Pools](database-client-pools.md). A full pool is
 not a failure, so an acquisition timeout or a lost connection is reported as `ERROR` instead.
 
 `DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, all
-four quiesce values and the node's `nervix_ingestor_transport_redeliveries_total`, using their
-Prometheus family names. A connected ingestor in any active mode is
-reported as `status: quiesced`, not `stopped`. Per-payload activity remains at debug or trace log
-levels and payload values are never logged.
+four quiesce values and the node's `nervix_ingestor_transport_redeliveries_total` and
+`nervix_ingestor_decode_rejections_total`, using their Prometheus family names, and
+`last decode rejection:`, the latest decode rejection on that node or `-`. A connected ingestor in
+any active mode is reported as `status: quiesced`, not `stopped`. Per-payload activity remains at
+debug or trace log levels and payload values are never logged.
 
 Counter summaries include:
 

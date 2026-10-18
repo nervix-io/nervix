@@ -159,7 +159,7 @@ Feature: CLI public session dispatch
       """
       {"value":1,"extra":true}
       """
-    Then the CLI REPL eventually displays "[events] server ERROR: failed to decode http message for ingestor 'raw_metrics_source' in domain '{{domain}}'"
+    Then the CLI REPL eventually displays "[events] server ERROR: ingestor 'raw_metrics_source' general error in domain '{{domain}}': decode rejection"
     When http payload is posted repeatedly to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics" until the CLI REPL displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
       """
       {"value":7}

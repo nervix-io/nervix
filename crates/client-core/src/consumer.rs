@@ -41,6 +41,7 @@ use nervix_primitives::sync::{
     oneshot, watch,
 };
 use nervix_recovery::Discarded as _;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -516,6 +517,14 @@ impl ConsumerHandle {
         self.request.clone()
     }
 
+    pub(crate) fn domain(&self) -> &DomainName {
+        &self.request.domain
+    }
+
+    pub(crate) fn emitter(&self) -> &EmitterName {
+        &self.request.emitter
+    }
+
     pub(crate) fn restoration_failed(&self, generation: &Arc<()>) {
         let mut state = self.lifecycle.state.lock();
         if !matches!(&state.phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
@@ -557,6 +566,12 @@ impl ConsumerHandle {
             state.phase = ConsumerPhase::ReopenRequired(reason);
             drop(state);
             self.lifecycle.changed.send_replace(());
+            debug!(
+                domain = self.request.domain.as_str(),
+                emitter = self.request.emitter.as_str(),
+                refusal = ?refusal,
+                "a consumer restoration was refused for good"
+            );
             return false;
         }
         true
@@ -610,6 +625,13 @@ impl ConsumerHandle {
             valid && matches!(&state.phase, ConsumerPhase::Active(_))
         };
         self.lifecycle.changed.send_replace(());
+        debug!(
+            domain = self.request.domain.as_str(),
+            emitter = self.request.emitter.as_str(),
+            consumer = %id,
+            installed,
+            "a consumer restoration was opened"
+        );
         if !installed {
             attachment.closed.store(true, Ordering::Release);
             close_consumer(
@@ -647,6 +669,11 @@ impl ConsumerHandle {
             if self.current().is_some() {
                 continue;
             }
+            debug!(
+                domain = self.request.domain.as_str(),
+                emitter = self.request.emitter.as_str(),
+                "a consumer read waits for its restoration"
+            );
             changed
                 .changed()
                 .await

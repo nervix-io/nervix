@@ -44,7 +44,7 @@ use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryE
 
 #[path = "source_acknowledgement.rs"]
 mod acknowledgement;
-use acknowledgement::RuntimeBatchAcknowledgement;
+use acknowledgement::{BatchRoots, RuntimeBatchAcknowledgement};
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
@@ -412,6 +412,7 @@ impl Runtime {
                 buffered_intake,
                 flush_each_intake,
                 unacknowledged_admission,
+                general_error_policy: ingestor.general_error_policy.clone(),
             });
             let run = instance.start(host, shutdown_tx.subscribe());
             let task_domain = domain.clone();
@@ -485,11 +486,13 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
     pub(super) unacknowledged_admission: QueueAdmission,
+    /// The ingestor's `ON GENERAL ERROR` policy, which reports the payloads its codec refuses.
+    pub(super) general_error_policy: GeneralErrorPolicy,
 }
 
 pub(super) struct RuntimeSourceHost {
     handles: IngestTaskHandles,
-    status: Arc<super::super::task_status::TaskStatus<RuntimeReconnectStatus>>,
+    status: Arc<IngestorStatus>,
     runtime: Runtime,
     domain: DomainName,
     ingestor: IngestorName,
@@ -519,6 +522,9 @@ pub(super) struct RuntimeSourceHost {
     /// Counts the positions this host discarded after a reconnect because the broker redelivers
     /// them.
     transport_redeliveries: prometheus::IntCounter,
+    /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
+    /// it hands out.
+    decode_rejections: DecodeRejections,
     /// How long a scenario makes this host wait between learning that a batch was acknowledged
     /// through the graph and letting its source confirm the batch, as a slow transport would.
     confirmation_delay: Option<Duration>,
@@ -552,6 +558,15 @@ impl RuntimeSourceHost {
             &spec.ingestor,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
+        let decode_rejections = DecodeRejections::new(
+            spec.general_error_policy,
+            spec.runtime.inner.metrics.ingestor_decode_rejections(
+                &spec.domain,
+                &spec.ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            ),
+            status.clone(),
+        );
         let delivery_stop = spec.shutdown.clone();
         let confirmation_delay = spec
             .runtime
@@ -583,6 +598,7 @@ impl RuntimeSourceHost {
             unacknowledged_admission: spec.unacknowledged_admission,
             unfolding_refused,
             transport_redeliveries,
+            decode_rejections,
             confirmation_delay,
         }
     }
@@ -628,12 +644,26 @@ impl RuntimeSourceHost {
             codec: self.codec.clone(),
             metrics: self.metrics.clone(),
             branched_senders: self.branched_senders.clone(),
+            decode_rejections: self.decode_rejections.clone(),
         }
     }
 
     fn record_poll_error(&self, reason: String) {
-        self.status.record_error(reason.clone());
+        self.status.connection.record_error(reason.clone());
         self.report_error(reason);
+    }
+
+    /// Consumes the payload `refusal` names as a decode rejection, as the source took it in at
+    /// `ingested_at`.
+    fn consume_refused(
+        &self,
+        refusal: &RefusedEntry<IngestMetadataRow<'_>>,
+        ingested_at: Timestamp,
+    ) {
+        let rejection =
+            DecodeRejection::new(&self.codec, &refusal.entry, &refusal.report, ingested_at);
+        self.decode_rejections
+            .consume(&self.runtime, &self.domain, &self.ingestor, rejection);
     }
 }
 
@@ -711,14 +741,19 @@ impl RuntimeSourceHost {
             }
         }
         if admitted.is_empty() {
-            return Ok(self.batch_acknowledgement(Vec::new()));
+            let roots = BatchRoots::new(&self.ack_root_trackers, 0);
+            return Ok(self.batch_acknowledgement(roots));
         }
         self.dispatch_acknowledged(admitted).await
     }
 
     /// Decodes an acknowledged batch into an ingest group of its own and dispatches it, returning
-    /// the acknowledgement the batch's source waits on. A payload the node's extension workers
-    /// cannot unfold now fails the batch, which its source rejects and presents again.
+    /// the acknowledgement the batch's source waits on.
+    ///
+    /// A payload its codec refuses is consumed as a decode rejection: its root resolves at once, so
+    /// the batch's positions are acknowledged once the graph acknowledged the rest. A payload the
+    /// node's extension workers cannot unfold now fails the batch, which its source rejects and
+    /// presents again.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -735,36 +770,40 @@ impl RuntimeSourceHost {
             messages.len().max(1),
             self.metrics.clone(),
         );
-        let decoded = self
+        let payloads = self
             .runtime
             .decode_raw_ingest_payload(
                 &mut collector,
                 QueueAdmission::RefuseWhenFull,
                 &self.codec,
-                messages.iter().map(message_payload),
+                messages.iter().map(batch_payload),
             )
-            .await;
-        if let Err(failure) = decoded {
-            return Err(failure.into_intake_error());
+            .await
+            .map_err(|refusal| refusal.change_context(SourceIntakeError::Dispatch))?;
+
+        let ingested_at = actual_utc_now();
+        let mut roots = BatchRoots::new(&self.ack_root_trackers, messages.len());
+        for refusal in &payloads.refused {
+            nervix_primitives::task::consume_budget().await;
+            self.consume_refused(refusal, ingested_at);
+            roots.consumed();
+        }
+        let metadata = payloads.decoded;
+        if metadata.is_empty() {
+            return Ok(self.batch_acknowledgement(roots));
         }
 
-        let metadata = messages
-            .into_iter()
-            .map(|message| message.metadata)
-            .collect::<Vec<_>>();
-        let mut roots = Vec::with_capacity(metadata.len());
-        let mut completions = Vec::with_capacity(metadata.len());
+        let mut dispatched = Vec::with_capacity(metadata.len());
         let mut acks = Vec::with_capacity(metadata.len());
         for _ in &metadata {
             nervix_primitives::task::consume_budget().await;
-            let (root, completion) = self.ack_root_trackers.confirmed_root();
+            let root = roots.dispatched();
             if self.branched_senders.is_empty() {
                 acks.push(root.clone());
             } else {
                 acks.push(root.attached());
             }
-            roots.push(root);
-            completions.push(completion);
+            dispatched.push(root);
         }
 
         self.runtime
@@ -777,7 +816,7 @@ impl RuntimeSourceHost {
                 output_routes: &self.output_routes,
                 filter_where: self.filter_where.as_ref(),
                 metadata: &metadata,
-                ingested_at: actual_utc_now(),
+                ingested_at,
                 acks,
             })
             .await
@@ -792,24 +831,16 @@ impl RuntimeSourceHost {
             .await
             .change_context(SourceIntakeError::Flush)?;
 
-        for root in roots {
+        for root in dispatched {
             root.ack_success();
         }
-        Ok(self.batch_acknowledgement(completions))
+        Ok(self.batch_acknowledgement(roots))
     }
 
-    /// The acknowledgement of a batch whose dispatched messages resolve the roots `completions`
-    /// observe. The roots are confirmed roots, which the batch keeps outstanding until its source
-    /// has settled the batch on its transport.
-    fn batch_acknowledgement(
-        &self,
-        completions: Vec<AckCompletion>,
-    ) -> RuntimeBatchAcknowledgement {
-        RuntimeBatchAcknowledgement::new(
-            completions,
-            self.shutdown.clone(),
-            self.confirmation_delay,
-        )
+    /// The acknowledgement of a batch that waits on `roots`. They are confirmed roots, which the
+    /// batch keeps outstanding until its source has settled the batch on its transport.
+    fn batch_acknowledgement(&self, roots: BatchRoots<'_>) -> RuntimeBatchAcknowledgement {
+        roots.acknowledgement(self.shutdown.clone(), self.confirmation_delay)
     }
 
     /// Decodes an unacknowledged batch read while the ingestor was not quiesced into the instance's
@@ -833,13 +864,13 @@ impl RuntimeSourceHost {
         messages: Vec<SourceIntakeMessage<'_>>,
         mut decided: IngestorQuiesceObservation,
     ) -> SourceIntakeResult<()> {
-        loop {
+        let payloads = loop {
             nervix_primitives::task::consume_budget().await;
             let decode = self.runtime.decode_raw_ingest_payload(
                 &mut self.collector,
                 self.unacknowledged_admission,
                 &self.codec,
-                messages.iter().map(message_payload),
+                messages.iter().map(batch_payload),
             );
             let decoded = match self.unacknowledged_admission {
                 QueueAdmission::RefuseWhenFull => decode.await,
@@ -867,17 +898,20 @@ impl RuntimeSourceHost {
                     }
                 }
             };
-            if let Err(failure) = decoded {
-                self.count_refused(&failure, messages.len());
-                return Err(failure.into_intake_error());
+            match decoded {
+                Ok(payloads) => break payloads,
+                Err(refusal) => {
+                    self.count_refused(messages.len());
+                    return Err(refusal.change_context(SourceIntakeError::Dispatch));
+                }
             }
-            break;
-        }
+        };
 
-        let metadata = messages
-            .into_iter()
-            .map(|message| message.metadata)
-            .collect::<Vec<_>>();
+        let ingested_at = actual_utc_now();
+        let metadata = self.consume_refused_payloads(payloads, ingested_at).await;
+        if metadata.is_empty() {
+            return Ok(());
+        }
         let acks = vec![AckSet::empty(); metadata.len()];
         self.runtime
             .dispatch_ingested_records(IngestGroupDispatch {
@@ -889,7 +923,7 @@ impl RuntimeSourceHost {
                 output_routes: &self.output_routes,
                 filter_where: self.filter_where.as_ref(),
                 metadata: &metadata,
-                ingested_at: actual_utc_now(),
+                ingested_at,
                 acks,
             })
             .await
@@ -945,13 +979,13 @@ impl RuntimeSourceHost {
         mut payload: BufferedIngestPayload,
         mut decided: IngestorQuiesceObservation,
     ) -> SourceIntakeResult<bool> {
-        loop {
+        let decoded = loop {
             nervix_primitives::task::consume_budget().await;
             let decode = self.runtime.decode_raw_ingest_payload(
                 &mut self.collector,
                 self.unacknowledged_admission,
                 &self.codec,
-                payload.payloads(),
+                payload.indexed_payloads(),
             );
             let delivery = self
                 .quiesce
@@ -978,15 +1012,23 @@ impl RuntimeSourceHost {
                     }
                 }
             };
-            if let Err(failure) = decoded {
-                self.count_refused(&failure, payload.len());
-                return Err(failure
-                    .into_group_error(&self.ingestor)
-                    .change_context(SourceIntakeError::Dispatch));
+            match decoded {
+                Ok(payloads) => break payloads,
+                Err(refusal) => {
+                    self.count_refused(payload.len());
+                    return Err(UnfoldingNotAdmitted::group_error(refusal)
+                        .change_context(SourceIntakeError::Dispatch));
+                }
             }
-            break;
-        }
+        };
 
+        let payloads = decoded.map(|index| payload.metadata_row(index));
+        let metadata = self
+            .consume_refused_payloads(payloads, payload.observed_at())
+            .await;
+        if metadata.is_empty() {
+            return Ok(false);
+        }
         self.runtime
             .accept_raw_ingest_payload(RawIngestAcceptance {
                 handles: &self.handles,
@@ -995,7 +1037,8 @@ impl RuntimeSourceHost {
                 timestamp_source: self.timestamp_source.as_ref(),
                 output_routes: &self.output_routes,
                 filter_where: self.filter_where.as_ref(),
-                payload: &payload,
+                metadata: &metadata,
+                ingested_at: payload.observed_at(),
                 collector: &mut self.collector,
             })
             .await
@@ -1008,10 +1051,23 @@ impl RuntimeSourceHost {
 
     /// Counts `payloads` an unacknowledged intake did not deliver because the node's extension
     /// workers had no room to unfold them.
-    fn count_refused(&self, failure: &PayloadDecodeFailure, payloads: usize) {
-        if let PayloadDecodeFailure::NotAdmitted(_) = failure {
-            self.unfolding_refused.inc_by(payloads.arch_into());
+    fn count_refused(&self, payloads: usize) {
+        self.unfolding_refused.inc_by(payloads.arch_into());
+    }
+
+    /// Consumes every payload of an unacknowledged or retained batch its codec refused, as the
+    /// source took the batch in at `ingested_at`, and returns the metadata rows of the payloads
+    /// that decoded.
+    async fn consume_refused_payloads<'m>(
+        &self,
+        payloads: SplitPayloads<IngestMetadataRow<'m>>,
+        ingested_at: Timestamp,
+    ) -> Vec<IngestMetadataRow<'m>> {
+        for refusal in &payloads.refused {
+            nervix_primitives::task::consume_budget().await;
+            self.consume_refused(refusal, ingested_at);
         }
+        payloads.decoded
     }
 
     /// Records that the ingestor stopped while a live payload waited for the node's extension
@@ -1026,20 +1082,12 @@ impl RuntimeSourceHost {
     }
 }
 
-/// The payload bytes one source message lends to its ingest group.
-fn message_payload<'a>(message: &SourceIntakeMessage<'a>) -> &'a [u8] {
-    message.payload
-}
-
-impl PayloadDecodeFailure {
-    /// The intake failure of a source batch one of whose payloads did not decode. A payload the
-    /// node could not take now was never judged, so it is not a decode failure: the batch failed
-    /// to dispatch.
-    fn into_intake_error(self) -> Report<SourceIntakeError> {
-        match self {
-            Self::Codec(report) => report.change_context(SourceIntakeError::Decode),
-            Self::NotAdmitted(report) => report.change_context(SourceIntakeError::Dispatch),
-        }
+/// The payload bytes one source message lends to its ingest group, with the metadata row that stays
+/// with them whatever their codec decides.
+fn batch_payload<'a>(message: &SourceIntakeMessage<'a>) -> BatchPayload<'a, IngestMetadataRow<'a>> {
+    BatchPayload {
+        payload: message.payload,
+        entry: message.metadata,
     }
 }
 
@@ -1118,7 +1166,11 @@ impl SourceHostServices for RuntimeSourceHost {
             }
             if self
                 .runtime
-                .wait_if_ingestor_faulted(&self.status, &self.ingestor, &mut self.shutdown)
+                .wait_if_ingestor_faulted(
+                    &self.status.connection,
+                    &self.ingestor,
+                    &mut self.shutdown,
+                )
                 .await
             {
                 return false;
@@ -1135,7 +1187,7 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
-        self.status.fail(
+        self.status.connection.fail(
             reason,
             Some(RuntimeReconnectStatus {
                 backoff: retry_after,
@@ -1145,7 +1197,7 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     fn clear_transient_error(&self) {
-        self.status.clear();
+        self.status.connection.clear();
     }
 
     fn report_error(&self, message: String) {
@@ -1195,8 +1247,8 @@ impl RuntimeSourceHost {
     /// workers rather than being refused, and the payload stays retained, counted with its bytes,
     /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
     /// that wait and leaves the payload at the front of the buffer, so it is delivered first when
-    /// the buffer drains again. A payload its codec rejects leaves the buffer and is reported, as
-    /// any retained payload that fails is.
+    /// the buffer drains again. A payload its codec refuses leaves the buffer as a decode
+    /// rejection.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1213,7 +1265,7 @@ impl RuntimeSourceHost {
             &mut self.collector,
             QueueAdmission::WaitForPlace,
             &self.codec,
-            retained.payload().payloads(),
+            retained.payload().indexed_payloads(),
         );
         let decoded = retained.run_until_interrupted(&self.shutdown, decode).await;
         let Some(decoded) = decoded else {
@@ -1222,9 +1274,9 @@ impl RuntimeSourceHost {
             self.collector.discard_undispatched_payloads();
             return Ok(false);
         };
-        match decoded {
-            Ok(()) => {}
-            Err(PayloadDecodeFailure::NotAdmitted(refusal)) => {
+        let payloads = match decoded {
+            Ok(payloads) => payloads,
+            Err(refusal) => {
                 // A job that waits for a place is refused only by an executor that no longer
                 // admits work. The refusal judged nothing, so the payload stays retained.
                 debug!(
@@ -1235,17 +1287,17 @@ impl RuntimeSourceHost {
                 );
                 return Ok(false);
             }
-            Err(failure @ PayloadDecodeFailure::Codec(_)) => {
-                // Its codec rejected it, so it leaves the buffer and its failure is reported.
-                drop(retained.finish());
-                return Err(failure
-                    .into_group_error(&self.ingestor)
-                    .change_context(SourceIntakeError::Dispatch));
-            }
-        }
-        // The payload's messages are in the group, so it leaves the buffer before the group
-        // accepts them.
+        };
+        // What its codec refused is consumed, and the payload's other messages are in the group, so
+        // it leaves the buffer before the group accepts them.
         let payload = retained.finish();
+        let payloads = payloads.map(|index| payload.metadata_row(index));
+        let metadata = self
+            .consume_refused_payloads(payloads, payload.observed_at())
+            .await;
+        if metadata.is_empty() {
+            return Ok(true);
+        }
         self.runtime
             .accept_raw_ingest_payload(RawIngestAcceptance {
                 handles: &self.handles,
@@ -1254,7 +1306,8 @@ impl RuntimeSourceHost {
                 timestamp_source: self.timestamp_source.as_ref(),
                 output_routes: &self.output_routes,
                 filter_where: self.filter_where.as_ref(),
-                payload: &payload,
+                metadata: &metadata,
+                ingested_at: payload.observed_at(),
                 collector: &mut self.collector,
             })
             .await
@@ -2907,6 +2960,10 @@ mod shuttle_tests;
 #[cfg(test)]
 #[path = "source_extension_tests.rs"]
 mod extension_tests;
+
+#[cfg(test)]
+#[path = "source_decode_tests.rs"]
+mod decode_tests;
 
 #[cfg(test)]
 #[path = "source_reconnect_tests.rs"]

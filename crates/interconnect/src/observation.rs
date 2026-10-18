@@ -229,6 +229,7 @@ pub(crate) struct TransportObservations {
     request_nanos: [AtomicU64; RequestSubquota::COUNT],
     relay_outcomes: [AtomicU64; RelayAdmissionOutcome::COUNT],
     relay_admission_wait_nanos: AtomicU64,
+    relay_channel_watermarks_evicted: AtomicU64,
     bulk_bytes: [[AtomicU64; TransferDirection::COUNT]; PoolClass::COUNT],
 }
 
@@ -287,6 +288,13 @@ impl TransportObservations {
             .fetch_add(nanos(waited), Ordering::AcqRel);
     }
 
+    /// Count one relay channel watermark a peer's budget forgot before its retention ended, to make
+    /// room for another channel's.
+    pub(crate) fn relay_channel_watermark_evicted(&self) {
+        self.relay_channel_watermarks_evicted
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(crate) fn bulk_transferred(
         &self,
         class: PoolClass,
@@ -322,6 +330,9 @@ impl TransportObservations {
             relay_admission_wait: Duration::from_nanos(
                 self.relay_admission_wait_nanos.load(Ordering::Acquire),
             ),
+            relay_channel_watermarks_evicted: self
+                .relay_channel_watermarks_evicted
+                .load(Ordering::Acquire),
             bulk_bytes: std::array::from_fn(|class| {
                 std::array::from_fn(|direction| {
                     self.bulk_bytes[class][direction].load(Ordering::Acquire)
@@ -352,6 +363,9 @@ pub struct TransportCounters {
     pub relay_outcomes: [u64; RelayAdmissionOutcome::COUNT],
     /// Time relay attempts spent between an accepted reservation and their resolution.
     pub relay_admission_wait: Duration,
+    /// Relay channel watermarks forgotten before their retention ended, because their peer's
+    /// budget needed the position for another channel.
+    pub relay_channel_watermarks_evicted: u64,
     pub bulk_bytes: [[u64; TransferDirection::COUNT]; PoolClass::COUNT],
 }
 
@@ -371,6 +385,8 @@ pub struct TransportSnapshot {
     pub relay_attempts: usize,
     /// Transfer grants a sender holds and has not spent.
     pub relay_grants: usize,
+    /// Relay channel watermarks retained for the channels peers opened, across every peer.
+    pub relay_channel_watermarks: usize,
     /// How long the oldest unresolved relay outcome has been waiting for its acknowledgement.
     pub oldest_unresolved_outcome: Duration,
 }

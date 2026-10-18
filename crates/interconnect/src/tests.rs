@@ -511,6 +511,14 @@ fn invalid_transport_options_report_the_failed_contract() {
                 ..TransportOptions::default()
             },
         ),
+        (
+            "relay_channel_watermark_capacity",
+            TransportOptions {
+                incoming_queue_capacity: 4,
+                relay_channel_watermark_capacity: 4,
+                ..TransportOptions::default()
+            },
+        ),
     ];
     for (contract, options) in cases {
         let error = options
