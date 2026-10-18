@@ -1141,6 +1141,10 @@ mod tests {
         NeverReady,
         /// The node runs, never answers a readiness probe, and ignores the stop request.
         NeverReadyAndNeverStops,
+        /// The node's owned teardown finishes after the stop request.
+        NeverReadyThenStops { delay: Duration },
+        /// Initialization returns its application error after readiness has expired.
+        NeverReadyThenFails { error: AppError },
         /// The node's task ends at once with this application error.
         ApplicationError(AppError),
         /// The node's task panics at once.
@@ -1216,6 +1220,15 @@ mod tests {
                 LaunchBehavior::NeverReadyAndNeverStops => OwnedNodeTask::spawn(async {
                     future::pending::<()>().await;
                     Ok(())
+                }),
+                LaunchBehavior::NeverReadyThenStops { delay } => OwnedNodeTask::spawn(async move {
+                    stop.cancelled().await;
+                    nervix_primitives::time::sleep(delay).await;
+                    Ok(())
+                }),
+                LaunchBehavior::NeverReadyThenFails { error } => OwnedNodeTask::spawn(async move {
+                    stop.cancelled().await;
+                    Err(Report::new(error))
                 }),
                 LaunchBehavior::NeverReady | LaunchBehavior::Ready => {
                     OwnedNodeTask::spawn(async move {
@@ -3042,7 +3055,7 @@ mod tests {
             .expect_err("a node that never answers a probe must exhaust its startup");
 
         let exhausted = error.current_context();
-        assert!(matches!(exhausted.end, StartupEnd::AttemptsSpent));
+        assert!(matches!(exhausted.end, StartupEnd::BudgetSpent));
         assert_eq!(exhausted.budget, NODE_STARTUP_BUDGET);
         assert_eq!(node.launches, NODE_START_ATTEMPTS);
         assert_eq!(node.ports_moved, NODE_START_ATTEMPTS - 1);
@@ -3245,6 +3258,89 @@ mod tests {
     }
 
     #[nervix_primitives::test(start_paused = true)]
+    async fn a_failed_attempt_finishes_its_owned_cleanup_before_retrying_with_the_remaining_budget()
+    {
+        let mut node = StandInStartupNode::new(
+            "node-delayed-cleanup",
+            [
+                LaunchBehavior::NeverReadyThenStops {
+                    delay: Duration::from_secs(7),
+                },
+                LaunchBehavior::Ready,
+            ],
+        );
+        let budget = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+
+        let result = node.start_within(budget).await;
+
+        assert!(
+            result.is_ok(),
+            "the same budget has room to finish cleanup and retry: {result:?}"
+        );
+        assert_eq!(node.launches, 2);
+        assert_eq!(node.ports_moved, 1);
+        assert!(budget.elapsed() < NODE_STARTUP_BUDGET);
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn an_initialization_failure_observed_during_cleanup_keeps_its_terminal_cause() {
+        let mut node = StandInStartupNode::new(
+            "node-initialization-failure",
+            [
+                LaunchBehavior::NeverReadyThenFails {
+                    error: AppError::OpenRegistry,
+                },
+                LaunchBehavior::Ready,
+            ],
+        );
+
+        let result = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await;
+        let Err(error) = result else {
+            panic!("a terminal initialization failure must end startup");
+        };
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(node.launches, 1);
+        assert_eq!(node.ports_moved, 0);
+        let [attempt] = exhausted.attempts.spent.as_slice() else {
+            panic!("one launched node has one retained attempt");
+        };
+        assert_eq!(attempt.retry, StartupRetry::Terminal);
+        let AttemptCleanup::Stopped(outcome) = &attempt.cleanup else {
+            panic!("the initialization failure was joined during cleanup");
+        };
+        let NodeTaskTerminalOutcome::ApplicationError(cause) = outcome.as_ref() else {
+            panic!("the joined task retains its application error");
+        };
+        assert!(matches!(cause.current_context(), AppError::OpenRegistry));
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_bind_failure_observed_during_cleanup_moves_only_its_own_listeners() {
+        let mut node = StandInStartupNode::new(
+            "node-late-bind-failure",
+            [
+                LaunchBehavior::NeverReadyThenFails {
+                    error: AppError::BindHttpListenAddress,
+                },
+                LaunchBehavior::Ready,
+            ],
+        );
+
+        let result = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "a fresh HTTP listener resolves the bind failure: {result:?}"
+        );
+        assert_eq!(node.port_moves, vec![StartupPorts::Http]);
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over() {
         let mut node = StandInStartupNode::new(
             "node-unstoppable",
@@ -3262,7 +3358,7 @@ mod tests {
         // The node the first attempt launched still holds whatever a node holds, so the launch
         // that would have become ready never starts and the node keeps its ports.
         let exhausted = error.current_context();
-        assert!(matches!(exhausted.end, StartupEnd::StillStopping));
+        assert!(matches!(exhausted.end, StartupEnd::BudgetSpent));
         assert_eq!(node.launches, 1);
         assert_eq!(node.ports_moved, 0);
         let [attempt] = exhausted.attempts.spent.as_slice() else {
@@ -3279,19 +3375,11 @@ mod tests {
             "the node that did not stop stays owned by the harness"
         );
         assert!(
-            exhausted.elapsed < NODE_STARTUP_BUDGET,
-            "a startup that cannot launch again ends at the cleanup slice rather than spending \
-             its budget: {:?}",
+            exhausted.elapsed >= NODE_STARTUP_BUDGET,
+            "cleanup spends the remaining startup budget before leaving its task owned: {:?}",
             exhausted.elapsed
         );
         let rendered = error.to_string();
-        assert!(
-            rendered.contains(
-                "the node the last attempt launched had not stopped, and a fresh launch cannot \
-                 take the database and listeners it still holds"
-            ),
-            "{rendered}"
-        );
         assert!(
             rendered.contains("cleanup: still stopping at the cleanup deadline"),
             "{rendered}"
