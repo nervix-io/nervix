@@ -695,6 +695,18 @@ impl ScenarioWorld {
             .expect("cluster must be created before using it")
     }
 
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
+    }
+
     fn cluster(&self) -> &Cluster {
         self.cluster
             .as_ref()
@@ -12247,13 +12259,7 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
