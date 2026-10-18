@@ -452,6 +452,11 @@ the step that injects the holds only awaits that task. A stalled runner delays w
 of a release, never the release itself. The step still watches the controlled operation, and a
 command that ends before its gates were held fails the step with the command's own outcome.
 
+The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
+into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
+do not establish a single sorting window. The one-node and three-node examples retain their exact
+ordered payloads, tenant keys, and existing flush and receive deadlines.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,

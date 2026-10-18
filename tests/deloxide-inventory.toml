@@ -540,6 +540,14 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "application::model_validation::tests::deloxide_onnx_metadata_inspection"
 
 [[workload]]
+coverage = "Processor and entrypoint branch expiry and LRU eviction, which end the channels their lanes publish through and stop each processor branch task under its tracked task guard."
+id = "owner.branch-lane-channel-retirement"
+invariant = "One fresh diagnostic process expires and evicts processor and entrypoint branches, ends only the channels each lane publishes through, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "runtime::processor_template::branch_lane_channel_tests::deloxide_branch_lane_channel_retirement"
+
+[[workload]]
 coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
 examples = 2
 feature = "tests/features/cluster/deadlock_diagnostics.feature"
@@ -2385,6 +2393,7 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/processor_branch_task.rs"
 workloads = [
+  "owner.branch-lane-channel-retirement",
   "scenario.wasm-kafka-restore",
   "scenario.client-alter-drain",
   "stress.wasm-kafka-restore",
