@@ -1620,8 +1620,13 @@ compiles, supervised by `scripts/deloxide_lane.py`. [Data-Plane Concurrency](./d
 owns what the lane proves, its failure classes and its applicability records; this section owns how
 it runs and how long it may take.
 
-The lane starts after its prerequisites, `just tests-deps`, and builds each invocation with Cargo
-before it runs it. The prerequisites provision what the workloads load, as they do for the
+The lane starts after its prerequisites, `just tests-deps`, and first builds every selected test
+executable and diagnostic paced driver with Cargo under a build budget of its own. No workload
+runs during that stage. Only after every executable is available does the unchanged workload
+budget start; neither compilation nor warming a local build directory consumes it. Both stages
+record their budget, start, verdict and elapsed time in `lane.json` and the CI step summary. A
+build failure or build-budget expiry retains its stage and starts no workload. Interruption
+retains whichever stage was running. The prerequisites provision what the workloads load, as they do for the
 ordinary suite: the WASM guests, the generated ONNX models and the ONNX runtime library, whose
 path the lane passes to every invocation. The probes, the tracked locks' conformance checks and
 the owner tests are libtest executables, run directly so that a signal reaches the lane as a
@@ -1647,7 +1652,12 @@ alternatives, so the walker starts at that feature's parent directory and still 
 that file. This bounds discovery without changing the registered examples or their deadlines.
 
 Under the native coverage collector the lane instruments only workspace crates, the scope the
-ordinary coverage build has. When every crate was instrumented, wasmtime's compiler included, CI's
+ordinary coverage build has. Before starting the workload clock it repeats every selected build
+once in the same instrumented target, with the same features, compiler wrapper and environment.
+The record and CI summary retain the initial and warm pass durations. Both passes share the one
+build budget; a failed warm build starts no workload. This measures cache conditions without
+another cold target or a second workload run. The completion reader requires both measurements
+for an instrumented lane. When every crate was instrumented, wasmtime's compiler included, CI's
 WASM restore scenarios ran five times as long as an uninstrumented local run, 338 seconds against
 64 for one of them, and its restored runtime revision missed the product's readiness deadline: the
 test cluster's 10-second node unavailability timeout plus the 30-second propagation bound. It
@@ -1678,11 +1688,13 @@ verdict.
 | Part of the job | Bound | Basis |
 | --- | --- | --- |
 | Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
-| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
+| Diagnostic builds | 80 minutes, `build_budget_seconds` in the inventory | A separate bound for all selected test and driver builds. A measured cold stressed scenario build on a loaded local host took 33m08s; CI builds measured 5.5–11 minutes. The bound leaves time for the other builds and variation without reducing workload time |
+| Workloads | 80 minutes, `budget_seconds` in the inventory | Starts after every diagnostic build succeeds. Per-invocation bounds and the six-minute scenario teardown reserve still apply; workload time reduces the time left for later invocations |
+| Prerequisites, both stages and the coverage export | 175 minutes, `timeout` in the step | The two 80-minute stage bounds plus 15 minutes for prerequisites and export. The historical combined-stage run took 25m02s for `deloxide` and 23m24s for `deloxide-order`; prerequisites took 3m05s and 2m46s, and export 2 seconds each |
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
+| Uploads and the kache report | The rest of the 200-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict, then [cache publication](#cache-publication), which waits at most 120 seconds. In the measured run the uploads took 4 and 3 seconds |
 
-The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
+The table's historical CI measurements come from the run of 2026-10-07 in which both selections passed with
 every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
 with the lane instrumenting workspace crates only and running 55 scenario examples at four at
 once. The first run in which both selections passed, on 2026-10-06 with 97 and 105 workloads and
@@ -1703,11 +1715,11 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 35
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 67
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 30 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
-invocation of 43 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
+invocation of 51 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
 bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
 
 The split follows from what the disturbance costs. It barely lengthens a scenario, because the
@@ -1734,13 +1746,23 @@ twenty nested mutex and write acquisitions by at most 200µs, and the product's 
 deadlines are not widened for it. A stressed workload that misses a product deadline is a finding to
 reproduce and fix in its owner, not a bound to raise.
 
-The budget is measured on CI's runner, whose diagnostic builds kache serves warm, and a local run
-pays its cold builds out of the same budget. On 2026-10-10 a shared 40-CPU host already at a load
-of 36 to 50 spent 33 minutes building the stressed scenario binary and ran the heaviest restore
-scenarios two to three times slower than CI, so `deloxide-stress-restore` expired its budget after
-17 of its 43 runs, every one of which passed. Run the stress lanes where the CPUs are not already
-saturated, or again once their builds are warm; an expired budget ends the lane with status `124`,
-never as a clean result.
+Separating the stages prevents a build cache's warmth from deciding how much time the workloads
+receive. On 2026-10-10 a shared 40-CPU host at a load of 36 to 50 spent 33m08s building the stressed
+scenario binary; under the combined budget that left its slower restore workloads too little
+time and the lane expired after 17 of 43 runs, all passed. A later loaded-host order run spent
+25m35s building and reached its paced scenarios with only 108 seconds of suite time left after
+the teardown reserve. Those builds now consume only the build stage. Workloads can still exhaust
+their own budget on a saturated host; expiry identifies the stage and ends with status `124`,
+never a clean result, and rerunning an unchanged failed workload is not a repair.
+
+`just build-deloxide-lane <selection>` measures the same selected builds without running
+workloads. Run it again to measure a warm local build directory; kache remains the configured
+compiler wrapper in both runs. The retained record has verdict `built`, zero executed workloads
+and only the build stage, so it cannot qualify as completed workload or native coverage evidence.
+The stress selections share one diagnostic build; a measurement after the other stress selection
+has built it is already warm for that shared work. Build-cache conditions and measured durations
+belong with the task's retained evidence rather than an assumption that every first invocation
+compiled dependencies from source.
 
 ### Two Stressed Scenarios In One Process
 
