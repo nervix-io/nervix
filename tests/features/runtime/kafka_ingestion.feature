@@ -313,6 +313,223 @@ Feature: Kafka ingestion
       | 1            | CBOR        | VEC<VEC<U8>> |
       | 3            | CBOR        | VEC<VEC<U8>> |
 
+  @decode_rejection
+  Scenario Outline: A Kafka <mode_name> ingestor consumes a payload its codec refuses, reports its record and delivers the next one
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "poison_input_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA poison_event (
+        tenant STRING,
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA poison_event_wire MODE STRICT (
+        tenant string,
+        user_id integer
+      );
+      CREATE CODEC poison_event_codec
+        FROM WIRE JSON SCHEMA poison_event_wire
+        TO SCHEMA poison_event;
+      CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR poison_source
+        FROM kafka_main TOPIC 'poison_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_poison_{{test_id}}'
+        MODE <mode>
+        ON QUIESCE SUSPEND DECODE USING poison_event_codec
+        TO poison_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION poison_events_subscription TO poison_events;
+      """
+    And these Kafka messages are rapidly published to topic "poison_input_{{test_id}}"
+      """
+      {"tenant":"acme","user_id":"one"}
+      {"tenant":"acme","user_id":2}
+      """
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "tenant":"acme","user_id":2
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      ingestor 'poison_source' general error in domain '{{domain}}': decode rejection
+      """
+    And the last server error contains
+      """
+      codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0: codec 'poison_event_codec' failed to parse field 'user_id'
+      """
+    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 1
+      """
+    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+      """
+      codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0
+      """
+    And within "30s" Kafka consumer group "nervix_cucumber_poison_{{test_id}}" next offset for topic "poison_input_{{test_id}}" partition 0 is "at least 2"
+
+    Examples:
+      | cluster_size | mode_name      | mode                                                                                     |
+      | 1            | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s                         |
+      | 3            | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s                         |
+      | 1            | ACK PARALLEL   | ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
+      | 3            | ACK PARALLEL   | ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
+
+  @decode_rejection
+  Scenario Outline: A Kafka ingestor that ignores general errors consumes a payload its codec refuses without reporting it, and counts it
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "ignored_poison_input_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA poison_event (
+        tenant STRING,
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA poison_event_wire MODE STRICT (
+        tenant string,
+        user_id integer
+      );
+      CREATE CODEC poison_event_codec
+        FROM WIRE JSON SCHEMA poison_event_wire
+        TO SCHEMA poison_event;
+      CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR ignored_poison_source
+        FROM kafka_main TOPIC 'ignored_poison_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_ignored_poison_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING poison_event_codec
+        TO poison_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR IGNORE;
+      CREATE SUBSCRIPTION poison_events_subscription TO poison_events;
+      """
+    And these Kafka messages are rapidly published to topic "ignored_poison_input_{{test_id}}"
+      """
+      {"tenant":"acme","user_id":"one"}
+      {"tenant":"acme","user_id":2}
+      """
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "tenant":"acme","user_id":2
+      """
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 1
+      """
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+      """
+      codec 'poison_event_codec' refused the payload from Kafka topic 'ignored_poison_input_{{test_id}}' partition 0 offset 0
+      """
+    And within "30s" Kafka consumer group "nervix_cucumber_ignored_poison_{{test_id}}" next offset for topic "ignored_poison_input_{{test_id}}" partition 0 is "at least 2"
+    And the active session observes no server error containing "decode rejection" within "2s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @decode_rejection
+  Scenario Outline: A Kafka ACK SEQUENTIAL ingestor presents again a payload the node could not unfold, and counts no decode rejection
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "unfolded_input_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA unfolded_event ( user_id I64 );
+      CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY unfolded_events SCHEMA unfolded_event UNBRANCHED;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR unfolded_source
+        FROM kafka_main TOPIC 'unfolded_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_unfolded_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING unfolded_codec
+        TO unfolded_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION unfolded_events_subscription TO unfolded_events;
+      """
+    And extension execution is saturated on every node
+    And these Kafka messages are rapidly published to topic "unfolded_input_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "30s" the active session observes a server error containing
+      """
+      the node's bounded execution did not unfold the payload
+      """
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 0
+      """
+    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+      """
+      last decode rejection: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
