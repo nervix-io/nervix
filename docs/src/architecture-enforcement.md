@@ -60,6 +60,21 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
+Cargo runs the driver for each workspace target through `scripts/typed_lint_wrapper.py`, below the
+compiler wrapper the host configures. That compiler wrapper reports a compiler ended by a signal with
+the exit status of a compile error, so the driver runs as the workspace wrapper's child instead of
+replacing it. It inherits the wrapper's descriptors, Cargo's jobserver among them, and ends when the
+wrapper ends, so a compiler wrapper that stops a compilation still stops the driver. A compilation
+that fails leaves a termination record beside the reports: its exit status or signal, its peak
+resident size and the out-of-memory kills the kernel counted in its cgroup while it ran. When Cargo
+fails, the gate names each failed compilation as terminated by a signal, failed with compiler
+errors, or exited without a compiler error, which means the driver itself failed, for example while
+publishing its report. A Cargo failure with no failed compilation happened outside them, in Cargo, a
+build script or the compiler wrapper. Records of an earlier run are discarded before Cargo starts.
+The analysis needs about the memory of rustc's own check of each target, and the server library's is
+the largest; the kernel's out-of-memory killer ends a compilation with a signal and no message, which
+the gate reports as such instead of as a missing report.
+
 Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The four
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward

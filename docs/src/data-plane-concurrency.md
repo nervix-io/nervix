@@ -1842,7 +1842,10 @@ to the collector, which exports nothing
 unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
-coverage stays out of ordinary coverage and its CRAP report. The [Integration Test
+coverage stays out of ordinary coverage and its CRAP report. For a pull request labeled
+`deloxide`, Check's `coverage-full` job requires each selection's complete collection with its
+complete `lane.json`, and adds their lines to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). The [Integration Test
 Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
 reserves.
 
