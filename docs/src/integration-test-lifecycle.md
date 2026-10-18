@@ -316,6 +316,7 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
+| `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./coverage-reports.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -1530,7 +1531,10 @@ beside it, and `just coverage-merge` maps that report onto the repository.
 export flags, checkout-root mapping, tracked-source policy, ordinary merge record and integrity
 failures. That chapter also owns the advisory patch/CRAP reports and the separate deterministic
 complexity verdict. The `coverage-merged` artifact retains the ordinary report, its merge record
-and both advisory reports.
+and both advisory reports. The `coverage-full` job later reads that report unchanged and adds the
+modeled, diagnostic and fuzz collections the run selected to form the
+[full workspace union](./coverage-reports.md#the-full-workspace-union); their counters never enter
+the ordinary report, its patch coverage or its CRAP report.
 
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
