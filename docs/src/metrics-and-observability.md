@@ -282,6 +282,13 @@ Relay admission:
   and their resolution
 - `nervix_interconnect_unresolved_outcome_age_seconds`: how long the oldest unacknowledged relay
   outcome has been waiting. A rising value means acknowledgements are not coming back
+- `nervix_interconnect_relay_channel_watermarks`: the relay channel watermarks this node retains for
+  the channels its peers opened, across every peer. Each peer has a fixed budget of 8,192
+- `nervix_interconnect_relay_channel_watermarks_evicted_total`: watermarks forgotten before their
+  ten-minute retention ended because their peer's budget needed the position for another channel.
+  A count that keeps rising means a peer opens more relay channels within ten minutes than the
+  budget holds; see
+  [Bounded Correlation And Peer Owners](./interconnect.md#bounded-correlation-and-peer-owners)
 
 Execution admission:
 

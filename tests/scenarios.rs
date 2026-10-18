@@ -163,6 +163,7 @@ mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
+mod generated_http_payloads;
 mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
@@ -506,6 +507,8 @@ struct ScenarioWorld {
     producers: client_producers::ScenarioProducers,
     /// Native and console consumers and the Arrow attempts they received.
     consumers: client_consumers::ScenarioConsumers,
+    /// The distinct-tenant payloads the last generating step posted and no assertion has received.
+    generated_payloads: generated_http_payloads::GeneratedPayloads,
 }
 
 impl fmt::Debug for ScenarioWorld {
