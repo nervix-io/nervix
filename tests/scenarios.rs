@@ -3166,6 +3166,7 @@ async fn start_ready_server_process_with_launch(
     );
     initialize_scenario_identity(world);
     let mut process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
@@ -3179,7 +3180,8 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
     world: &mut ScenarioWorld,
     limit: u32,
 ) {
-    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[])
+        .await;
 }
 
 #[when(
@@ -3191,7 +3193,7 @@ async fn when_nervix_server_process_is_started_with_written_option(
     value: String,
 ) {
     let option = ServerProcessOption::Written { option, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 #[when(
@@ -3203,12 +3205,12 @@ async fn when_nervix_server_process_is_started_with_environment_variable(
     value: String,
 ) {
     let option = ServerProcessOption::Environment { variable, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 /// Starts the scenario's server process without waiting for it to accept commands, for a
 /// scenario about a process that is expected to exit during startup.
-fn start_server_process_without_waiting(
+async fn start_server_process_without_waiting(
     world: &mut ScenarioWorld,
     launch: ServerProcessLaunch,
     options: &[ServerProcessOption],
@@ -3218,6 +3220,7 @@ fn start_server_process_without_waiting(
         "a scenario starts at most one nervix-server process"
     );
     let process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
