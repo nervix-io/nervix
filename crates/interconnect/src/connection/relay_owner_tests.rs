@@ -763,8 +763,8 @@ fn shuttle_peer_retirement_racing_runtime_admission_releases_the_exact_intake() 
     });
 }
 
-/// A full watermark budget forgets the least recently used watermark instead of refusing the next
-/// channel, however many of the peer's channels have turned over.
+/// A full watermark budget forgets the least recently used watermark, so the peer's next channel is
+/// admitted however many of its channels have turned over.
 #[test]
 fn a_peer_keeps_admitting_new_channels_after_more_than_its_watermark_budget_turned_over() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
@@ -941,8 +941,8 @@ fn a_new_process_epoch_clears_the_retired_channel_floor() {
     ));
 }
 
-/// A cancellation that fences a channel before its grant takes a position from a full budget
-/// instead of being answered as unknown, and the fence refuses the grant that follows.
+/// A cancellation that fences a channel before its grant takes a position from a full budget and
+/// is answered as cancelled, and the fence refuses the grant that follows.
 #[test]
 fn a_cancellation_fence_takes_a_position_from_a_full_watermark_budget() {
     let fixture = PeerFixture::with_capacity(RelayPeerCapacity {

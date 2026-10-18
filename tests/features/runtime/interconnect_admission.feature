@@ -334,9 +334,9 @@ Feature: Interconnect relay admission
 
   # Every node-3 branch opens its own relay channel to the relay's owner on node-1. The first 600
   # tenants' branches expire, and then the same tenants return with new branches, so 1,201 channels
-  # from node-3 reach node-1 within the ten minutes the receiver retains a channel's watermark:
-  # more channels than the 1,024 a receiver held for one peer, which refused every further one.
-  @relay_channel_turnover
+  # from node-3 reach node-1 within the ten minutes the receiver retains a channel's watermark,
+  # more than the incoming queue capacity of 1,024 that bounds the work a peer has in flight.
+  @relay_channel_turnover @long_running
   Scenario: A node keeps delivering to another node's relay owner after more than 1,024 of its branch channels turn over
     Given branched relay expiration scan interval is configured as "100ms"
     And the production sticky scheduler is configured
