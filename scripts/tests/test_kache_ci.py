@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -241,7 +242,6 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.1}"', justfile)
 
         self.assertIn("ARG KACHE_VERSION=1.2.1", dockerfile)
-        self.assertIn('cargo binstall --no-confirm "kache@${KACHE_VERSION}"', dockerfile)
         self.assertIn("COPY scripts/kache_remote.py ./scripts/kache_remote.py", dockerfile)
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
@@ -262,6 +262,71 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertNotIn("sync --push", dockerfile)
         self.assertNotIn("kache save-manifest", dockerfile)
         self.assertNotIn("configure_kache_remote", dockerfile)
+
+    def test_the_image_builder_takes_kache_and_trunk_from_their_pinned_release_archives(self) -> None:
+        image_build = ImageBuild.read()
+        for tool, argument, repository, libc in (
+            ("kache", "KACHE", "kunobi-ninja/kache", "musl"),
+            ("trunk", "TRUNK", "trunk-rs/trunk", "gnu"),
+        ):
+            image_build.assert_pinned(self, f"{argument}_VERSION", r"\d+\.\d+\.\d+")
+            for build_architecture in ("AMD64", "ARM64"):
+                checksum = f"{argument}_SHA256_{build_architecture}"
+                image_build.assert_pinned(self, checksum, "[0-9a-f]{64}")
+                self.assertIn(f'{tool}_sha256="${{{checksum}}}"', image_build.builder_stage)
+            self.assertIn(
+                f'"https://github.com/{repository}/releases/download/v${{{argument}_VERSION}}/'
+                f'{tool}-${{tool_arch}}-unknown-linux-{libc}.tar.gz"',
+                image_build.builder_stage,
+            )
+            # The archive is checked before anything is taken out of it.
+            check = image_build.builder_stage.index(f'echo "${{{tool}_sha256}}  /tmp/{tool}.tar.gz" | sha256sum --check -')
+            extraction = image_build.builder_stage.index(f"tar -xzf /tmp/{tool}.tar.gz")
+            self.assertLess(check, extraction)
+            self.assertIn(f'test "$({tool} --version)" = "{tool} ${{{argument}_VERSION}}"', image_build.builder_stage)
+        self.assertIn("amd64) tool_arch=x86_64;", image_build.builder_stage)
+        self.assertIn("arm64) tool_arch=aarch64;", image_build.builder_stage)
+
+    def test_the_image_builder_compiles_its_other_tools_from_their_published_lockfiles(self) -> None:
+        # Unlocked, a tool resolves the newest compatible release of each dependency, which can
+        # stop it compiling: kache 1.2.1 did once kache-shims 1.2.2 was published.
+        image_build = ImageBuild.read()
+        instructions = image_build.builder_stage.replace("\\\n", " ").splitlines()
+        installs = [instruction for instruction in instructions if instruction.startswith("RUN cargo install")]
+        self.assertEqual(len(installs), 1, installs)
+        install_command = installs[0].removeprefix("RUN ").split("&&")[0]
+        arguments = shlex.split(install_command)
+        self.assertEqual(arguments[:3], ["cargo", "install", "--locked"])
+
+        pins = {}
+        for package in arguments[3:]:
+            name, _, version = package.partition("@")
+            pin = re.fullmatch(r"\$\{(?P<argument>[A-Z_]+_VERSION)\}", version)
+            self.assertIsNotNone(pin, package)
+            pins[name] = pin["argument"]
+        self.assertEqual(pins, {"cargo-auditable": "CARGO_AUDITABLE_VERSION", "cargo-sonic": "CARGO_SONIC_VERSION"})
+        for argument in pins.values():
+            image_build.assert_pinned(self, argument, r"\d+\.\d+\.\d+")
+
+
+@dataclass(frozen=True)
+class ImageBuild:
+    """`Dockerfile.debian`'s global build arguments and its builder stage."""
+
+    global_arguments: str
+    builder_stage: str
+
+    @classmethod
+    def read(cls) -> ImageBuild:
+        dockerfile = Path("Dockerfile.debian").read_text()
+        global_arguments, stages = dockerfile.split("\nFROM ", maxsplit=1)
+        builder_stage = stages.split("\nFROM ", maxsplit=1)[0]
+        return cls(global_arguments=global_arguments, builder_stage=builder_stage)
+
+    def assert_pinned(self, test: unittest.TestCase, argument: str, value: str) -> None:
+        """`argument` defaults to a value matching `value` and reaches the builder stage."""
+        test.assertRegex(self.global_arguments, rf"(?m)^ARG {argument}={value}$")
+        test.assertIn(f"\nARG {argument}\n", self.builder_stage)
 
 
 def isolated(environment: dict[str, str]) -> dict[str, str]:

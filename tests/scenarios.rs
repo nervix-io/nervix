@@ -15,8 +15,8 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, BooleanArray, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
-    TimestampMicrosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Int64Array, LargeListArray, LargeStringArray,
+    ListArray, RecordBatch, StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
@@ -138,7 +138,9 @@ use crate::common::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
     },
-    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
+    scenario_schedule::{
+        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+    },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -693,6 +695,18 @@ impl ScenarioWorld {
         self.cluster
             .as_mut()
             .expect("cluster must be created before using it")
+    }
+
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
     }
 
     fn cluster(&self) -> &Cluster {
@@ -11195,6 +11209,51 @@ async fn when_command_durable_admission_pause_is_released(
         .release_command_durable_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "command finalization on node {string} pauses before its outcome is recorded")]
+async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_finalization_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command finalization pause on node {string} is reached")]
+async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let task = world.background_command_result.as_mut();
+    // A leader resumes an applying execution on its own, so the finalization a scenario holds may
+    // belong to no request of the scenario. A loaded node takes long to get there, and the wait
+    // ends once the pause is reached, so its bound is generous.
+    nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        let Some(task) = task else {
+            fault_injection
+                .wait_for_command_finalization_pause(&node_name)
+                .await;
+            return;
+        };
+        nervix_primitives::select! {
+            () = fault_injection.wait_for_command_finalization_pause(&node_name) => {},
+            result = task => panic!(
+                "command on '{node_id}' returned before its finalization pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("command finalization pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the command finalization pause on node {string} is released")]
+async fn when_command_finalization_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_finalization_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "relocation publication for domain {string} pauses after planning")]
 async fn given_relocation_publication_pauses_after_planning(
     world: &mut ScenarioWorld,
@@ -12250,16 +12309,26 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
+        .await
+        .expect("failed to restart cluster");
+}
+
+/// The node's runtime installation is held from its start, so whatever reaches it after the
+/// restart finds a node that has not installed its committed domains again.
+#[when(expr = "the cluster is restarted while runtime installation on node {string} waits")]
+async fn when_the_cluster_is_restarted_holding_runtime_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.forget_session_observations();
+    world
+        .cluster_mut()
+        .restart_holding_runtime_installation(&node_id)
         .await
         .expect("failed to restart cluster");
 }
@@ -12712,6 +12781,27 @@ async fn then_rabbitmq_queue_eventually_has_consumers(
         .wait_for_rabbitmq_queue_consumers(&queue, expected)
         .await
         .expect("rabbitmq queue did not reach expected consumer count");
+}
+
+/// The messages a queue holds ready for delivery. Once the queue has no consumer, they include
+/// every delivery a consumer still held unacknowledged when it left, because the broker returns
+/// those to the queue as the consumer goes.
+#[then(expr = "RabbitMQ queue {string} holds {int} messages")]
+async fn then_rabbitmq_queue_holds_messages(
+    world: &mut ScenarioWorld,
+    queue: String,
+    expected: usize,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let actual = world
+        .cluster()
+        .rabbitmq_queue_messages(&queue)
+        .await
+        .expect("rabbitmq queue state could not be read");
+    assert_eq!(
+        actual, expected,
+        "RabbitMQ queue '{queue}' holds {actual} messages, expected {expected}"
+    );
 }
 
 #[then(expr = "Redis channel {string} eventually has {int} subscribers")]
@@ -13714,6 +13804,27 @@ async fn then_background_command_request_reports_conflict_or_unknown_leadership(
             nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
         )
     ));
+}
+
+#[then("the background command request reports an unknown outcome because leadership moved")]
+async fn then_background_command_request_reports_leadership_lost(world: &mut ScenarioWorld) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        ),
+        "background command request did not report that leadership moved: {}",
+        result.message
+    );
 }
 
 #[then("the last command request reports an execution reference content conflict")]
@@ -22803,6 +22914,53 @@ async fn given_pulsar_topic_accepts_messages_of_at_most(
         });
 }
 
+/// What the broker holds for the subscription now: messages no acknowledgement reached it for.
+#[then(
+    expr = "Pulsar subscription {string} of topic {string} holds {int} unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    let backlog = world
+        .cluster()
+        .pulsar_subscription_backlog(&topic, &subscription)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the backlog of Pulsar subscription '{subscription}': {error}")
+        });
+    assert_eq!(
+        backlog, expected,
+        "Pulsar subscription '{subscription}' of topic '{topic}' holds {backlog} unacknowledged \
+         messages"
+    );
+}
+
+#[then(
+    expr = "within {string} Pulsar subscription {string} of topic {string} holds {int} \
+            unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_eventually_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .wait_for_pulsar_subscription_backlog(&topic, &subscription, expected, duration)
+        .await
+        .expect("Pulsar subscription backlog assertion failed");
+}
+
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
 async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     initialize_scenario_identity(world);
@@ -27177,6 +27335,43 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     }
 }
 
+/// A server error that must never be raised. Every error the session receives within the window is
+/// read, including those it already held from earlier steps, and none of them may contain `text`.
+#[then(expr = "the active session observes no server error containing {string} within {string}")]
+async fn then_the_active_session_observes_no_server_error_containing(
+    world: &mut ScenarioWorld,
+    text: String,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let unexpected = expand_placeholders(world, &text);
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist");
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .try_next_server_error(remaining)
+            .await
+            .expect("failed while waiting for server error");
+        let Some(event) = event else {
+            return;
+        };
+        append_cucumber_log_line(&format!(
+            "observed runtime server error level={:?} message={}",
+            event.level, event.message
+        ));
+        assert!(
+            !event.message.contains(&unexpected),
+            "the session observed a server error containing {unexpected:?}: {}",
+            event.message
+        );
+    }
+}
+
 #[then("the last server error contains")]
 async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step).trim());
@@ -29024,6 +29219,15 @@ impl IcebergTableFixture {
     }
 
     fn parse_data_type(column_type: &str) -> ArrowDataType {
+        if let Some(nested) = column_type.strip_prefix("LIST<")
+            && let Some(element) = nested.strip_suffix('>')
+        {
+            return ArrowDataType::List(StdArc::new(ArrowField::new(
+                "item",
+                Self::parse_data_type(element),
+                false,
+            )));
+        }
         match column_type {
             "STRING" => ArrowDataType::Utf8,
             "I64" => ArrowDataType::Int64,
@@ -29061,52 +29265,76 @@ fn iceberg_cell_value(
 ) -> Result<serde_json::Value, String> {
     let schema = batch.schema();
     let field = schema.field(column_index);
-    let array = batch.column(column_index);
+    iceberg_array_value(batch.column(column_index).as_ref(), row_index, field.name())
+}
+
+fn iceberg_array_value(
+    array: &dyn Array,
+    row_index: usize,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
     if array.is_null(row_index) {
         return Ok(serde_json::Value::Null);
     }
-    match field.data_type() {
+    match array.data_type() {
         ArrowDataType::Int64 => Ok(serde_json::Value::from(
-            iceberg_column::<Int64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<Int64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::UInt64 => Ok(serde_json::Value::from(
-            iceberg_column::<UInt64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<UInt64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Boolean => Ok(serde_json::Value::from(
-            iceberg_column::<BooleanArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<BooleanArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8 => Ok(serde_json::Value::from(
-            iceberg_column::<StringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::LargeUtf8 => Ok(serde_json::Value::from(
-            iceberg_column::<LargeStringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<LargeStringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8View => Ok(serde_json::Value::from(
-            iceberg_column::<StringViewArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringViewArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => Ok(serde_json::Value::from(
-            iceberg_column::<TimestampMicrosecondArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<TimestampMicrosecondArray>(array, field_name)?.value(row_index),
         )),
+        ArrowDataType::List(_) => iceberg_list_values(
+            iceberg_array::<ListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::LargeList(_) => iceberg_list_values(
+            iceberg_array::<LargeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::FixedSizeList(_, _) => iceberg_list_values(
+            iceberg_array::<FixedSizeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
         unsupported => Err(format!(
             "unsupported Iceberg assertion field '{}' Arrow type {unsupported:?}",
-            field.name()
+            field_name
         )),
     }
 }
 
-fn iceberg_column<T: 'static>(batch: &RecordBatch, column_index: usize) -> Result<&T, String> {
-    let schema = batch.schema();
-    batch
-        .column(column_index)
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| {
-            format!(
-                "Iceberg assertion column '{}' did not contain expected Arrow array {}",
-                schema.field(column_index).name(),
-                std::any::type_name::<T>()
-            )
-        })
+fn iceberg_list_values(
+    values: StdArc<dyn Array>,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
+    let values = (0..values.len())
+        .map(|index| iceberg_array_value(values.as_ref(), index, field_name))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::Value::Array(values))
+}
+
+fn iceberg_array<'a, T: 'static>(array: &'a dyn Array, field_name: &str) -> Result<&'a T, String> {
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        format!(
+            "Iceberg assertion column '{}' did not contain expected Arrow array {}",
+            field_name,
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 fn iceberg_row_matches_expected(row: &serde_json::Value, expected: &serde_json::Value) -> bool {
@@ -30141,21 +30369,31 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(move |feature, _rule, scenario, world| {
+        .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
+            let rule_tags: &[String] = match rule {
+                Some(rule) => &rule.tags,
+                None => &[],
+            };
+            let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
+            let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                let registration =
-                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let registration = ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                    scenario_line,
+                    length,
+                );
                 let attempt = registration.attempt();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

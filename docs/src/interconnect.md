@@ -616,7 +616,10 @@ do. Only the failed class carries the answering node's own description, because 
 another node's subsystem is opaque to the caller and that text exists for the operator reading it.
 State snapshot exchange, dataflow node status, domain and entity drain status, entity gating, metric
 description, relay, hash map and ingestor description, hash map queries, and subscription-interest
-visibility all answer in these terms.
+visibility all answer in these terms. An ingestor description is the execution owner's report of
+the ingestor. Its last decode rejection crosses as a typed record: a reference, an instant, a codec
+name, field paths, an optional Kafka or syslog position and the rendered codec diagnostic. The
+asking node renders that record; it never parses one.
 
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation
 finds its handler without taking a lock and registrations that race each other all take effect.
@@ -868,9 +871,18 @@ before admission permanently fences that delivery identity, including when cance
 receiver before the original grant request. If admission has already won, cancellation returns the
 known admitted result and does not undo work handed to the runtime.
 
-Removing or evicting a concrete branch cancels its unadmitted channel generation and releases its
-reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
-keeps a previous branch lifetime from being confused with the new runtime instance.
+Removing or evicting a concrete branch cancels the unadmitted generation of the channels that
+branch ends and releases their reserved work. A relay owner's branch ends the channels through
+which the owner routes that relay's branch. A processor's, ingestor's or reingestor's branch ends
+the channels of the relays it publishes through for its key; the producers of one relay on a node
+share that relay's channel for a key. The channels of every other relay keep their generation,
+even when another relay or processor holds a branch with the same key, because each ends only with
+its own branch's lifetime. If a branch appears again, its channels use a fresh channel incarnation
+and sequence. This keeps a previous branch lifetime from being confused with the new runtime
+instance. An ended channel's watermark stays on its receiver for the retention that
+[Ordering, Retry, And Reconciliation](#ordering-retry-and-reconciliation) describes and occupies a
+channel position in that peer's budget, so a burst of ended channels larger than the budget's free
+positions refuses the peer's new channels until those watermarks expire.
 
 A committed forced ownership change also retires changing relay routes' preceding channel
 generation before the local graph installer waits for dispatch quiescence. The sender interrupts
@@ -1426,7 +1438,11 @@ one. The serving node sends `Open` with the domain, ingestor, expected fields, c
 largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
 bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
 with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
-`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`.
+`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`. The
+serving node checked the committed domain, schedule and ingestor before it forwarded the open, so
+an owning node that runs no endpoint of the ingestor yet, as one that has not installed its domains
+again since it started, refuses it as `EndpointUnavailable` rather than classifying the endpoint
+from its own installation.
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other

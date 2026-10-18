@@ -22,6 +22,7 @@ elif [[ "$#" -ne 0 ]]; then
 fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/pause-delivery-self-test.sh"
 "${script_dir}/hold-quorum-self-test.sh"
 "${script_dir}/output-boundary-self-test.sh"
 "${script_dir}/image-package-self-test.sh"
@@ -867,6 +868,8 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
+"${script_dir}/backup-fault-self-test.sh"
+"${script_dir}/backup-state-self-test.sh"
 "${script_dir}/load-self-test.sh"
 "${script_dir}/mixed-self-test.sh"
 "${script_dir}/diagnostic-self-test.sh"

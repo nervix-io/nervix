@@ -261,6 +261,7 @@ mod materialized_read;
 mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
+mod message_error_decode;
 mod message_error_delivery;
 mod message_error_plan;
 mod native_checkpoint_encoding;
@@ -461,10 +462,10 @@ use http_request_fields::{
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
-    BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
+    BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestAcceptance, decode_ingested_payload,
-    prepare_branched_entrypoint_input,
+    PayloadDecodeFailure, RawIngestAcceptance, RefusedEntry, SplitPayloads, UnfoldingNotAdmitted,
+    decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
@@ -475,7 +476,8 @@ pub(in crate::runtime) use ingestor_quiesce::{
     IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
+    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, IngestorStatus,
+    RuntimeReconnectStatus,
 };
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
@@ -613,15 +615,16 @@ use test_fixtures::{
     expression, ingest_metadata_for_test, install_test_domain_execution,
     install_unpaced_test_domain, junction_branch_template, key_label, named, nonzero_capacity,
     paced_domain_state, planned_entrypoints_for_test, processor_branched_by,
-    publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
-    test_branching, test_domain_clock, test_domain_clock_authority, test_execution_revision,
-    test_ingestor_quiesce_control, test_named_branching, test_optional_schema,
-    test_relay_boundary_services, test_schema, u32_branch_key, unbranched_subscription_definition,
-    unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
-    vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm, wasm_generated_pool,
-    wasm_guest_column, wasm_guest_stream, wasm_input_acks, wasm_input_for_records,
-    wasm_input_for_values, wasm_test_generated_output, wasm_test_output, window_aggregate,
-    window_outputs, window_plan, with_inherit_all,
+    publish_state_identity, publish_test_relay_routing, quiesce_test_batch, row_value,
+    scheduled_model, string_branch_key, test_branching, test_domain_clock,
+    test_domain_clock_authority, test_execution_revision, test_ingestor_quiesce_control,
+    test_named_branching, test_optional_schema, test_relay_boundary_services, test_schema,
+    u32_branch_key, unbranched_subscription_definition, unpaced_domain_state,
+    validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
+    wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
+    wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
+    wasm_test_generated_output, wasm_test_output, window_aggregate, window_outputs, window_plan,
+    with_inherit_all,
 };
 #[cfg(test)]
 pub(crate) use test_fixtures::{FilledCpuClass, single_worker_executor};
@@ -955,6 +958,8 @@ pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
+use message_error_decode::DecodeRejections;
+pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
 use observability::BranchMetricsMark;
 pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};

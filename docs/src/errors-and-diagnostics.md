@@ -388,10 +388,11 @@ wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError`
 does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
 builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
-output position after it. The ingest group returns that report unchanged. A source host keeps it
-beneath its intake's decode or dispatch failure and reports the whole chain, an HTTP or WebSocket
-endpoint renders the whole chain in its decode notice, a lookup line keeps it beneath the line it
-failed on, and an emitter keeps it beneath the record it rejects or the encoding it could not start. The rendered chain reads as the codec
+output position after it. The ingest group returns that report unchanged. A source host and an HTTP
+or WebSocket endpoint render the whole chain once as the message of the decode rejection that
+replaces the refused payload, described in [Decode Rejections](#decode-rejections). A lookup line
+keeps it beneath the line it failed on, and an emitter keeps it beneath the record it rejects or the
+encoding it could not start. The rendered chain reads as the codec
 diagnostic did before: `codec 'events_codec' failed to parse field 'user_id': ...` followed by the
 Arrow builder's own reason. A codec that fails to compile while a domain execution is built keeps its
 report beneath `RuntimeError::BuildDomainExecution`, which names the domain. A codec failure whose
@@ -648,6 +649,18 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
+A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
+`PulsarSourceError`, beneath `SourceError::Acknowledge` or `SourceError::Reject`. An
+acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
+`PulsarRefusal` keeps the server error, absent for a code the client does not know, and the reason
+the broker gave. An acknowledgement nothing answered is `AcknowledgementUnconfirmed`, and a
+redelivery request the consumer could not send is `RedeliveryRequestUnsent`; both carry a typed
+`PulsarUnresolvedRequest` naming whether the client's operation timeout passed, the connection
+closed or the consumer stopped first, because the broker may or may not have applied the request. A
+client failure the source does not classify keeps the driver's error as the typed cause beneath
+`Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
+shows.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
@@ -664,7 +677,10 @@ An outbound WebSocket peer's Close is a typed read failure preserving its status
 an end without a status has its own typed state. Transport failures keep the WebSocket driver's
 error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
-failure and its growing retry delay across successful reconnects until a batch is accepted.
+failure and its growing retry delay across successful reconnects until a batch is accepted. A
+broker source's acknowledgement that its transport fails to confirm, and a rejection it fails to
+take back, become the ingestor's transient status with the innermost context of the source's
+report as the reason, and only a later confirmed acknowledgement clears it.
 
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
 operations read the retained status without writing it; a transition clears an active failure.
@@ -871,6 +887,12 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
+The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
+absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
+before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
+conversion error beneath that context. The check compares names and nested types after narrowing
+UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
@@ -904,6 +926,15 @@ drain as a printable attachment, which a rendered chain does not show, so `StopE
 description and its message ends with it. A later stop can still end the retained task.
 
 ### Node Startup
+
+The integration harness keeps a readiness failure and the exact node task's cleanup outcome in
+one attempt record. Retry classification happens after cleanup: a joined application error, panic
+or cancellation supplies the task's cause even when the probe was still waiting for a session.
+A joined listener bind failure selects its own listener family for a retry. A clean exit after the
+harness requested stop leaves the readiness timeout as the retry cause. Cleanup receives the
+remaining absolute startup budget; exhaustion with the task still running retains that task and
+reports its pending cleanup. [Integration Test Lifecycle](./integration-test-lifecycle.md#node-startup)
+owns these harness bounds and the distinction from product shutdown deadlines.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -962,7 +993,8 @@ installing the new worker and drains the earlier task, preserving its pending ac
 Changing to immediate delivery or withdrawing the route also retires its buffered worker.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
-`ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
+`ON GENERAL ERROR` handles node-wide source and sink failures, and an ingestor's also reports the
+[decode rejections](#decode-rejections) of payloads that never reached a route. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves
 the branch in which the operation failed; ingestor errors are unbranched. See [Runtime Node Error
 Policies](./nspl-overview.md#runtime-node-error-policies), [Message
@@ -973,6 +1005,34 @@ Hot paths retain typed failure variants and row or batch error masks; they do no
 formatted diagnostic for every row or batch when the variant already names the failure. Formatting
 belongs at the policy or public reporting boundary. This keeps error construction from changing
 the processing cadence and avoids putting source payloads in reports.
+
+### Decode Rejections
+
+A source payload its ingestor's codec refuses is the codec's own judgement of that payload, which
+presenting the payload again would only repeat. `PayloadDecodeFailure::Codec` carries that refusal,
+and `PayloadDecodeFailure::NotAdmitted` the executor's refusal to unfold the payload now, which
+judged nothing. The two are told apart by these typed variants, never by text. An ingest group that
+decodes a batch keeps decoding the payloads after a codec refusal and returns each refusal with the
+payload's place in its batch. An unfolding refusal takes the whole batch back out of the group and
+is returned as the batch's own failure, which the source host reports beneath its intake's dispatch
+failure.
+
+The source host, or the endpoint that received the payload, turns each codec refusal into a
+`DecodeRejection`: a UUIDv7 reference, the code `validation`, the operation `decode`, the codec,
+the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
+those of a failed message an unfolding kept as a report of its own, the instant the source took the
+payload in, the transport position the payload's typed metadata names, and the codec report's whole
+chain rendered once as its message. The code and the operation are the same for every decode
+rejection, so the record does not store them. The record never holds the payload, and the codec's
+contexts name the codec and the field, never a value. The ingestor's `ON GENERAL ERROR` policy then
+reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
+rejection <record>` as a runtime event and logs the reference, code, operation and codec as fields,
+and `IGNORE` reports nothing. Unlike a node failure under `LOG`, a decode rejection is never
+negatively acknowledged, because a source that presented the payload again would only be refused
+again. In an acknowledged mode the host resolves the payload's acknowledgement root at once. In
+every mode it counts the payload in `nervix_ingestor_decode_rejections_total` and publishes the
+record as the ingestor's last decode rejection, which `DESCRIBE INGESTOR` reads from the node that
+runs the ingestor through the typed fields of its describe envelope.
 
 ### Sink And Emitter Rejections
 
@@ -1509,7 +1569,10 @@ occur.
 
 Before a restarted serving node has proved linearizable catch-up, both native endpoint opens use
 the ordinary retryable `EndpointUnavailable` refusal. They do not report a missing or stopped
-domain from that node's stale local snapshot as a terminal application error.
+domain from that node's stale local snapshot as a terminal application error. The node executing
+the endpoint follows the same rule after the serving node's checks passed: an endpoint it has not
+installed is `EndpointUnavailable`, so a node that restarted after the serving node never turns a
+restored producer's open into a terminal missing-domain or removed-endpoint refusal.
 
 The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
 reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains
@@ -2010,8 +2073,8 @@ consume the sample's bound. The probe record keeps each stage's outcome and the 
 times on the kernel uptime clock the controller shares with the helper, and a failed helper keeps
 Docker's state and events for it before its removal. A failed required attempt remains evidence
 even after a subsequent successful qualification. The controller's measurement budget does not extend the
-product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
-commands, measurement interpretation and retained artifact paths.
+product's recovery budget. [External Cluster Chaos](./cluster-chaos.md#link-degradation) owns
+the commands, measurement interpretation and retained artifact paths.
 Network-fault preflight refusals retain the failing stage and original command status, exact
 arguments and bound, elapsed time, helper identities and both raw streams. The operation record
 exists before execution, so an interrupted inspection remains identifiable. Cleanup captures the

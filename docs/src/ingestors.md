@@ -140,16 +140,17 @@ Each entity accepts only the modes it can honor, and completion offers only thos
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
-In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and
-error delivery the message unfolded into has completed, and it reports that progress only once
-the transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
-broker's answer to its deletion, a `RABBITMQ QUEUE` for its acknowledgement to be written to the
-connection, and a `KAFKA TOPIC`, `PULSAR TOPIC` or `MQTT TOPIC` only for its client to queue the
-acknowledgement. An acknowledgement the transport fails to confirm is a source error that
+In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and error
+delivery the message unfolded into has completed, and it reports that progress only once the
+transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
+broker's answer to its deletion, a `KAFKA TOPIC` for the answer to its consumer-group commit, or
+under `OFFSET BY DOMAIN` for its offsets' state replicas, a `PULSAR TOPIC` for the broker's answer
+to its acknowledgement, a `RABBITMQ QUEUE` for its acknowledgement to be written to the connection,
+and an `MQTT TOPIC` only for its client to queue the acknowledgement. An acknowledgement the
+transport fails to confirm, or a rejection it fails to take back, is a source error that
 `DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
 messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
-confirmations before it closes them; see
-[Shutdown And Recovery](shutdown.md#connector-contracts).
+confirmations before it closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
 ## Altering Ingestors
 
@@ -287,7 +288,8 @@ sender was already answered or its source has moved past it, so when its codec's
 transformation finds the node's extension workers full, the payload waits for them rather than
 being refused, ahead of work that asks after it, and nothing behind it drains first. A new quiesce
 or a shutdown ends that wait and leaves the payload at the front of the buffer. A payload its codec
-rejects is reported and dropped, as any failure after it was retained is.
+refuses leaves the buffer as a decode rejection; see
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
 Memory pressure never adds buffered bytes. During memory-pressure quiesce, a `BUFFER` push source
 drops and counts new payloads, polling sources skip polls, and endpoints reject. Payloads already
@@ -299,8 +301,48 @@ pause|memory pressure`, `status: quiesced` for every active hold, and the four q
 It also renders `nervix_ingestor_transport_redeliveries_total`, the acknowledgements and rejections
 the node discarded after a RabbitMQ, SQS or MQTT source reconnected, because the broker redelivers
 what the lost connection did not acknowledge; see
-[Connector Crates And The Connector Contract](connector-contract.md). `SHOW CREATE` round-trips the
+[Connector Crates And The Connector Contract](connector-contract.md). It renders
+`nervix_ingestor_decode_rejections_total` and `last decode rejection:` as well; see
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). `SHOW CREATE` round-trips the
 full clause.
+
+## When The Codec Refuses A Payload
+
+A payload its codec refuses, because it is not in the wire format the codec reads or does not fit
+the codec's schema, would be refused again however often its source presented it. The ingestor
+therefore consumes it, and a decode rejection takes its place: a message error that the ingestor's
+node-wide `ON GENERAL ERROR` policy reports.
+
+- `ON GENERAL ERROR LOG` reports the rejection to every attached session as a server error and logs
+  its fields at `warn`, such as `ingestor 'orders_source' general error in domain 'shop': decode
+  rejection 0199f1c2-… at 2026-10-17T12:00:00Z: codec 'order_codec' refused the payload from Kafka
+  topic 'orders' partition 0 offset 7: codec 'order_codec' failed to parse field 'total': …`.
+- `ON GENERAL ERROR IGNORE` reports nothing.
+
+Neither policy makes the source present the payload again, and the other payloads of its batch
+continue through the ingestor's routes. An acknowledged delivery mode settles the refused payload's
+position on its transport together with the rest of the batch, so a Kafka consumer group commits
+past it and a RabbitMQ queue no longer holds it. In `MODE NO ACK` the payload is dropped with its
+rejection. A JAQ-backed codec that refuses one message an unfolding payload produced refuses the
+whole payload, and so does an unfolding that panics.
+
+A decode rejection carries a stable UUIDv7 reference, the code `validation`, the operation `decode`,
+the codec, the fields the codec named at fault, the instant the source took the payload in, and the
+codec's diagnostic as its message. When the source's metadata names where on its transport the
+payload was read, the rejection names it too: a Kafka record's topic, partition and offset, or the
+peer a syslog frame came from. A source whose metadata holds only headers names no position, because
+a header value is what its sender wrote. The rejection never holds the payload, and the codec's
+diagnostic names the codec and the field at fault, never a payload value.
+
+The node counts the payloads its ingestor consumed this way in
+`nervix_ingestor_decode_rejections_total`. `DESCRIBE INGESTOR` renders that count and
+`last decode rejection:`, the latest rejection on the node that runs the ingestor, or `-` before
+the first.
+
+A payload the node's extension workers have no room to unfold has not been judged by its codec, so
+it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+An endpoint ingestor accepts a body its codec refuses and reports it the same way, including a body
+its quiesce buffer retained.
 
 ## When The Extension Workers Are Full
 
@@ -838,6 +880,15 @@ transient status in `DESCRIBE INGESTOR`, and the ingestor reads the batch again,
 repeat; the status clears once a later commit is answered. A graceful stop or an ownership move
 waits for the answer to every commit of the work it drains, within the drain timeout.
 
+Under `OFFSET BY CONSUMER GROUP`, a consumer that stops heartbeating without leaving its group,
+because its node was killed, paused or cut off from the broker, keeps its partitions until the group
+coordinator expires its session, `session.timeout.ms` after its last heartbeat. librdkafka's default
+is 45 seconds; the client's pass-through configuration can change it. When the ingestor moves to
+another node, the new owner's consumer joins the group as soon as it starts, but receives those
+partitions, and records flow again, only after that expiry. A graceful stop or an ownership move
+leaves the group first, so its partitions move without that wait. `OFFSET BY DOMAIN` assigns
+partitions through the domain schedule and waits for no group session.
+
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
 commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
 for downstream acknowledgement, so a failure can lose records whose positions were committed before
@@ -891,6 +942,18 @@ Client config currently supports:
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+
+In an `ACK` mode the ingestor acknowledges the messages a batch read from each topic in one
+acknowledgement and waits for the broker's answer, within the client's 30-second operation
+timeout. An acknowledgement the broker refuses shows its server error and reason as the transient
+error, as in `the Pulsar broker refused an acknowledgement with NotAllowedError: ...`, and one it
+does not answer in time, or whose connection closes first, shows `the Pulsar broker did not confirm
+an acknowledgement`. Either way the messages are rejected and delivered again. A rejection asks the
+broker to redeliver the messages and returns once the consumer sent that request, because the
+broker does not answer it; a request the consumer cannot send, such as while it reconnects to a
+broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
+and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
+each message without waiting for the broker's answer.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
@@ -1165,12 +1228,13 @@ rejecting ingestor declares `REJECT`.
 A body whose codec runs an `ON INGESTION` transformation is unfolded on the node's extension
 workers. When they cannot take it now, the body is rejected the same way: HTTP answers 503 without
 `Retry-After`, and an established WebSocket closes with 1013. The body was not decoded, so its
-sender may send it again; a body its codec rejects is still accepted and reported as a decode
-failure. A body `BUFFER` retained was already answered 202, so when it drains after resume and the
-extension workers cannot take it, it waits for them instead. It stays in the buffer, counted in the
-ingestor's buffered records and bytes, until they unfold it, and the bodies behind it follow in
-order. A body its codec rejects as it drains is reported as an ingestor error and not delivered,
-like any other retained body that fails after its 202.
+sender may send it again; a body its codec refuses is still accepted, and becomes a decode
+rejection the ingestor's `ON GENERAL ERROR` policy reports; see
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). A body `BUFFER` retained was
+already answered 202, so when it drains after resume and the extension workers cannot take it, it
+waits for them instead. It stays in the buffer, counted in the ingestor's buffered records and
+bytes, until they unfold it, and the bodies behind it follow in order. A body its codec refuses as it
+drains leaves the buffer as a decode rejection too.
 
 A WebSocket connection retains the route and signaling protocol selected at upgrade. Stopping or
 replacing its endpoint source ends that intake lifetime, including signaling data intake. During

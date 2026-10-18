@@ -204,8 +204,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md) is the authoritative
   architecture reference for coverage producers and exports, source mapping and exclusions,
   ordinary report ownership, merge records and integrity verdicts, patch coverage, the advisory
-  CRAP report and the mandatory complexity count. Any change to those contracts keeps that chapter
-  current in the same change. Verification methods and scenario supervision retain their own owners.
+  CRAP report, the full workspace union and the mandatory complexity count. Any change to those
+  contracts keeps that chapter current in the same change. Verification methods and scenario
+  supervision retain their own owners.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
   reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
   change to hot-path state publication, task or branch ownership, delivery or assignment fences,
@@ -1117,6 +1118,17 @@ build and the existing tests, and nothing in it changes behavior.
   supervision, the fault model, semantic traces and replay rules, seed selection, commands and
   budgets, the scenario matrix, simulated restart versus real-process evidence, findings and
   retained regressions, qualification evidence, and the prerequisites for whole-cluster simulation.
+- [External Cluster Chaos](docs/src/cluster-chaos.md) is the authoritative architecture reference
+  for the external chaos runner and its suites. Any change to `scripts/chaos`, its Compose
+  deployment, fixtures, tool image pins, verifiers or self-tests, the chaos recipes in the
+  `justfile`, the `Chaos` workflow or the chaos and diagnostic-image jobs of the `Docker Build`
+  workflow must keep that chapter current in the same change. Its scope includes the public
+  observation boundary, image and tool identity, host requirements, the deployment, how each fault
+  is injected and proven, every scenario with its verdicts and bounds, seeded plans and replay,
+  failure categories and exit statuses, controller budgets versus product deadlines, artifacts,
+  cleanup and signals, diagnostic images, the suites and their shards, CI triggers, labels and
+  cancellation, guarantees and limits, and qualification evidence. The product contracts its
+  scenarios verify stay with their own chapters.
 - Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
@@ -1313,14 +1325,14 @@ build and the existing tests, and nothing in it changes behavior.
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
 - `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image. CI runs the smoke suite against a pull request's own images only for a pull request
-  labeled `chaos`, and the soak suite for one labeled `chaos-soak` and nightly on `main`; a pull
-  request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
-  its scenarios verify, carries the `chaos` label. Each suite runs against the release image and
-  against the Deloxide diagnostic image of the same revision, whose label makes every run fail
-  unless the deadlock evidence of each process its nodes started qualifies; a change to the
-  diagnostic image, its evidence collection or a path its scenarios exercise under tracked locks
-  keeps both green.
+  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the
+  smoke suite against a pull request's own images only for a pull request labeled `chaos`, and the
+  soak suite for one labeled `chaos-soak` and nightly on `main`; a pull request that changes the
+  chaos runner, or the membership, failover, recovery or delivery behavior its scenarios verify,
+  carries the `chaos` label. Each suite runs against the release image and against the Deloxide
+  diagnostic image of the same revision, whose label makes every run fail unless the deadlock
+  evidence of each process its nodes started qualifies; a change to the diagnostic image, its
+  evidence collection or a path its scenarios exercise under tracked locks keeps both green.
 - Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
   approximately four-second observation window and 30-second sample bound; the probe helper's
   Docker launch has a separate bound. Other profiles and healthy observations use 40 packets at
@@ -1421,6 +1433,22 @@ build and the existing tests, and nothing in it changes behavior.
   file the analysis did not read or bind, or no matched file. A function in a file the report holds
   no record of is listed as unmeasured, never scored as uncovered. `just test-crap-report`
   exercises it, and `just coverage-crap-report-runner` collects its Python line coverage.
+- `just coverage-full [input ...]` combines every coverage producer one CI run selects into the
+  full workspace line-coverage union in `target/coverage-full/`, after `just coverage-full-select`
+  records the run's event and pull request label snapshot, its suite and Bolero selection, its run
+  and attempt, the tested revision and each producer job's result. CI's `coverage-full` job runs it
+  after every producer job, including a skipped or failed one, from downloaded artifacts only. The
+  selection derives the required producers: the ordinary report, the modeled primitive
+  conformance and diagnostic-evidence collections, and the producers the `shuttle`, `loom`,
+  `turmoil`, `deloxide` and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
+  recorded deliberate skip and refuses a fuzz report. A missing, stale, foreign, corrupt, failed,
+  incomplete or unselected input fails the union, which then writes no report. The union is line
+  coverage with per-mode attribution and carries no function or branch records; the ordinary
+  report, its patch coverage and its CRAP report never read it. A change to a producer job, the
+  producer it collects or the artifact it uploads keeps the requirement table in
+  `scripts/coverage_full.py` current in the same change, which its workflow contract tests hold.
+  `just test-coverage-full` exercises the union, and `just coverage-full-runner` collects its Python
+  line coverage.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
