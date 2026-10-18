@@ -22,6 +22,13 @@ fail() {
     exit 1
 }
 
+# The handoff bound starts from librdkafka's default session timeout, which the source consumer
+# keeps only while the baseline graph leaves session.timeout.ms unset.
+baseline_graph="$(<"${script_dir}/fixtures/baseline.nspl")"
+if [[ "${baseline_graph}" == *session.timeout.ms* ]]; then
+    fail "fixtures/baseline.nspl sets session.timeout.ms, but the handoff bound assumes librdkafka's default of ${pause_group_session_timeout_seconds} seconds"
+fi
+
 node_hosts=(nervix-1 nervix-2 nervix-3)
 export CHAOS_NODE_1_ADDRESS=10.213.206.11
 export CHAOS_NODE_2_ADDRESS=10.213.206.12
