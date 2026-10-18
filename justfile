@@ -2391,7 +2391,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2492,7 +2492,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2658,6 +2658,36 @@ validate-nspl-docs:
 # time, every entry names a declared capability once, and every scenario it names exists.
 validate-connector-capabilities:
     cargo test -p nervix-models --test capability_inventory
+
+# Read the vocabulary directly; no Rust-source or manual-table parser supplies capability facts.
+connector-declarations:
+    python3 scripts/connector_matrix.py --declarations {{ quote(cargo_target_dir + "/connector-matrix/declarations.json") }} --export-only
+
+# Regenerate the public Plexus capability matrix and checked manual regions.
+connector-matrix: connector-declarations
+    python3 scripts/connector_matrix.py --declarations {{ quote(cargo_target_dir + "/connector-matrix/declarations.json") }}
+
+# A declaration or manual edit without regeneration fails this check.
+validate-connector-matrix: test-connector-matrix validate-connector-matrix-render
+
+# This whole compiled export and comparison is the native coverage execution, after its unit tests.
+[private]
+validate-connector-matrix-render:
+    python3 scripts/connector_matrix.py --declarations {{ quote(cargo_target_dir + "/connector-matrix/declarations.json") }} --export --check
+
+test-connector-matrix:
+    python3 -m unittest scripts.tests.test_connector_matrix
+
+# Ordinary Python coverage for the renderer, its current compiled input and its drift checks.
+coverage-connector-matrix: connector-declarations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    export COVERAGE_FILE="{{ cargo_target_dir }}/connector-matrix/python.coverage"
+    "${coverage[@]}" run --branch --source=scripts.connector_matrix,scripts.tests.test_connector_matrix -m unittest scripts.tests.test_connector_matrix
+    "${coverage[@]}" run --append --branch --source=scripts.connector_matrix -m scripts.connector_matrix --declarations "{{ cargo_target_dir }}/connector-matrix/declarations.json" --check
+    "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/connector-matrix/python.lcov"
+    "${coverage[@]}" report
 
 # Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
 # job's daemon, and the bounded publication of what the job built.

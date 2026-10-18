@@ -40,6 +40,7 @@ counters.
 | `coverage-native-extras bench-smoke` (`extra-tests`) | Every Criterion body once in test mode. Its instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
 | Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `nspl-completion-walk` recipe. |
+| Connector declaration validation (`extra-tests`) | The compiled Plexus vocabulary export and comparison of generated capability tables and manual regions, collected by `validate-connector-matrix`. |
 
 The `extra-tests` job also exports ordinary Python tooling reports. Each recipe executes the
 owner's tests under coverage and publishes `python.lcov`; the merge discovers those names inside
@@ -53,6 +54,7 @@ the downloaded artifact:
 | `coverage-paced-simulation-python` | Paced Python drivers' deterministic open policy |
 | `coverage-release-evidence` | Required revision/check evidence accounting |
 | `coverage-kache-ci` | The shared compiler cache's remote publication contract |
+| `coverage-connector-matrix` | Plexus connector matrix rendering, generated manual regions and declaration drift checks |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
@@ -80,7 +82,7 @@ lines they execute. Run them the way CI does:
 just coverage-native-extras
 ```
 
-Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
+Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, `validate-connector-matrix`,
 `test-shuttle`, `test-loom`, `test-turmoil`, `test-deadlock-evidence-order`, `test-deadlock-report`,
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
 an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
