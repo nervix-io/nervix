@@ -998,6 +998,113 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
+  # The workspace line-coverage union of every producer this run's event and labels select: the
+  # ordinary report, the modeled and diagnostic native collections, and the live fuzz campaigns a
+  # pull request carrying `fuzz` requests. It waits for every producer job, including a skipped or
+  # failed one, so a producer that did not succeed fails the union instead of hiding behind a skip.
+  # It downloads the exported reports and records and rebuilds nothing. The ordinary report, its
+  # CRAP report and its patch coverage stay with the coverage job.
+  coverage-full:
+    name: coverage-full
+    needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
+    if: ${{ !cancelled() && needs.test-selection.outputs.tests-required == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The justfile reads the repository toolchain with toml-cli whenever it loads.
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli
+
+      - name: Download ordinary coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-merged
+          path: coverage-full-inputs/coverage-merged
+
+      - name: Download native extra coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-native-extras
+          path: coverage-full-inputs/coverage-native-extras
+
+      - name: Download diagnostic evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: diagnostic-evidence
+          path: coverage-full-inputs/diagnostic-evidence
+
+      # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
+      # artifact downloads nothing; the union then names what the selection required and lacks.
+      - name: Download Shuttle coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shuttle
+          path: coverage-full-inputs
+
+      - name: Download Loom coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-loom
+          path: coverage-full-inputs
+
+      - name: Download Turmoil coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-turmoil
+          path: coverage-full-inputs
+
+      - name: Download Deloxide lane coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deloxide-*
+          path: coverage-full-inputs
+
+      - name: Download combined fuzz coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-bolero-fuzz
+          path: coverage-full-inputs
+
+      - name: Download Bolero selection
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bolero-selection
+          path: coverage-full-inputs
+
+      - name: Record the event, labels and producer results
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
+          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
+            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
+
+      - name: Combine coverage
+        run: just coverage-full coverage-full-inputs/*
+
+      - name: Upload full coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-full
+          path: |
+            target/coverage-full/lcov-full.info
+            target/coverage-full/beyond-ordinary.info
+            target/coverage-full/record.json
+            target/coverage-full/selection.json
+            target/coverage-full/summary.md
+          if-no-files-found: warn
+
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
   # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
   # suite job does not install and run a feature of their own, so they are a job of their own
@@ -1287,6 +1394,9 @@ jobs:
       - name: CRAP report
         run: just coverage-crap-report-runner
 
+      - name: Full coverage union
+        run: just coverage-full-runner
+
       - name: Paced simulation Python open policy
         run: just coverage-paced-simulation-python
 
@@ -1349,6 +1459,7 @@ jobs:
             target/patch-coverage/python.lcov
             target/coverage-merge/python.lcov
             target/crap-report/python.lcov
+            target/coverage-full/python.lcov
             target/paced-simulation/python.lcov
             target/release-evidence-coverage/python.lcov
             target/kache-ci/python.lcov

@@ -3,10 +3,12 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One isolated server process: its ports, database directory, interconnect
-//!   credentials, command-line options, captured log, the signals delivered to it, the clients a
-//!   scenario holds open against it, and the status it exits with.
-//! - **Depends on.** The executable Cargo builds beside this test target, the shared test port
-//!   reservations, the test interconnect certificate authority, and the session client.
+//!   credentials, command-line options, captured log, the startup of each launch and the
+//!   description of a startup that fails, the signals delivered to it, the clients a scenario holds
+//!   open against it, and the status it exits with.
+//! - **Depends on.** The executable Cargo builds beside this test target and the read of it before
+//!   each launch, the shared test port reservations, the test interconnect certificate authority,
+//!   the session client, the readiness history, and the observation of a running process.
 //! - **Must not know.** Server internals. Everything it observes crosses the process boundary: the
 //!   gRPC API, HTTP/2 frames, the files the process writes, the log the process writes, and how
 //!   the process exits.
@@ -54,9 +56,11 @@ use super::{
         TestSession, open_raw_session, publish_http_uri_with_headers, run_command_via_client,
         test_basic_authorization,
     },
-    node_liveness::{LastReadinessOutcome, ReadinessProbeOutcome},
+    node_liveness::{ReadinessHistory, ReadinessProbeOutcome},
     phase_deadline::PhaseDeadline,
     port_pool::{next_port, release_test_ports},
+    process_observation::ProcessObservation,
+    server_executable::{PreparedExecutable, ServerExecutable},
     status_request::{
         STATUS_REQUEST_TIMEOUT, STATUS_REQUESTS_PER_STARTUP, StatusEndpoint, StatusTransport,
     },
@@ -66,6 +70,8 @@ use super::{
 /// single-node cluster, so one identity serves every process.
 const CLUSTER_ID: &str = "cucumber";
 const NODE_ID: &str = "node-1";
+/// How long one launch has, from its start until the process accepts commands. Reading the
+/// executable, spawning the process and waiting for its readiness all share it.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const _: () = assert!(
     match STATUS_REQUEST_TIMEOUT.checked_mul(STATUS_REQUESTS_PER_STARTUP) {
@@ -104,11 +110,21 @@ pub(crate) enum ServerProcessLaunch {
 }
 
 impl ServerProcessLaunch {
-    fn command(&self) -> Command {
-        let default_executable = Path::new(env!("CARGO_BIN_EXE_nervix-server"));
+    /// The server executable the launch runs. A launch that lowers the open-file limit starts a
+    /// shell that replaces itself with the default executable, so that is the one it runs.
+    fn executable_path(&self) -> PathBuf {
         match self {
-            Self::Direct => Command::new(default_executable),
-            Self::Executable(executable) => Command::new(executable),
+            Self::Direct | Self::OpenFileLimit(_) => {
+                PathBuf::from(env!("CARGO_BIN_EXE_nervix-server"))
+            }
+            Self::Executable(executable) => executable.clone(),
+        }
+    }
+
+    fn command(&self) -> Command {
+        let executable = self.executable_path();
+        match self {
+            Self::Direct | Self::Executable(_) => Command::new(executable),
             Self::OpenFileLimit(limit) => {
                 let mut command = Command::new("bash");
                 command
@@ -118,7 +134,7 @@ impl ServerProcessLaunch {
                     .arg(r#"ulimit -Sn "$1" && ulimit -Hn "$1" && shift && exec "$@""#)
                     .arg("bash")
                     .arg(limit.to_string())
-                    .arg(default_executable);
+                    .arg(executable);
                 command
             }
         }
@@ -342,6 +358,40 @@ impl ServerProcessConfiguration {
         }
         command.spawn()
     }
+
+    /// Starts one launch: reads the executable the launch runs, in file order, and then spawns the
+    /// process. The launch's startup deadline starts before the read, so reading the executable,
+    /// spawning the process and waiting until it accepts commands all share it.
+    async fn launch(&self, root: &Path) -> io::Result<Launched> {
+        let deadline = PhaseDeadline::after(STARTUP_TIMEOUT);
+        let executable = ServerExecutable::new(self.launch.executable_path());
+        let prepared = executable.prepare(deadline).await.map_err(|error| {
+            io::Error::other(format!("nervix-server could not be launched: {error:#}"))
+        })?;
+        let child = self.spawn(root)?;
+        Ok(Launched {
+            child,
+            startup: LaunchStartup {
+                deadline,
+                executable: prepared,
+            },
+        })
+    }
+}
+
+/// The startup of one launch of a server process.
+#[derive(Debug)]
+struct LaunchStartup {
+    /// The deadline the launch must accept commands by. It started before the executable was read.
+    deadline: PhaseDeadline,
+    /// What reading the executable before the launch did.
+    executable: PreparedExecutable,
+}
+
+/// A process one launch spawned, and the startup it belongs to.
+struct Launched {
+    child: Child,
+    startup: LaunchStartup,
 }
 
 /// A started `nervix-server` process and everything it was given.
@@ -352,13 +402,15 @@ pub(crate) struct ServerProcess {
     child: Child,
     exit_status: Option<ExitStatus>,
     configuration: ServerProcessConfiguration,
+    /// The startup of the current process launch.
+    startup: LaunchStartup,
     /// Byte offset where the current process launch began in the shared append-only log.
     log_start: u64,
     root: TempDir,
 }
 
 impl ServerProcess {
-    pub(crate) fn start(
+    pub(crate) async fn start(
         launch: ServerProcessLaunch,
         options: &[ServerProcessOption],
     ) -> io::Result<Self> {
@@ -367,10 +419,11 @@ impl ServerProcess {
             .tempdir()?;
         let certificate_authority = InterconnectTestCa::new(&root)?;
         Self::start_cluster_member(root, &certificate_authority, NODE_ID, None, launch, options)
+            .await
     }
 
     /// Starts one independently persisted member under a shared cluster certificate authority.
-    pub(crate) fn start_cluster_member(
+    pub(crate) async fn start_cluster_member(
         root: TempDir,
         certificate_authority: &InterconnectTestCa,
         node_id: &str,
@@ -397,12 +450,13 @@ impl ServerProcess {
             private_key,
             temp_dir,
         };
-        let child = configuration.spawn(root.path())?;
+        let launched = configuration.launch(root.path()).await?;
 
         Ok(Self {
-            child,
+            child: launched.child,
             exit_status: None,
             configuration,
+            startup: launched.startup,
             log_start: 0,
             root,
         })
@@ -410,46 +464,60 @@ impl ServerProcess {
 
     /// Reopens this process's existing database on the same isolated ports.
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
-        self.restart_without_waiting()?;
+        self.restart_without_waiting().await?;
         self.wait_until_ready().await
     }
 
     /// Starts the next process before checking readiness. A whole cluster must bring up its
     /// persisted voters together because one voter alone cannot form the old quorum.
-    pub(crate) fn restart_without_waiting(&mut self) -> io::Result<()> {
+    pub(crate) async fn restart_without_waiting(&mut self) -> io::Result<()> {
         if self.observe_exit()?.is_none() {
             return Err(io::Error::other(
                 "cannot restart nervix-server before its preceding process exits",
             ));
         }
         self.log_start = std::fs::metadata(self.root.path().join("server.log"))?.len();
-        self.child = self.configuration.spawn(self.root.path())?;
+        let launched = self.configuration.launch(self.root.path()).await?;
+        self.child = launched.child;
+        self.startup = launched.startup;
         self.exit_status = None;
         Ok(())
     }
 
     /// Waits until the server answers an authenticated command, which also proves that its
-    /// configured default user exists. Every readiness probe receives only the time left before
-    /// the startup deadline, so a server that never answers ends the wait at that deadline.
+    /// configured default user exists. The wait ends at the startup deadline of the current
+    /// launch, which started before the launch read its executable, and every readiness probe
+    /// receives only the time left before it, so a server that never answers ends the wait there.
+    ///
+    /// A failure describes the whole startup: how reading the executable went, every kind of
+    /// answer the probes got and when, and, when the deadline passed, what the still-running
+    /// process and its host were doing at that moment, before anything kills the process.
     pub(crate) async fn wait_until_ready(&mut self) -> io::Result<()> {
-        let deadline = PhaseDeadline::after(STARTUP_TIMEOUT);
+        let deadline = self.startup.deadline;
         let endpoint = self.status_endpoint();
-        let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
+        let mut readiness = ReadinessHistory::new();
         loop {
             nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited during startup with {}; last readiness outcome: \
-                     {last_readiness}\n{}",
+                     {}\nbefore the process was spawned, the launch {}\nreadiness probes since \
+                     the launch began: {readiness}\n{}",
                     describe_exit(status),
+                    readiness.last(),
+                    self.startup.executable,
                     self.log_tail()
                 )));
             }
             if deadline.has_passed() {
+                let observation = ProcessObservation::of(self.process_id()?).await;
                 return Err(io::Error::other(format!(
                     "nervix-server did not accept commands within {}; last readiness outcome: \
-                     {last_readiness}\n{}",
+                     {}\nbefore the process was spawned, the launch {}\nreadiness probes since \
+                     the launch began: {readiness}\n{observation}\n{}",
                     humantime::format_duration(STARTUP_TIMEOUT),
+                    readiness.last(),
+                    self.startup.executable,
                     self.log_tail()
                 )));
             }
@@ -457,7 +525,7 @@ impl ServerProcess {
             if outcome.is_ready() {
                 return Ok(());
             }
-            last_readiness = LastReadinessOutcome::Observed(outcome);
+            readiness.record(deadline.elapsed(), outcome);
             deadline.pause(POLL_INTERVAL).await;
         }
     }

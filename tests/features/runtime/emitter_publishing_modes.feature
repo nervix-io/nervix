@@ -1,5 +1,5 @@
 Feature: Emitter publishing modes
-  @emitter_publishing_mode_canonical_roundtrip
+  @emitter_publishing_mode_canonical_roundtrip @long_running
   Scenario Outline: Every emitter publishing mode round-trips through SHOW CREATE
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

@@ -2245,6 +2245,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/connection/__fuzz__/connection__relay_owner__tests__bolero_relay_channel_turnover_never_admits_an_identity_twice/corpus"
+domain_version = 1
+features = []
+id = "relay-channel-watermark-turnover"
+invariant = "Channel openings, resolutions, continuations, delayed repeats and idle sweeps through a peer owner whose three watermarks are fewer than its turnover never admit one delivery identity twice, always admit a channel opened after every forgotten one, and keep the retained watermarks within the budget."
+manifest = "Cargo.toml"
+max_input_bytes = 96
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/connection/relay_owner_tests.rs"
+test = "connection::relay_owner::tests::bolero_relay_channel_turnover_never_admits_an_identity_twice"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_sealed_window_checkpoints_match_their_resident_encoding/corpus"
 domain_version = 2
 features = []
@@ -2981,10 +2996,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "ingestor-describe-envelope"
-invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges and ordered metric lines, survives the describe envelope conversion and the production command response codec unchanged."
+invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, decode rejection count and last decode rejection with its reference, codec, Kafka or IPv4 and IPv6 syslog position, sorted fields, message and instant, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges and ordered metric lines, survives the describe envelope conversion and the production command response codec unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"

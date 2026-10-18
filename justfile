@@ -1165,6 +1165,37 @@ coverage-merge-runner:
     "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" --branch --source=scripts.coverage_merge,scripts.tests.test_coverage_merge -m unittest scripts.tests.test_coverage_merge
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-merge/python.coverage" -o "{{ cargo_target_dir }}/coverage-merge/python.lcov"
 
+# Record the selection the full coverage union is derived from in
+# target/coverage-full/selection.json: the run's event and pull request label snapshot, whether the
+# tested diff required the suites and the Bolero call, the run, its attempt, the tested revision and,
+# in CI, each producer job's result from the needs context. Without arguments it records a local
+# selection, whose labels name the label-enabled producers collected locally.
+coverage-full-select *args:
+    python3 -m scripts.coverage_full select --output {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} {{ quote(args) }}
+
+# Combine every coverage producer the recorded selection requires into one workspace line-coverage
+# union, target/coverage-full/lcov-full.info, with its record, its contributor breakdown and the lines
+# each contribution covered beyond the ordinary report. An input is a downloaded artifact directory,
+# an attempt directory, the ordinary lcov-workspace.info or one record; --selection <path> names a
+# retained selection instead. It reads reports and records only, so repeating it over retained
+# artifacts at the tested revision gives the same lines, and it fails, writing no report, when an
+# input is missing, stale, foreign, corrupt, incomplete or not selected.
+coverage-full *inputs:
+    python3 -m scripts.coverage_full union --selection {{ quote(cargo_target_dir + "/coverage-full/selection.json") }} --directory {{ quote(cargo_target_dir + "/coverage-full") }} {{ quote(inputs) }}
+
+# Exercise the union's selection, validation, attribution and CI contract.
+test-coverage-full:
+    python3 -m unittest scripts.tests.test_coverage_full
+
+# Retain the union's own measured line coverage beside the other Python tooling reports.
+coverage-full-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/coverage-full"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" --branch --source=scripts.coverage_full,scripts.tests.test_coverage_full -m unittest scripts.tests.test_coverage_full
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" -o "{{ cargo_target_dir }}/coverage-full/python.lcov"
+
 # Report CRAP over the merged ordinary workspace report as the coverage job does: the pinned cargo-crap
 # scores the repository's Rust sources against the report and writes target/crap-report/crap.json
 # and crap.md. No score fails the recipe. It fails only when the analysis is vacuous: the merge record
@@ -2809,6 +2840,21 @@ test-chaos-rate-probe:
 # Judge mixed-instability holds over a lossy link from retained public statuses without a product image.
 test-chaos-hold-quorum:
     exec bash scripts/chaos/tests/hold-quorum-self-test.sh
+
+# Judge a failover-length pause's sink progress and source consumer-group handoff from retained
+# pause timelines without a product image.
+test-chaos-pause-delivery:
+    exec bash scripts/chaos/tests/pause-delivery-self-test.sh
+
+# Retain shell coverage of the failover-length pause's sink progress and consumer-group handoff controls.
+coverage-chaos-pause-delivery:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/pause-resume-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/consumer-group.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/pause-delivery-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-pause-delivery-coverage") }} scripts/chaos/tests/pause-delivery-self-test.sh
 
 # Exercise bounded packet sampling and the directed-link effect limits without a product image.
 test-chaos-degraded-evidence:

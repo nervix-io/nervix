@@ -237,6 +237,84 @@ fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
     assert_eq!(reopened.sequence, 0);
 }
 
+/// A receiver may forget a channel opened after this one and refuse every unseen channel at or
+/// below it, so a channel that opened and carried nothing for the idle rotation opens a fresh
+/// incarnation for its first batch.
+#[test]
+fn a_channel_left_unused_since_it_opened_reopens_before_its_first_delivery() {
+    let slot = RelayOutboundSlot::new();
+    let after_opening = Instant::now();
+    let opened_later = uuid::Uuid::now_v7().into_bytes();
+
+    let first = slot.next_delivery_at(
+        after_opening
+            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
+            .expect("the fixed relay idle duration should fit the monotonic clock"),
+    );
+
+    assert!(
+        first.channel_incarnation > opened_later,
+        "the first delivery used the incarnation the slot opened {RELAY_CHANNEL_IDLE_ROTATION:?} \
+         before it"
+    );
+    assert_eq!(first.sequence, 0);
+}
+
+#[test]
+fn a_channel_left_unused_since_it_reopened_reopens_before_its_next_delivery() {
+    let slot = RelayOutboundSlot::new();
+    let unresolved = slot.next_delivery();
+    slot.reopen_delivery_channel();
+    let after_reopening = Instant::now();
+    let reopened_later = uuid::Uuid::now_v7().into_bytes();
+
+    let next = slot.next_delivery_at(
+        after_reopening
+            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
+            .expect("the fixed relay idle duration should fit the monotonic clock"),
+    );
+
+    assert!(unresolved.channel_incarnation < reopened_later);
+    assert!(
+        next.channel_incarnation > reopened_later,
+        "the next delivery used the incarnation reopened {RELAY_CHANNEL_IDLE_ROTATION:?} before it"
+    );
+    assert_eq!(next.sequence, 0);
+}
+
+#[test]
+fn a_channel_used_within_the_idle_rotation_of_its_opening_keeps_its_incarnation() {
+    let slot = RelayOutboundSlot::new();
+    let opened_later = uuid::Uuid::now_v7().into_bytes();
+    let after_opening = Instant::now();
+
+    let first = slot.next_delivery_at(after_opening);
+
+    assert!(first.channel_incarnation < opened_later);
+    assert_eq!(first.sequence, 0);
+}
+
+/// A receiver refuses a channel at or below the greatest one it forgot, so every channel this
+/// process opens, at a slot's creation and at each reopening, sorts after every channel it opened
+/// before.
+#[test]
+fn every_channel_this_process_opens_sorts_after_the_channels_it_opened_before() {
+    let slots = [RelayOutboundSlot::new(), RelayOutboundSlot::new()];
+    let mut previous = slots[0].next_delivery().channel_incarnation;
+    let mut latest = slots[1].next_delivery().channel_incarnation;
+    assert!(latest > previous);
+    for round in 0..1_000 {
+        previous = latest;
+        let slot = &slots[round % 2];
+        slot.reopen_delivery_channel();
+        latest = slot.next_delivery().channel_incarnation;
+        assert!(
+            latest > previous,
+            "reopening {round} opened {latest:?} after {previous:?}"
+        );
+    }
+}
+
 #[test]
 fn indeterminate_delivery_reopens_with_a_fresh_channel_incarnation() {
     let slot = RelayOutboundSlot::new();
