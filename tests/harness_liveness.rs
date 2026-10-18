@@ -4080,6 +4080,81 @@ mod tests {
         assert_ne!(published(&retry).identity, published(&example).identity);
     }
 
+    #[nervix_primitives::test(start_paused = true)]
+    async fn the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running() {
+        use crate::{
+            scenario_phase::suite_summary,
+            scenario_schedule::{LONG_RUNNING_ATTEMPT, ScenarioLength},
+        };
+
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let start_body = |scenario, declared| {
+            let registration = ActiveScenarioRegistration::start(
+                "Harness liveness",
+                scenario,
+                STAND_IN_SCENARIO_LINE,
+                declared,
+            );
+            registration.enter(ScenarioPhase::Body);
+            registration
+        };
+        let undeclared = start_body(
+            "an undeclared attempt that ran for two minutes",
+            ScenarioLength::Ordinary,
+        );
+        let _running = start_body(
+            "an undeclared attempt still running after two minutes",
+            ScenarioLength::Ordinary,
+        );
+        let declared = start_body(
+            "a declared attempt that ran for two minutes",
+            ScenarioLength::LongRunning,
+        );
+        let shorter = start_body(
+            "an undeclared attempt that ended just short of two minutes",
+            ScenarioLength::Ordinary,
+        );
+
+        let short_of_the_bound = Duration::from_millis(100);
+        let just_short = LONG_RUNNING_ATTEMPT
+            .checked_sub(short_of_the_bound)
+            .verified("the long-running bound is two minutes, far above 100 milliseconds");
+        nervix_primitives::time::advance(just_short).await;
+        shorter.enter(ScenarioPhase::Finished);
+        nervix_primitives::time::advance(short_of_the_bound).await;
+        undeclared.enter(ScenarioPhase::Finished);
+        declared.enter(ScenarioPhase::Finished);
+
+        // The section is the summary's last, and rows of other tests' scenarios may share it.
+        let summary = suite_summary();
+        let Some((_, section)) =
+            summary.split_once("### Attempts of at least 120s without @long_running")
+        else {
+            panic!("the summary must have a section for undeclared long attempts:\n{summary}");
+        };
+        let row = |scenario: &str| {
+            format!(
+                "| 120.0s | 1 | Harness liveness / {scenario} (line {STAND_IN_SCENARIO_LINE}) |"
+            )
+        };
+        assert!(
+            section.contains(&row("an undeclared attempt that ran for two minutes")),
+            "{summary}"
+        );
+        assert!(
+            section.contains(&row("an undeclared attempt still running after two minutes")),
+            "an attempt still in its body counts as long as it has run so far:\n{summary}"
+        );
+        assert!(
+            !section.contains("a declared attempt that ran for two minutes"),
+            "{summary}"
+        );
+        assert!(
+            !section.contains("an undeclared attempt that ended just short of two minutes"),
+            "{summary}"
+        );
+    }
+
     /// A command line that carries only the suite watchdog's own options, so the injection point
     /// a run configures the budget through can be parsed on its own.
     #[derive(clap::Parser)]
