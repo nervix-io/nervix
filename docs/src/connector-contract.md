@@ -497,6 +497,16 @@ group closes. Compiled field keys direct borrowed JSON values into typed columns
 tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
 it started, including any list value it left half-filled at any depth, preserving the accepted rows
 and transport positions around it: every payload decodes into its group exactly as it would alone.
+A payload its codec refuses leaves its batch instead of failing it, because presenting it again
+would repeat the refusal. The host consumes it as a decode rejection, which the ingestor's
+`ON GENERAL ERROR` policy reports and which names the transport position the payload's typed
+metadata carries; see [When The Codec Refuses A Payload](./ingestors.md#when-the-codec-refuses-a-payload).
+In an acknowledged mode the host gives the refused payload a confirmed root and resolves it at once,
+so its position is acknowledged together with the batch's other positions and a drain or an
+ownership handoff waits for that confirmation, as it waits for a dispatched payload's. In
+`MODE NO ACK` the host drops it. A payload the extension workers had no room to unfold was judged by
+nothing, so it still fails its whole batch: an acknowledged batch is rejected for its source to
+present again, and a live unacknowledged one follows its source's unacknowledged admission.
 At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
 admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
 Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
@@ -547,7 +557,7 @@ behind it until then. Its sender was already answered and its source has moved p
 host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
 than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
 and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
-rejects leaves the buffer and is reported.
+refuses leaves the buffer as a decode rejection.
 
 At the start of a graceful stop, the host closes intake on the stopping node before the control
 plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
@@ -1465,8 +1475,10 @@ bind all stay beneath the ingestor's initialize failure, which names the ingesto
 Host-owned refusals, such as a missing node resolver, signaling protocol or endpoint, Kafka
 `DOMAIN` offsets this node does not own, or a delivery-mode duration that does not parse, are typed
 causes in the same place. Host decoding returns the codec's report through the ingest group
-unchanged and keeps it beneath the intake's decode failure, which a source loop reports with its
-whole chain; the host never renders a codec failure into text before that boundary. A context whose
+unchanged, and the decode rejection that replaces the refused payload renders its whole chain once
+as the rejection's message; the host never renders a codec failure into text before that boundary.
+A refusal for room keeps the executor's report beneath the intake's dispatch failure, which a source
+loop reports with its whole chain. A context whose
 parser or driver error is its `#[source]` leaves that error out of its own message, because the
 report carries the source as the frame beneath it: a rendered chain names each cause once. A
 Syslog `max_message_size` or `addr` value that does not parse therefore reads as the key and value

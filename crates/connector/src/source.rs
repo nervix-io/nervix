@@ -337,8 +337,6 @@ pub struct SourceIntakeMessage<'a> {
 pub enum SourceIntakeError {
     #[error("failed to retain a source batch during quiesce")]
     Retain,
-    #[error("failed to decode a source payload")]
-    Decode,
     #[error("failed to dispatch a source batch")]
     Dispatch,
     #[error("failed to flush a source batch")]

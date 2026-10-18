@@ -186,3 +186,138 @@ async fn peer_departure_reclaims_an_admitted_relays_capacity() {
     pair.transport_a.shutdown().await;
     pair.transport_b.shutdown().await;
 }
+
+/// One-byte rows on `delivery`, carrying the admission `ack_id` of `registrar`.
+fn turnover_payload(
+    delivery: RelayDelivery,
+    ack_id: u64,
+    registrar: &ClusterNodeName,
+) -> RelayPayload {
+    RelayPayload {
+        delivery,
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("turnover").assured("the fixture domain is valid"),
+        relay: RelayName::parse("records").assured("the fixture relay is valid"),
+        key: None,
+        batch_ipc: Executor::default()
+            .try_charge_owned(MemoryClass::Relay, vec![1])
+            .assured("one byte fits the fixture's relay budget"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(registration(ack_id, registrar)),
+    }
+}
+
+/// A receiver whose watermark budget is smaller than a sender's channel turnover keeps admitting
+/// the sender's new channels through the authenticated connection, and answers a repeated request
+/// for a channel it forgot as retired on the grant, status and cancellation paths instead of
+/// admitting it again.
+#[nervix_primitives::test]
+async fn a_receiver_admits_channel_turnover_beyond_its_watermark_budget() {
+    let options = TransportOptions {
+        incoming_queue_capacity: 1,
+        relay_channel_watermark_capacity: 2,
+        ..TransportOptions::default()
+    };
+    let mut pair = connected_transports_with_options(options).await;
+    pair.transport_b
+        .register_outbound_target(
+            pair.node_a.clone(),
+            NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
+        )
+        .assured("the terminal outcome has a reverse authenticated route");
+    for channel in 1..=6_u8 {
+        let delivery = RelayDelivery {
+            channel_incarnation: [channel; 16],
+            sequence: 0,
+        };
+        let ack_id = u64::from(channel);
+        pair.transport_a
+            .send(
+                &pair.node_b,
+                Envelope::RelayPayload(turnover_payload(delivery, ack_id, &pair.node_a)),
+            )
+            .await
+            .assured("every new channel is granted while forgotten ones make room");
+        let received = timeout(Duration::from_secs(10), pair.incoming_b.recv())
+            .await
+            .assured("the body reaches its intake within the fixture deadline")
+            .assured("the receiver remains connected");
+        assert_eq!(
+            received
+                .relay_admission
+                .as_ref()
+                .assured("a relay body has an intake")
+                .admit(),
+            RelayAdmissionDecision::Admitted
+        );
+        // The sender's one-item queue also takes the receiver's progress reports, so the
+        // terminal outcome is sent while the sender drains them.
+        let resolution = registration(ack_id, &pair.node_a).resolution(RemoteAckOutcome::Ack);
+        let sending = pair
+            .transport_b
+            .send(&pair.node_a, Envelope::Ack(resolution.clone()));
+        let incoming_a = &mut pair._incoming_a;
+        let draining = timeout(Duration::from_secs(10), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let received = incoming_a
+                    .recv()
+                    .await
+                    .assured("the sender remains connected");
+                if let Envelope::Ack(ack) = received.envelope
+                    && ack == resolution
+                {
+                    break;
+                }
+            }
+        });
+        let (sent, drained) = futures_util::future::join(sending, draining).await;
+        sent.assured("the terminal outcome crosses the authenticated connection");
+        drained.assured("the terminal outcome returns within the fixture deadline");
+        assert_eq!(pair.transport_b.snapshot().relay_attempts, 0);
+    }
+    let snapshot = pair.transport_b.snapshot();
+    assert_eq!(snapshot.relay_channel_watermarks, 2);
+    assert_eq!(snapshot.counters.relay_channel_watermarks_evicted, 4);
+
+    let forgotten = RelayDelivery {
+        channel_incarnation: [1; 16],
+        sequence: 0,
+    };
+    let repeated = pair
+        .transport_a
+        .send(
+            &pair.node_b,
+            Envelope::RelayPayload(turnover_payload(forgotten, 1, &pair.node_a)),
+        )
+        .await
+        .expect_err("a forgotten channel is never granted again");
+    assert!(
+        matches!(
+            repeated.current_context(),
+            TransportError::RelayIndeterminate
+        ),
+        "{repeated:?}"
+    );
+    assert_eq!(
+        pair.transport_a
+            .relay_admission_status(&pair.node_b, forgotten)
+            .await
+            .assured("the receiver answers the status of a forgotten channel"),
+        RelayAdmissionStatus::Retired
+    );
+    assert_eq!(
+        pair.transport_a
+            .cancel_relay(&pair.node_b, forgotten)
+            .await
+            .assured("the receiver answers the cancellation of a forgotten channel"),
+        RelayAdmissionStatus::Retired
+    );
+    assert!(
+        pair.incoming_b.try_recv().is_err(),
+        "the forgotten channel never reaches the application again"
+    );
+    pair.transport_a.shutdown().await;
+    pair.transport_b.shutdown().await;
+}

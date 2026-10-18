@@ -206,6 +206,7 @@ Feature: WASM guest-state checkpoint durability
       | 1            | 0             | after_local_durability |
       | 3            | 1             | after_local_durability |
 
+  @long_running
   Scenario: A WASM processor withholds source acknowledgement until its replica durably holds the checkpoint
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"

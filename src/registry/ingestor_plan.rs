@@ -26,17 +26,17 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerPolicy,
     ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, CreateIngestor,
-    CreateSchema, DomainName, EndpointName, FlushPolicy, HttpEndpointSource, HttpRequestSource,
-    HttpSource, IngestAcknowledgement, IngestQuiesceMode, IngestSource, IngestSourceKind,
-    IngestTimestampSource, IngestorInput, IngestorName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSource, KafkaTopicSource, MessageErrorOperation, Model, ModelName, MqttIngestMode,
-    MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource, PrometheusQuerySource,
-    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
-    RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource, ResolvedBranching,
-    ScheduledNode, SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode, SqsQueueSource,
-    SqsSource, SyslogListenerSource, SyslogSource, WebsocketsConnectionSource,
-    WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource, ZeroMqSource,
-    parse_duration_text,
+    CreateSchema, DomainName, EndpointName, FlushPolicy, GeneralErrorPolicy, HttpEndpointSource,
+    HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode, IngestSource,
+    IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName, KafkaIngestMode,
+    KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model, ModelName,
+    MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
+    PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource,
+    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
+    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
+    WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource,
+    ZeroMqSource, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -84,6 +84,9 @@ pub(crate) struct IngestorSpec {
     pub(crate) timestamp_source: Option<IngestTimestampSource>,
     pub(crate) filter_where: Option<LoweredFilter>,
     pub(crate) declared_input: DeclaredIngestorInput,
+    /// The ingestor's node-wide `ON GENERAL ERROR` policy, which also reports the payloads its
+    /// codec refuses.
+    pub(crate) general_error_policy: GeneralErrorPolicy,
 }
 
 impl IngestorSpec {
@@ -344,6 +347,7 @@ impl IngestorStartPlan {
             declared_input: DeclaredIngestorInput {
                 input: ingestor.input.clone(),
             },
+            general_error_policy: ingestor.general_error_policy.clone(),
         };
         Ok(Self { ingestor, input })
     }
