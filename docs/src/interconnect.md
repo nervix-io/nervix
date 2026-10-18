@@ -1438,7 +1438,11 @@ one. The serving node sends `Open` with the domain, ingestor, expected fields, c
 largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
 bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
 with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
-`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`.
+`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`. The
+serving node checked the committed domain, schedule and ingestor before it forwarded the open, so
+an owning node that runs no endpoint of the ingestor yet, as one that has not installed its domains
+again since it started, refuses it as `EndpointUnavailable` rather than classifying the endpoint
+from its own installation.
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other

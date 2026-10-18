@@ -1433,6 +1433,15 @@ show the state before a committed `START`, so it does not classify a missing or 
 terminal until that barrier passes. The client retries this temporary refusal with its bounded
 restoration backoff.
 
+The node that executes the endpoint answers only for the endpoint it runs. The serving node has
+already checked the open against the committed domain and schedule, and the executing node's
+installation trails them until it has installed its domains again after it started, or the
+revision the serving node read. An open that finds no endpoint there is therefore
+`EndpointUnavailable`, never `DomainNotFound`, `DomainStopped`, `IngestorNotFound` or
+`NotClientIngestor`. A restored producer whose open reaches a restarted executing node before that
+node installs its domain retries instead of requiring an explicit new open, and a removed or
+stopped endpoint is still classified, by the serving node, on the next attempt.
+
 ## Emitter Consumers
 
 `OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested

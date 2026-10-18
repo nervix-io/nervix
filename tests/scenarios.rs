@@ -697,6 +697,18 @@ impl ScenarioWorld {
             .expect("cluster must be created before using it")
     }
 
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
+    }
+
     fn cluster(&self) -> &Cluster {
         self.cluster
             .as_ref()
@@ -12294,16 +12306,26 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
+        .await
+        .expect("failed to restart cluster");
+}
+
+/// The node's runtime installation is held from its start, so whatever reaches it after the
+/// restart finds a node that has not installed its committed domains again.
+#[when(expr = "the cluster is restarted while runtime installation on node {string} waits")]
+async fn when_the_cluster_is_restarted_holding_runtime_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.forget_session_observations();
+    world
+        .cluster_mut()
+        .restart_holding_runtime_installation(&node_id)
         .await
         .expect("failed to restart cluster");
 }

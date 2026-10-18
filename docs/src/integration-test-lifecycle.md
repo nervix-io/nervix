@@ -533,6 +533,12 @@ The boundary between them is kept in four places.
   run again. A killed voter restarts from its own database and ports, and the step then waits for
   the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
   fixture asks only the running ones which node leads.
+  The held-installation restart fixture also stops every in-process node first. It then holds the
+  first runtime installation one named node begins, before that node's process-start catch-up, so
+  the restarted cluster answers opens that reach the node before it has installed any committed
+  domain again. Startup waits only for Raft catch-up and the interconnect, which the hold does not
+  stop, and the scenario releases the installation. Arming the hold after the stop keeps an
+  installation the stopping node began from taking it.
   The restarted-voter observation fixture stops every in-process node before arming its fault.
   It blocks direct gossip between the first leader and one voter, then holds that voter's first
   relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's

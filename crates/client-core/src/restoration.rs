@@ -49,6 +49,7 @@ use nervix_primitives::{
     sync::{Arc, StdArc},
     time::sleep,
 };
+use tracing::debug;
 
 use crate::{
     consumer::ConsumerHandle,
@@ -414,6 +415,13 @@ impl ConsumerFollower {
                         return;
                     }
                     OpenEmitterDisposition::Refused(refusal) => {
+                        debug!(
+                            domain = self.handle.domain().as_str(),
+                            emitter = self.handle.emitter().as_str(),
+                            refusal = ?refusal,
+                            message = outcome.message.as_str(),
+                            "the session refused to restore a consumer"
+                        );
                         self.handle.restoration_refused(&self.generation, refusal)
                     }
                 },
@@ -422,10 +430,22 @@ impl ConsumerFollower {
                     return;
                 }
                 Err(report) if report.current_context().retryable_session_failure() => {
+                    debug!(
+                        domain = self.handle.domain().as_str(),
+                        emitter = self.handle.emitter().as_str(),
+                        error = %format_args!("{report:#}"),
+                        "a consumer restoration ended with its exchange"
+                    );
                     self.handle.exchange_ended(&self.generation);
                     return;
                 }
-                Err(_) => {
+                Err(report) => {
+                    debug!(
+                        domain = self.handle.domain().as_str(),
+                        emitter = self.handle.emitter().as_str(),
+                        error = %format_args!("{report:#}"),
+                        "a consumer restoration failed"
+                    );
                     self.handle.restoration_failed(&self.generation);
                     return;
                 }
@@ -434,6 +454,12 @@ impl ConsumerFollower {
                 return;
             }
             let retry_after = delay.advance();
+            debug!(
+                domain = self.handle.domain().as_str(),
+                emitter = self.handle.emitter().as_str(),
+                retry_after = ?retry_after,
+                "a refused consumer restoration is sent again after its wait"
+            );
             let mut changed = self.handle.watch();
             nervix_primitives::select! {
                 () = sleep(retry_after) => {}
@@ -488,12 +514,33 @@ impl ProducerFollower {
                                 self.generation.clone(),
                             )
                             .await;
-                        if restored.is_err() {
-                            self.handle.restoration_failed(&self.generation);
+                        match restored {
+                            Ok(installed) => debug!(
+                                domain = self.handle.domain().as_str(),
+                                ingestor = self.handle.ingestor().as_str(),
+                                installed,
+                                "a producer restoration was opened"
+                            ),
+                            Err(report) => {
+                                debug!(
+                                    domain = self.handle.domain().as_str(),
+                                    ingestor = self.handle.ingestor().as_str(),
+                                    error = %format_args!("{report:#}"),
+                                    "a producer restoration was opened and could not be installed"
+                                );
+                                self.handle.restoration_failed(&self.generation);
+                            }
                         }
                         return;
                     }
                     OpenIngestorDisposition::Refused(refusal) => {
+                        debug!(
+                            domain = self.handle.domain().as_str(),
+                            ingestor = self.handle.ingestor().as_str(),
+                            refusal = refusal.as_ref(),
+                            message = outcome.message.as_str(),
+                            "the session refused to restore a producer"
+                        );
                         self.handle.restoration_refused(&self.generation, refusal)
                     }
                 },
@@ -502,10 +549,22 @@ impl ProducerFollower {
                     return;
                 }
                 Err(report) if report.current_context().retryable_session_failure() => {
+                    debug!(
+                        domain = self.handle.domain().as_str(),
+                        ingestor = self.handle.ingestor().as_str(),
+                        error = %format_args!("{report:#}"),
+                        "a producer restoration ended with its exchange"
+                    );
                     self.handle.exchange_ended(&self.generation);
                     return;
                 }
-                Err(_) => {
+                Err(report) => {
+                    debug!(
+                        domain = self.handle.domain().as_str(),
+                        ingestor = self.handle.ingestor().as_str(),
+                        error = %format_args!("{report:#}"),
+                        "a producer restoration failed"
+                    );
                     self.handle.restoration_failed(&self.generation);
                     return;
                 }
@@ -514,6 +573,12 @@ impl ProducerFollower {
                 return;
             }
             let retry_after = delay.advance();
+            debug!(
+                domain = self.handle.domain().as_str(),
+                ingestor = self.handle.ingestor().as_str(),
+                retry_after = ?retry_after,
+                "a refused producer restoration is sent again after its wait"
+            );
             let mut changed = self.handle.watch();
             nervix_primitives::select! {
                 () = sleep(retry_after) => {}
