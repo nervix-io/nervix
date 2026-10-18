@@ -506,7 +506,14 @@ The boundary between them is kept in four places.
   records its disposition.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
-  retain the protocol's received dispositions. A paced-driver file fixture writes only the
+  retain the protocol's received dispositions. A restore completion probe explicitly requesting
+  outcome recovery repeats its same reference, statement and archive against the cluster's nodes
+  after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
+  its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a
+  definitive failure or upload refusal immediately, and keeps the terminal reply's actual origin
+  and complete report. The staging scenario transfers leadership while publication is paused on
+  three nodes, while retaining the one-node example and its staging and branch-state checks.
+  A paced-driver file fixture writes only the
   scenario's ledger or effect file before the driver starts. The published driver reads that
   file, and the scenario checks the process exit and the occurrence count of its terminal cause.
   No harness deadline shortens
