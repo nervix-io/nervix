@@ -3,11 +3,11 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Starting, killing and restarting every persisted voter, signalling, freezing and
-//!   restarting one of them, observable membership and leader readiness before a scenario sends
+//!   restarting one of them, the budget its members have to converge before a scenario sends
 //!   commands, and, in a diagnostic build, retaining the members' deadlock evidence and logs,
 //!   whether the cluster started or its start failed.
-//! - **Depends on.** The single-process fixture, its test certificate authority, and bounded
-//!   public cluster-status requests.
+//! - **Depends on.** The single-process fixture, its test certificate authority, bounded public
+//!   cluster-status requests, and the convergence its members report.
 //! - **Must not know.** Server state beyond the command and status surfaces each process exposes.
 //!
 //! A member stopped by SIGSTOP keeps its sockets open and answers nothing, so the cluster asks
@@ -27,6 +27,7 @@ use tempfile::TempDir;
 use super::{
     cluster::{InterconnectTestCa, TestSession},
     phase_deadline::PhaseDeadline,
+    process_cluster_convergence::ClusterConvergence,
     server_process::{ServerProcess, ServerProcessLaunch, ServerProcessOption, describe_exit},
     status_request::STATUS_REQUEST_TIMEOUT,
 };
@@ -36,7 +37,6 @@ const NODE_COUNT: usize = 3;
 #[cfg(feature = "deloxide")]
 const DEADLOCK_EVIDENCE_DIRECTORY: &str = "deadlock-evidence";
 const CLUSTER_READY_TIMEOUT: Duration = Duration::from_secs(120);
-const MEMBERSHIP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A whole real-process cluster. Each member retains its ports and database across a restart.
 #[derive(Debug)]
@@ -215,7 +215,7 @@ impl ServerProcessCluster {
             self.nodes.insert(node_id.clone(), process);
             self.member_mut(&node_id)?.wait_until_ready().await?;
         }
-        self.wait_for_voters().await
+        self.convergence().wait().await
     }
 
     pub(crate) fn node_ids(&self) -> Vec<String> {
@@ -250,8 +250,9 @@ impl ServerProcessCluster {
     /// Starts an exited member again from its own database and ports, then waits until every
     /// member reports the same leader and all configured voters.
     pub(crate) async fn restart(&mut self, node_id: &str) -> io::Result<()> {
-        self.member_mut(node_id)?.restart().await?;
-        self.wait_for_voters().await
+        let convergence = self.convergence();
+        let member = self.member_mut(node_id)?;
+        convergence.relaunch(node_id, member.restart()).await
     }
 
     /// The node the running members report as leader.
@@ -309,7 +310,7 @@ impl ServerProcessCluster {
             nervix_primitives::task::consume_budget().await;
             process.wait_until_ready().await?;
         }
-        self.wait_for_voters().await
+        self.convergence().wait().await
     }
 
     async fn leader(&self) -> io::Result<&ServerProcess> {
@@ -356,60 +357,12 @@ impl ServerProcessCluster {
         )))
     }
 
-    async fn wait_for_voters(&self) -> io::Result<()> {
-        let deadline = PhaseDeadline::after(CLUSTER_READY_TIMEOUT);
-        let mut last_statuses = BTreeMap::new();
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let mut leader: Option<String> = None;
-            let mut ready = true;
-            for (node_id, process) in &self.nodes {
-                nervix_primitives::task::consume_budget().await;
-                let status = process
-                    .status_endpoint()
-                    .cluster_status(deadline.nested(STATUS_REQUEST_TIMEOUT))
-                    .await;
-                let status = match status {
-                    Ok(status) => status,
-                    Err(error) => {
-                        last_statuses.insert(node_id.clone(), error.to_string());
-                        ready = false;
-                        continue;
-                    }
-                };
-                let current_leader = status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("raft.current_leader: "));
-                if let Some(current_leader) = current_leader
-                    && current_leader != "(none)"
-                    && self.nodes.contains_key(current_leader)
-                {
-                    match leader.as_deref() {
-                        Some(existing) if existing != current_leader => ready = false,
-                        None => leader = Some(current_leader.to_string()),
-                        _ => {}
-                    }
-                } else {
-                    ready = false;
-                }
-                for member in self.nodes.keys() {
-                    if !status.contains(&format!("- {member} [voter]")) {
-                        ready = false;
-                    }
-                }
-                last_statuses.insert(node_id.clone(), status);
-            }
-            if ready {
-                return Ok(());
-            }
-            if deadline.has_passed() {
-                return Err(io::Error::other(format!(
-                    "process cluster did not converge on its voters within {}; last statuses: \
-                     {last_statuses:?}",
-                    humantime::format_duration(CLUSTER_READY_TIMEOUT)
-                )));
-            }
-            deadline.pause(MEMBERSHIP_POLL_INTERVAL).await;
+    /// What every member must report before a scenario continues, and the budget it has.
+    fn convergence(&self) -> ClusterConvergence {
+        let mut members = BTreeMap::new();
+        for (node_id, process) in &self.nodes {
+            members.insert(node_id.clone(), process.status_endpoint());
         }
+        ClusterConvergence::new(members, CLUSTER_READY_TIMEOUT)
     }
 }
