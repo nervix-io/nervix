@@ -171,6 +171,59 @@ async fn an_unacknowledged_batch_drops_a_payload_its_codec_refuses_and_delivers_
     fixture.finish().await;
 }
 
+/// An unacknowledged batch whose every payload its codec refuses dispatches nothing.
+#[nervix_primitives::test]
+async fn an_unacknowledged_batch_its_codec_refuses_whole_dispatches_nothing() {
+    let mut fixture = UnfoldingDomain::start().await;
+    let mut errors = fixture.runtime.events().subscribe();
+    let (_shutdown_tx, shutdown) = watch::channel(false);
+    let quiesce = fixture.quiesce();
+    let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
+
+    host.intake_unacknowledged(vec![message(REFUSED)])
+        .await
+        .expect("a payload its codec refuses does not fail its batch");
+
+    let report = next_error(&mut errors).await;
+    assert_rejected(&fixture, &report, 1);
+    assert_eq!(
+        host.collector.len(),
+        0,
+        "nothing of the batch enters the group"
+    );
+    fixture.finish().await;
+}
+
+/// A poll whose every message its codec refuses puts nothing into the ingest group.
+#[nervix_primitives::test]
+async fn a_poll_its_codec_refuses_whole_enters_nothing() {
+    let mut fixture = UnfoldingDomain::start().await;
+    let mut errors = fixture.runtime.events().subscribe();
+    let (_shutdown_tx, shutdown) = watch::channel(false);
+    let quiesce = fixture.quiesce();
+    let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
+
+    let polled = host
+        .intake_poll(SourcePoll {
+            messages: vec![SourcePollMessage {
+                payload: REFUSED.to_vec(),
+                headers: RetainedIngestHeaders::none(),
+            }],
+            failures: Vec::new(),
+            observed_at: Timestamp::from_unix_nanos(1),
+        })
+        .await;
+
+    assert!(
+        matches!(polled, Ok(false)),
+        "no message of the poll enters the ingest group: {polled:?}"
+    );
+    let report = next_error(&mut errors).await;
+    assert_rejected(&fixture, &report, 1);
+    assert_eq!(host.collector.len(), 0);
+    fixture.finish().await;
+}
+
 /// A poll whose codec refuses one of its messages delivers the others.
 #[nervix_primitives::test]
 async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
