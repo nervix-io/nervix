@@ -452,6 +452,15 @@ the step that injects the holds only awaits that task. A stalled runner delays w
 of a release, never the release itself. The step still watches the controlled operation, and a
 command that ends before its gates were held fails the step with the command's own outcome.
 
+The duration window outline establishes its observation boundary through a public subscription:
+it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
+as one HTTP payload unfolded into a decoded batch. Explicit source timestamps are already due
+when that batch arrives, while `TIMESTAMP NOW` gives the whole batch one fresh ingestion snapshot.
+Each branch receives its two rows together before its next timer check. The outline retains both
+rates, one- and three-node clusters, exact counts and sums, timestamp preservation and its
+ten-second assertion bounds. Independent HTTP requests would allow domain-time completion between
+rows, even when their explicit source timestamps are identical.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
