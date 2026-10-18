@@ -1788,6 +1788,12 @@ impl Cluster {
         }
     }
 
+    /// The messages `queue` holds ready for delivery now.
+    pub(crate) async fn rabbitmq_queue_messages(&self, queue: &str) -> io::Result<usize> {
+        let state = rabbitmq_queue_state(&self.dependencies, queue).await?;
+        Ok(state.messages)
+    }
+
     pub(crate) async fn wait_for_redis_channel_subscribers(
         &self,
         channel: &str,
@@ -3532,11 +3538,10 @@ impl StartableNode for NodeHandle {
             .await
     }
 
-    /// A node that never became ready has no drain to finish, so its cleanup is the short slice
-    /// its startup budget can spare rather than the product's shutdown watchdog. The stop is
-    /// requested first. A node still stopping when the slice ends keeps its task, its coordinator
-    /// and its consensus registration, and the startup ends rather than launching over the
-    /// database and the listeners it still holds.
+    /// Failed-startup cleanup shares the node's remaining absolute startup budget. The stop is
+    /// requested first, and the product's shutdown watchdog does not restart the harness budget.
+    /// A node still stopping when that budget ends keeps its task, its coordinator and its
+    /// consensus registration; a replacement cannot take the database or listeners it still holds.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
         let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);
@@ -4736,10 +4741,26 @@ async fn declare_rabbitmq_queue(channel: &lapin::Channel, queue: &str) -> io::Re
     Ok(())
 }
 
+/// What a passive declaration of a RabbitMQ queue reports about it.
+struct RabbitMqQueueState {
+    /// The messages ready for delivery. A delivery a consumer still holds unacknowledged is not one
+    /// of them until the consumer leaves.
+    messages: usize,
+    consumers: usize,
+}
+
 async fn rabbitmq_queue_consumer_count(
     dependencies: &DependencyEndpoints,
     queue: &str,
 ) -> io::Result<usize> {
+    let state = rabbitmq_queue_state(dependencies, queue).await?;
+    Ok(state.consumers)
+}
+
+async fn rabbitmq_queue_state(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<RabbitMqQueueState> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),
@@ -4761,7 +4782,10 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count().arch_into())
+    Ok(RabbitMqQueueState {
+        messages: declared.message_count().arch_into(),
+        consumers: declared.consumer_count().arch_into(),
+    })
 }
 
 async fn publish_redis(

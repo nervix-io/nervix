@@ -388,10 +388,11 @@ wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError`
 does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
 builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
-output position after it. The ingest group returns that report unchanged. A source host keeps it
-beneath its intake's decode or dispatch failure and reports the whole chain, an HTTP or WebSocket
-endpoint renders the whole chain in its decode notice, a lookup line keeps it beneath the line it
-failed on, and an emitter keeps it beneath the record it rejects or the encoding it could not start. The rendered chain reads as the codec
+output position after it. The ingest group returns that report unchanged. A source host and an HTTP
+or WebSocket endpoint render the whole chain once as the message of the decode rejection that
+replaces the refused payload, described in [Decode Rejections](#decode-rejections). A lookup line
+keeps it beneath the line it failed on, and an emitter keeps it beneath the record it rejects or the
+encoding it could not start. The rendered chain reads as the codec
 diagnostic did before: `codec 'events_codec' failed to parse field 'user_id': ...` followed by the
 Arrow builder's own reason. A codec that fails to compile while a domain execution is built keeps its
 report beneath `RuntimeError::BuildDomainExecution`, which names the domain. A codec failure whose
@@ -926,6 +927,15 @@ description and its message ends with it. A later stop can still end the retaine
 
 ### Node Startup
 
+The integration harness keeps a readiness failure and the exact node task's cleanup outcome in
+one attempt record. Retry classification happens after cleanup: a joined application error, panic
+or cancellation supplies the task's cause even when the probe was still waiting for a session.
+A joined listener bind failure selects its own listener family for a retry. A clean exit after the
+harness requested stop leaves the readiness timeout as the retry cause. Cleanup receives the
+remaining absolute startup budget; exhaustion with the task still running retains that task and
+reports its pending cleanup. [Integration Test Lifecycle](./integration-test-lifecycle.md#node-startup)
+owns these harness bounds and the distinction from product shutdown deadlines.
+
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
 the larger requirement controls admission. Arithmetic that cannot represent either requirement is
@@ -983,7 +993,8 @@ installing the new worker and drains the earlier task, preserving its pending ac
 Changing to immediate delivery or withdrawing the route also retires its buffered worker.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
-`ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
+`ON GENERAL ERROR` handles node-wide source and sink failures, and an ingestor's also reports the
+[decode rejections](#decode-rejections) of payloads that never reached a route. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves
 the branch in which the operation failed; ingestor errors are unbranched. See [Runtime Node Error
 Policies](./nspl-overview.md#runtime-node-error-policies), [Message
@@ -994,6 +1005,34 @@ Hot paths retain typed failure variants and row or batch error masks; they do no
 formatted diagnostic for every row or batch when the variant already names the failure. Formatting
 belongs at the policy or public reporting boundary. This keeps error construction from changing
 the processing cadence and avoids putting source payloads in reports.
+
+### Decode Rejections
+
+A source payload its ingestor's codec refuses is the codec's own judgement of that payload, which
+presenting the payload again would only repeat. `PayloadDecodeFailure::Codec` carries that refusal,
+and `PayloadDecodeFailure::NotAdmitted` the executor's refusal to unfold the payload now, which
+judged nothing. The two are told apart by these typed variants, never by text. An ingest group that
+decodes a batch keeps decoding the payloads after a codec refusal and returns each refusal with the
+payload's place in its batch. An unfolding refusal takes the whole batch back out of the group and
+is returned as the batch's own failure, which the source host reports beneath its intake's dispatch
+failure.
+
+The source host, or the endpoint that received the payload, turns each codec refusal into a
+`DecodeRejection`: a UUIDv7 reference, the code `validation`, the operation `decode`, the codec,
+the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
+those of a failed message an unfolding kept as a report of its own, the instant the source took the
+payload in, the transport position the payload's typed metadata names, and the codec report's whole
+chain rendered once as its message. The code and the operation are the same for every decode
+rejection, so the record does not store them. The record never holds the payload, and the codec's
+contexts name the codec and the field, never a value. The ingestor's `ON GENERAL ERROR` policy then
+reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
+rejection <record>` as a runtime event and logs the reference, code, operation and codec as fields,
+and `IGNORE` reports nothing. Unlike a node failure under `LOG`, a decode rejection is never
+negatively acknowledged, because a source that presented the payload again would only be refused
+again. In an acknowledged mode the host resolves the payload's acknowledgement root at once. In
+every mode it counts the payload in `nervix_ingestor_decode_rejections_total` and publishes the
+record as the ingestor's last decode rejection, which `DESCRIBE INGESTOR` reads from the node that
+runs the ingestor through the typed fields of its describe envelope.
 
 ### Sink And Emitter Rejections
 

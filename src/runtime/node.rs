@@ -38,7 +38,7 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
     pub(in crate::runtime) memory_pressure: MemoryPressurePause,
     pub(in crate::runtime) ingestor_statuses:
-        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<RuntimeReconnectStatus>>, RandomState>,
+        DashMap<DomainNodeRef, Arc<IngestorStatus>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:

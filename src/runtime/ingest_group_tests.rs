@@ -374,6 +374,104 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     );
 }
 
+/// A batch keeps decoding after its codec refuses one payload: the payloads around it decode into
+/// the group and keep their entries in order, and the refused payload's entry comes back with the
+/// codec's report.
+#[nervix_primitives::test]
+async fn a_batch_keeps_decoding_after_its_codec_refuses_a_payload() {
+    let runtime = Runtime::default();
+    let codec = grouped_event_codec();
+    let mut collector = IngestRouteCollector::new(
+        SourceMetadataScope::Headers,
+        8,
+        grouped_event_ingestor_metrics(),
+    );
+    let batch = [
+        BatchPayload {
+            payload: br#"{"user_id":1}"#.as_slice(),
+            entry: "first",
+        },
+        BatchPayload {
+            payload: br#"{"user_id":"two"}"#.as_slice(),
+            entry: "second",
+        },
+        BatchPayload {
+            payload: br#"{"user_id":3}"#.as_slice(),
+            entry: "third",
+        },
+    ];
+
+    let payloads = runtime
+        .decode_raw_ingest_payload(
+            &mut collector,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            batch,
+        )
+        .await
+        .expect("a codec refusal leaves the batch's other payloads to decode");
+
+    assert_eq!(payloads.decoded, ["first", "third"]);
+    assert_eq!(payloads.refused.len(), 1);
+    let refusal = &payloads.refused[0];
+    assert_eq!(refusal.entry, "second");
+    assert!(
+        matches!(
+            refusal.report.current_context(),
+            CodecError::ParseField { field, .. } if field == "user_id"
+        ),
+        "the refusal keeps the codec's report: {:?}",
+        refusal.report
+    );
+    assert_eq!(
+        collector.pending.undispatched_payloads(),
+        2,
+        "the group holds the two payloads that decoded, waiting for their source to accept them"
+    );
+}
+
+/// A payload the node cannot unfold now was judged by nothing, so the whole batch is refused
+/// rather than consumed, even a payload its codec would have refused, and the group keeps nothing
+/// of it.
+#[nervix_primitives::test]
+async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
+    let executor = single_worker_executor();
+    let runtime = Runtime::with_executor(executor.clone());
+    let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
+    let codec = unfolding_event_codec(".");
+    let mut collector = IngestRouteCollector::new(
+        SourceMetadataScope::Headers,
+        8,
+        grouped_event_ingestor_metrics(),
+    );
+    let batch = [
+        BatchPayload {
+            payload: br#"{"user_id":"one"}"#.as_slice(),
+            entry: 0_usize,
+        },
+        BatchPayload {
+            payload: br#"{"user_id":2}"#.as_slice(),
+            entry: 1,
+        },
+    ];
+
+    let refused = runtime
+        .decode_raw_ingest_payload(
+            &mut collector,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            batch,
+        )
+        .await;
+
+    assert!(
+        refused.is_err(),
+        "a full extension class refuses the batch instead of judging its payloads"
+    );
+    assert_eq!(collector.pending.undispatched_payloads(), 0);
+    filled.release().await;
+}
+
 /// Every message a payload unfolds into takes the payload's metadata and a share of its ACK
 /// set, so the source's acknowledgement waits for all of them.
 #[nervix_primitives::test]

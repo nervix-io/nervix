@@ -25,7 +25,7 @@ use nervix_models::{
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
     ModelName, NodeEndpoint, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, WasmStateResetScope,
+    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, Timestamp, WasmStateResetScope,
 };
 use nervix_primitives::{sync::mpsc, unmodeled::sync::OnceLock};
 use nervix_recovery::Discarded as _;
@@ -483,6 +483,8 @@ pub struct IngestorDescribeEnvelope {
     pub quiesce_dropped_total: u64,
     pub quiesce_rejected_total: u64,
     pub transport_redeliveries_total: u64,
+    pub decode_rejections_total: u64,
+    pub last_decode_rejection: Option<DecodeRejectionEnvelope>,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,
@@ -490,6 +492,35 @@ pub struct IngestorDescribeEnvelope {
     pub kafka_domain_offsets: Option<KafkaDomainOffsetDescribeEnvelope>,
     pub client_producers: Option<ClientProducersDescribeEnvelope>,
     pub metrics: Vec<String>,
+}
+
+/// The latest payload an ingestor's codec refused on the node that executes the ingestor, as that
+/// node reports it. Its code and operation are the same for every decode rejection, so they do not
+/// cross.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecodeRejectionEnvelope {
+    /// The rejection's UUID reference, as its 128 bits.
+    pub reference: u128,
+    pub codec: CodecName,
+    pub position: Option<TransportPositionEnvelope>,
+    /// The field paths the codec named at fault, sorted.
+    pub fields: Vec<String>,
+    /// The codec's rendered diagnostic, which names no payload value.
+    pub message: String,
+    pub occurred_at: Timestamp,
+}
+
+/// Where on its transport a refused payload was read.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransportPositionEnvelope {
+    Kafka {
+        topic: String,
+        partition: i32,
+        offset: i64,
+    },
+    Syslog {
+        peer: SocketAddr,
+    },
 }
 
 /// The producers attached to a client ingestor on the node that executes it.

@@ -261,6 +261,7 @@ mod materialized_read;
 mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
+mod message_error_decode;
 mod message_error_delivery;
 mod message_error_plan;
 mod native_checkpoint_encoding;
@@ -461,10 +462,10 @@ use http_request_fields::{
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
-    BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
+    BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
-    PayloadDecodeFailure, RawIngestAcceptance, decode_ingested_payload,
-    prepare_branched_entrypoint_input,
+    PayloadDecodeFailure, RawIngestAcceptance, RefusedEntry, SplitPayloads, UnfoldingNotAdmitted,
+    decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
@@ -475,7 +476,8 @@ pub(in crate::runtime) use ingestor_quiesce::{
     IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
+    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, IngestorStatus,
+    RuntimeReconnectStatus,
 };
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
@@ -956,6 +958,8 @@ pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 pub(crate) use local_drain::LocalGraphDrainOutcome;
 pub(crate) use materialized_state::MaterializedRecordReport;
+use message_error_decode::DecodeRejections;
+pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
 use observability::BranchMetricsMark;
 pub(crate) use observability::{IngestorDescribe, KafkaDomainOffsetDescribe};
