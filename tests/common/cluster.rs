@@ -3532,11 +3532,10 @@ impl StartableNode for NodeHandle {
             .await
     }
 
-    /// A node that never became ready has no drain to finish, so its cleanup is the short slice
-    /// its startup budget can spare rather than the product's shutdown watchdog. The stop is
-    /// requested first. A node still stopping when the slice ends keeps its task, its coordinator
-    /// and its consensus registration, and the startup ends rather than launching over the
-    /// database and the listeners it still holds.
+    /// Failed-startup cleanup shares the node's remaining absolute startup budget. The stop is
+    /// requested first, and the product's shutdown watchdog does not restart the harness budget.
+    /// A node still stopping when that budget ends keeps its task, its coordinator and its
+    /// consensus registration; a replacement cannot take the database or listeners it still holds.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
         let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);

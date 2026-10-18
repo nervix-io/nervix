@@ -926,6 +926,15 @@ description and its message ends with it. A later stop can still end the retaine
 
 ### Node Startup
 
+The integration harness keeps a readiness failure and the exact node task's cleanup outcome in
+one attempt record. Retry classification happens after cleanup: a joined application error, panic
+or cancellation supplies the task's cause even when the probe was still waiting for a session.
+A joined listener bind failure selects its own listener family for a retry. A clean exit after the
+harness requested stop leaves the readiness timeout as the retry cause. Cleanup receives the
+remaining absolute startup budget; exhaustion with the task still running retains that task and
+reports its pending cleanup. [Integration Test Lifecycle](./integration-test-lifecycle.md#node-startup)
+owns these harness bounds and the distinction from product shutdown deadlines.
+
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
 the larger requirement controls admission. Arithmetic that cannot represent either requirement is
