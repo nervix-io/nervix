@@ -1515,7 +1515,10 @@ occur.
 
 Before a restarted serving node has proved linearizable catch-up, both native endpoint opens use
 the ordinary retryable `EndpointUnavailable` refusal. They do not report a missing or stopped
-domain from that node's stale local snapshot as a terminal application error.
+domain from that node's stale local snapshot as a terminal application error. The node executing
+the endpoint follows the same rule after the serving node's checks passed: an endpoint it has not
+installed is `EndpointUnavailable`, so a node that restarted after the serving node never turns a
+restored producer's open into a terminal missing-domain or removed-endpoint refusal.
 
 The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
 reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains

@@ -126,6 +126,7 @@ fn shuttle_consumer_loss_and_ack_race_release_one_retained_delivery() {
                     Uuid::from_u128(next_reference)
                 },
                 false,
+                tracing::Span::none(),
             ));
             let credit = NonZeroU64::new(1024).assured("literal credit");
             let first = endpoint
@@ -223,6 +224,7 @@ fn shuttle_publish_cancellation_and_ack_race_release_one_reservation() {
                     Uuid::from_u128(next_reference)
                 },
                 false,
+                tracing::Span::none(),
             ));
             let credit = NonZeroU64::new(1024).assured("literal credit");
             let mut consumer = endpoint

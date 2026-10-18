@@ -822,6 +822,8 @@ enum RestartArrangement<'a> {
     /// The bootstrap node holds the first heartbeat this voter relays and fails its health probes,
     /// so the scenario observes scheduling while the voter looks unavailable.
     RelayedVoter(&'a str),
+    /// The first runtime installation this node begins waits until the scenario releases it.
+    HeldRuntimeInstallation(&'a str),
 }
 
 impl<'a> RestartArrangement<'a> {
@@ -830,7 +832,7 @@ impl<'a> RestartArrangement<'a> {
     fn relayed_voter(self) -> Option<&'a str> {
         match self {
             Self::RelayedVoter(voter) => Some(voter),
-            Self::Unchanged => None,
+            Self::Unchanged | Self::HeldRuntimeInstallation(_) => None,
         }
     }
 }
@@ -1614,6 +1616,17 @@ impl Cluster {
             .await
     }
 
+    /// Restarts every node with the first runtime installation `node` begins held until the
+    /// scenario releases it, so the restarted cluster answers requests that reach `node` before it
+    /// has installed any committed domain again.
+    pub(crate) async fn restart_holding_runtime_installation(
+        &mut self,
+        node: &str,
+    ) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::HeldRuntimeInstallation(node))
+            .await
+    }
+
     async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
@@ -1654,6 +1667,10 @@ impl Cluster {
                     .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
                 self.fault_injection
                     .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+            }
+            RestartArrangement::HeldRuntimeInstallation(node) => {
+                self.fault_injection
+                    .pause_runtime_installation_on(node_name(node));
             }
         }
         let voter = arrangement.relayed_voter();

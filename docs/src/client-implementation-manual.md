@@ -560,8 +560,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   request identity. A changed contract or generation, a removed or stopped endpoint, or a schema
   mismatch requires an explicit new producer. A temporary capacity or owner refusal MAY be retried
   with bounded physical backoff. `EndpointUnavailable` while the serving node establishes its
-  process-start catch-up proof is such a temporary refusal. Close and drop MUST win over an
-  in-flight restoration.
+  process-start catch-up proof, or while the node executing the ingestor has not installed it again
+  after a restart, is such a temporary refusal. Close and drop MUST win over an in-flight
+  restoration.
 
 ## Emitter Consumers
 
