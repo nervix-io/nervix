@@ -849,6 +849,10 @@ Lost terminal replies remain reconcilable while their watermark is retained. A s
 reclaims attempts, outbound correlations and channel watermarks after ten minutes without progress
 or reconciliation; live admission reports renew retained records. The sweep forgets a watermark the
 same way, raising the floor, and passes over the watermark of a channel with a batch outstanding.
+Because a sender rotates a channel after five minutes without a batch, a sweep can leave a live
+channel's next request at or below the floor with no watermark retained for it only when that request
+arrives more than five minutes after its sender created it, long after the sender stopped waiting for
+its answer.
 `nervix_interconnect_relay_channel_watermarks` shows how many watermarks a node retains, and
 `nervix_interconnect_relay_channel_watermarks_evicted_total` counts the ones forgotten to make room
 for another channel; a count that keeps rising means a peer opens more channels within ten minutes
@@ -868,8 +872,10 @@ already received or the batch was admitted, the receiver returns that known stat
 does not resend the body. Sequence watermarks reject reordering and duplicate enqueue. A receiver
 keeps a channel's watermark while a batch granted on that channel is unresolved, and for ten minutes
 after the watermark was last recorded or consulted by a grant, status, or cancellation request, so
-ordinary reconnects can still reconcile. Inactive sender channels rotate after five minutes, which is less
-than that retention, so a channel its sender resumes still finds its watermark. A consultation
+ordinary reconnects can still reconcile. A sender channel that has carried no batch for five minutes,
+counted from when it opened or from its last batch, opens a fresh incarnation for its next batch. That
+rotation is shorter than the retention, so a channel its sender resumes still finds its watermark, and no
+batch carries an incarnation opened more than five minutes before it. A consultation
 refreshes retention under that peer's protocol guard, together with its sequence decision.
 Independent peers have independent guards. When a peer opens more channels than its watermark
 budget holds, the least recently used watermarks go first, as
