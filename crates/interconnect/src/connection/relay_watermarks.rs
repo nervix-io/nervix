@@ -148,6 +148,12 @@ impl RelayChannelWatermarks {
     /// The scan stops at the first watermark still within its retention, because every later
     /// position was recorded or consulted later. Before that it passes over at most one retained
     /// watermark per outstanding attempt.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the peer owner supplies a synchronous lookup of its own \
+                                   attempts under the protocol guard it already holds; its \
+                                   effects belong to that owner")
+    )]
     pub(super) fn expire(&mut self, now: Instant, in_use: impl Fn(&RelayChannelKey) -> bool) {
         let mut expired = Vec::new();
         for (position, channel) in &self.order {
@@ -186,6 +192,12 @@ impl RelayChannelWatermarks {
     /// reports nothing outstanding on. Returns whether there was one.
     ///
     /// The scan passes over at most one retained watermark per outstanding attempt.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the peer owner supplies a synchronous lookup of its own \
+                                   attempts under the protocol guard it already holds; its \
+                                   effects belong to that owner")
+    )]
     fn forget_least_recent(&mut self, in_use: impl Fn(&RelayChannelKey) -> bool) -> bool {
         let mut chosen = None;
         for (position, channel) in &self.order {
