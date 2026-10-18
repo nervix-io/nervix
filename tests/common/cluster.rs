@@ -2058,6 +2058,46 @@ impl Cluster {
         limit_pulsar_topic_message_size(&self.dependencies, topic, max_message_size).await
     }
 
+    /// The number of messages the broker holds for `subscription` of `topic` that no consumer has
+    /// acknowledged, as its admin API reports the subscription's backlog.
+    pub(crate) async fn pulsar_subscription_backlog(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<u64> {
+        pulsar_subscription_backlog(&self.dependencies, topic, subscription).await
+    }
+
+    /// Waits until the backlog of `subscription` of `topic` holds `expected` messages, as the
+    /// acknowledgements a consumer sends reach the broker.
+    pub(crate) async fn wait_for_pulsar_subscription_backlog(
+        &self,
+        topic: &str,
+        subscription: &str,
+        expected: u64,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed =
+                pulsar_subscription_backlog(&self.dependencies, topic, subscription).await;
+            if let Ok(backlog) = &observed
+                && *backlog == expected
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Pulsar subscription '{subscription}' of topic \
+                     '{topic}' to hold {expected} unacknowledged messages; last observation: \
+                     {observed:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn publish_kafka(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_kafka(&self.dependencies, topic, payload).await
     }
@@ -3536,11 +3576,10 @@ impl StartableNode for NodeHandle {
             .await
     }
 
-    /// A node that never became ready has no drain to finish, so its cleanup is the short slice
-    /// its startup budget can spare rather than the product's shutdown watchdog. The stop is
-    /// requested first. A node still stopping when the slice ends keeps its task, its coordinator
-    /// and its consensus registration, and the startup ends rather than launching over the
-    /// database and the listeners it still holds.
+    /// Failed-startup cleanup shares the node's remaining absolute startup budget. The stop is
+    /// requested first, and the product's shutdown watchdog does not restart the harness budget.
+    /// A node still stopping when that budget ends keeps its task, its coordinator and its
+    /// consensus registration; a replacement cannot take the database or listeners it still holds.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
         let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);
@@ -4988,6 +5027,34 @@ async fn limit_pulsar_topic_message_size(
         }
         sleep(POLL_INTERVAL).await;
     }
+}
+
+/// The backlog the Pulsar admin API reports for `subscription` of `topic`: the messages the broker
+/// holds for it that no consumer acknowledged, delivered or not.
+async fn pulsar_subscription_backlog(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<u64> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/stats");
+    let stats: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(io::Error::other)?
+        .error_for_status()
+        .map_err(io::Error::other)?
+        .json()
+        .await
+        .map_err(io::Error::other)?;
+    let Some(backlog) = stats["subscriptions"][subscription]["msgBacklog"].as_u64() else {
+        return Err(io::Error::other(format!(
+            "the stats of Pulsar topic '{topic}' report no backlog for subscription \
+             '{subscription}': {stats}"
+        )));
+    };
+    Ok(backlog)
 }
 
 /// The body the admin API answers `url` with, or what kept it from answering.

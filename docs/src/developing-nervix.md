@@ -57,6 +57,18 @@ Both recipes require the repository's remote compiler-cache configuration: `KACH
 and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
 are available for publishing builds.
 
+The `builder` stage installs its build tools at the exact versions that `ARG`s in
+`Dockerfile.debian` pin, and every image build runs that step. kache and trunk come from their
+projects' release archives for the build architecture, fetched from the release download URL with
+no GitHub API call, and each archive is checked against its pinned SHA-256 before anything is taken
+out of it. Both projects build their releases with fat LTO in one codegen unit, which would take
+minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install --locked` against
+the lockfile each crate published, so a later compatible release of one of their dependencies can
+neither change them nor stop them compiling. Moving a tool to another version changes its version
+pin and, for an archive, the checksum of each build architecture; an archive that does not match
+its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
+install, which the recipes pass to the build.
+
 `Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
 binaries and Sonic bundle from the shared `builder` stage using `COPY --link`, so those artifact
@@ -774,7 +786,8 @@ corresponding ClickUp task; keep durable architectural conclusions in the chapte
 
 [Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the ordinary producer
 catalog, native collection, source mapping, report integrity, advisory patch coverage and CRAP,
-and their relationship to the deterministic complexity ratchet. Start with its
+the full workspace union, and their relationship to the deterministic complexity ratchet. Start
+with its
 [local reproduction commands](./coverage-reports.md#the-ordinary-workspace-report) or
 [native collection commands](./coverage-reports.md#native-collection).
 

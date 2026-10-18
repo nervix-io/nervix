@@ -341,6 +341,7 @@ enum CommandPausePoint {
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
+    Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
@@ -1448,6 +1449,21 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::DurableAdmission(node_id.clone()));
     }
 
+    /// Holds the next persistent command whose effects returned a terminal result, before the
+    /// node proposes that outcome for its execution reference.
+    pub fn pause_command_finalization_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::Finalization(node_id));
+    }
+
+    pub async fn wait_for_command_finalization_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::Finalization(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_finalization_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::Finalization(node_id.clone()));
+    }
+
     /// Holds a relocation after it has computed its target schedule but before it validates and
     /// publishes the captured planning inputs.
     pub fn pause_relocation_publication(&self, domain: DomainName) {
@@ -2284,6 +2300,11 @@ impl FaultInjection {
         node_id: &ClusterNodeName,
     ) {
         self.pause_command_if_armed(CommandPausePoint::DurableAdmission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_command_finalization_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::Finalization(node_id.clone()))
             .await;
     }
 

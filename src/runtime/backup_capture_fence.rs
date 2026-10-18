@@ -112,7 +112,7 @@ impl Drop for BackupCut {
 )]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
-    use nervix_model_harness::shuttle::check_interleavings;
+    use nervix_model_harness::shuttle::check_spinning_interleavings;
     use nervix_primitives::{
         sync::{
             Arc,
@@ -147,9 +147,11 @@ mod shuttle_tests {
         publisher.join().assured("the branch publisher completes");
     }
 
+    /// A publisher spins while the cut holds the generation closed, and the cut spins while a
+    /// publication is registered, so each side can wait for the other.
     #[test]
     fn shuttle_backup_cut_includes_pre_cut_branch_publication() {
-        check_interleavings(publication_and_cut);
+        check_spinning_interleavings(publication_and_cut);
     }
 }
 

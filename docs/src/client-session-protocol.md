@@ -634,12 +634,21 @@ The same rule covers every transaction control:
 - **Appends.** Each statement of a request is recorded under an identity derived from the request's
   reference and the statement's position in it. Repeating an append with the same reference,
   position, and text returns the admission recorded for it, without preflighting it again or
-  renewing the transaction's activity; the transaction is not appended to twice.
+  renewing the transaction's activity; the transaction is not appended to twice. This holds after
+  the transaction has finished as well: a committed, failed, reverted, or expired transaction keeps
+  the identity and admission of every statement it accepted for as long as its tombstone is
+  retained, so a repetition that arrives after the transaction ended still receives the admission
+  recorded for its append.
 - **`COMMIT`.** Repeating a commit joins the committing execution or returns its recorded outcome.
 - **`REVERT`.** Repeating a revert of a transaction its owner already reverted succeeds again.
 - **Multi-statement requests.** A request of several statements is one execution with one outcome
   per statement, and a repetition after a leader change or a full restart returns those outcomes
-  without repeating any effect.
+  without repeating any effect. A request that begins, fills, and commits its own transaction can
+  lose its outcome after its commit applied, when leadership moves before the outcome is recorded.
+  The leader that resumes it finds the transaction finished and answers each statement from what the
+  transaction recorded: the same transaction for `BEGIN`, each append's recorded admission, and the
+  commit's recorded outcome. The outcome it records is therefore the one the interrupted attempt
+  applied, however many times leadership moves while an attempt records it.
 
 ### Conflicting Reuse
 
@@ -666,9 +675,10 @@ tombstone or only the retry fence. The outcome of the original attempt can no lo
 A client that lost the reply to an append, or to a commit, might be tempted to look at the
 transaction instead: if it is `COMMITTED` and its operation count moved, the append must have been
 in it. That inference is false. Another session can attach the transaction, commit it without the
-outstanding append, and leave the same counts. Finishing a transaction clears its queued statements,
-so an append that was never admitted cannot match anything afterwards, and the only witness of what
-happened to a particular request is the record of its own reference. A client therefore reports an
+outstanding append, and leave the same counts. Finishing a transaction discards its queued
+statements and keeps only the identity and admission of each statement it accepted, so an append
+that was never admitted cannot match anything afterwards, and the only witness of what happened to
+a particular request is the record of its own reference. A client therefore reports an
 append or a commit only from the outcome recorded for that exact request.
 
 ```mermaid

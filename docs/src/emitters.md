@@ -1192,6 +1192,13 @@ protocol, such as `message`, `level`, `environment`, `release`, `tags`, `extra`,
 authentication header from the DSN, and submits the event. An invalid event object is handled as a
 route-local encoding error.
 
+Nervix prepares and retains the complete encoded envelope once per payload, before its first
+publish attempt. If `event_id` is omitted, Nervix generates a UUID once during that preparation.
+A supplied valid `event_id` keeps its exact spelling, including hyphens and letter case; the
+envelope header and event body carry the same value. Every retry of the retained payload sends
+the same envelope bytes, including the event id and any default fields, even when the connector
+is reopened after a failed request.
+
 Sentry sends one event per envelope and acknowledges the successful HTTP response. On `429` or
 `503`, Nervix honors `Retry-After` and `X-Sentry-Rate-Limits`; the server interval extends the
 declared retry delay when it is longer.

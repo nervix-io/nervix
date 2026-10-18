@@ -698,10 +698,12 @@ format failure.
 
 ## Qualification Evidence
 
-The integration harness's startup owner classifies a failed attempt once into a terminal outcome
-or a transient retry carrying its listener family. A listener bind failure names the addresses to
-replace; a readiness timeout names all listeners. The launcher applies that decision after cleanup
-within the same absolute startup budget. See [Integration Test Lifecycle](./integration-test-lifecycle.md)
+The integration harness's startup owner classifies a failed attempt after its cleanup, using the
+task's joined terminal outcome when that reveals an initialization failure the readiness probe
+could not observe. A listener bind failure names the addresses to replace; a readiness timeout
+whose requested stop ended cleanly names all listeners. Cleanup shares the absolute startup budget,
+and only the ending of the exact launched task permits a new launch. A task still stopping at the
+budget boundary stays owned with its storage and listeners. See [Integration Test Lifecycle](./integration-test-lifecycle.md)
 for its occupied-listener regression and endpoint observation.
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)

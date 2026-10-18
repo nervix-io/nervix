@@ -8,8 +8,11 @@ import io
 import os
 import pathlib
 import runpy
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -273,6 +276,42 @@ class RunnerExecutionTests(CompletionTests):
             with self.assertRaisesRegex(AnalysisError, "did not finish"):
                 Runner.cargo(self.runner, self.configuration, self.root / "build", self.reports, "namespace")
 
+    def failed_cargo(self, messages: list[dict], terminations: list[dict]) -> str:
+        def popen(args, **kwargs):
+            for message in messages:
+                kwargs["stdout"].write(json.dumps(message) + "\n")
+            for termination in terminations:
+                atomic_json(self.reports / f"{termination['crate_name']}{termination['extra_filename']}.termination.json", termination)
+            return mock.Mock(wait=mock.Mock(return_value=101))
+        with mock.patch("scripts.typed_ratchet.subprocess.Popen", side_effect=popen):
+            with self.assertRaisesRegex(AnalysisError, "compiler run failed or did not finish") as failure:
+                Runner.cargo(self.runner, self.configuration, self.root / "build", self.reports, "namespace")
+        return str(failure.exception)
+
+    def test_a_failed_compilation_names_how_each_analysis_compiler_ended(self) -> None:
+        finished = {"reason": "build-finished", "success": False}
+        target = {"name": "example", "kind": ["lib"], "src_path": str(self.source)}
+        error = {"reason": "compiler-message", "package_id": "example-id", "target": target, "message": {"level": "error", "message": "mismatched types", "rendered": "error: mismatched types", "code": None}}
+        termination = {"crate_name": "example", "extra_filename": "-abcd", "crate_types": ["lib"], "source": "src/lib.rs", "peak_resident_bytes": 14 * 2**30, "seconds": 412.0, "oom_kills": 1}
+        killed = self.failed_cargo([finished], [{**termination, "ending": {"kind": "signal", "signal": 9, "name": "SIGKILL"}}])
+        self.assertRegex(killed, r"example \(lib\): the analysis compiler was terminated by signal 9 \(SIGKILL\) after 412s at a peak resident size of 14\.0 GiB; the kernel's out-of-memory killer recorded 1 kill in its cgroup while it ran; it wrote no compiler report")
+        stopped = self.failed_cargo([finished], [{**termination, "crate_types": [], "oom_kills": 0, "ending": {"kind": "signal", "signal": 15, "name": None}}])
+        self.assertIn("example (unknown): the analysis compiler was terminated by signal 15 (unnamed) after 412s at a peak resident size of 14.0 GiB; it wrote no compiler report", stopped)
+        failed = self.failed_cargo([error, finished], [{**termination, "ending": {"kind": "exit", "status": 1}}])
+        self.assertIn("example (lib): the analysis compiler failed with 1 compiler error (exit status 1)", failed)
+        driver = self.failed_cargo([finished], [{**termination, "oom_kills": None, "ending": {"kind": "exit", "status": 1}}])
+        self.assertIn("example (lib): the analysis compiler exited with status 1 without a compiler error, so the analysis driver itself failed", driver)
+        self.assertNotIn("out-of-memory", driver)
+        outside = self.failed_cargo([finished], [])
+        self.assertIn("no analysis compilation ended unsuccessfully, so Cargo, a build script or the compiler wrapper failed outside them", outside)
+
+    def test_a_previous_runs_termination_is_not_reported_again(self) -> None:
+        stale = {"crate_name": "example", "extra_filename": "-abcd", "crate_types": ["lib"], "source": "src/lib.rs", "peak_resident_bytes": 1, "seconds": 1.0, "oom_kills": 0, "ending": {"kind": "signal", "signal": 9, "name": "SIGKILL"}}
+        atomic_json(self.reports / "example-abcd.termination.json", stale)
+        outside = self.failed_cargo([{"reason": "build-finished", "success": False}], [])
+        self.assertNotIn("SIGKILL", outside)
+        self.assertFalse((self.reports / "example-abcd.termination.json").exists())
+
     def test_clean_only_this_analysis_build(self) -> None:
         with mock.patch("scripts.typed_ratchet.command") as command:
             Runner.clean_authored_artifacts(self.runner, self.configuration, self.expected, self.root / "isolated")
@@ -394,14 +433,189 @@ class MainTests(unittest.TestCase):
 
 
 class WorkspaceWrapperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = pathlib.Path(self.temporary.name)
+        self.reports = self.root / "reports"
+        self.reports.mkdir()
+        self.arguments = ["/rustc", "--crate-name", "example", "src/lib.rs", "--crate-type", "lib", "-C", "extra-filename=-abcd"]
+
+    def driver(self, body: str) -> pathlib.Path:
+        path = self.root / "driver"
+        path.write_text(f"#!{sys.executable}\nimport os, signal, sys\n{body}\n")
+        path.chmod(0o755)
+        return path
+
+    def wrap(self, driver: pathlib.Path, inherited: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
+        environment = {**os.environ, "NERVIX_LINT_DRIVER": str(driver), "NERVIX_LINT_REPORTS": str(self.reports)}
+        environment.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
+        return subprocess.run([sys.executable, str(ROOT / "scripts/typed_lint_wrapper.py"), *self.arguments], env=environment, capture_output=True, text=True, pass_fds=inherited)
+
+    def record(self) -> dict:
+        return json.loads((self.reports / "example-abcd.termination.json").read_text())
+
     def test_wrapper_forwards_compiler_and_arguments_with_optional_coverage_recording(self) -> None:
         for coverage in ("", "/attempt"):
-            with mock.patch.dict(os.environ, {"NERVIX_LINT_DRIVER": "/driver", "NERVIX_NATIVE_COVERAGE_ATTEMPT": coverage}), mock.patch("sys.argv", ["wrapper", "/rustc", "--crate-name", "example"]), mock.patch("os.execv", side_effect=RuntimeError("executed")) as execute:
-                with self.assertRaisesRegex(RuntimeError, "executed"):
+            with mock.patch.dict(os.environ, {"NERVIX_LINT_DRIVER": "/driver", "NERVIX_LINT_REPORTS": str(self.reports), "NERVIX_NATIVE_COVERAGE_ATTEMPT": coverage}), mock.patch("sys.argv", ["wrapper", "/rustc", "--crate-name", "example"]), mock.patch("subprocess.Popen", side_effect=RuntimeError("started")) as start:
+                with self.assertRaisesRegex(RuntimeError, "started"):
                     runpy.run_module("scripts.typed_lint_wrapper", run_name="__main__")
-            arguments = execute.call_args.args[1]
+            arguments = start.call_args.args[0]
             self.assertEqual(arguments[-4:], ["/driver", "/rustc", "--crate-name", "example"])
             self.assertEqual("exec" in arguments, bool(coverage))
+
+    def test_the_driver_inherits_the_descriptors_the_wrapper_inherited(self) -> None:
+        reading, writing = os.pipe()
+        self.addCleanup(os.close, reading)
+        self.addCleanup(os.close, writing)
+        # Cargo's jobserver reaches the compiler as inherited descriptors named in CARGO_MAKEFLAGS.
+        completed = self.wrap(self.driver(f"os.write({writing}, b'token')"), inherited=(writing,))
+        self.assertEqual((completed.returncode, completed.stderr), (0, ""))
+        self.assertEqual(os.read(reading, 5), b"token")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the parent-death signal is Linux's")
+    def test_the_driver_ends_when_a_compiler_wrapper_stops_its_wrapper(self) -> None:
+        started = self.root / "started"
+        driver = self.driver(f"import pathlib, time\npathlib.Path({str(started)!r}).write_text(str(os.getpid()))\ntime.sleep(600)")
+        environment = {**os.environ, "NERVIX_LINT_DRIVER": str(driver), "NERVIX_LINT_REPORTS": str(self.reports)}
+        environment.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
+        wrapper = subprocess.Popen([sys.executable, str(ROOT / "scripts/typed_lint_wrapper.py"), *self.arguments], env=environment)
+        self.addCleanup(wrapper.wait)
+        deadline = time.monotonic() + 60
+        while not started.exists():
+            self.assertIsNone(wrapper.poll(), "the wrapper ended before its driver started")
+            self.assertLess(time.monotonic(), deadline, "the driver never started")
+            time.sleep(0.01)
+        pid = int(started.read_text())
+
+        def running() -> bool:
+            # An ended driver can briefly remain a zombie until whoever adopted it reaps it.
+            try:
+                state = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                return False
+            return state != "Z"
+
+        self.addCleanup(lambda: running() and os.kill(pid, signal.SIGKILL))
+        wrapper.kill()
+        wrapper.wait()
+        deadline = time.monotonic() + 60
+        while running():
+            self.assertLess(time.monotonic(), deadline, "the driver outlived its stopped wrapper")
+            time.sleep(0.01)
+        self.assertEqual(list(self.reports.iterdir()), [])
+
+    def test_a_driver_ended_by_a_signal_leaves_its_termination_and_the_same_signal(self) -> None:
+        completed = self.wrap(self.driver("os.kill(os.getpid(), signal.SIGKILL)"))
+        self.assertEqual(completed.returncode, -signal.SIGKILL)
+        record = self.record()
+        self.assertEqual(record["ending"], {"kind": "signal", "signal": signal.SIGKILL, "name": "SIGKILL"})
+        self.assertEqual((record["crate_name"], record["extra_filename"], record["crate_types"], record["source"]), ("example", "-abcd", ["lib"], "src/lib.rs"))
+        self.assertGreater(record["peak_resident_bytes"], 0)
+        self.assertIn("example", completed.stderr)
+        self.assertIn("signal 9 (SIGKILL)", completed.stderr)
+
+    def run_main(self, driver: pathlib.Path) -> tuple[int, str]:
+        from scripts import typed_lint_wrapper
+
+        handlers = {number: signal.getsignal(number) for number in typed_lint_wrapper.FORWARDED}
+        for number, handler in handlers.items():
+            self.addCleanup(signal.signal, number, handler)
+        output = io.StringIO()
+        environment = {"NERVIX_LINT_DRIVER": str(driver), "NERVIX_LINT_REPORTS": str(self.reports), "NERVIX_NATIVE_COVERAGE_ATTEMPT": ""}
+        with mock.patch.dict(os.environ, environment), contextlib.redirect_stderr(output):
+            status = typed_lint_wrapper.main(self.arguments)
+        return status, output.getvalue()
+
+    def test_main_records_a_failed_driver_and_returns_its_status(self) -> None:
+        self.assertEqual(self.run_main(self.driver("pass")), (0, ""))
+        self.assertEqual(list(self.reports.iterdir()), [])
+        status, output = self.run_main(self.driver("sys.exit(3)"))
+        self.assertEqual((status, output), (3, ""))
+        record = self.record()
+        self.assertEqual(record["ending"], {"kind": "exit", "status": 3})
+        self.assertEqual(record["crate_name"], "example")
+        self.assertGreater(record["peak_resident_bytes"], 0)
+        self.assertGreaterEqual(record["seconds"], 0)
+        with mock.patch("scripts.typed_lint_wrapper.cgroup_oom_kills", return_value=None):
+            self.assertEqual(self.run_main(self.driver("sys.exit(3)"))[0], 3)
+        self.assertIsNone(self.record()["oom_kills"])
+
+    def test_an_unwritable_record_keeps_the_drivers_ending(self) -> None:
+        self.reports.rmdir()
+        status, output = self.run_main(self.driver("sys.exit(3)"))
+        self.assertEqual(status, 3)
+        self.assertIn("nervix analysis: cannot write the termination record of example:", output)
+
+    def test_main_names_a_terminating_signal_and_ends_with_it(self) -> None:
+        with mock.patch("scripts.typed_lint_wrapper.os.kill") as kill:
+            status, output = self.run_main(self.driver("os.kill(os.getpid(), signal.SIGKILL)"))
+        kill.assert_called_once_with(os.getpid(), signal.SIGKILL)
+        self.assertEqual(status, 128 + signal.SIGKILL)
+        self.assertIn("the compilation of example was terminated by signal 9 (SIGKILL); termination record: " + str(self.reports / "example-abcd.termination.json"), output)
+        self.assertEqual(self.record()["ending"]["name"], "SIGKILL")
+
+    def test_endings_name_signals_and_keep_unnamed_ones_by_number(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        self.assertEqual(typed_lint_wrapper.ending(-signal.SIGTERM), {"kind": "signal", "signal": signal.SIGTERM, "name": "SIGTERM"})
+        unnamed = next(number for number in range(1, 128) if number not in {item.value for item in signal.Signals})
+        self.assertEqual(typed_lint_wrapper.ending(-unnamed), {"kind": "signal", "signal": unnamed, "name": None})
+        with mock.patch("scripts.typed_lint_wrapper.os.kill") as kill:
+            previous = signal.getsignal(signal.SIGTERM)
+            self.addCleanup(signal.signal, signal.SIGTERM, previous)
+            self.assertEqual(typed_lint_wrapper.end_like(signal.SIGTERM), 128 + signal.SIGTERM)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+    def test_out_of_memory_kills_come_from_the_unified_cgroup_hierarchy(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        membership = self.root / "cgroup"
+        hierarchy = self.root / "hierarchy"
+        events = hierarchy / "user.slice/build.scope/memory.events"
+        events.parent.mkdir(parents=True)
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+        membership.write_text("12:memory:/user.slice/build.scope\n0::/user.slice/build.scope\n")
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+        events.write_text("low 0\nhigh 0\nmax 4\noom 1\noom_kill 2\noom_group_kill 0\n")
+        self.assertEqual(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy), 2)
+        events.write_text("oom_kill unknown\n")
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+        membership.write_text("12:memory:/user.slice/build.scope\n")
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+
+    def test_platform_specific_lifetime_and_resident_size(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        self.assertTrue(callable(typed_lint_wrapper.ending_with(os.getpid())))
+        usage = mock.Mock(ru_maxrss=4096)
+        with mock.patch("scripts.typed_lint_wrapper.sys.platform", "darwin"), mock.patch("scripts.typed_lint_wrapper.resource.getrusage", return_value=usage):
+            self.assertIsNone(typed_lint_wrapper.ending_with(os.getpid()))
+            self.assertEqual(typed_lint_wrapper.peak_resident_bytes(), 4096)
+        with mock.patch("scripts.typed_lint_wrapper.sys.platform", "linux"), mock.patch("scripts.typed_lint_wrapper.resource.getrusage", return_value=usage):
+            self.assertEqual(typed_lint_wrapper.peak_resident_bytes(), 4096 * 1024)
+
+    def test_a_record_needs_a_report_directory_and_a_crate(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        record = {**typed_lint_wrapper.compilation(["/rustc", "-vV"]), "ending": {"kind": "exit", "status": 1}}
+        self.assertEqual((record["crate_name"], record["crate_types"], record["extra_filename"], record["source"]), (None, [], "", None))
+        with mock.patch.dict(os.environ, {"NERVIX_LINT_REPORTS": str(self.reports)}):
+            self.assertIsNone(typed_lint_wrapper.publish(record))
+        with mock.patch.dict(os.environ, {"NERVIX_LINT_REPORTS": ""}):
+            self.assertIsNone(typed_lint_wrapper.publish({**record, **typed_lint_wrapper.compilation(self.arguments)}))
+        self.assertEqual(list(self.reports.iterdir()), [])
+
+    def test_a_failed_driver_leaves_its_exit_status_and_a_successful_one_leaves_nothing(self) -> None:
+        completed = self.wrap(self.driver("print('Error: cannot publish the required compiler report', file=sys.stderr)\nsys.exit(1)"))
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(self.record()["ending"], {"kind": "exit", "status": 1})
+        self.assertIn("cannot publish the required compiler report", completed.stderr)
+        (self.reports / "example-abcd.termination.json").unlink()
+        completed = self.wrap(self.driver("print('{\"artifact\": \"example\"}', file=sys.stderr)"))
+        self.assertEqual((completed.returncode, completed.stderr), (0, '{"artifact": "example"}\n'))
+        self.assertEqual(list(self.reports.iterdir()), [])
 
 
 class CacheQualificationTests(unittest.TestCase):

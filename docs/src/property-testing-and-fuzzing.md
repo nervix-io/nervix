@@ -93,8 +93,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `restore-installation-wire` | `nervix-interconnect` complete installation request and success/refusal wire equality through the bulk class limit | all actions, authority, all eight runtime state kinds branched and unbranched, zero/full-width lengths, arbitrary digests, payload and inventory, v2 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-staging-kept-measurement` | `nervix-server` the measurement of unpublished restore staging a store kept equals one read afresh from every staged entry, after every step | histories of up to ten steps over two domains, two entities and three generations: staging of up to two whole chunks and a partial one that completes, fails its digest or is cut short, retried staging, sweeps that retain or reclaim, publication and reopening, v1 | 96 | 96 bytes |
-| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v2 | 128 | 65536 bytes |
-| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v2 | 256 | 65600 bytes |
+| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, the accepted statements a finished transaction keeps, names across the whole name rule and boundary counts and times, v4 | 128 | 65536 bytes |
+| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v4 | 256 | 65600 bytes |
 | `consensus-raft-records` | `nervix-consensus` complete Raft record equality through the storage codec, and keys that name their position or section | votes, log positions, entries of every command, state metadata, snapshot manifests and sections, v2 | 256 | 4096 bytes |
 | `consensus-raft-records-malformed` | `nervix-consensus` typed storage failure or a value that stores back to the same record | arbitrary bytes as every Raft record, log key and section key, v2 | 256 | 4096 bytes |
 | `registry-stored-models` | `nervix-server` complete Model equality through listing and keyed reads of a reopened registry, from its journal and from flushed tables | Models of every family in domains and with names across the whole name rule, v2 | 64 | 4096 bytes |
@@ -689,6 +689,12 @@ shards' line, function and branch counters because they ran disjoint campaigns, 
 `bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
 remain separate from ordinary workspace coverage and its CRAP report. A sanitizer skip publishes no
 fuzz coverage artifact.
+
+Check's `coverage-full` job reads both artifacts. For a pull request carrying `fuzz`, it requires
+the gate's successful randomized and sanitizer verdicts and the combined campaign of this run's
+shards over every target of the tested inventory, and adds the campaign's lines to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). Without `fuzz`, it requires
+the recorded deliberate skip and refuses any fuzz report.
 
 ## Adding A Target
 
