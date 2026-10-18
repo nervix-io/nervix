@@ -24,6 +24,7 @@ from pathlib import Path
 
 from scripts import coverage_full, native_coverage
 from scripts.coverage_full import JOBS, REQUIREMENTS, Provider, Selection
+from scripts.deloxide_lane import BuildPass, Stage
 from scripts.tests.test_coverage_merge import counters, lcov, recipe_body, sources
 from scripts.tests.test_native_coverage import job_section, step_section
 
@@ -67,9 +68,20 @@ def models(mode: str) -> dict[str, object]:
 
 
 def lane(selection: str) -> dict[str, object]:
-    """A complete Deloxide lane record of one selection."""
+    """A complete Deloxide lane record of one selection: its build and workload stages completed
+    within their budgets, the instrumented workspace's initial and warm builds measured inside the
+    build stage, and every selected workload completed with qualifying evidence."""
+    stages = [
+        {"name": Stage.BUILD, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0},
+        {"name": Stage.WORKLOADS, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0},
+    ]
+    build_measurements = [
+        {"kind": BuildPass.INITIAL, "duration_seconds": 0.5},
+        {"kind": BuildPass.WARM, "duration_seconds": 0.5},
+    ]
     return {
-        "selection": selection, "verdict": "complete",
+        "selection": selection, "verdict": "complete", "stages": stages,
+        "workspace": {"instrumented": True}, "build_measurements": build_measurements,
         "counts": {"discovered": 2, "selected": 1, "executed": 1, "completed": 1},
         "workloads": [{"completed": True}], "findings": {"observations": 2, "qualifying": 2},
     }
