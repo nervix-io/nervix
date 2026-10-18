@@ -660,10 +660,17 @@ mod shuttle_tests {
 
     use super::{test_archives::*, *};
 
-    /// Enough bytes for several chunks, so a stream has frames to run ahead with.
-    const ARCHIVE_BYTES: usize = 3 * 256 * 1024 + 1;
+    /// The most frames a bounded stream reads ahead of its client: a full queue, and the one chunk
+    /// it holds while it waits for room.
+    const BOUNDED_LEAD: usize = DOWNLOAD_FRAME_CAPACITY + 1;
+    /// One chunk more than the bounded lead, so a stream that stopped waiting for its client reads
+    /// past the bound before the client takes the start frame.
+    const ARCHIVE_CHUNKS: usize = BOUNDED_LEAD + 1;
+    /// Full chunks, then one byte in the last, as a download of the default session limits reads
+    /// them.
+    const ARCHIVE_BYTES: usize = (ARCHIVE_CHUNKS - 1) * DOWNLOAD_CHUNK_BYTES + 1;
     /// The frames an intact download of the archive sends: its start, one per chunk, completion.
-    const DOWNLOAD_FRAMES: usize = 1 + 4 + 1;
+    const DOWNLOAD_FRAMES: usize = 1 + ARCHIVE_CHUNKS + 1;
 
     const MODEL_THREAD_JOINS: &str =
         "Shuttle fails the whole execution when a model thread panics, so no join observes one";
@@ -730,7 +737,7 @@ mod shuttle_tests {
             let produced = chunks_read.load(Ordering::SeqCst) + 1;
             let ahead = produced.saturating_sub(frames_read);
             assert!(
-                ahead <= DOWNLOAD_FRAME_CAPACITY + 1,
+                ahead <= BOUNDED_LEAD,
                 "the stream read {ahead} frames ahead of its client"
             );
             thread::yield_now();

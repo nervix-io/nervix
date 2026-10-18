@@ -140,16 +140,17 @@ Each entity accepts only the modes it can honor, and completion offers only thos
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
-In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and
-error delivery the message unfolded into has completed, and it reports that progress only once
-the transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
-broker's answer to its deletion, a `RABBITMQ QUEUE` for its acknowledgement to be written to the
-connection, and a `KAFKA TOPIC`, `PULSAR TOPIC` or `MQTT TOPIC` only for its client to queue the
-acknowledgement. An acknowledgement the transport fails to confirm is a source error that
+In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and error
+delivery the message unfolded into has completed, and it reports that progress only once the
+transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
+broker's answer to its deletion, a `KAFKA TOPIC` for the answer to its consumer-group commit, or
+under `OFFSET BY DOMAIN` for its offsets' state replicas, a `PULSAR TOPIC` for the broker's answer
+to its acknowledgement, a `RABBITMQ QUEUE` for its acknowledgement to be written to the connection,
+and an `MQTT TOPIC` only for its client to queue the acknowledgement. An acknowledgement the
+transport fails to confirm, or a rejection it fails to take back, is a source error that
 `DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
 messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
-confirmations before it closes them; see
-[Shutdown And Recovery](shutdown.md#connector-contracts).
+confirmations before it closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
 ## Altering Ingestors
 
@@ -891,6 +892,18 @@ Client config currently supports:
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+
+In an `ACK` mode the ingestor acknowledges the messages a batch read from each topic in one
+acknowledgement and waits for the broker's answer, within the client's 30-second operation
+timeout. An acknowledgement the broker refuses shows its server error and reason as the transient
+error, as in `the Pulsar broker refused an acknowledgement with NotAllowedError: ...`, and one it
+does not answer in time, or whose connection closes first, shows `the Pulsar broker did not confirm
+an acknowledgement`. Either way the messages are rejected and delivered again. A rejection asks the
+broker to redeliver the messages and returns once the consumer sent that request, because the
+broker does not answer it; a request the consumer cannot send, such as while it reconnects to a
+broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
+and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
+each message without waiting for the broker's answer.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription

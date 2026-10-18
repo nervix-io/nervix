@@ -648,6 +648,18 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
+A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
+`PulsarSourceError`, beneath `SourceError::Acknowledge` or `SourceError::Reject`. An
+acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
+`PulsarRefusal` keeps the server error, absent for a code the client does not know, and the reason
+the broker gave. An acknowledgement nothing answered is `AcknowledgementUnconfirmed`, and a
+redelivery request the consumer could not send is `RedeliveryRequestUnsent`; both carry a typed
+`PulsarUnresolvedRequest` naming whether the client's operation timeout passed, the connection
+closed or the consumer stopped first, because the broker may or may not have applied the request. A
+client failure the source does not classify keeps the driver's error as the typed cause beneath
+`Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
+shows.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
@@ -664,7 +676,10 @@ An outbound WebSocket peer's Close is a typed read failure preserving its status
 an end without a status has its own typed state. Transport failures keep the WebSocket driver's
 error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
-failure and its growing retry delay across successful reconnects until a batch is accepted.
+failure and its growing retry delay across successful reconnects until a batch is accepted. A
+broker source's acknowledgement that its transport fails to confirm, and a rejection it fails to
+take back, become the ingestor's transient status with the innermost context of the source's
+report as the reason, and only a later confirmed acknowledgement clears it.
 
 Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
 operations read the retained status without writing it; a transition clears an active failure.
@@ -914,6 +929,15 @@ drain as a printable attachment, which a rendered chain does not show, so `StopE
 description and its message ends with it. A later stop can still end the retained task.
 
 ### Node Startup
+
+The integration harness keeps a readiness failure and the exact node task's cleanup outcome in
+one attempt record. Retry classification happens after cleanup: a joined application error, panic
+or cancellation supplies the task's cause even when the probe was still waiting for a session.
+A joined listener bind failure selects its own listener family for a retry. A clean exit after the
+harness requested stop leaves the readiness timeout as the retry cause. Cleanup receives the
+remaining absolute startup budget; exhaustion with the task still running retains that task and
+reports its pending cleanup. [Integration Test Lifecycle](./integration-test-lifecycle.md#node-startup)
+owns these harness bounds and the distinction from product shutdown deadlines.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
