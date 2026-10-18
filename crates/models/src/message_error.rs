@@ -53,6 +53,8 @@ pub enum MessageErrorOperation {
     Flush,
     Commit,
     Publish,
+    /// A source payload its ingestor's codec refused.
+    Decode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,9 +3,10 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Waiting on the acknowledgement roots of one source batch together, deciding the
-//!   batch's outcome, and holding the batch's work outstanding for drains and ownership handoffs
-//!   from the moment its last root resolves until the source loop drops the acknowledgement.
+//! - **Owns.** The confirmed roots of one source batch's payloads, including the at-once resolved
+//!   root of a payload the host consumed, waiting on them together, deciding the batch's outcome,
+//!   and holding the batch's work outstanding for drains and ownership handoffs from the moment its
+//!   last root resolves until the source loop drops the acknowledgement.
 //! - **Depends on.** The ACK tree's confirmed roots, the source contract's batch acknowledgement
 //!   and the stop the source host watches.
 //! - **Must not know.** A broker driver, connector configuration, the source loop's retry policy,
@@ -19,6 +20,53 @@
 use nervix_connector::SourceBatchAcknowledgementServices;
 
 use super::*;
+
+/// The confirmed roots of one acknowledged batch's payloads, which the batch's acknowledgement
+/// waits on.
+///
+/// A dispatched payload's root resolves once the graph has acknowledged every message the payload
+/// produced. A payload the host consumed without dispatching it, one its codec refused, has nothing
+/// left to wait for, so its root resolves at once. It still takes a confirmed root, because the
+/// payload's position is settled on the transport together with the batch's: a drain or an
+/// ownership handoff has to wait for that settlement before another owner may read the payload's
+/// position again, exactly as it waits for a dispatched payload's.
+pub(super) struct BatchRoots<'t> {
+    trackers: &'t IngestorAckRootTrackers,
+    completions: Vec<AckCompletion>,
+}
+
+impl<'t> BatchRoots<'t> {
+    /// The roots of a batch of `payloads` payloads, counted against `trackers`.
+    pub(super) fn new(trackers: &'t IngestorAckRootTrackers, payloads: usize) -> Self {
+        Self {
+            trackers,
+            completions: Vec::with_capacity(payloads),
+        }
+    }
+
+    /// The root of a payload the host dispatches into the graph, which resolves it.
+    pub(super) fn dispatched(&mut self) -> AckSet {
+        let (root, completion) = self.trackers.confirmed_root();
+        self.completions.push(completion);
+        root
+    }
+
+    /// Resolves the root of a payload the host consumed without dispatching it.
+    pub(super) fn consumed(&mut self) {
+        let (root, completion) = self.trackers.confirmed_root();
+        root.ack_success();
+        self.completions.push(completion);
+    }
+
+    /// The acknowledgement of the batch, which waits on every root these hold.
+    pub(super) fn acknowledgement(
+        self,
+        shutdown: watch::Receiver<bool>,
+        confirmation_delay: Option<Duration>,
+    ) -> RuntimeBatchAcknowledgement {
+        RuntimeBatchAcknowledgement::new(self.completions, shutdown, confirmation_delay)
+    }
+}
 
 /// One root of a batch whose wait ended: the outcome it ended with and the completion that
 /// observed it.
