@@ -156,6 +156,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-checkpoint-listing-malformed",
             "remote-correlation-lifetimes",
             "relay-admission-owners",
+            "relay-channel-watermark-turnover",
             "client-emitter-wire",
             "client-requests",
             "client-replies",

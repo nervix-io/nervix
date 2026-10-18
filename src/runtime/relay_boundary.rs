@@ -32,7 +32,14 @@ use channels::{RelayBranchChannels, RelayChannels};
 mod shuttle_tests;
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
+/// A channel left idle this long opens a fresh incarnation for its next batch. It stays below the
+/// receiver's watermark retention, so a channel its sender resumes still finds its watermark there.
 const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
+const _: () = assert!(
+    RELAY_CHANNEL_IDLE_ROTATION.as_nanos()
+        < nervix_interconnect::RELAY_CHANNEL_RETENTION.as_nanos(),
+    "an idle relay channel rotates before its receiver's watermark retention ends"
+);
 
 /// A count NSPL configures, narrowed to the width this node addresses memory with.
 ///
@@ -126,6 +133,9 @@ pub(super) struct RelayOutboundSlot {
     )
 )]
 struct RelayOutboundSequence {
+    /// A version 7 UUID. Every one this process creates sorts after the ones it created before,
+    /// because uuid orders them through one process-wide context, and a receiver relies on that
+    /// order to refuse a channel it forgot.
     channel_incarnation: [u8; 16],
     next_sequence: u64,
     last_delivery_at: Option<Instant>,

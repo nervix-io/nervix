@@ -237,6 +237,27 @@ fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
     assert_eq!(reopened.sequence, 0);
 }
 
+/// A receiver refuses a channel at or below the greatest one it forgot, so every channel this
+/// process opens, at a slot's creation and at each reopening, sorts after every channel it opened
+/// before.
+#[test]
+fn every_channel_this_process_opens_sorts_after_the_channels_it_opened_before() {
+    let slots = [RelayOutboundSlot::new(), RelayOutboundSlot::new()];
+    let mut previous = slots[0].next_delivery().channel_incarnation;
+    let mut latest = slots[1].next_delivery().channel_incarnation;
+    assert!(latest > previous);
+    for round in 0..1_000 {
+        previous = latest;
+        let slot = &slots[round % 2];
+        slot.reopen_delivery_channel();
+        latest = slot.next_delivery().channel_incarnation;
+        assert!(
+            latest > previous,
+            "reopening {round} opened {latest:?} after {previous:?}"
+        );
+    }
+}
+
 #[test]
 fn indeterminate_delivery_reopens_with_a_fresh_channel_incarnation() {
     let slot = RelayOutboundSlot::new();
