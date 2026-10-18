@@ -1901,7 +1901,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -1916,7 +1916,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."

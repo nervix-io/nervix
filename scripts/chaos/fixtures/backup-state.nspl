@@ -1,0 +1,77 @@
+BEGIN;
+
+// Deduplicator and window state for the backup-cycles and restore-fresh-cluster scenarios, read
+// from the baseline graph's branched relay. The deduplicator keys each branch's records by their
+// sequence modulo 30: a branch holds every sequence congruent to its own residue modulo 3, so
+// exactly the records below sequence 30 are unique and every later record repeats a key its branch
+// has seen. The window is detached, so its retained rows hold no source acknowledgement and a
+// restored window closes over rows from both sides of the backup without reading any again.
+
+CREATE RELAY chaos_unique SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE ATTACHED DEDUPLICATOR chaos_dedup
+  FROM chaos_records
+  DEDUPLICATE ON input.sequence % 30
+  MAX TIME 1h
+  BRANCHED BY chaos_branch
+  TO chaos_unique
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_unique_emitter
+  FROM chaos_unique
+  TO KAFKA chaos_kafka TOPIC chaos_unique_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_window_summary (
+  branch_name STRING,
+  records I64,
+  first_sequence I64,
+  last_sequence I64,
+  sequence_sum I64
+);
+
+CREATE WIRE JSON SCHEMA chaos_window_wire MODE STRICT (
+  branch_name STRING,
+  records INTEGER,
+  first_sequence INTEGER,
+  last_sequence INTEGER,
+  sequence_sum INTEGER
+);
+
+CREATE CODEC chaos_window_json
+  FROM WIRE JSON SCHEMA chaos_window_wire
+  TO SCHEMA chaos_window_summary;
+
+CREATE RELAY chaos_windows SCHEMA chaos_window_summary BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE DETACHED WINDOW PROCESSOR chaos_window
+  FROM chaos_records
+  WIDTH 12 MESSAGES
+  STEP 12 MESSAGES
+  BRANCHED BY chaos_branch
+  TO chaos_windows
+    SET branch_name = first(input.branch_name),
+        records = count(input.sequence),
+        first_sequence = min(input.sequence),
+        last_sequence = max(input.sequence),
+        sequence_sum = sum(input.sequence)
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_window_emitter
+  FROM chaos_windows
+  TO KAFKA chaos_kafka TOPIC chaos_window_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_window_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

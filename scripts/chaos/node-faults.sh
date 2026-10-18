@@ -41,18 +41,19 @@ node_fault_hold() {
     fi
 }
 
-# Runs a Pumba dry run of COMMAND... against the node container NAME and requires it to select
-# exactly CONTAINER_ID with MESSAGE.
+# Runs a Pumba dry run of COMMAND... among the run's containers whose chaos role is ROLE and requires
+# it to select exactly CONTAINER_ID with MESSAGE.
 node_fault_dry_run() {
     local output="$1"
     local container_id="$2"
-    local message="$3"
-    shift 3
+    local role="$3"
+    local message="$4"
+    shift 4
     run_bounded 20 docker run --rm \
         --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=fault \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --dry-run --log-level info \
-        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=node \
+        --label "io.nervix.chaos.run=${run_id}" --label "io.nervix.chaos.role=${role}" \
         "$@" >"${output}" 2>&1
     [[ "$(grep -Fc "msg=\"${message}\"" "${output}")" -eq 1 ]] \
         && grep -Fq "dryrun=true id=${container_id}" "${output}" \
@@ -200,7 +201,7 @@ node_fault_stop_inject() {
     "${script_dir}/verify-restart-evidence.sh" before "${run_id}" "${project_name}" \
         "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/selected.json"
     container_name="$(jq -r '.[0].Name | ltrimstr("/")' "${case_dir}/selected.json")"
-    node_fault_dry_run "${case_dir}/pumba-dry-run.txt" "${container_id}" 'stopping container' \
+    node_fault_dry_run "${case_dir}/pumba-dry-run.txt" "${container_id}" node 'stopping container' \
         stop --time 60 --limit 1 "${container_name}"
     record_node_volumes "${case_dir}/volumes-before.json"
     node_fault_begin "${before_hook}"
@@ -261,7 +262,7 @@ node_fault_pause_inject() {
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
         "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/selected.json"
     container_name="$(jq -r '.[0].Name | ltrimstr("/")' "${case_dir}/selected.json")"
-    node_fault_dry_run "${case_dir}/pumba-dry-run.txt" "${container_id}" 'pausing container' \
+    node_fault_dry_run "${case_dir}/pumba-dry-run.txt" "${container_id}" node 'pausing container' \
         pause --duration 1ms --limit 1 "${container_name}"
     node_fault_begin "${before_hook}"
     jq -n --arg image "${pumba_image_id}" --arg target "${container_name}" --arg id "${container_id}" \

@@ -295,10 +295,15 @@ this execution and waits for the retained terminal result. Atomicity still does 
 transaction.
 
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
-and executed quiesce levels. Their final report revision remains available for committed, failed,
-reverted, and expired outcomes even after later graph changes. Removing the tombstone removes its
-plan and report records and any topology content no retained report references. During retention,
-attach reports the exact outcome and aggregate commit output; after removal the id is unknown.
+and executed quiesce levels. A tombstone also keeps the request identity, position, source digest
+and admitted result of every statement the transaction accepted, without the statement itself. An
+exact repetition of an accepted append, including a command execution that resumes it after the
+transaction finished, is answered with that admitted result; an append the transaction never
+accepted is refused. A finished transaction's final report revision remains available for
+committed, failed, reverted, and expired outcomes even after later graph changes. Removing the
+tombstone removes its plan and report records and any topology content no retained report
+references. During retention, attach reports the exact outcome and aggregate commit output; after
+removal the id is unknown.
 `SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
