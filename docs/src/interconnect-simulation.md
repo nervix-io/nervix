@@ -518,7 +518,10 @@ the ordinary coverage comment, and publication checks that the PR is open at the
 A fast simulation run cannot replace the ordinary report, and a failed collection never supplies
 a successful report. Coverage percentages and comment failures remain advisory; the simulation,
 replay and collection verdicts remain mandatory. The ordinary coverage/CRAP job uses ordinary
-reports only. `just coverage-turmoil <output>` uses this same collector for local inspection.
+reports only. For a pull request labeled `turmoil`, the `coverage-full` job requires this job's
+success and its complete collection, and adds the collection's lines, attributed to Turmoil, to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). `just coverage-turmoil
+<output>` uses this same collector for local inspection.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
 adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking. It installs `flatc`, because

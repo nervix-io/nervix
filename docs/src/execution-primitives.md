@@ -274,8 +274,12 @@ runs in the command processes and supplies no ordering, wakeups or branches insi
 The per-mode build directories and fresh attempt directories prevent one mode from replacing
 another's executable or counters. Native source-line execution complements each model's claim;
 it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
-ordinary coverage and its advisory CRAP report. See [native extra coverage](developing-nervix.md) for
-collection, artifacts, filtering and replay commands.
+ordinary coverage and its advisory CRAP report. The
+[full workspace union](./coverage-reports.md#the-full-workspace-union) adds them to the ordinary
+report with their mode attribution, and accepts a Shuttle or Loom collection only with complete,
+unfiltered `models.json` evidence. See
+[native extra coverage](./coverage-reports.md#native-collection) for collection, artifacts,
+filtering and replay commands.
 
 The integrated ordinary cost probe is `just bench-primitives`. It measures the boundary's atomic
 access, `ArcSwap` publication, an uncontended blocking mutex, and shared-reference clone/drop

@@ -786,7 +786,8 @@ corresponding ClickUp task; keep durable architectural conclusions in the chapte
 
 [Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the ordinary producer
 catalog, native collection, source mapping, report integrity, advisory patch coverage and CRAP,
-and their relationship to the deterministic complexity ratchet. Start with its
+the full workspace union, and their relationship to the deterministic complexity ratchet. Start
+with its
 [local reproduction commands](./coverage-reports.md#the-ordinary-workspace-report) or
 [native collection commands](./coverage-reports.md#native-collection).
 

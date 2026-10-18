@@ -2,8 +2,9 @@
 
 This chapter owns ordinary coverage producers and exports, checkout-root and tracked-source
 mapping, the merged report and its integrity verdicts, patch coverage, the advisory CRAP report,
-and how they relate to the mandatory complexity count. Changes to those contracts keep this
-chapter current. [Architecture Rules And The Debt Ratchet](./architecture-enforcement.md#function-complexity)
+the full workspace union, and how they relate to the mandatory complexity count. Changes to those
+contracts keep this chapter current.
+[Architecture Rules And The Debt Ratchet](./architecture-enforcement.md#function-complexity)
 owns the analyzer's source eligibility, complexity measurement and enforcement details.
 [Integration Test Lifecycle](./integration-test-lifecycle.md) owns scenario supervision and budgets;
 [Execution Primitives](./execution-primitives.md) and each verification method's chapter own what
@@ -26,7 +27,9 @@ above `debt-baseline.json`; when it falls, the baseline falls in the same change
 A producer that adds ordinary coverage registers its exported reports in the merge's inputs.
 A producer that stays outside the ordinary report states its execution scope and why. Reports of
 Shuttle, Loom, Turmoil, Deloxide and live Bolero fuzz campaigns describe different execution modes:
-they retain separate reports and attribution. Chaos runs against prebuilt images and supplies no
+they retain separate reports and attribution. The [full workspace union](#the-full-workspace-union)
+combines them with the ordinary report into a report of its own, which no ordinary consumer reads;
+its integrity is mandatory too. Chaos runs against prebuilt images and supplies no
 LLVM counters. Browser, guest WASM and other-language execution is not inferred from native Rust
 counters.
 
@@ -51,6 +54,7 @@ the downloaded artifact:
 | `coverage-patch-runner` | Patch line accounting and comment publication |
 | `coverage-merge-runner` | Ordinary source normalization, merge and integrity verdicts |
 | `coverage-crap-report-runner` | CRAP analysis, binding and advisory report construction |
+| `coverage-full-runner` | The full workspace union's selection, validation and attribution |
 | `coverage-paced-simulation-python` | Paced Python drivers' deterministic open policy |
 | `coverage-release-evidence` | Required revision/check evidence accounting |
 | `coverage-kache-ci` | The shared compiler cache's remote publication contract |
@@ -190,7 +194,8 @@ once for each weakening of a server owner. The jobs upload `lcov.info`, `complet
 `executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
 `coverage-shuttle`, `coverage-loom` and `coverage-turmoil`, whatever the verdict. The
 [ordinary workspace report](#the-ordinary-workspace-report) merges ordinary collections only; mode
-reports describe modeled or diagnostic execution and retain separate attribution.
+reports describe modeled or diagnostic execution and retain separate attribution, which the
+[full workspace union](#the-full-workspace-union) keeps when it combines them.
 `just coverage-shuttle <output> [filter]`,
 `just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a successfully
 completed canonical report to the
@@ -424,6 +429,106 @@ that the PR is still open at that head before publication. Fork PR tokens may la
 the local report, workflow summary and artifact remain available. `just test-patch-coverage`
 exercises accounting and publication, and `just coverage-patch-runner` exports the reporter's
 measured Python coverage for CI.
+
+## The Full Workspace Union
+
+The full workspace union combines every coverage producer one CI run selects into one line-coverage
+report: the ordinary workspace report, the modeled and diagnostic native collections, and the live
+fuzz campaigns a pull request carrying `fuzz` requests. It reads the ordinary report unchanged. The
+[CRAP report](#advisory-crap-report) and patch line coverage keep reading the ordinary report
+alone, so modeled execution never changes either of them.
+
+The `coverage-full` job waits for every producer job, including one that failed or was skipped. It
+downloads their artifacts, rebuilds nothing, and records the run's selection before it combines:
+
+```bash
+just coverage-full-select --event "$EVENT" --labels "$LABELS" \
+  --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
+just coverage-full coverage-full-inputs/*
+```
+
+The selection is the run's event and pull request label snapshot, whether the tested diff required
+the suites and the Bolero call, the run and its attempt, the tested revision, and every producer
+job's result. It decides which producers the union requires:
+
+| Producer | Job and artifact | Required |
+| --- | --- | --- |
+| The ordinary workspace report | `coverage`, `coverage-merged` | Whenever the tested diff requires the suites |
+| `test-primitives-shuttle`, `test-primitives-loom`, `test-primitives-turmoil` and `test-primitives-deloxide` | `extra-tests`, `coverage-native-extras` | Whenever the tested diff requires the suites |
+| `test-deadlock-evidence-order` and `test-deadlock-report` | `diagnostic-evidence`, `diagnostic-evidence` | Whenever the tested diff requires the suites |
+| `test-shuttle` | `shuttle`, `coverage-shuttle` | For a pull request labeled `shuttle` |
+| `test-loom` | `loom`, `coverage-loom` | For a pull request labeled `loom` |
+| `test-turmoil` | `turmoil`, `coverage-turmoil` | For a pull request labeled `turmoil` |
+| `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` | `deloxide`, `deloxide-<selection>` | For a pull request labeled `deloxide` |
+| `bolero-fuzz`, the combined live campaign | `bolero`, `coverage-bolero-fuzz` | For a pull request labeled `fuzz` |
+| The Bolero call's selection record | `bolero`, `bolero-selection` | Whenever the run calls Bolero |
+
+Every required producer job must have succeeded, and every other one must have been skipped. The
+Bolero selection record must show that the randomized properties passed and that the sanitizer
+campaigns ran exactly when `fuzz` requested them. Without `fuzz`, the recorded deliberate skip is
+valid and supplies no report. A job that a later attempt of the run did not rerun keeps its earlier
+attempt's verdict and artifacts, so a collection of any attempt up to the current one is the run's.
+
+Each input is validated before its lines join the union:
+
+- A native collection is complete; at the tested revision, with an unmodified working tree; from
+  this run; and in its producer's declared mode, attempt directory and source policy. A Shuttle or
+  Loom collection selected the canonical inventory unfiltered and its `models.json` is complete. A
+  Deloxide lane collection's `lane.json` records a complete run.
+- The ordinary report's merge record is complete at the tested revision, and so is every ordinary
+  collection it merged. The native extras artifact holds those collections too, and they count once.
+- The fuzz campaign combines this run's shards, tested this revision for this event and label
+  snapshot, and ran every target of the tested inventory once.
+- Each report's sources map onto the files the tested revision tracks exactly as the ordinary merge
+  maps them. A line beyond the end of its file shows that a report describes another revision.
+
+The union fails when an input is missing, stale, from another run, revision or attempt, corrupt,
+failed or incomplete; when two different inputs name one producer; and when an input holds a
+producer the selection does not enable, such as a fuzz report without `fuzz`. It then writes its
+record and summary, naming every problem, and no report. An identical input named twice counts
+once, so neither the order of the inputs nor a repeated artifact changes the result.
+
+The union is line coverage. Its executable lines are the union of every contribution's lines, a line
+is covered when any contribution executed it, and its counter is the sum. A counter that wrapped
+below zero counts no executions, as in the [ordinary merge](#the-ordinary-workspace-report): the
+union leaves it out of the sum and lists it under its contribution in the record, and a line only
+such counters count is not measured. Any collection can hold such counters when its instrumented
+executables run the same code on concurrent threads. Function and branch
+identities depend on the toolchain and configuration each producer built with, so the union carries
+none; each producer's own report keeps them. Native collections leave out harness code below
+`tests`, `examples` and `benches` directories, so only the ordinary report measures those files.
+The job writes `target/coverage-full/` and retains it as the `coverage-full` artifact:
+
+| Entry | Content |
+| --- | --- |
+| `lcov-full.info` | The union, in source and line order |
+| `beyond-ordinary.info` | One `TN:` section per contribution, with the lines it covered that the ordinary report did not cover |
+| `record.json` | The verdict, the selection, every required producer and where it was found, each contribution's identity, line attribution and counters that wrapped below zero, the totals per mode, the workspace members and the source policy |
+| `summary.md` | The contributor breakdown, which CI also publishes as the job summary |
+| `selection.json` | The recorded selection |
+
+No collector measures the browser console's WebAssembly build, WASM guest code, the client
+conformance probes in other languages, or the product processes the chaos suites kill. Miri,
+mutation testing, compile-only checks, `compile_fail` doctests and the Loom weakening qualification
+keep verdicts of their own, separate from executable coverage.
+
+The union reads reports and records only. Repeating it over a run's retained artifacts, at the
+tested revision the selection names, gives the same lines without binaries or a compiler:
+
+```bash
+gh run download <run> --name coverage-full --dir retained
+gh run download <run> --dir inputs --name coverage-merged --name coverage-native-extras \
+  --name diagnostic-evidence --name bolero-selection
+just coverage-full --selection retained/selection.json inputs/*
+```
+
+Download the artifacts of the run's label-enabled producers into `inputs` as well. Outside CI,
+`just coverage-full-select` records a local selection whose `--labels` name the label-enabled
+producers collected locally. It requires collections of the checked-out revision from an
+unmodified working tree: name the `lcov-workspace.info` that `just coverage-merge` wrote and each
+attempt directory below `target/native-coverage`. `just test-coverage-full` exercises the
+selection, every validation, the attribution and the CI contract, and `just coverage-full-runner`
+exports the union's measured Python coverage for CI.
 
 ## Limits And Failure Recovery
 
