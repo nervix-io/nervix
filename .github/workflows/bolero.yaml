@@ -31,6 +31,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   NO_COLOR: "1"
