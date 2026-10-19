@@ -447,7 +447,14 @@ pub(in crate::application) fn format_ingestor_describe_output(
     }))) = ingestor.input.transport_source()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
-        lines.push(format!("pulsar subscription: {}", subscription.as_str()));
+        lines.push(format!(
+            "pulsar subscription: {}",
+            subscription.name.as_str()
+        ));
+        lines.push(format!(
+            "pulsar subscription ownership: {}",
+            subscription.ownership.keywords()
+        ));
         lines.push(format!("pulsar instances: {instances}"));
     }
 

@@ -10,13 +10,13 @@ use nervix_models::{
     IngestTimestampSource, IngestorInput, KafkaIngestMode, KafkaOffsetMode, KafkaSourceEntity,
     KafkaTopicSource, MqttIngestMode, MqttQos, MqttSession, MqttSourceEntity, MqttTopicSource,
     NatsIngestMode, NatsSourceEntity, NatsSubjectSource, PrometheusIngestMode,
-    PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarTopicSource,
-    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSourceEntity, RedisPubSubIngestMode,
-    RedisPubSubSource, RedisSourceEntity, RetryPolicy, SourceBody, SourceEntity, SqsIngestMode,
-    SqsQueueSource, SqsSourceEntity, SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity,
-    TransportIngestorInput, WebsocketsConnectionSource, WebsocketsEndpointSource,
-    WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode, ZeroMqPullSource,
-    ZeroMqSourceEntity,
+    PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarSubscription,
+    PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
+    RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSource, RedisSourceEntity, RetryPolicy,
+    SourceBody, SourceEntity, SqsIngestMode, SqsQueueSource, SqsSourceEntity, SyslogIngestMode,
+    SyslogListenerSource, SyslogSourceEntity, TransportIngestorInput, WebsocketsConnectionSource,
+    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode,
+    ZeroMqPullSource, ZeroMqSourceEntity,
 };
 
 use crate::{
@@ -174,12 +174,21 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// A Pulsar topic read through a subscription.
+    /// A Pulsar topic read through a subscription that the ingestor owns or an operator
+    /// provisioned.
     pub fn pulsar_topic_source(&mut self) -> PulsarTopicSource {
+        let client = self.name();
+        let topic = self.pulsar_topic_name();
+        let name = self.pulsar_subscription_name();
+        let ownership = if self.entropy.flag() {
+            PulsarSubscriptionOwnership::Ingestor
+        } else {
+            PulsarSubscriptionOwnership::Provisioned
+        };
         let source = PulsarTopicSource {
-            client: self.name(),
-            topic: self.pulsar_topic_name(),
-            subscription: self.pulsar_subscription_name(),
+            client,
+            topic,
+            subscription: PulsarSubscription { name, ownership },
             instances: self.positive_u64(),
             mode: self.kafka_mode(),
             quiesce: IngestQuiesceMode::Suspend,

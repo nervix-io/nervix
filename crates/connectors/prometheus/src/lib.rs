@@ -29,12 +29,12 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_approx_into::CheckedApproxInto as _;
 use nervix_connector::{
-    ClientConfigResult, HttpClientConfig, HttpClientConfigError, PacedSourceConnector,
-    RetainedIngestHeaders, SourceConnector, SourceError, SourcePoll, SourcePollMessage,
-    SourceResult, client_config_value, physical_time::actual_utc_now,
+    HttpClientConfig, HttpClientConfigError, PacedSourceConnector, RetainedIngestHeaders,
+    SourceConnector, SourceError, SourcePoll, SourcePollMessage, SourceResult,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, Timestamp};
+use nervix_models::{ClientConfigEntry, PrometheusApiRoot, Timestamp};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use thiserror::Error;
@@ -50,14 +50,12 @@ pub struct PrometheusSourcePlan {
 
 pub struct PrometheusSource {
     client: HttpClient,
-    addr: String,
+    api_root: PrometheusApiRoot,
     query: String,
 }
 
 #[derive(Debug, Error)]
 pub enum PrometheusSourceError {
-    #[error("invalid Prometheus service address")]
-    InvalidAddress,
     #[error("failed to send Prometheus query")]
     QueryRequest,
     #[error("Prometheus query failed with HTTP status {status}")]
@@ -102,17 +100,19 @@ impl SourceConnector for PrometheusSource {
     type Plan = PrometheusSourcePlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
+        let api_root = PrometheusApiRoot::of_client_config(&plan.config).change_context(
+            SourceError::Open {
+                connector: PROMETHEUS,
+            },
+        )?;
         let client = Self::client_from_config(&plan.config, &plan.dns).change_context(
             SourceError::Open {
                 connector: PROMETHEUS,
             },
         )?;
-        let addr = Self::addr_from_config(&plan.config).change_context(SourceError::Open {
-            connector: PROMETHEUS,
-        })?;
         Ok(Self {
             client,
-            addr,
+            api_root,
             query: plan.query.clone(),
         })
     }
@@ -157,10 +157,6 @@ impl PrometheusSource {
         HttpClientConfig::new(config, "Prometheus", dns).build()
     }
 
-    fn addr_from_config(config: &[ClientConfigEntry]) -> ClientConfigResult<String> {
-        client_config_value(config, "addr", "Prometheus")
-    }
-
     async fn query_vector(
         &self,
         query_time: Option<Timestamp>,
@@ -169,7 +165,7 @@ impl PrometheusSource {
         if let Some(query_time) = query_time {
             params.push(("time".to_string(), Self::query_time_seconds(query_time)));
         }
-        let url = Self::query_url(&self.addr, params)?;
+        let url = Self::query_url(&self.api_root, params);
         let response = self.client.get(url).send().await.map_err(|source| {
             Report::new(PrometheusSourceError::QueryRequest).attach_printable(source.to_string())
         })?;
@@ -214,19 +210,15 @@ impl PrometheusSource {
         format!("{sign}{seconds}.{fraction:09}")
     }
 
-    fn query_url(
-        addr: &str,
-        params: Vec<(String, String)>,
-    ) -> Result<Url, Report<PrometheusSourceError>> {
-        let mut url = Url::parse(addr).map_err(|source| {
-            Report::new(PrometheusSourceError::InvalidAddress).attach_printable(source.to_string())
-        })?;
+    /// The instant-query endpoint beneath `api_root`, carrying `params` as its query. The root
+    /// has no query of its own, so the endpoint carries exactly these.
+    fn query_url(api_root: &PrometheusApiRoot, params: Vec<(String, String)>) -> Url {
+        let mut url = api_root.url().clone();
         let mut path = url.path().trim_end_matches('/').to_string();
         path.push_str("/api/v1/query");
         url.set_path(&path);
-        url.set_query(None);
         url.query_pairs_mut().extend_pairs(params);
-        Ok(url)
+        url
     }
 
     fn sample_payload(
@@ -285,22 +277,49 @@ mod tests {
     use super::*;
 
     #[nervix_primitives::test]
-    async fn prometheus_source_reads_address_and_validates_client_configuration()
+    async fn prometheus_source_opens_only_with_a_config_its_client_declares()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
-        let address = vec![ClientConfigEntry {
-            key: "addr".to_string(),
-            value: "http://prometheus:9090".to_string(),
-        }];
+        let plan = |config: Vec<ClientConfigEntry>| PrometheusSourcePlan {
+            config,
+            query: "up".to_string(),
+            dns: dns.clone(),
+        };
+        let entry = |key: &str, value: &str| ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+
+        let source = PrometheusSource::open(
+            &plan(vec![
+                entry("addr", "http://prometheus:9090/base"),
+                entry("timeout_ms", "5000"),
+            ]),
+            0,
+        )
+        .await
+        .expect("a declared configuration opens");
         assert_eq!(
-            PrometheusSource::addr_from_config(&address).expect("address"),
-            "http://prometheus:9090"
+            source.api_root.url().as_str(),
+            "http://prometheus:9090/base"
         );
+
+        let Err(refused) = PrometheusSource::open(
+            &plan(vec![entry("addr", "http://prometheus:9090/?stale=true")]),
+            0,
+        )
+        .await
+        else {
+            panic!("an address with a query string must not open");
+        };
+        assert!(matches!(
+            refused.current_context(),
+            SourceError::Open { .. }
+        ));
         assert!(
-            PrometheusSource::addr_from_config(&[])
-                .expect_err("missing Prometheus address")
-                .to_string()
-                .contains("missing Prometheus client config key 'addr'")
+            refused
+                .downcast_ref::<nervix_models::PrometheusClientConfigError>()
+                .is_some()
         );
 
         let timeout = vec![ClientConfigEntry {
@@ -354,12 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn prometheus_query_url_uses_url_parser_for_path_and_query() {
+    fn prometheus_query_url_extends_the_api_root_path() {
+        let api_root = PrometheusApiRoot::parse("http://prometheus:9090/base/")
+            .expect("the test address is an API root");
         let url = PrometheusSource::query_url(
-            "http://prometheus:9090/base/?stale=true",
+            &api_root,
             vec![("query".to_string(), "vector(1)".to_string())],
-        )
-        .expect("must build url");
+        );
         assert_eq!(
             url.as_str(),
             "http://prometheus:9090/base/api/v1/query?query=vector%281%29"
@@ -400,7 +420,8 @@ mod tests {
         });
         let source = PrometheusSource {
             client: HttpClient::new(),
-            addr: format!("http://{address}"),
+            api_root: PrometheusApiRoot::parse(&format!("http://{address}"))
+                .expect("the test listener's address is an API root"),
             query: "up".to_string(),
         };
         let result = source.query_vector(None).await;
@@ -414,7 +435,8 @@ mod tests {
     async fn prometheus_query_failures_have_distinct_typed_contexts() {
         let unavailable = PrometheusSource {
             client: HttpClient::new(),
-            addr: "http://127.0.0.1:1".to_string(),
+            api_root: PrometheusApiRoot::parse("http://127.0.0.1:1")
+                .expect("the unused port's address is an API root"),
             query: "up".to_string(),
         }
         .query_vector(None)
@@ -466,13 +488,6 @@ mod tests {
 
     #[test]
     fn prometheus_helpers_classify_parse_failures() {
-        let address = PrometheusSource::query_url("not a URL", Vec::new())
-            .expect_err("an invalid address must fail");
-        assert!(matches!(
-            address.current_context(),
-            PrometheusSourceError::InvalidAddress
-        ));
-
         let sample = PrometheusVectorResult {
             metric: BTreeMap::new(),
             value: (1.0, "not-a-number".to_string()),

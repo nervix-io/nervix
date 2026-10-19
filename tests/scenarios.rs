@@ -162,6 +162,7 @@ mod database_batches;
 mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
+mod domain_resume;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod ingestion_time;
@@ -172,6 +173,8 @@ mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
+mod pulsar_delivery;
+mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
 mod websocket_lifecycle;
@@ -371,6 +374,7 @@ struct ScenarioWorld {
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
+    pulsar_stop_timing: Option<pulsar_delivery::StopTiming>,
     /// When the scenario first posted an HTTP payload to a node. An input collector's window
     /// opens no earlier than the first record that reaches it, so a collection-delay assertion
     /// measures its collected output from this instant.
@@ -912,9 +916,11 @@ async fn configure_stallable_tcp_endpoint(
     let target_port = endpoint_url
         .port()
         .unwrap_or_else(|| panic!("{name} endpoint '{endpoint}' has no explicit port"));
-    let proxy = StallableTcpProxy::start(target_host, target_port)
-        .await
-        .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
+    let proxy = match name {
+        "pulsar" => StallableTcpProxy::start_pulsar(target_host, target_port).await,
+        _ => StallableTcpProxy::start(target_host, target_port).await,
+    }
+    .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
     endpoint_url
         .set_host(Some("127.0.0.1"))
         .unwrap_or_else(|_| panic!("failed to replace host in {name} endpoint '{endpoint}'"));
@@ -13590,6 +13596,10 @@ async fn when_exact_command_retry_begins_in_parallel(
     expr = "the active session begins this NSPL command request with execution reference {string} \
             in the background"
 )]
+#[when(
+    expr = "the active session begins this Plexus command request with execution reference \
+            {string} in the background"
+)]
 async fn when_active_session_referenced_command_begins_in_background(
     world: &mut ScenarioWorld,
     execution_reference: String,
@@ -13673,6 +13683,10 @@ async fn when_background_command_caller_deadline_expires(
 #[when(
     expr = "this NSPL command request with execution reference {string} is executed on the leader \
             node"
+)]
+#[when(
+    expr = "this Plexus command request with execution reference {string} is executed on the \
+            leader node"
 )]
 async fn when_referenced_command_request_is_executed_on_leader(
     world: &mut ScenarioWorld,
@@ -14162,6 +14176,7 @@ async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domai
 }
 
 #[when("these NSPL commands are executed on the active session")]
+#[when("these Plexus statements are executed on the active session")]
 async fn when_these_nspl_commands_are_executed_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -15636,6 +15651,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
 }
 
 #[when("this NSPL command request is executed on the leader node")]
+#[when("this Plexus command request is executed on the leader node")]
 async fn when_this_nspl_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16815,7 +16831,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -17070,6 +17086,7 @@ async fn given_the_leader_node_is_configured_with_these_nspl_commands(
 }
 
 #[when(expr = "these NSPL commands fail with {string}")]
+#[when(expr = "these Plexus statements fail with {string}")]
 async fn when_these_nspl_commands_fail_with(
     world: &mut ScenarioWorld,
     expected_error: String,

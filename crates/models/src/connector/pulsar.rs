@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The Pulsar client Model, the topic source and sink Models with their delivery
 //!   mode, the topic and subscription names a source reads with the rules Pulsar holds them to,
-//!   and what each entity declares.
+//!   who owns a source's subscription, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
@@ -28,9 +28,10 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
     IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, KafkaIngestMode,
-    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, TopicName,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind, TopicName,
 };
 
 configured_client!(Pulsar: unpooled, config Nervix, CreateClientPulsar => PulsarConfigEntry);
@@ -105,10 +106,55 @@ fn pulsar_subscription_rule(text: &str) -> Result<(), ExternalNameError> {
 pub struct PulsarTopicSource {
     pub client: ClientName,
     pub topic: PulsarTopicName,
-    pub subscription: PulsarSubscriptionName,
+    pub subscription: PulsarSubscription,
     pub instances: NonZeroU64,
     pub mode: PulsarIngestMode,
     pub quiesce: IngestQuiesceMode,
+}
+
+/// The durable subscription a Pulsar source reads through, and who owns it on the broker.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct PulsarSubscription {
+    pub name: PulsarSubscriptionName,
+    pub ownership: PulsarSubscriptionOwnership,
+}
+
+/// Who owns a Pulsar source's subscription, which its statement declares after the
+/// subscription's name.
+///
+/// The broker cannot say later who created a subscription, so the statement states it rather than
+/// Nervix inferring it when the subscription is first opened.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum PulsarSubscriptionOwnership {
+    /// `OWNED BY INGESTOR`: the ingestor owns the subscription. Joining it creates it when it is
+    /// absent, and dropping the ingestor or its domain removes it.
+    Ingestor,
+    /// `PROVISIONED`: an operator provisioned the subscription. Every open verifies that it exists,
+    /// and Nervix never creates or removes it.
+    Provisioned,
+}
+
+impl PulsarSubscriptionOwnership {
+    /// The words a statement writes after the subscription's name to declare this ownership.
+    pub const fn keywords(self) -> &'static str {
+        match self {
+            Self::Ingestor => "OWNED BY INGESTOR",
+            Self::Provisioned => "PROVISIONED",
+        }
+    }
 }
 
 /// A Pulsar subscription acknowledges exactly as a Kafka consumer does.
@@ -137,10 +183,20 @@ impl SourceEntity for PulsarTopicSource {
             OptionDeclaration {
                 keywords: "SUBSCRIPTION",
                 presence: OptionPresence::Required,
-                form: OptionForm::Value {
-                    value: OptionValue::Name(PulsarSubscriptionName::DECLARATION),
-                    example: "SUBSCRIPTION 'readers'",
-                },
+                // The subscription's name comes first and its ownership follows it, as each
+                // example writes the option in full.
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: PulsarSubscriptionOwnership::Ingestor.keywords(),
+                        value: Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION)),
+                        example: "SUBSCRIPTION 'readers' OWNED BY INGESTOR",
+                    },
+                    OptionChoice {
+                        name: PulsarSubscriptionOwnership::Provisioned.keywords(),
+                        value: Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION)),
+                        example: "SUBSCRIPTION 'readers' PROVISIONED",
+                    },
+                ]),
             },
             OptionDeclaration::INSTANCES,
         ],

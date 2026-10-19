@@ -34,7 +34,8 @@ use lapin::{
 };
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
@@ -307,11 +308,20 @@ impl BrokerSourceConnector for RabbitMqSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        match consumer.consumer.next().await {
+        let Some(received) = cancellation
+            .unless_cancelled(consumer.consumer.next())
+            .await
+        else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        match received {
             Some(Ok(delivery)) => Ok(SourceBatch::Messages(vec![RabbitMqSourceMessage::new(
                 delivery,
             )])),

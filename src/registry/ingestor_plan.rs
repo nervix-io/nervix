@@ -31,12 +31,12 @@ use nervix_models::{
     IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName, KafkaIngestMode,
     KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model, ModelName,
     MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
-    PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource,
-    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource, RedisSource,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
-    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
-    WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource,
-    ZeroMqSource, parse_duration_text,
+    PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource,
+    PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
+    RabbitMqSource, RedisPubSubSource, RedisSource, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaName, SignalingProtocolName, SqsIngestMode, SqsQueueSource, SqsSource,
+    SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
+    WebsocketsSource, ZeroMqPullSource, ZeroMqSource, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -164,7 +164,7 @@ client_plan!(KafkaIngestorStartPlan {
 });
 client_plan!(PulsarIngestorStartPlan {
     topic: nervix_models::PulsarTopicName,
-    subscription: nervix_models::PulsarSubscriptionName,
+    subscription: nervix_models::PulsarSubscription,
     instances: NonZeroU64,
     mode: PulsarIngestMode,
 });
@@ -292,20 +292,38 @@ pub(crate) enum SourceStartPlan {
 impl IngestorStartPlan {
     /// Whether replacing this input retires external state that outlives its execution.
     /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
+    /// A Pulsar subscription its ingestor owns is removed only once no replacement reads in its
+    /// place: dropping the ingestor or its domain removes it, and a replacement keeps it.
     pub(crate) fn requires_source_retirement(&self, replacement: Option<&Self>) -> bool {
         let IngestorInputPlan::Transport(input) = &self.input else {
             return false;
         };
-        let SourceStartPlan::Mqtt(source) = &input.source else {
-            return false;
-        };
-        if let Some(replacement) = replacement
-            && let IngestorInputPlan::Transport(input) = &replacement.input
-            && let SourceStartPlan::Mqtt(replacement) = &input.source
-        {
-            return source != replacement;
+        match &input.source {
+            SourceStartPlan::Mqtt(source) => {
+                if let Some(replacement) = replacement
+                    && let IngestorInputPlan::Transport(input) = &replacement.input
+                    && let SourceStartPlan::Mqtt(replacement) = &input.source
+                {
+                    return source != replacement;
+                }
+                true
+            }
+            SourceStartPlan::Pulsar(source) => {
+                let owned = source.subscription.ownership == PulsarSubscriptionOwnership::Ingestor;
+                owned && replacement.is_none()
+            }
+            SourceStartPlan::Http(_)
+            | SourceStartPlan::Kafka(_)
+            | SourceStartPlan::Nats(_)
+            | SourceStartPlan::RabbitMq(_)
+            | SourceStartPlan::RedisPubSub(_)
+            | SourceStartPlan::Prometheus(_)
+            | SourceStartPlan::ZeroMq(_)
+            | SourceStartPlan::Sqs(_)
+            | SourceStartPlan::Endpoint(_)
+            | SourceStartPlan::Websockets(_)
+            | SourceStartPlan::Syslog(_) => false,
         }
-        true
     }
 
     /// Decides the start plan of one scheduled ingestor from the node its input resolved to: the
@@ -950,6 +968,14 @@ mod tests {
         }
     }
 
+    /// The subscription the Pulsar fixture reads, which its ingestor owns.
+    fn pulsar_subscription() -> nervix_models::PulsarSubscription {
+        nervix_models::PulsarSubscription {
+            name: named("nervix"),
+            ownership: PulsarSubscriptionOwnership::Ingestor,
+        }
+    }
+
     /// One source statement, the model it resolves to, and the source plan and header access they
     /// decide.
     struct SourceCase {
@@ -1011,7 +1037,7 @@ mod tests {
             source: IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
                 client: named("upstream"),
                 topic: named("events"),
-                subscription: named("nervix"),
+                subscription: pulsar_subscription(),
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -1024,7 +1050,7 @@ mod tests {
             plan: SourceStartPlan::Pulsar(PulsarIngestorStartPlan {
                 client: client(),
                 topic: named("events"),
-                subscription: named("nervix"),
+                subscription: pulsar_subscription(),
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::NoAck,
             }),
@@ -1392,6 +1418,39 @@ mod tests {
         replacement.input = IngestorInputPlan::Transport(input);
         assert!(previous.requires_source_retirement(Some(&replacement)));
         assert!(!replacement.requires_source_retirement(None));
+    }
+
+    #[test]
+    fn retirement_removes_an_owned_pulsar_subscription_only_with_its_ingestor() {
+        let case = pulsar_case();
+        let plans = planned_entrypoints(domain_models(case.source, case.source_model))
+            .assured("a matching source and ingestor produce a plan");
+        let owned = start_plan(&plans);
+        assert!(owned.requires_source_retirement(None));
+        assert!(!owned.requires_source_retirement(Some(owned)));
+
+        // A replacement keeps the owned subscription, whatever it reads.
+        let mut input = transport_plan(owned).clone();
+        let SourceStartPlan::Pulsar(source) = &mut input.source else {
+            panic!("the Pulsar fixture produces a typed Pulsar source");
+        };
+        source.subscription.name = named("replacement");
+        let mut replacement = owned.clone();
+        replacement.input = IngestorInputPlan::Transport(input.clone());
+        assert!(!owned.requires_source_retirement(Some(&replacement)));
+        input.source = http_case().plan;
+        replacement.input = IngestorInputPlan::Transport(input);
+        assert!(!owned.requires_source_retirement(Some(&replacement)));
+
+        // A provisioned subscription is the operator's, so even a drop keeps it.
+        let mut provisioned = owned.clone();
+        let mut input = transport_plan(owned).clone();
+        let SourceStartPlan::Pulsar(source) = &mut input.source else {
+            panic!("the Pulsar fixture produces a typed Pulsar source");
+        };
+        source.subscription.ownership = PulsarSubscriptionOwnership::Provisioned;
+        provisioned.input = IngestorInputPlan::Transport(input);
+        assert!(!provisioned.requires_source_retirement(None));
     }
 
     #[test]

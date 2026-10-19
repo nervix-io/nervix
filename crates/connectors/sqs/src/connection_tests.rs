@@ -17,7 +17,7 @@ use aws_sdk_sqs::{
 use nervix_connector::{
     BrokerSourceConnector as _, RecordSink as _, SinkPublishError, SinkRecord, SinkRecordId,
     SinkStartError, SourceBatch, SourceBatchRequest, SourceConnector as _, SourceError,
-    SourceResume,
+    SourceReadCancellation, SourceResume,
 };
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, SqsQueueName, Timestamp};
@@ -544,7 +544,7 @@ async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
     assert_eq!(fixture.authority.questions_for(SERVICE), 0);
     assert!(source.needs_resume());
     let batch = source
-        .next_batch(batch_request())
+        .next_batch(batch_request(), &SourceReadCancellation::new())
         .await
         .expect("a source without its queue's URL asks to resume");
     assert!(matches!(batch, SourceBatch::ResumeRequired));

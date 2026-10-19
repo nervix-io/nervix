@@ -27,7 +27,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
       CREATE CLIENT mqtt_main TYPE MQTT CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
       CREATE CLIENT nats_main TYPE NATS CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
-      CREATE CLIENT prom_main TYPE PROMETHEUS CONFIG { 'addr' = 'http://127.0.0.1:9090' };
+      CREATE CLIENT prom_main TYPE PROMETHEUS CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
       CREATE CLIENT zmq_main TYPE ZEROMQ CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
       CREATE CLIENT sqs_main TYPE SQS CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
       CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
@@ -54,7 +54,7 @@ Feature: Ingestors name their connector and entity in the statement head
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers'
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -163,7 +163,7 @@ Feature: Ingestors name their connector and entity in the statement head
     Then the last command output contains
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these NSPL commands are executed on the leader node
