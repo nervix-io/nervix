@@ -283,10 +283,22 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Check diagnostic evidence and report tool coverage
         run: just coverage-deadlock
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-diagnostic-evidence
 
       - name: Upload diagnostic evidence
         if: always()

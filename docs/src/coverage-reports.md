@@ -454,8 +454,8 @@ active. The check name stays stable across runner, producer and artifact changes
 
 Producer jobs retain sampled CPU utilization, steal time, used memory and swap with their build
 and execution evidence. Tests, scenarios and fuzz shards record their load directly; native
-extras, Shuttle, Loom, Turmoil, diagnostic lanes, client conformance and the independent Loom
-weakening shards use `.github/actions/runner-load` around their workloads. Its finish phase runs
+extras, Shuttle, Loom, Turmoil, diagnostic evidence and workload lanes, client conformance and the
+independent Loom weakening shards use `.github/actions/runner-load` around their workloads. Its finish phase runs
 after failure too, waits at most ten seconds for the recorder, and requires its summary before
 uploading `runner-load-<job>`; diagnostic selections and weakening shards append their matrix
 identity so their artifacts cannot overwrite one another. These are measurements of the runner,
