@@ -124,6 +124,13 @@ replacement. A failed preceding configuration supplies no preservation proof: th
 replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
 
+**Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
+from replacing it. A changed owned source requires a comparison of resolved broker address,
+qualified topic and subscription name; ownership and consumer policy are not subscription
+identity. A failed resolution or invalid service address leaves that comparison undecided, reports
+its typed failure and preserves the subscription. It never supplies a default identity or treats
+unknown state as permission to delete broker state.
+
 **Consensus append input.** `None` from the caller's request stream means that input has ended;
 the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed
 append request, retained exactly once while setup runs. A membership, admission or transport error

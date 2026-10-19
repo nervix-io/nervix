@@ -1909,6 +1909,46 @@ scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Typed input retirement during running entity replacement after the exact source tasks stop. Broker I/O, async waits and concurrent-map internals remain outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "scenario.pulsar-subscription-replacement"
+invariant = "ALTER removes an owned subscription when its replacement reads another topic or subscription, on one and three nodes."
+invocation = "scenarios"
+scenario = "Replacing a Pulsar input removes the owned subscription the replacement leaves behind"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during running entity replacement after exact source tasks stop. Broker I/O, async waits and concurrent-map internals remain outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "stress.pulsar-subscription-replacement"
+invariant = "ALTER removes an owned subscription when its replacement reads another topic or subscription, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Replacing a Pulsar input removes the owned subscription the replacement leaves behind"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Typed input retirement during passive revision replacement, comparing resolved subscription identities before restart. Surrounding lifecycle locks are tracked; broker I/O and async waits are not."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "scenario.pulsar-subscription-retention"
+invariant = "An equivalent replacement or PROVISIONED handoff preserves the subscription backlog across STOP and START, on one and three nodes."
+invocation = "scenarios"
+scenario = "A Pulsar replacement reading the same subscription keeps its backlog and declared ownership"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during passive revision replacement and resumed intake. Surrounding lifecycle locks are tracked; broker I/O and async waits are not."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "stress.pulsar-subscription-retention"
+invariant = "An equivalent replacement or PROVISIONED handoff preserves the subscription backlog across STOP and START, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar replacement reading the same subscription keeps its backlog and declared ownership"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Forced emitter recovery while the former owner's relay admission and runtime preparation remain held. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/forced_failover_delivery.feature"
@@ -2416,6 +2456,10 @@ workloads = [
   "stress.mqtt-endpoint-replacement",
   "scenario.pulsar-subscription-drop",
   "stress.pulsar-subscription-drop",
+  "scenario.pulsar-subscription-replacement",
+  "stress.pulsar-subscription-replacement",
+  "scenario.pulsar-subscription-retention",
+  "stress.pulsar-subscription-retention",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",
