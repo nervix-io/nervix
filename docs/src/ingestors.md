@@ -499,7 +499,7 @@ Transport-specific schemes and keys:
 
 - `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
-- `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
+- `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -1145,6 +1145,34 @@ evaluated with a fresh domain execution snapshot.
 and delivers retained results in order after resume. A scrape whose `ON INGESTION` unfolding finds
 the node's extension workers full waits for them; see
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+
+The ingestor reads through a `TYPE PROMETHEUS` client. Every key of its `CONFIG` is Nervix's own:
+
+| Key | Required | Value |
+| --- | --- | --- |
+| `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
+| `timeout_ms` | Yes | How long one query may take, as a positive whole number of milliseconds. It covers name resolution, connection setup, TLS and the response. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the roots the client already trusts. |
+| `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
+
+```nspl
+CREATE CLIENT prom_main
+  TYPE PROMETHEUS
+  CONFIG {
+    'addr' = 'https://prometheus.example.com/monitoring',
+    'timeout_ms' = 5000
+  };
+```
+
+`CREATE CLIENT` refuses a configuration that cannot configure a query source, and names the key:
+a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
+`addr` that is not such a URL, a `timeout_ms` that is not a positive whole number of
+milliseconds, or one of `tls_cert_file` and `tls_key_file` without the other. For example,
+`PROMETHEUS client 'prom_main' in domain 'shop' cannot use its CONFIG: 'timeout_ms' is required`.
+Keys are matched without regard to ASCII case, as the client reads them. A value can name a file
+of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. When a source opens, it
+checks the configuration again with those values rendered, so the address it queries is the one
+the rules admit.
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 

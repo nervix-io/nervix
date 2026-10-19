@@ -17019,6 +17019,7 @@ async fn given_the_leader_node_is_configured_with_these_nspl_commands(
 }
 
 #[when(expr = "these NSPL commands fail with {string}")]
+#[when(expr = "these Plexus statements fail with {string}")]
 async fn when_these_nspl_commands_fail_with(
     world: &mut ScenarioWorld,
     expected_error: String,
