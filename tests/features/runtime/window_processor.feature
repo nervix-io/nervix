@@ -948,13 +948,9 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
-        tenant string,
-        latency integer
-      );
         CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
-        TO SCHEMA metric;
+        FROM JSON TO SCHEMA metric
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
@@ -978,44 +974,34 @@ Feature: Window processor runtime behavior
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), total_latency = SUM(input.latency)
         ON MESSAGE ERROR LOG;
-        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":1}
+      [
+        {"tenant":"acme","latency":1},
+        {"tenant":"beta","latency":100},
+        {"tenant":"acme","latency":2},
+        {"tenant":"beta","latency":200},
+        {"tenant":"acme","latency":3},
+        {"tenant":"beta","latency":300}
+      ]
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      {"tenant":"acme","latency":2}
-      """
-    Then the relay subscription does not receive a payload within "300ms"
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
-      """
-      {"tenant":"acme","latency":3}
-      """
-    Then the relay subscription receives a payload
-      """
-      "sample_count":3
-      """
-    And the last relay subscription payload contains
-      """
-      "total_latency":6
+      key={"tenant":"acme"} | payload={"sample_count":3,"tenant":"acme","total_latency":6}
+      key={"tenant":"beta"} | payload={"sample_count":3,"tenant":"beta","total_latency":600}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":10}
+      [{"tenant":"acme","latency":10},{"tenant":"beta","latency":1000}]
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    Then the relay subscription receives a payload
+    Then within "30s" the relay subscription receives payloads no sooner than "3s" after they were published
       """
-      "sample_count":1
+      key={"tenant":"acme"} | payload={"sample_count":1,"tenant":"acme","total_latency":10}
+      key={"tenant":"beta"} | payload={"sample_count":1,"tenant":"beta","total_latency":1000}
       """
-    And the last relay subscription payload contains
-      """
-      "total_latency":10
-      """
-    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
 
     Examples:
       | cluster_size | replica_count |

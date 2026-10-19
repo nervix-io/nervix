@@ -2608,6 +2608,61 @@ mod tests {
         assert!(window.state.entries.is_empty());
     }
 
+    #[nervix_primitives::test]
+    async fn combined_window_completes_at_either_width_boundary() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.value), samples = COUNT(input.value)",
+            &[field("value", ParseAsType::I64)],
+            &[
+                field("total", ParseAsType::I64),
+                field("samples", ParseAsType::I64),
+            ],
+        );
+        let width = Duration::from_secs(3);
+        window.admit(vec![int64([Some(1), Some(2)])], &[0, 0]).await;
+        assert_eq!(
+            window_next_deadline(&window.state, Some(width)),
+            Some(at(3_000_000_000))
+        );
+        assert!(!window_width_met(
+            &window.state,
+            Some(3),
+            Some(width),
+            at(2_999_999_999)
+        ));
+        assert!(window_width_met(
+            &window.state,
+            Some(3),
+            Some(width),
+            at(3_000_000_000)
+        ));
+        let timed = window.emitted().await;
+        assert_eq!(batch_value(&timed, "total"), Some(RuntimeValue::I64(3)));
+        assert_eq!(batch_value(&timed, "samples"), Some(RuntimeValue::I64(2)));
+        advance_window(&mut window.state, Some(3), Some(width), at(3_000_000_000));
+        assert!(window.state.entries.is_empty());
+
+        window
+            .admit(
+                vec![int64([Some(1), Some(2), Some(3)])],
+                &[4_000_000_000; 3],
+            )
+            .await;
+        assert_eq!(
+            window_next_deadline(&window.state, Some(width)),
+            Some(at(7_000_000_000))
+        );
+        assert!(window_width_met(
+            &window.state,
+            Some(3),
+            Some(width),
+            at(4_000_000_000)
+        ));
+        let counted = window.emitted().await;
+        assert_eq!(batch_value(&counted, "total"), Some(RuntimeValue::I64(6)));
+        assert_eq!(batch_value(&counted, "samples"), Some(RuntimeValue::I64(3)));
+    }
+
     #[test]
     fn window_message_timestamp_uses_low_watermark() {
         let message = RelayMessage {

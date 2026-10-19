@@ -498,6 +498,15 @@ rates, one- and three-node clusters, exact counts and sums, timestamp preservati
 ten-second assertion bounds. Independent HTTP requests would allow domain-time completion between
 rows, even when their explicit source timestamps are identical.
 
+The combined message/duration window outline likewise publishes each message-threshold group as
+one decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
+observing both outputs, it publishes one row per branch and measures each duration output from
+that publication. Its three-second lower bound measures the window lifetime even when the next
+step starts late. A silence assertion starting after separate HTTP posts would race a deadline
+that those posts already started. The production-owner regression checks both sides of the exact
+duration boundary with two retained rows and the message threshold with three rows before that
+deadline, without wall-clock scheduling assumptions.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
