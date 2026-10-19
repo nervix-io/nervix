@@ -629,10 +629,10 @@ sending node towards the fixed address of the receiver:
 | --- | --- | --- |
 | `delay` | 180 ms | Average ICMP latency at least 100 ms above the healthy baseline, with at least 87.5% replies |
 | `jitter` | 180 ms with 100 ms of normally distributed variation | Average latency at least 80 ms above the baseline and a spread of at least 70 ms, with at least 87.5% replies |
-| `random-loss` | 30% independent loss | At least 7.5% loss and 12.5% replies |
+| `random-loss` | 30% independent loss | At least 7.5% loss and 12.5% replies, over 400 packets at 10 ms intervals |
 | `burst-loss` | Pumba's four-state model, `p13=20`, `p31=15` | At least 7.5% loss, 12.5% replies, and at least two consecutive lost packets, over 400 packets at 10 ms intervals |
 | `rate-limit` | 256 kbit/s | At least 75% replies, and a transfer at least twice as slow as healthy |
-| `combined` | One `netem combine`: 180 ms delay, 60 ms jitter, 20% loss, 256 kbit/s | Average latency at least 80 ms above the baseline, at least 5% loss and 12.5% replies, and a transfer at least twice as slow as healthy |
+| `combined` | One `netem combine`: 180 ms delay, 60 ms jitter, 20% loss, 256 kbit/s | Average latency at least 80 ms above the baseline, at least 5% loss and 12.5% replies over 400 packets at 10 ms intervals, and a transfer at least twice as slow as healthy |
 
 Before any fault, a run records a healthy ICMP and transfer baseline. Under a fault, it requires
 the broker and every node's listeners to keep answering, but not their readiness. It also checks
@@ -641,8 +641,9 @@ and its peer filter. An installed qdisc alone cannot pass; the effect must be me
 
 **ICMP samples.**
 
-- Every profile, the healthy baseline and each healing check send 40 packets at 100 ms intervals.
-  Burst loss sends 400 at 10 ms. Both sample in about four seconds.
+- The loss profiles, random, burst and combined loss, send 400 packets at 10 ms intervals. Every
+  other profile, the healthy baseline and each healing check send 40 at 100 ms. Both send for about
+  four seconds, and a sample that misses a reply waits one second more for it.
 - The limits scale with the number sent. A large sample cannot turn four replies in forty into
   passing evidence, and a sample that is missing packets fails.
 - Each ICMP sample runs in its own detached helper. Docker's start of the helper has a 60-second
@@ -654,6 +655,23 @@ and its peer filter. An installed qdisc alone cannot pass; the effect must be me
 - `*.probe.json` keeps the launch, wait, ping, log and removal outcomes, with the launch and sample
   times. A failed observation names the stage that took the time and keeps the helper's raw
   streams and Docker's state and events for it.
+
+**Sample size.** A loss floor is a claim about a random sample, so even a working fault misses it
+with some probability. The larger sample keeps that probability negligible without lowering a
+floor:
+
+| Profile | Floor | Missed by a working fault, 40 packets | 400 packets |
+| --- | --- | --- | --- |
+| `combined` | 5% lost | 1.5 × 10⁻³, and 1.3 × 10⁻⁴ that it loses none | 1.1 × 10⁻¹⁸ |
+| `random-loss` | 7.5% lost | 1.0 × 10⁻⁴ | 3.3 × 10⁻²⁹ |
+| `burst-loss` | 7.5% lost | 9.6 × 10⁻⁴ | 4.8 × 10⁻²⁴ |
+| `burst-loss` | 12.5% replies | 2.7 × 10⁻² | 1.3 × 10⁻¹⁰ |
+
+Random and combined loss are independent per packet. Burst loss is Pumba's chain, which starts a
+burst with probability 20% and ends one with 15%; its figures are for the less favorable of its two
+states at the start of a sample. No other limit gives a working fault a comparable chance to fail:
+a profile without loss need keep only 75% or 87.5% of its replies, and each latency limit sits far
+below its rule's delay.
 
 **The transfer.**
 
@@ -2492,6 +2510,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 61](https://app.clickup.com/t/86bcdxk5q) | The rate probe no longer abandons a transfer that loss stalls for over a second |
 | [Keep a caught-up leader during directed burst loss](https://app.clickup.com/t/86bcjn14h) | A hold no longer requires the lagging end of a randomly or burst-lossy link to join a connected quorum's leader agreement. `mixed-burst-loss-leader-peer` replays the step that found it |
 | [Restore backup soak setup](https://app.clickup.com/t/86bcjn14f) | The backup graph derived again after the Kafka ingestor statement gained its connector and entity kind |
+| [A combined degradation's sample that lost nothing](https://app.clickup.com/t/86bcm0fq2) | Random and combined loss judge their floors over 400 packets, as burst loss already did. Forty packets of a working 20% loss missed the combined floor about once in 700 samples |
 
 The suite also corrected defects of its own that surfaced in its qualification runs:
 
@@ -2529,8 +2548,17 @@ lost finding. The task records each entry's ledger, outcome and timings.
   of revision `8bc67c9a`, every shard of the soak suite passed on both the release and the
   diagnostic image.
 - In run [39009603191](https://github.com/nervix-io/nervix/actions/runs/39009603191), of revision
-  `ac67de6d`, which runs the runner this chapter documents, 17 of 18 shards passed. The 18th failed
-  in seed 42 because a combined degradation's 40-packet ICMP sample lost no packet under an
-  installed 20% loss.
+  `ac67de6d`, 17 of 18 shards passed. The 18th failed in seed 42 because a combined degradation's
+  40-packet ICMP sample lost no packet under an installed 20% loss.
   [Cluster Chaos: Find why a combined link degradation's 40-packet ICMP sample lost nothing under an
-  installed 20% netem loss](https://app.clickup.com/t/86bcm0fq2) owns that failure.
+  installed 20% netem loss](https://app.clickup.com/t/86bcm0fq2) found the fault working. The 103
+  combined samples of the 13 nightly soaks from 7 to 19 October, on both images, lost 18.7% of
+  4,120 packets with the variance of independent loss, and their 134 random-loss samples lost
+  29.1% of 5,360. The seeded netem generator of the failed qdisc, replayed from the seed the kernel
+  reported, draws 20.0% losses. Forty packets of a working 20% loss miss the 5% floor about once in
+  700 samples, so the loss profiles now sample 400 packets. Chaos run
+  [39330398655](https://github.com/nervix-io/nervix/actions/runs/39330398655) qualified the larger
+  samples on GitHub-hosted workers, with Linux 6.17 and 7.0, against the release image of
+  `e69c0801`. Twelve combined runs lost 20.2% of 4,800 packets, at least 64 of 400 against the
+  floor of 20, and four random-loss runs lost 30.3% of 1,600, at least 99 against 30. All 16 runs
+  passed, and each sample took 5.0 seconds, against 4.9 for 40 lossy packets.

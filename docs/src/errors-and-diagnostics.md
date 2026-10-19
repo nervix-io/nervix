@@ -2130,9 +2130,9 @@ fails the shard without consuming a product scenario's execution window.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product
-recovery failed. Burst samples use 400 packets inside the existing observation window, and the
-effect verifier preserves the original received and lost fractions. Failed observations remain
-retained alongside subsequent qualified samples.
+recovery failed. Random, burst and combined loss samples use 400 packets inside the existing
+observation window, and the effect verifier preserves the original received and lost fractions.
+Failed observations remain retained alongside subsequent qualified samples.
 
 Kafka end-offset observations retain their exact command, raw streams, command outcome, parsed
 offset, start time, elapsed time and effective bound before the controller relies on them. Output
