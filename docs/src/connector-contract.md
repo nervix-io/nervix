@@ -678,6 +678,40 @@ retired subscriptions lose theirs. Each phase runs at most its declared instance
 connections concurrently, and keeps no discovery-map guard while awaiting a connection.
 The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
 
+### Pulsar subscription ownership
+
+A Pulsar source's Model declares who owns its subscription, and its plan carries the declaration.
+The plan of an input whose subscription its ingestor owns requires retirement only when no
+replacement reads in its place: the same retirement step as MQTT's removes it after `DROP
+INGESTOR` or the domain's drop withdraws the input, on the node the installed revision assigned the
+ingestor to, once that ingestor's exact source tasks stopped, a stopped domain's passive plan
+included. A replacement keeps the subscription, whatever it reads, and a provisioned subscription is
+never retired.
+
+The Pulsar composition root resolves the dropped input's client entries through its pinned mounts
+and keeps their lease through the removal. The connector connects a client, joins the subscription
+with a durable shared consumer registered under `<domain>~<ingestor>-removal` and unsubscribes it,
+and the broker removes the subscription with its backlog. An absent subscription is created by the
+join and removed again. The broker refuses while another consumer is connected, and the removal
+then closes its own consumer so that it does not keep the subscription busy. The driver's
+ten-second connection timeout encloses the whole removal: connecting, joining and unsubscribing.
+Every failure, whether of resolution, connection, join, unsubscribe or the deadline, is rendered
+once into runtime error events and never fails the drop. A node removes the subscriptions a
+revision retires one at a time, within its application of that revision, so the command that
+dropped them completes once every removal has ended, and an unreachable broker delays it by up to
+the timeout for each subscription.
+
+Opening an owned subscription joins it. A provisioned subscription is joined by the instance's
+first resume instead, because a failed open ends the domain's execution start while a failed resume
+is the ingestor's transient status, retried on the source's retry policy. Before joining, the
+instance subscribes with a non-durable cursor of the same name. While the durable subscription
+exists, the broker refuses that with `NotAllowedError` and the reason `Durable subscription with
+the same name already exists`; the reason, not the error code the broker also answers for other
+refusals such as a topic's subscription limit, is what says the subscription exists. Otherwise the
+broker opens the non-durable cursor, which the instance closes again before reporting the
+subscription missing. Each instance's consumer registers under `<domain>~<ingestor>-<instance>`.
+The [ingestor manual](./ingestors.md#pulsar) owns the public behavior.
+
 ### Confirmed acknowledgements
 
 `acknowledge` returns only once the source's transport has confirmed the positions, as far as the

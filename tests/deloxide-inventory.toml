@@ -132,6 +132,7 @@ tags = [
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
   "@mqtt_source_retirement",
+  "@pulsar_source_retirement",
   "@forced_failover_delivery",
 ]
 target = "test:scenarios"
@@ -1867,6 +1868,26 @@ scenario = "An MQTT input moves away from an unavailable endpoint without retain
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "scenario.pulsar-subscription-drop"
+invariant = "DROP while running or stopped retires each locally owned Pulsar input before its typed execution plan is withdrawn, on one and three nodes."
+invocation = "scenarios"
+scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "stress.pulsar-subscription-drop"
+invariant = "DROP while running or stopped retires each locally owned Pulsar input before its typed execution plan is withdrawn, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Forced emitter recovery while the former owner's relay admission and runtime preparation remain held. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/forced_failover_delivery.feature"
@@ -2344,6 +2365,8 @@ workloads = [
   "stress.mqtt-session-drop",
   "stress.mqtt-topic-replacement",
   "stress.mqtt-endpoint-replacement",
+  "scenario.pulsar-subscription-drop",
+  "stress.pulsar-subscription-drop",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",

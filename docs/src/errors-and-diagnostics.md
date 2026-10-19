@@ -593,6 +593,18 @@ events and do not fail a drop or prevent moving to another reachable endpoint. F
 the replacement's changed sessions remains an installation failure. Neither path rejects a record
 or confirms payload delivery.
 
+Pulsar input retirement reports `RuntimeError::RetireIngestorSource` above the connector's
+`PulsarSourceError::RemoveSubscription`, which names the subscription and its qualified topic.
+Beneath it is the step that failed: the client's connection failure, `JoinSubscription` or
+`Unsubscribe` above the driver's `pulsar::Error`, which keeps a refusal's server error and reason,
+or `RemovalDeadline` with the connection budget it exceeded. A client whose configuration does not
+resolve keeps `SourceStartError::ClientConfiguration` beneath the retirement context instead. Each
+report is rendered once into runtime error events and never fails the drop. A provisioned
+subscription that does not exist is `PulsarSourceError::MissingSubscription` beneath the source's
+resume context, which the ingestor's transient status shows by its subscription and topic; a check
+that could not learn whether the subscription exists is `VerifySubscription` above the driver's
+error.
+
 A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
 refuses to take a record for a reason that is not the record's own, a full producer queue included,
 and when a delivery report leaves a confirmed publish's record unresolved. A record the producer

@@ -225,9 +225,11 @@ typed choice limited to that pair: clients of its connector, or endpoints of the
 names. The preview writes the statement under that pair's head. The source's own fields,
 delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
-typed, case and spaces included, and the form refuses a name its entity's rule refuses. The
-decoding codec list contains only codecs that support decoding. Timestamp behavior must be chosen
-explicitly: source timestamp, `NOW`, or `AT` a typed field from the codec's output schema.
+typed, case and spaces included, and the form refuses a name its entity's rule refuses. A
+`PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR` or
+`PROVISIONED`, which the form never defaults. The decoding codec list contains only codecs that
+support decoding. Timestamp behavior must be chosen explicitly: source timestamp, `NOW`, or `AT` a
+typed field from the codec's output schema.
 
 Each ingestor route explicitly chooses an unbranched or named branch and a relay with that exact
 branch declaration. Routes can be added, removed, and moved in order. They edit inheritance,

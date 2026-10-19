@@ -29,9 +29,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
-- Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
-  expectations, emitter publishing mode, confirmation window and timeout where applicable, retry
-  pacing, ordering, and offsets.
+- Source and sink: connector kinds, externally provisioned entity names, whether an operator
+  provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
+  emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
+  ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
