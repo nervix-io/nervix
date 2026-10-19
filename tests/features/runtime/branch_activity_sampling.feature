@@ -108,12 +108,35 @@ Feature: Branch activity sampling
       """
       DESCRIBE RELAY left_events WHERE (user_id = 42);
       """
+    # Complete both priming correlations before idling. Each entity owns its branch and scan,
+    # so the later relay retirement observations establish relay state, independently of the
+    # correlator's pending rows.
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
+      """
+      {"user_id":42,"event_seq":3}
+      """
+    Then the relay subscription receives a payload
+      """
+      "left_seq":1,"right_seq":3,"user_id":42
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
+      """
+      {"user_id":7,"event_seq":4}
+      """
+    Then the relay subscription receives a payload
+      """
+      "left_seq":2,"right_seq":4,"user_id":7
+      """
     # Retention is enforced by a physical maintenance scan whose latency is separate from the
     # logical expiration boundary. The observed expiration therefore marks a scan boundary, and
     # idling towards the next one leaves the supervisors waiting for input across it.
     And within "30s" node "node-1" eventually reports describe relay as "not exists"
       """
       DESCRIBE RELAY left_events WHERE (user_id = 42);
+      """
+    And within "30s" node "node-1" eventually reports describe relay as "not exists"
+      """
+      DESCRIBE RELAY left_events WHERE (user_id = 7);
       """
     When physical time passes for "4500ms"
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
