@@ -3051,10 +3051,11 @@ impl IngestorBodyNspl for PulsarTopicSource {
             quiesce,
         } = self;
         format!(
-            "{} TOPIC {} SUBSCRIPTION {}{} MODE {} ON QUIESCE {}",
+            "{} TOPIC {} SUBSCRIPTION {} {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(topic.as_str()),
-            string_literal(subscription.as_str()),
+            string_literal(subscription.name.as_str()),
+            subscription.ownership.keywords(),
             optional_instances_to_nspl(*instances),
             kafka_mode_to_nspl(mode),
             ingest_quiesce_to_nspl(quiesce)
@@ -4014,16 +4015,17 @@ mod tests {
         NatsSink, NatsSubjectSink, NatsSubjectSource, OutputBranch, ParseAsType, PlacementPolicy,
         PostgresConflictAction, PostgresSink, PostgresTableSink, PostgresValueMapping,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        PrometheusIngestMode, PrometheusQuerySource, PulsarSink, PulsarTopicSink,
-        PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource,
-        RabbitMqSink, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink,
-        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
-        SentryEventSink, SentrySink, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink,
-        SyslogCollectorSink, SyslogIngestMode, SyslogListenerSource, SyslogSink, UdfArgument,
-        UdfLanguage, UdfReturn, WebsocketsConnectionSource, WebsocketsEndpointSource,
-        WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
-        ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, expression_to_nspl,
+        PrometheusIngestMode, PrometheusQuerySource, PulsarSink, PulsarSubscription,
+        PulsarSubscriptionOwnership, PulsarTopicSink, PulsarTopicSource, RabbitMqIngestMode,
+        RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink, RedisPubSubIngestMode,
+        RedisPubSubSink, RedisPubSubSource, RedisSink, RelayBranching, RetryPolicy,
+        RouteConstruction, SchemaField, SentryConfigEntry, SentryEventSink, SentrySink,
+        SignalingProtobufConfig, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink, SyslogCollectorSink,
+        SyslogIngestMode, SyslogListenerSource, SyslogSink, UdfArgument, UdfLanguage, UdfReturn,
+        WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode, WindowBound,
+        WindowStateLimit, WireSchemaField, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink,
+        ZeroMqSink, expression_to_nspl,
     };
 
     fn named<N>(raw: &str) -> N
@@ -5414,15 +5416,18 @@ mod tests {
                     decoded(PulsarTopicSource {
                         client: named("pulsar_main"),
                         topic: named("persistent://public/default/Orders"),
-                        subscription: named("Readers"),
+                        subscription: PulsarSubscription {
+                            name: named("Readers"),
+                            ownership: PulsarSubscriptionOwnership::Provisioned,
+                        },
                         instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
                 "CREATE PULSAR TOPIC INGESTOR pulsar_ingestor\n  FROM pulsar_main TOPIC \
-                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' MODE NO ACK ON \
-                 QUIESCE SUSPEND",
+                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' PROVISIONED MODE NO \
+                 ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

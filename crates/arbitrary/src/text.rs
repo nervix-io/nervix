@@ -48,7 +48,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 364] = [
+pub const KEYWORDS: [&str; 366] = [
     "create",
     "delete",
     "add",
@@ -118,6 +118,8 @@ pub const KEYWORDS: [&str; 364] = [
     "timestamp",
     "session",
     "subscription",
+    "owned",
+    "provisioned",
     "vhost",
     "endpoint",
     "signaling",

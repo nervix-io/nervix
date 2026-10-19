@@ -228,6 +228,10 @@ The shared mode vocabulary is:
   cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an acknowledged body is never
   discarded by buffer policy.
 
+A read already in progress when an ingestor quiesces ends without losing what its source took from
+the transport: under `SUSPEND` those payloads still dispatch before the source suspends, and under
+`BUFFER` and `DROP` the mode decides on them like any payload received during the quiesce.
+
 A source accepts only the modes it can honor, and completion of its body offers only those.
 `SET QUIESCE` parses every body and refuses one the stored source does not honor:
 
@@ -540,7 +544,7 @@ Transport-specific schemes and keys:
 
 - `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
-- `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
+- `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -981,7 +985,7 @@ does not change the auto-commit loss windows of `MODE NO ACK`.
 ```plexus,ignore
 CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
-  (SUBSCRIPTION 'readers')
+  (SUBSCRIPTION 'readers' OWNED BY INGESTOR | SUBSCRIPTION 'readers' PROVISIONED)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -997,7 +1001,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers'` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers` |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
@@ -1008,8 +1012,47 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
 
-Pulsar ingestors use Nervix-managed shared subscriptions. The subscription
-name is still required by Pulsar, but subscription type is not exposed in NSPL.
+Pulsar ingestors read through a shared, durable subscription. The subscription name is required by
+Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
+the subscription, because the broker cannot say later who created one:
+
+- `OWNED BY INGESTOR`: the ingestor owns the subscription. Its consumers create it when it is
+  absent, starting at the earliest message the topic retains, and dropping the ingestor or its
+  domain removes it.
+- `PROVISIONED`: an operator provisioned the subscription, and Nervix never creates or removes it.
+  Before an instance joins it, the instance checks that it exists. A missing subscription is the
+  ingestor's transient error, as in `PULSAR subscription 'readers' of topic
+  'persistent://public/default/orders' does not exist`, and the instance checks again after its
+  retry policy's backoff, or on the host's reconnect cadence in `MODE NO ACK`, until the operator
+  provisions it. A missing subscription does not keep the ingestor or its domain from starting.
+
+The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
+the durable subscription exists, and otherwise opens a cursor that the check closes again. The
+driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
+not have creates the topic. While a check holds its cursor, the broker refuses to create a
+subscription of that name as a conflict, so an operator's request that arrives in that moment fails
+with HTTP 409 and succeeds when repeated. A subscription that disappears between the check and the
+join is created by the join.
+
+Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
+indices, so ingestors of the same name in different domains are told apart in the broker's
+statistics. A consumer name does not separate what ingestors read: ingestors that name the same
+subscription of the same topic share it, and each message reaches one of them.
+
+`DROP INGESTOR` of an ingestor that owns its subscription removes the subscription, including after
+`STOP`, and so does dropping its domain. Once the ingestor's consumers have closed, the node that
+ran it joins the subscription with a durable consumer and unsubscribes, and the broker removes the
+subscription with its backlog. Removal is best-effort and ends within the driver's ten-second
+connection timeout: a broker that cannot be reached, or one that refuses because another consumer
+is still connected to the subscription, is reported as a runtime error that attached sessions
+observe, and does not prevent the drop. A node removes owned subscriptions one at a time and
+applies the drop once its removals have ended, so a drop whose broker cannot be reached completes
+only after that timeout for each owned subscription it removes. The subscription then remains until
+the operator removes it or the broker expires it. `STOP`, a node restart, a relocation and a restore
+keep the subscription. Replacing the source with `ALTER PULSAR TOPIC INGESTOR ... SET FROM ...`
+keeps the preceding owned subscription in place, whatever the replacement reads. `DESCRIBE INGESTOR`
+shows the ownership as `pulsar subscription ownership: OWNED BY INGESTOR` or `PROVISIONED`.
+
 Client config currently supports:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
@@ -1034,8 +1077,11 @@ each message without waiting for the broker's answer.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
-expiry remain in force. If the subscription expires, resume creates it again at the broker's new
-subscription initial position and the suspension window is lost.
+expiry remain in force. If an owned subscription expires, resume creates it again at the earliest
+message the topic retains, which can deliver earlier messages again, and what the topic no longer
+retains from the suspension window is lost.
+A provisioned subscription that expires is the ingestor's transient error until the operator
+provisions it again.
 
 ### RabbitMQ
 
@@ -1431,6 +1477,34 @@ evaluated with a fresh domain execution snapshot.
 and delivers retained results in order after resume. A scrape whose `ON INGESTION` unfolding finds
 the node's extension workers full waits for them; see
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+
+The ingestor reads through a `TYPE PROMETHEUS` client. Every key of its `CONFIG` is Nervix's own:
+
+| Key | Required | Value |
+| --- | --- | --- |
+| `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
+| `timeout_ms` | Yes | How long one query may take, as a positive whole number of milliseconds. It covers name resolution, connection setup, TLS and the response. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the roots the client already trusts. |
+| `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
+
+```nspl
+CREATE CLIENT prom_main
+  TYPE PROMETHEUS
+  CONFIG {
+    'addr' = 'https://prometheus.example.com/monitoring',
+    'timeout_ms' = 5000
+  };
+```
+
+`CREATE CLIENT` refuses a configuration that cannot configure a query source, and names the key:
+a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
+`addr` that is not such a URL, a `timeout_ms` that is not a positive whole number of
+milliseconds, or one of `tls_cert_file` and `tls_key_file` without the other. For example,
+`PROMETHEUS client 'prom_main' in domain 'shop' cannot use its CONFIG: 'timeout_ms' is required`.
+Keys are matched without regard to ASCII case, as the client reads them. A value can name a file
+of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. When a source opens, it
+checks the configuration again with those values rendered, so the address it queries is the one
+the rules admit.
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 

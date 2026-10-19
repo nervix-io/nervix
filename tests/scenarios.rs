@@ -174,6 +174,7 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
 mod websocket_lifecycle;
@@ -14175,6 +14176,7 @@ async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domai
 }
 
 #[when("these NSPL commands are executed on the active session")]
+#[when("these Plexus statements are executed on the active session")]
 async fn when_these_nspl_commands_are_executed_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16829,7 +16831,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -17084,6 +17086,7 @@ async fn given_the_leader_node_is_configured_with_these_nspl_commands(
 }
 
 #[when(expr = "these NSPL commands fail with {string}")]
+#[when(expr = "these Plexus statements fail with {string}")]
 async fn when_these_nspl_commands_fail_with(
     world: &mut ScenarioWorld,
     expected_error: String,

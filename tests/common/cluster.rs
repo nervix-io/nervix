@@ -155,6 +155,9 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
         ),
     };
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long provisioning a Pulsar subscription repeats a request the broker refuses as a
+/// conflict while an ingestor's check holds a non-durable cursor of the same name.
+const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
     branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
@@ -2170,6 +2173,54 @@ impl Cluster {
         subscription: &str,
     ) -> io::Result<u64> {
         pulsar_subscription_backlog(&self.dependencies, topic, subscription).await
+    }
+
+    /// What the broker's admin API reports of `subscription` of `topic` now, absent when the topic
+    /// holds no subscription of that name.
+    pub(crate) async fn pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<Option<PulsarSubscriptionObservation>> {
+        pulsar_subscription(&self.dependencies, topic, subscription).await
+    }
+
+    /// Provisions `subscription` of `topic` as an operator does, through the broker's admin API:
+    /// the topic is created when it is absent, and the subscription starts at the topic's latest
+    /// message, so it holds what is published from then on.
+    pub(crate) async fn provision_pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<()> {
+        provision_pulsar_subscription(&self.dependencies, topic, subscription).await
+    }
+
+    /// Waits until the admin API's report of `subscription` of `topic` satisfies `holds`.
+    pub(crate) async fn wait_for_pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+        within: Duration,
+        holds: impl Fn(Option<&PulsarSubscriptionObservation>) -> bool,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed = pulsar_subscription(&self.dependencies, topic, subscription).await;
+            if let Ok(observation) = &observed
+                && holds(observation.as_ref())
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Pulsar subscription '{subscription}' of topic \
+                     '{topic}'; last observation: {observed:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
     }
 
     /// Waits until the backlog of `subscription` of `topic` holds `expected` messages, as the
@@ -5178,6 +5229,118 @@ async fn pulsar_subscription_backlog(
         )));
     };
     Ok(backlog)
+}
+
+/// One subscription of a topic as the Pulsar admin API reports it: whether its cursor is
+/// durable, which a probe's non-durable cursor is not, and the names its consumers registered
+/// under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PulsarSubscriptionObservation {
+    pub(crate) durable: bool,
+    pub(crate) consumer_names: Vec<String>,
+}
+
+/// The subscription `subscription` of `topic` as the admin API's topic stats report it, absent
+/// when the topic holds no subscription of that name. A topic the broker does not have holds no
+/// subscription either: the broker deletes an inactive topic without subscriptions.
+async fn pulsar_subscription(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<Option<PulsarSubscriptionObservation>> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/stats");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let stats: serde_json::Value = response
+        .error_for_status()
+        .map_err(io::Error::other)?
+        .json()
+        .await
+        .map_err(io::Error::other)?;
+    let reported = &stats["subscriptions"][subscription];
+    if reported.is_null() {
+        return Ok(None);
+    }
+    let Some(durable) = reported["isDurable"].as_bool() else {
+        return Err(io::Error::other(format!(
+            "the stats of Pulsar topic '{topic}' report no durability for subscription \
+             '{subscription}': {stats}"
+        )));
+    };
+    let mut consumer_names = Vec::new();
+    for consumer in reported["consumers"].as_array().into_iter().flatten() {
+        let Some(name) = consumer["consumerName"].as_str() else {
+            return Err(io::Error::other(format!(
+                "the stats of Pulsar topic '{topic}' report a consumer of subscription \
+                 '{subscription}' without a name: {stats}"
+            )));
+        };
+        consumer_names.push(name.to_string());
+    }
+    consumer_names.sort();
+    Ok(Some(PulsarSubscriptionObservation {
+        durable,
+        consumer_names,
+    }))
+}
+
+/// Creates `topic` when the broker does not have it, then `subscription` of it at the topic's
+/// latest message, through the admin API.
+async fn provision_pulsar_subscription(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<()> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let client = reqwest::Client::new();
+    let topic_url = format!("{admin}/admin/v2/persistent/public/default/{topic}");
+    let created = client
+        .put(&topic_url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    // A topic that already exists, such as one a probe of the subscription created, answers
+    // conflict and is used as it is.
+    if created.status() != reqwest::StatusCode::CONFLICT {
+        created.error_for_status().map_err(io::Error::other)?;
+    }
+    // An ingestor that checks for the missing subscription holds a non-durable cursor of its name
+    // for the moment of each check, and the broker refuses to create the subscription as a
+    // conflict meanwhile. An operator repeats the request, and so does this, until the broker
+    // holds the subscription durably.
+    let subscription_url = format!("{topic_url}/subscription/{subscription}");
+    let deadline = Instant::now() + PULSAR_PROVISION_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let created = client
+            .put(&subscription_url)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if created.status() != reqwest::StatusCode::CONFLICT {
+            created.error_for_status().map_err(io::Error::other)?;
+            return Ok(());
+        }
+        let observed = pulsar_subscription(dependencies, topic, subscription).await?;
+        if let Some(PulsarSubscriptionObservation { durable: true, .. }) = observed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "the broker refused to create Pulsar subscription '{subscription}' of topic \
+                 '{topic}' as a conflict for {PULSAR_PROVISION_TIMEOUT:?} without holding it \
+                 durably; last observation: {observed:?}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// The body the admin API answers `url` with, or what kept it from answering.
