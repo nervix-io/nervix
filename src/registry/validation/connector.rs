@@ -13,21 +13,19 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::time::Duration;
-
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
     Assignment, AssignmentTarget, ClientIngestMode, CodecBatchContainer, CreateClientHttp,
     CreateCodec, CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName,
     EmitSink, EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
-    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestSink, HttpSink,
-    IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName, OtelAggregationTemporality,
-    OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink, ParseAsType, ProcessorOutput,
-    RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
-    SqsQueueSink, SqsSink, VhostName, parse_duration_text,
+    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestSink, HttpRequestTimeout,
+    HttpSink, IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName,
+    OtelAggregationTemporality, OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink,
+    ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName,
+    SignalingWireFormat, SqsFifoGroup, SqsQueueSink, SqsSink, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -821,19 +819,11 @@ pub(in crate::registry) fn validate_http_emitter_client(
 
     let timeout =
         entry("timeout_ms").ok_or_else(|| invalid("HTTP emitter client requires timeout_ms"))?;
-    if timeout.is_empty() || !timeout.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(invalid(
-            "HTTP emitter client timeout_ms must be a positive schedulable integer",
-        ));
-    }
-    let timeout = timeout.parse::<u64>().map_err(|_| {
-        invalid("HTTP emitter client timeout_ms must be a positive schedulable integer")
+    HttpRequestTimeout::parse(timeout).change_context(RegistryError::InvalidModel {
+        domain: domain.as_str().to_string(),
+        identifier: identifier.as_str().to_string(),
+        reason: "HTTP emitter client timeout_ms must be a positive schedulable integer".to_string(),
     })?;
-    if timeout == 0 || Duration::from_millis(timeout).as_nanos() > u128::from(u64::MAX / 2) {
-        return Err(invalid(
-            "HTTP emitter client timeout_ms must be a positive schedulable integer",
-        ));
-    }
 
     if entry("tls_cert_file").is_some() != entry("tls_key_file").is_some() {
         return Err(invalid(

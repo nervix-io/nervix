@@ -2,11 +2,12 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Composing the Pulsar connector plan with the declared acknowledgement policy and
-//!   host-owned intake.
+//! - **Owns.** Composing the Pulsar connector plan with the declared acknowledgement policy,
+//!   host-owned intake and the domain-qualified name its consumers register under, and retiring
+//!   an input by removing the subscription its dropped ingestor owned.
 //! - **Depends on.** The connector source contract, the Pulsar connector, and pre-resolved runtime
 //!   execution handles.
-//! - **Must not know.** The Pulsar driver, consumer lifecycle, NSPL parsing, registry validation,
+//! - **Must not know.** The Pulsar driver, consumer lifecycle, Plexus parsing, registry validation,
 //!   or placement computation.
 
 #![cfg_attr(
@@ -18,11 +19,11 @@ use error_stack::ResultExt as _;
 use nervix_connector_pulsar::{
     PulsarAckReceipts, PulsarSource, PulsarSourcePlan, PulsarSourceSettings,
 };
-use nervix_models::IngestAcknowledgement;
+use nervix_models::{ClientConfigEntry, IngestAcknowledgement};
 
 use super::{
     super::*,
-    IngestorStartError,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -32,38 +33,20 @@ impl PulsarIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let PulsarIngestorStartPlan {
-            client,
-            topic,
-            subscription,
-            instances,
-            mode,
-        } = self;
         let resolved = runtime
-            .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
+            .resolve_client_config(
+                &ingestor.domain,
+                self.client.mount.as_ref(),
+                &self.client.config,
+            )
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let acknowledgement = mode.acknowledgement();
-        // A mode without an acknowledgement tree reads one message at a time, so only an
-        // acknowledged mode waits for the broker to answer what it acknowledges.
-        let ack_receipts = match acknowledgement {
-            IngestAcknowledgement::Unacknowledged => PulsarAckReceipts::Unawaited,
-            IngestAcknowledgement::Sequential { .. } | IngestAcknowledgement::Parallel { .. } => {
-                PulsarAckReceipts::Awaited
-            }
-        };
-        let connector = PulsarSourcePlan::connect(PulsarSourceSettings {
-            config: &resolved.entries,
-            topic: &topic,
-            subscription,
-            consumer_name: ingestor.name.as_str().to_string(),
-            ack_receipts,
-        })
-        .await
-        .change_context_lazy(|| ingestor.initialize_failure())?;
+        let connector = PulsarSourcePlan::connect(self.settings(&resolved.entries, ingestor))
+            .await
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
-            instances,
-            acknowledgement,
+            instances: self.instances,
+            acknowledgement: self.mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
             // A consumer whose receive queue fills while the loop is held cannot complete its close,
@@ -75,5 +58,63 @@ impl PulsarIngestorStartPlan {
         }
         .open::<PulsarSource>(ingestor)
         .await
+    }
+
+    /// Removes the subscription this input owned, once its dropped ingestor's source tasks have
+    /// stopped. Removal is best-effort: every failure, an unreachable broker included, is
+    /// reported as a runtime error and leaves the subscription in place, and none fails the drop.
+    pub(super) async fn retire(&self, runtime: &Runtime, ingestor: &IngestorSpec) {
+        let context = || RuntimeError::RetireIngestorSource {
+            domain: ingestor.domain.clone(),
+            ingestor: ingestor.name.clone(),
+        };
+        // The resolved client keeps the lease of its pinned resource mounts until the removal
+        // has finished with them.
+        let resolved = runtime.resolve_client_config(
+            &ingestor.domain,
+            self.client.mount.as_ref(),
+            &self.client.config,
+        );
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let error = error
+                    .change_context(SourceStartError::ClientConfiguration)
+                    .change_context(context());
+                runtime.events().report_error(format!("{error:#}"));
+                return;
+            }
+        };
+        let removed =
+            PulsarSourcePlan::remove_subscription(self.settings(&resolved.entries, ingestor)).await;
+        if let Err(error) = removed {
+            let error = error.change_context(context());
+            runtime.events().report_error(format!("{error:#}"));
+        }
+    }
+
+    /// What this input's connector subscribes with. Its consumers register under the ingestor's
+    /// name qualified by its domain, so ingestors of one name in different domains are told apart
+    /// on the broker.
+    fn settings<'a>(
+        &'a self,
+        config: &'a [ClientConfigEntry],
+        ingestor: &IngestorSpec,
+    ) -> PulsarSourceSettings<'a> {
+        // A mode without an acknowledgement tree reads one message at a time, so only an
+        // acknowledged mode waits for the broker to answer what it acknowledges.
+        let ack_receipts = match self.mode.acknowledgement() {
+            IngestAcknowledgement::Unacknowledged => PulsarAckReceipts::Unawaited,
+            IngestAcknowledgement::Sequential { .. } | IngestAcknowledgement::Parallel { .. } => {
+                PulsarAckReceipts::Awaited
+            }
+        };
+        PulsarSourceSettings {
+            config,
+            topic: &self.topic,
+            subscription: self.subscription.clone(),
+            consumer_name: format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str()),
+            ack_receipts,
+        }
     }
 }

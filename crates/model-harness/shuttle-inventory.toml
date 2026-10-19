@@ -65,6 +65,13 @@ name = "nervix-connector"
 
 [[package]]
 checks = [
+  "delivery::shuttle_tests::shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained",
+  "delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
+]
+name = "nervix-connector-kafka"
+
+[[package]]
+checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
@@ -134,6 +141,7 @@ checks = [
   "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload",
   "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
   "runtime::ingestors::source::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
+  "runtime::ingestors::source::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
   "runtime::ingestors::source::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",

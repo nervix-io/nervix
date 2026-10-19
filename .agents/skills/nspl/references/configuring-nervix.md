@@ -197,6 +197,9 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
+- For Pulsar receipt deadlines and the final wait after `NO_ACK` acceptance, read
+  [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
+  [Finishing a sink](../../../docs/src/connector-contract.md#finishing-a-sink).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
@@ -298,6 +301,12 @@ relay. Do not use them to scan across branches.
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
+  `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
+  domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
+  the operator must create before the ingestor reads. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
+  failures and what `ALTER` keeps.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The
@@ -323,11 +332,16 @@ relay. Do not use them to scan across branches.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
+- Every `TYPE PROMETHEUS` client sets `addr` to the API root, an `http` or `https` URL without a
+  query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
+  the paired `tls_cert_file` and `tls_key_file`; `CREATE CLIENT` refuses any other. Read
+  `Ingestors` → `Prometheus` for the keys.
 - Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
   `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
-  bound.
+  bound. The producer always reports every record, so `delivery.report.only.error` in a client's
+  `CONFIG` has no effect.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts

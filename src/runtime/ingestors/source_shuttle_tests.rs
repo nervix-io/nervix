@@ -2,11 +2,12 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Controlled source dispatch and quiesce interleavings for the host loops, the
-//!   interleavings of a lost broker connection with the broker loop's acknowledgements and
+//!   interleavings of a stop or a suspension of intake with a broker read that gathers a batch,
+//!   the interleavings of a lost broker connection with the broker loop's acknowledgements and
 //!   rejections, and the interleavings of a drain's observation with a batch's confirmation.
 //! - **Depends on.** The production source loops, source contract, quiesce control, the runtime's
-//!   batch acknowledgement and confirmed ACK roots, the connection-bound doubles of the reconnect
-//!   tests and Shuttle.
+//!   batch acknowledgement and confirmed ACK roots, the gathering doubles of the read tests, the
+//!   connection-bound doubles of the reconnect tests and Shuttle.
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
 
 #![cfg_attr(
@@ -14,7 +15,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow};
+use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceReadCancellation};
 use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
@@ -22,6 +23,10 @@ use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
+    read_tests::{
+        GatheringSource, HostControl, ReadEvent, ReadInFlight, ReadLog, RecordingHost,
+        SourceSignals, assert_every_taken_position_taken_in_first, gathering_policy,
+    },
     reconnect_tests::{RedeliveringBroker, RedeliveringSource, RedeliveryHost, sequential_policy},
     *,
 };
@@ -59,6 +64,31 @@ impl SourceMessage for ChannelMessage {
 
 struct ChannelSource {
     messages: mpsc::Receiver<ChannelMessage>,
+    read: ReadInFlight,
+}
+
+impl ChannelSource {
+    fn new(messages: mpsc::Receiver<ChannelMessage>) -> Self {
+        Self {
+            messages,
+            read: ReadInFlight::default(),
+        }
+    }
+
+    async fn receive(
+        &mut self,
+        cancellation: &SourceReadCancellation,
+    ) -> nervix_connector::SourceResult<SourceBatch<ChannelMessage>> {
+        let Some(received) = cancellation.unless_cancelled(self.messages.recv()).await else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        match received {
+            Some(message) => Ok(SourceBatch::Messages(vec![message])),
+            None => Ok(SourceBatch::Closed),
+        }
+    }
 }
 
 #[async_trait]
@@ -77,6 +107,11 @@ impl SourceConnector for ChannelSource {
     async fn resume(&mut self) -> nervix_connector::SourceResult<SourceResume> {
         Ok(SourceResume::Ready)
     }
+
+    async fn close(&mut self) -> nervix_connector::SourceResult<()> {
+        self.read.assert_none_before("close");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -87,11 +122,12 @@ impl BrokerSourceConnector for ChannelSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> nervix_connector::SourceResult<SourceBatch<Self::Message>> {
-        match self.messages.recv().await {
-            Some(message) => Ok(SourceBatch::Messages(vec![message])),
-            None => Ok(SourceBatch::Closed),
-        }
+        self.read.start();
+        let batch = self.receive(cancellation).await;
+        self.read.finish();
+        batch
     }
 
     async fn acknowledge(
@@ -375,7 +411,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
             dispatched: dispatched.clone(),
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let source = ChannelSource { messages: receiver };
+        let source = ChannelSource::new(receiver);
         if matches!(family, SourceFamily::Request) {
             // Request sources only replay work already buffered when their loop starts.
             send_message(&replays, 1).await;
@@ -489,6 +525,79 @@ fn shuttle_request_source_observes_engagement_during_dispatch() {
     explore_family(SourceFamily::Request);
 }
 
+/// What interrupts a broker read in the gathering check.
+#[derive(Clone, Copy)]
+enum ReadInterruptionCause {
+    /// The source stops.
+    Stop,
+    /// Intake is suspended, as a quiesce engagement that stops reading suspends it.
+    Suspension,
+}
+
+/// A broker source gathering a batch of up to three messages while its transport delivers two, and
+/// a stop or a suspension of intake meets the read at any point of its gathering.
+fn interrupted_gathering(cause: ReadInterruptionCause) {
+    shuttle::future::block_on(async move {
+        let (transport, receiver) = mpsc::channel(2);
+        let events = ReadLog::new();
+        let signals = Arc::new(SourceSignals::new());
+        let control = Arc::new(HostControl::new());
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
+            GatheringSource::new(receiver, events.clone(), signals.clone()),
+            SourceHost::new(RecordingHost::new(events.clone(), control.clone())),
+            gathering_policy(3),
+            shutdown_rx,
+        ));
+        let deliverer = nervix_primitives::task::spawn(async move {
+            for position in [1, 2] {
+                // The source drops its transport once the loop has stopped, which may come first.
+                if transport.send(position).await.is_err() {
+                    break;
+                }
+            }
+            // The transport stays open, so only the stop or the suspension ends the read.
+            transport
+        });
+
+        match cause {
+            ReadInterruptionCause::Stop => {}
+            ReadInterruptionCause::Suspension => {
+                // Only a source the loop has resumed is suspended, so intake is suspended once the
+                // loop reads. The batch can never fill, so the loop always reaches the suspension.
+                signals.reading.notified().await;
+                control.suspend_intake();
+                signals.suspended.notified().await;
+            }
+        }
+        shutdown.send_replace(true);
+        loop_task.await.assured(JOIN);
+        let _transport = deliverer
+            .await
+            .assured("the deliverer ends once it sent both messages or the source stopped");
+
+        let events = events.events();
+        assert_every_taken_position_taken_in_first(&events);
+        if let ReadInterruptionCause::Suspension = cause {
+            assert!(
+                events.contains(&ReadEvent::Suspended),
+                "the suspension reached the source"
+            );
+        }
+    });
+}
+
+#[test]
+fn shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took() {
+    for cause in [
+        ReadInterruptionCause::Stop,
+        ReadInterruptionCause::Suspension,
+    ] {
+        check_random(move || interrupted_gathering(cause), 500);
+        check_pct(move || interrupted_gathering(cause), 500, 3);
+    }
+}
+
 /// A broker connection lost at any point of the loop, possibly twice, while the host acknowledges
 /// two messages one at a time.
 fn lost_connection_during_settlement(losses: usize) {
@@ -582,6 +691,7 @@ impl BrokerSourceConnector for ConfirmingChannelSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        _cancellation: &SourceReadCancellation,
     ) -> nervix_connector::SourceResult<SourceBatch<Self::Message>> {
         if self.queue.is_empty() {
             return Ok(SourceBatch::Closed);

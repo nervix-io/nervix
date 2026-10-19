@@ -28,7 +28,7 @@ use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders,
     RustlsClientConfigSource, SourceBatch, SourceBatchRequest, SourceConnector, SourceError,
-    SourceMessage, SourceResult, SourceResume, client_config_value,
+    SourceMessage, SourceReadCancellation, SourceResult, SourceResume, client_config_value,
 };
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::{ClientConfigEntry, RedisChannelName};
@@ -324,11 +324,17 @@ impl BrokerSourceConnector for RedisPubSubSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(stream) = self.stream.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let Some(message) = stream.next().await else {
+        let Some(received) = cancellation.unless_cancelled(stream.next()).await else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let Some(message) = received else {
             self.stream = None;
             return Err(Report::new(RedisPubSubSourceError::SubscriptionClosed)
                 .change_context(SourceError::Read { connector: REDIS }));

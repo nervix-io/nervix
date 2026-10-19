@@ -703,9 +703,9 @@ to another broker checks against the new one's. A Pulsar topic can also set a sm
 `maxMessageSize` policy of its own. Only the broker applies it, measuring the metadata and payload
 with ten bytes of framing, so such a message is written and refused afterwards. In `MODE ACK` the
 refusal rejects every member the same way, with the broker's reason, such as
-`pulsar rejected record: the Pulsar broker does not allow the message: Exceed maximum message
+`PULSAR rejected record: the Pulsar broker does not allow the message: Exceed maximum message
 size`. In `MODE NO_ACK` the message was already delivered when the producer accepted it, so the
-refusal is not observed.
+refusal is reported at finish through the sink's typed failure, after that earlier completion.
 
 The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
 setting that AMQP never tells a client, and the broker compares it with the message body alone. A
@@ -1026,9 +1026,12 @@ ends the attempt without discarding an answer the broker already gave: the recor
 confirmed are delivered and are not sent again, and only the records still awaiting a report are
 retried. When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
-the node's graceful shutdown each give that flush their deadline. Records still queued when the
-deadline passes are lost; `DESCRIBE EMITTER` reports how many as its transient error, and a
-replacement that cannot flush fails and keeps the running emitter. A definitive record-specific
+the node's graceful shutdown each give that flush their deadline. Records still awaiting their
+delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
+transient error, counting records alone and never the errors or statistics waiting in librdkafka's
+queue beside them, and a replacement that cannot flush fails and keeps the running emitter. Because
+a record counts until its delivery report arrives, the producer always reports every record and
+overrides `delivery.report.only.error` in the client's `CONFIG`. A definitive record-specific
 rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
@@ -1066,10 +1069,17 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-emit).
 <!-- connector-matrix:emit-pulsar-topic:end -->
 
-`ACK` waits for each broker receipt. `NO_ACK` acknowledges producer acceptance and does not expose
-later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
-pipelines producer work. Messages the producer accepted under `NO_ACK` and has not sent when the
-emitter stops are discarded with the producer, which the node logs at `warn`.
+`ACK` waits for each broker receipt, for up to `ACK TIMEOUT` after that record's hand-over. The
+driver uses the same timeout, including values longer than thirty seconds. If a later enqueue
+fails, receipts already given are settled before retry, so confirmed records are not sent again.
+`NO_ACK` acknowledges producer acceptance and does not expose later broker errors as per-record
+outcomes; its throughput advantage may be smaller than Kafka's because Pulsar already pipelines
+producer work. On stop, Nervix waits for the accepted messages' outstanding receipts until the
+stop's deadline. A driver failure or receipts still unanswered then fail the finish and are
+reported by the host. This final wait does not change the earlier `NO_ACK` completion point.
+Receipt bookkeeping is bounded to 100 accepted messages, matching the driver's outbound channel
+capacity. At that bound, another hand-over waits for a receipt to free a place; the accepted
+records keep their earlier completion point.
 
 A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
 connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
@@ -2377,8 +2387,9 @@ resends only records not yet confirmed or definitively rejected. With the
 [batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
 yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
-after a crash or downstream failure. A stop sends what a Kafka producer still queues within the
-stop's deadline, while Pulsar `NO_ACK` and MQTT QoS 0 discard what their clients still queue; see
+after a crash or downstream failure. A stop sends what a Kafka producer still queues and waits
+for accepted Pulsar messages' receipts within the stop's deadline. MQTT QoS 0 discards what its
+client still queues; see
 [Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
 idempotence settings remain the user's client and service configuration.
 

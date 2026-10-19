@@ -593,6 +593,18 @@ events and do not fail a drop or prevent moving to another reachable endpoint. F
 the replacement's changed sessions remains an installation failure. Neither path rejects a record
 or confirms payload delivery.
 
+Pulsar input retirement reports `RuntimeError::RetireIngestorSource` above the connector's
+`PulsarSourceError::RemoveSubscription`, which names the subscription and its qualified topic.
+Beneath it is the step that failed: the client's connection failure, `JoinSubscription` or
+`Unsubscribe` above the driver's `pulsar::Error`, which keeps a refusal's server error and reason,
+or `RemovalDeadline` with the connection budget it exceeded. A client whose configuration does not
+resolve keeps `SourceStartError::ClientConfiguration` beneath the retirement context instead. Each
+report is rendered once into runtime error events and never fails the drop. A provisioned
+subscription that does not exist is `PulsarSourceError::MissingSubscription` beneath the source's
+resume context, which the ingestor's transient status shows by its subscription and topic; a check
+that could not learn whether the subscription exists is `VerifySubscription` above the driver's
+error.
+
 A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
 refuses to take a record for a reason that is not the record's own, a full producer queue included,
 and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
@@ -604,7 +616,9 @@ record itself, an invalid or oversized message, timestamp or record, rejects tha
 `SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
-beneath `SinkFinishError::Unsent`, which counts the records still queued; a flush that fails
+beneath `SinkFinishError::Unsent`, which counts the records whose delivery report has not been
+served and never the errors, statistics or other events waiting in the producer's queue; a flush
+that gives up only after every record's report was served is no failure. A flush that fails
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `SinkFinishError::Flush`.
 
@@ -648,6 +662,14 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
+
+The Pulsar sink preserves the driver's `pulsar::Error` beneath `SinkPublishError::Publish` for
+enqueue failures and failed receipts, with its description in a printable attachment. Its shared
+confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO_ACK` finish
+keeps the first failed receipt beneath `SinkFinishError::Flush`; if its deadline expires with
+receipts still unanswered, `SinkFinishError::Unsent` counts those receipts, retaining an earlier
+driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
+than proving that the broker did not store the message.
 
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
 `PulsarSourceError`, beneath `SourceError::Acknowledge` or `SourceError::Reject`. An
@@ -767,7 +789,13 @@ invalid-model failure naming the node and output in its diagnostic. An ingestor 
 client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
 or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
-in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. Planning failures
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `TYPE
+PROMETHEUS` client's `CONFIG` is held to the keys the vocabulary declares for it when the client
+is created. The refusal names the connector, the client and the domain, with the vocabulary's
+`PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
+or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
+domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
+Planning failures
 likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
 a member that does not exist names the domain and the member, a server-listener ingestor names the

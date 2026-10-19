@@ -46,6 +46,22 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The Pulsar finish scenario runs a public `STOP` concurrently with a timed resumption of its
+paused dependency forwarder. The forwarder's resumption future owns its control and cancellation
+handles and is awaited beside the command, so no timer task outlives the scenario. It records
+the resumption instant before reopening the gate; the command records its completion instant
+when it returns. The scenario requires completion after resumption and observes the retained payloads
+exactly once after recovery. The longer receipt scenario uses the same fault control to delay the broker
+beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOUT`. These
+dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
+
+The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
+in topic lookup responses, retaining every other command and payload field. The driver's discovered
+producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
+An opaque bootstrap proxy alone does not establish a Pulsar broker fault because discovery can
+otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
+recovery, including a producer with all 100 receipt slots occupied.
+
 The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
 write locks. It observes a pending metadata lock on the server before queuing the next writer,
 and observes each emitter's public pool-wait state to establish the borrowing order. Releasing
