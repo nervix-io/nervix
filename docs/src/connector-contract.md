@@ -953,7 +953,7 @@ event. What a stop leaves to a finish, and what the finish does with it, differs
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
 | Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
-| Pulsar | `NO_ACK`: messages the producer accepted and has not sent. `ACK`: nothing | Discards them with the producer |
+| Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
 | ZeroMQ | Nothing: each send writes and flushes its frame to a peer's socket | Nothing to send |
@@ -1040,9 +1040,25 @@ leaves the record unresolved with the driver's typed cause. A client that does n
 within `ACK TIMEOUT`, because its connection stopped draining what it queued, ends the publish
 through the window, so the retry resends none of the records JetStream confirmed before it.
 
-The Pulsar sink still awaits its answers through a window of its own, which drops its in-flight
-records when the driver refuses to take one, so a retry can resend records its broker already
-confirmed; RabbitMQ settles its records when it loses a channel instead.
+The Pulsar sink awaits its send receipts through the same window. A receipt confirms the record,
+a refusal about the record itself rejects it, and a driver or connection failure leaves it
+unresolved with its typed cause. An enqueue failure ends through the window, which settles every
+answer already given before the retry. The sink sets the driver's `operation_timeout` to the
+declared `ACK TIMEOUT`, so the driver's thirty-second default cannot end a longer declared wait.
+Driver retries remain disabled; the host's declared retry policy owns another attempt. RabbitMQ
+settles its records when it loses a channel instead.
+
+Under Pulsar `NO_ACK`, accepting a record still delivers it. The sink retains its receipt until
+it resolves, without retaining the payload or its upstream acknowledgement. Completed receipts
+are collected during subsequent publishes, and the first driver failure is retained for finish.
+The receipt set and the driver's outbound channel each hold at most 100 entries, from one shared
+connector-owned capacity. When the receipt set is full, another hand-over waits for a receipt to
+finish, under the driver's operation timeout, before accepting another record. This bounds the
+additional bookkeeping while preserving the completion point of records already accepted.
+Finishing awaits all outstanding receipts under the host's existing physical deadline before the
+producer is dropped. A late broker refusal is a finish failure, never a rejection of an already
+delivered record; an unanswered receipt is counted as unresolved when that deadline expires.
+These receipt futures and their outcome are task-owned, in-memory state.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one

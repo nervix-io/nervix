@@ -663,6 +663,14 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
+The Pulsar sink preserves the driver's `pulsar::Error` beneath `SinkPublishError::Publish` for
+enqueue failures and failed receipts, with its description in a printable attachment. Its shared
+confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO_ACK` finish
+keeps the first failed receipt beneath `SinkFinishError::Flush`; if its deadline expires with
+receipts still unanswered, `SinkFinishError::Unsent` counts those receipts, retaining an earlier
+driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
+than proving that the broker did not store the message.
+
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
 `PulsarSourceError`, beneath `SourceError::Acknowledge` or `SourceError::Reject`. An
 acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed

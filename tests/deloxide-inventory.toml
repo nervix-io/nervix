@@ -636,6 +636,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "STOP on one and three nodes reaches the Pulsar sink's finish after NO ACK delivered one record or a full 100-record producer queue while its broker connection was paused. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; receipt futures and the proxy's asynchronous gate are untracked."
+examples = 4
+feature = "tests/features/runtime/pulsar_delivery.feature"
+id = "scenario.pulsar-finish-at-stop"
+invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
+invocation = "scenarios"
+scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline are untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -1699,6 +1709,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes reaches the Pulsar sink's finish while one NO ACK record or a full 100-record producer queue is held behind a paused broker connection. Source controls and domain teardown reach tracked locks; the receipt futures and asynchronous fault gate remain untracked."
+examples = 4
+feature = "tests/features/runtime/pulsar_delivery.feature"
+id = "stress.pulsar-finish-at-stop"
+invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
+invocation = "stress-scenarios"
+scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: a three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, with tracked entity-gate state, source controls and ACK completion during the stop. The confirmation delay, the Kafka client and transport waits remain untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -2386,6 +2406,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.pulsar-finish-at-stop",
+  "stress.pulsar-finish-at-stop",
   "scenario.mqtt-session-drop",
   "scenario.mqtt-topic-replacement",
   "scenario.mqtt-endpoint-replacement",
