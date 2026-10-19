@@ -87,7 +87,7 @@ pub use source::{
     SourceAcknowledgementSupport, SourceBatch, SourceBatchAcknowledgement,
     SourceBatchAcknowledgementServices, SourceBatchRequest, SourceCapabilities, SourceConnector,
     SourceError, SourceHost, SourceHostServices, SourceIntakeError, SourceIntakeMessage,
-    SourceIntakeResult, SourceMessage, SourcePlan, SourcePoll, SourcePollMessage, SourceResult,
-    SourceResume,
+    SourceIntakeResult, SourceMessage, SourcePlan, SourcePoll, SourcePollMessage,
+    SourceReadCancellation, SourceResult, SourceResume,
 };
 pub use tls::{RustlsClientConfigSource, TlsClientConfigError, install_rustls_crypto_provider};

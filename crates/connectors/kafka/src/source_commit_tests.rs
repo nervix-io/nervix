@@ -10,7 +10,7 @@ use std::{num::NonZeroUsize, time::Duration};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, ParsedRetryPolicy, SourceAckPolicy, SourceBatch, SourceBatchRequest,
-    SourceConnector, SourceMessage, SourceResume,
+    SourceConnector, SourceMessage, SourceReadCancellation, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::time::timeout;
@@ -37,10 +37,10 @@ const DRIVER_CADENCE_MS: &str = "3600000";
 
 /// How long a test waits for its source to join the group and read the published record. The mock
 /// coordinator holds a new group's first rebalance for three seconds.
-const READ_DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const READ_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A mock cluster of one broker holding the test topic with one partition.
-fn cluster() -> MockCluster<'static, DefaultProducerContext> {
+pub(super) fn cluster() -> MockCluster<'static, DefaultProducerContext> {
     let cluster = MockCluster::new(1).assured("librdkafka builds an in-process mock cluster");
     cluster
         .create_topic(TOPIC, 1, 1)
@@ -76,7 +76,7 @@ fn plan(
 }
 
 /// Publishes one record to the test topic and returns once the broker stored it.
-async fn publish(cluster: &MockCluster<'static, DefaultProducerContext>) {
+pub(super) async fn publish(cluster: &MockCluster<'static, DefaultProducerContext>) {
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", cluster.bootstrap_servers())
         .create()
@@ -89,7 +89,7 @@ async fn publish(cluster: &MockCluster<'static, DefaultProducerContext>) {
 }
 
 /// A source whose offsets `commit` commits, subscribed to the test topic in the test group.
-async fn subscribed_source(
+pub(super) async fn subscribed_source(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
 ) -> KafkaSource {
@@ -105,15 +105,18 @@ async fn subscribed_source(
 }
 
 /// Reads the next record from `source` once it joined its group, and returns its position.
-async fn read_positions(source: &mut KafkaSource) -> Vec<KafkaOffsetPosition> {
+pub(super) async fn read_positions(source: &mut KafkaSource) -> Vec<KafkaOffsetPosition> {
     let request = SourceBatchRequest {
         max_messages: NonZeroUsize::MIN,
         batch_timeout: None,
     };
-    let batch = timeout(READ_DEADLINE, source.next_batch(request))
-        .await
-        .assured("the source joins its group and reads the published record within its deadline")
-        .assured("the source reads the record its broker serves");
+    let batch = timeout(
+        READ_DEADLINE,
+        source.next_batch(request, &SourceReadCancellation::new()),
+    )
+    .await
+    .assured("the source joins its group and reads the published record within its deadline")
+    .assured("the source reads the record its broker serves");
     let SourceBatch::Messages(messages) = batch else {
         panic!("a subscribed source reads a batch of messages");
     };
