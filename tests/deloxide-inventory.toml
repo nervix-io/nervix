@@ -2,7 +2,7 @@
 #
 # `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
 # `just test-deloxide-stress-restore` build every invocation below that their selection runs, and
-# run it supervised: each process in a session of its own, within its bound and the lane's budget,
+# run it supervised: each process in a session of its own, within its bound and its stage's budget,
 # with its output, evidence and exit kept in a fresh attempt directory. A selection runs every
 # workload that lists it. The lane fails when a registered workload is missing, ignored
 # or did not complete; when a discovered test or tagged scenario is not registered; when an
@@ -18,9 +18,13 @@
 # longer acquires one is removed.
 
 [lane]
-# The real-time budget of one selection's diagnostic compilation and execution, after its
-# prerequisites. Expiry ends the lane with status 124. CI bounds the prerequisites, this budget and
-# the coverage export together at 95 minutes.
+# All diagnostic test and driver executables build before any workload starts, under their own
+# real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
+# minutes also leaves room for the selection's other builds and variation without borrowing time
+# from its workloads. Expiry ends the lane with status 124 and identifies the build stage.
+build_budget_seconds = 4800
+# The unchanged real-time budget of one selection's workloads, started after every build completes.
+# CI bounds prerequisites, both stages and the coverage export together at 175 minutes.
 budget_seconds = 4800
 # How long a process gets to end on SIGTERM before the lane kills it.
 stop_grace_seconds = 30
@@ -100,6 +104,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@client_wire_pause_leadership",
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
@@ -1882,6 +1887,26 @@ invocation = "stress-scenarios"
 scenario = "A forced failover and a later revision install while the former owner remains paused"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Transaction model application, tracked impact recording and domain pause release across two controlled leadership transfers. Async proposal waits and fault barriers remain untracked."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.transaction-pause-release"
+invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
+invocation = "scenarios"
+scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: transaction model application, tracked impact recording and pause cleanup across two leadership transfers."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.transaction-pause-release"
+invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
+invocation = "stress-scenarios"
+scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2098,6 +2123,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "stress.diagnostic-nodes",
@@ -2182,6 +2209,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-rejection",
   "stress.diagnostic-nodes",
@@ -2191,6 +2220,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
   "stress.client-alter-drain",

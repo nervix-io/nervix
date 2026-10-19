@@ -138,7 +138,9 @@ use crate::common::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
     },
-    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
+    scenario_schedule::{
+        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+    },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -160,7 +162,9 @@ mod database_batches;
 mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
+mod domain_resume;
 mod endpoint_intake;
+mod generated_http_payloads;
 mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
@@ -504,6 +508,8 @@ struct ScenarioWorld {
     producers: client_producers::ScenarioProducers,
     /// Native and console consumers and the Arrow attempts they received.
     consumers: client_consumers::ScenarioConsumers,
+    /// The distinct-tenant payloads the last generating step posted and no assertion has received.
+    generated_payloads: generated_http_payloads::GeneratedPayloads,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -693,6 +699,18 @@ impl ScenarioWorld {
         self.cluster
             .as_mut()
             .expect("cluster must be created before using it")
+    }
+
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
     }
 
     fn cluster(&self) -> &Cluster {
@@ -3152,6 +3170,7 @@ async fn start_ready_server_process_with_launch(
     );
     initialize_scenario_identity(world);
     let mut process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
@@ -3165,7 +3184,8 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
     world: &mut ScenarioWorld,
     limit: u32,
 ) {
-    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[])
+        .await;
 }
 
 #[when(
@@ -3177,7 +3197,7 @@ async fn when_nervix_server_process_is_started_with_written_option(
     value: String,
 ) {
     let option = ServerProcessOption::Written { option, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 #[when(
@@ -3189,12 +3209,12 @@ async fn when_nervix_server_process_is_started_with_environment_variable(
     value: String,
 ) {
     let option = ServerProcessOption::Environment { variable, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 /// Starts the scenario's server process without waiting for it to accept commands, for a
 /// scenario about a process that is expected to exit during startup.
-fn start_server_process_without_waiting(
+async fn start_server_process_without_waiting(
     world: &mut ScenarioWorld,
     launch: ServerProcessLaunch,
     options: &[ServerProcessOption],
@@ -3204,6 +3224,7 @@ fn start_server_process_without_waiting(
         "a scenario starts at most one nervix-server process"
     );
     let process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
@@ -12292,16 +12313,26 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
+        .await
+        .expect("failed to restart cluster");
+}
+
+/// The node's runtime installation is held from its start, so whatever reaches it after the
+/// restart finds a node that has not installed its committed domains again.
+#[when(expr = "the cluster is restarted while runtime installation on node {string} waits")]
+async fn when_the_cluster_is_restarted_holding_runtime_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.forget_session_observations();
+    world
+        .cluster_mut()
+        .restart_holding_runtime_installation(&node_id)
         .await
         .expect("failed to restart cluster");
 }
@@ -12754,6 +12785,27 @@ async fn then_rabbitmq_queue_eventually_has_consumers(
         .wait_for_rabbitmq_queue_consumers(&queue, expected)
         .await
         .expect("rabbitmq queue did not reach expected consumer count");
+}
+
+/// The messages a queue holds ready for delivery. Once the queue has no consumer, they include
+/// every delivery a consumer still held unacknowledged when it left, because the broker returns
+/// those to the queue as the consumer goes.
+#[then(expr = "RabbitMQ queue {string} holds {int} messages")]
+async fn then_rabbitmq_queue_holds_messages(
+    world: &mut ScenarioWorld,
+    queue: String,
+    expected: usize,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let actual = world
+        .cluster()
+        .rabbitmq_queue_messages(&queue)
+        .await
+        .expect("rabbitmq queue state could not be read");
+    assert_eq!(
+        actual, expected,
+        "RabbitMQ queue '{queue}' holds {actual} messages, expected {expected}"
+    );
 }
 
 #[then(expr = "Redis channel {string} eventually has {int} subscribers")]
@@ -13539,6 +13591,10 @@ async fn when_exact_command_retry_begins_in_parallel(
     expr = "the active session begins this NSPL command request with execution reference {string} \
             in the background"
 )]
+#[when(
+    expr = "the active session begins this Plexus command request with execution reference \
+            {string} in the background"
+)]
 async fn when_active_session_referenced_command_begins_in_background(
     world: &mut ScenarioWorld,
     execution_reference: String,
@@ -13622,6 +13678,10 @@ async fn when_background_command_caller_deadline_expires(
 #[when(
     expr = "this NSPL command request with execution reference {string} is executed on the leader \
             node"
+)]
+#[when(
+    expr = "this Plexus command request with execution reference {string} is executed on the \
+            leader node"
 )]
 async fn when_referenced_command_request_is_executed_on_leader(
     world: &mut ScenarioWorld,
@@ -15585,6 +15645,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
 }
 
 #[when("this NSPL command request is executed on the leader node")]
+#[when("this Plexus command request is executed on the leader node")]
 async fn when_this_nspl_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -27288,6 +27349,43 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     }
 }
 
+/// A server error that must never be raised. Every error the session receives within the window is
+/// read, including those it already held from earlier steps, and none of them may contain `text`.
+#[then(expr = "the active session observes no server error containing {string} within {string}")]
+async fn then_the_active_session_observes_no_server_error_containing(
+    world: &mut ScenarioWorld,
+    text: String,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let unexpected = expand_placeholders(world, &text);
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist");
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .try_next_server_error(remaining)
+            .await
+            .expect("failed while waiting for server error");
+        let Some(event) = event else {
+            return;
+        };
+        append_cucumber_log_line(&format!(
+            "observed runtime server error level={:?} message={}",
+            event.level, event.message
+        ));
+        assert!(
+            !event.message.contains(&unexpected),
+            "the session observed a server error containing {unexpected:?}: {}",
+            event.message
+        );
+    }
+}
+
 #[then("the last server error contains")]
 async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step).trim());
@@ -30285,21 +30383,31 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(move |feature, _rule, scenario, world| {
+        .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
+            let rule_tags: &[String] = match rule {
+                Some(rule) => &rule.tags,
+                None => &[],
+            };
+            let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
+            let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                let registration =
-                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let registration = ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                    scenario_line,
+                    length,
+                );
                 let attempt = registration.attempt();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

@@ -712,6 +712,12 @@ presents none while a lease is held, a different one, or one from a superseded a
 refused, and so are automatic schedule changes and clock-authority updates while any lease is held.
 The command or transaction releases the lease when it finishes, whatever its outcome.
 
+A transaction that paused its domain for a model alteration completes that pause's release before
+it publishes a terminal outcome. Losing leadership during release leaves the applying step and its
+mutation lease available to recovery under the same execution identity. The successor completes
+cleanup before another mutation can acquire the domain; a refused release alone does not turn an
+otherwise applied alteration into a definitive failure.
+
 Because the lease lives in replicated state rather than in a leader's memory, it survives leadership
 changes and restarts. A new leader resumes the applying record, or the committing transaction, that
 holds the lease and continues under it; a deposed leader can no longer propose, and a stale
@@ -1432,6 +1438,15 @@ refuses producer and consumer opens as `EndpointUnavailable`. Its local domain s
 show the state before a committed `START`, so it does not classify a missing or stopped endpoint as
 terminal until that barrier passes. The client retries this temporary refusal with its bounded
 restoration backoff.
+
+The node that executes the endpoint answers only for the endpoint it runs. The serving node has
+already checked the open against the committed domain and schedule, and the executing node's
+installation trails them until it has installed its domains again after it started, or the
+revision the serving node read. An open that finds no endpoint there is therefore
+`EndpointUnavailable`, never `DomainNotFound`, `DomainStopped`, `IngestorNotFound` or
+`NotClientIngestor`. A restored producer whose open reaches a restarted executing node before that
+node installs its domain retries instead of requiring an explicit new open, and a removed or
+stopped endpoint is still classified, by the serving node, on the next attempt.
 
 ## Emitter Consumers
 

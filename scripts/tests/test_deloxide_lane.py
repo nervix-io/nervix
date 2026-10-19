@@ -42,6 +42,7 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 INVENTORY = textwrap.dedent(
     """
     [lane]
+    build_budget_seconds = 1200
     budget_seconds = 600
     stop_grace_seconds = 1
     suite_teardown_reserve_seconds = 10
@@ -278,6 +279,7 @@ class ScriptedProcesses(Processes):
         return self.root / "bin" / name
 
     def build_messages(self, name: str) -> str:
+        name = name.removesuffix("-warm")
         if name == "probes-build":
             return artifact("test", "active_cycles", self.executable("probes"), self.root / "crates/deadlock/Cargo.toml")
         if name == "owner-tests-build":
@@ -290,6 +292,8 @@ class ScriptedProcesses(Processes):
                 artifact("test", "scenarios", self.executable("scenarios"), self.root / "Cargo.toml"),
             ]
             return "\n".join(lines)
+        if name == "nervix-paced-simulation-build":
+            return artifact("bin", "nervix-paced-simulation", self.executable("driver"), self.root / "examples/paced-simulation/Cargo.toml", test=False)
         raise AssertionError(f"unexpected build {name}")
 
     def run(self, launch: Launch) -> Ended:
@@ -515,7 +519,7 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(counterpart.invariant, workload.invariant)
                 self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 67)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 68)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 51)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
@@ -693,6 +697,7 @@ class InventoryTests(unittest.TestCase):
             "an unknown table": (INVENTORY + "\n[extra]\nkey = 1\n", "the inventory has unknown keys: extra"),
             "no lane": (INVENTORY.replace("[lane]", "[lanes]", 1), "unknown keys: lanes"),
             "a zero budget": (edited("budget_seconds = 600", "budget_seconds = 0"), r"\[lane\] needs a positive integer `budget_seconds`"),
+            "a zero build budget": (edited("build_budget_seconds = 1200", "build_budget_seconds = 0"), r"\[lane\] needs a positive integer `build_budget_seconds`"),
             "a mode as a selection": (edited('name = "deloxide"\nrecorded', 'name = "loom"\nrecorded'), "`loom` is not a diagnostic build feature"),
             "a selection twice": (edited('name = "deloxide-order"', 'name = "deloxide"'), "selection deloxide is registered twice"),
             "an unknown kind": (edited('kind = "libtest"', 'kind = "doctest"'), "invocation probes: `kind` is not one of"),
@@ -1075,6 +1080,116 @@ class LaneTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = Fixture(self)
 
+    def test_builds_finish_before_workloads_and_leave_their_whole_budget(self) -> None:
+        processes = ScriptedProcesses(self.fixture.root)
+        now = [0.0]
+        run = processes.run
+
+        def advancing(launch: Launch) -> Ended:
+            ended = run(launch)
+            if launch.stdout is not None:
+                now[0] += 210.0
+            return ended
+
+        processes.run = advancing  # type: ignore[method-assign]
+        lane = self.fixture.lane(processes, clock=lambda: now[0])
+        self.assertEqual(quietly(lane.execute), 0)
+        self.assertEqual(
+            [launch.name for launch in processes.launches],
+            ["probes-build", "owner-tests-build", "scenarios-build", "probes",
+             "owner-tests-owner.store", "scenarios"],
+        )
+        scenario = processes.launches[-1]
+        self.assertEqual(scenario.bound_seconds, 120)
+        self.assertEqual(scenario.environment[deloxide_lane.SUITE_BUDGET_VARIABLE], "110s")
+        self.assertEqual(record(lane)["counts"]["completed"], 4)
+        stages = record(lane)["stages"]
+        self.assertEqual([(stage["name"], stage["duration_seconds"]) for stage in stages], [("build", 630.0), ("workloads", 0.0)])
+        self.assertTrue(all(stage["verdict"] == "complete" for stage in stages))
+
+    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_binding_path(self) -> None:
+        fixture = Fixture(self, INVENTORY.replace('tags = ["@lane"]', 'tags = ["@lane"]\ndriver = "nervix-paced-simulation"'))
+        processes = ScriptedProcesses(fixture.root)
+        lane = fixture.lane(processes)
+        self.assertEqual(quietly(lane.execute), 0)
+        names = [launch.name for launch in processes.launches]
+        self.assertLess(names.index("nervix-paced-simulation-build"), names.index("probes"))
+        scenario = processes.launches[-1]
+        self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PATH"], str(processes.executable("driver")))
+        self.assertEqual(scenario.environment["NERVIX_CLIENT_LIBRARY"], str(fixture.target / "debug/libnervix_client_ffi.so"))
+
+    def test_a_build_measurement_runs_no_workload_and_cannot_qualify_as_one(self) -> None:
+        processes = ScriptedProcesses(self.fixture.root)
+        lane = self.fixture.lane(processes)
+        self.assertEqual(quietly(lambda: lane.execute(build_only=True)), 0)
+        self.assertEqual([launch.name for launch in processes.launches], ["probes-build", "owner-tests-build", "scenarios-build"])
+        content = record(lane)
+        self.assertEqual(content["verdict"], "built")
+        self.assertEqual(content["counts"], {"discovered": 0, "selected": 0, "executed": 0, "completed": 0})
+        self.assertEqual([stage["name"] for stage in content["stages"]], ["build"])
+        self.assertEqual(content["stages"][0]["verdict"], "complete")
+        with self.assertRaisesRegex(deloxide_lane.RecordError, "did not complete"):
+            deloxide_lane.read_complete(lane.record.path, "deloxide")
+
+    def test_the_build_clock_starts_when_execution_begins(self) -> None:
+        now = [0.0]
+        processes = ScriptedProcesses(self.fixture.root)
+        lane = self.fixture.lane(processes, clock=lambda: now[0])
+        now[0] = 5000.0
+        self.assertEqual(quietly(lane.execute), 0)
+        self.assertEqual(processes.launches[0].bound_seconds, 1200)
+
+    def test_workload_time_still_reduces_later_bounds_and_can_exhaust_the_workload_stage(self) -> None:
+        for scenario_seconds, expected in ((50.0, 0), (90.0, 124)):
+            with self.subTest(scenario_seconds=scenario_seconds):
+                fixture = Fixture(self, INVENTORY.replace("budget_seconds = 600", "budget_seconds = 180"))
+                processes = ScriptedProcesses(fixture.root)
+                now = [0.0]
+                run = processes.run
+
+                def advancing(launch: Launch) -> Ended:
+                    ended = run(launch)
+                    if launch.stdout is None:
+                        now[0] += scenario_seconds if launch.name == "scenarios" else 50.0
+                    return ended
+
+                processes.run = advancing  # type: ignore[method-assign]
+                lane = fixture.lane(processes, clock=lambda: now[0])
+                self.assertEqual(quietly(lane.execute), expected)
+                scenario = processes.launches[-1]
+                self.assertEqual(scenario.bound_seconds, 80.0)
+                self.assertEqual(scenario.environment[deloxide_lane.SUITE_BUDGET_VARIABLE], "70s")
+                content = record(lane)
+                self.assertEqual(content["stages"][0]["verdict"], "complete")
+                if expected:
+                    self.assertEqual(content["failure"]["class"], "budget-expired")
+                    self.assertIn("workloads stage", content["failure"]["detail"])
+                    self.assertEqual(content["stages"][1]["verdict"], "failed")
+
+    def test_build_timeout_and_interruption_retain_the_build_stage_without_starting_workloads(self) -> None:
+        for ending in (Ending.TIMED_OUT, Ending.SIGNALED, Ending.EXITED, None):
+            with self.subTest(ending=ending):
+                processes = ScriptedProcesses(self.fixture.root)
+                if ending is None:
+                    def interrupted(launch: Launch) -> Ended:
+                        raise deloxide_lane.Interrupted(signal.SIGTERM)
+                    processes.run = interrupted  # type: ignore[method-assign]
+                else:
+                    exit_status = 101 if ending is Ending.EXITED else None
+                    processes.endings["probes-build"] = Ended(9, ending, exit_status, signal.SIGKILL if ending is Ending.SIGNALED else None, 1200.0)
+                lane = self.fixture.lane(processes)
+                status = quietly(lane.execute)
+                content = record(lane)
+                self.assertEqual([stage["name"] for stage in content["stages"]], ["build"])
+                self.assertEqual(content["counts"]["executed"], 0)
+                if ending is None:
+                    self.assertEqual(status, 128 + signal.SIGTERM)
+                    self.assertEqual(content["stages"][0]["verdict"], "interrupted")
+                else:
+                    self.assertEqual(content["stages"][0]["verdict"], "failed")
+                    self.assertEqual(status, 124 if ending is Ending.TIMED_OUT else 1)
+                    self.assertEqual(content["failure"]["class"], "budget-expired" if ending is Ending.TIMED_OUT else "build-failed")
+
     def test_order_example_processes_account_for_every_run_and_keep_separate_evidence(self) -> None:
         extra = textwrap.dedent("""
             [[workload]]
@@ -1147,7 +1262,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide-order"), content)
 
         launches = {launch.name: launch for launch in processes.launches}
-        self.assertEqual(list(launches), ["probes-build", "probes", "owner-tests-build", "owner-tests-owner.store", "scenarios-build", "scenarios-0"])
+        self.assertEqual(list(launches), ["probes-build", "owner-tests-build", "scenarios-build", "probes", "owner-tests-owner.store", "scenarios-0"])
         build = launches["probes-build"]
         self.assertEqual(build.argv[:5], ("cargo", "test", "--no-run", "--package", "nervix-deadlock"))
         self.assertIn("deloxide-order", build.argv)
@@ -1185,7 +1300,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual([workload["id"] for workload in content["workloads"]], ["probe.cycle", "scenario.nodes"])
         self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide-restore"), content)
         launches = {launch.name: launch for launch in processes.launches}
-        self.assertEqual(list(launches), ["probes-build", "probes", "scenarios-build", "scenarios"])
+        self.assertEqual(list(launches), ["probes-build", "scenarios-build", "probes", "scenarios"])
         self.assertEqual(launches["probes-build"].argv[5:8], ("--features", "deloxide", "--test"))
         self.assertEqual(launches["scenarios-build"].argv[5:8], ("--features", "testing deloxide", "--test"))
 
@@ -1195,12 +1310,14 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(quietly(lane.execute), 0)
         self.assertEqual(
             [launch.name for launch in processes.launches],
-            ["probes-build", "probes", "scenarios-build", "scenarios-0"],
+            ["probes-build", "scenarios-build", "probes", "scenarios-0"],
         )
         self.assertEqual(processes.launches[0].argv[5:7], ("--features", "deloxide-order"))
         self.assertEqual(record(lane)["feature"], "deloxide-order")
 
     def test_an_instrumented_run_builds_where_the_collector_chose_and_starts_through_its_runner(self) -> None:
+        inventory = INVENTORY.replace('tags = ["@lane"]', 'tags = ["@lane"]\ndriver = "nervix-paced-simulation"')
+        self.fixture = Fixture(self, inventory + CONFORMANCE)
         environment = {
             deloxide_lane.COVERAGE_ATTEMPT_VARIABLE: "/collector/attempt",
             deloxide_lane.PREPARED_TARGET_VARIABLE: str(self.fixture.target),
@@ -1218,6 +1335,61 @@ class LaneTests(unittest.TestCase):
         probes = next(launch for launch in processes.launches if launch.name == "probes")
         self.assertEqual(probes.argv, ("python3", "scripts/native_coverage.py", "exec", str(processes.executable("probes"))))
         self.assertEqual(record(lane)["workspace"]["instrumented"], True)
+        self.assertEqual([measurement["kind"] for measurement in record(lane)["build_measurements"]], ["initial", "warm"])
+        launches = {launch.name: launch for launch in processes.launches}
+        for name in ("probes-build", "owner-tests-build", "scenarios-build", "conformance-build", "nervix-paced-simulation-build"):
+            self.assertEqual(launches[name].argv, launches[name + "-warm"].argv)
+            self.assertEqual(launches[name].environment, launches[name + "-warm"].environment)
+            self.assertLess(processes.launches.index(launches[name + "-warm"]), processes.launches.index(probes))
+        self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide")["verdict"], "complete")
+
+        content = record(lane)
+        content["build_measurements"].pop()
+        lane.record.path.write_text(json.dumps(content))
+        with self.assertRaisesRegex(deloxide_lane.RecordError, "missing a completed build measurement"):
+            deloxide_lane.read_complete(lane.record.path, "deloxide")
+
+    def test_a_failed_warm_build_starts_no_workload_and_retains_its_failure(self) -> None:
+        environment = {
+            deloxide_lane.COVERAGE_ATTEMPT_VARIABLE: "/collector/attempt",
+            deloxide_lane.PREPARED_TARGET_VARIABLE: str(self.fixture.target),
+        }
+        workspace = deloxide_lane.resolve_workspace(self.fixture.root, self.fixture.target / "instrumented", environment, "x86_64-unknown-linux-gnu")
+        processes = ScriptedProcesses(self.fixture.root)
+        processes.endings["owner-tests-build-warm"] = Ended(9, Ending.EXITED, 101, None, 1.0)
+        lane = Lane(self.fixture.inventory, self.fixture.inventory.selection("deloxide"), workspace, processes)
+        self.assertEqual(quietly(lane.execute), 1)
+        content = record(lane)
+        self.assertEqual(content["failure"]["class"], "build-failed")
+        self.assertIn("owner-tests-build-warm", content["failure"]["detail"])
+        self.assertEqual(content["counts"]["executed"], 0)
+        self.assertEqual([stage["name"] for stage in content["stages"]], ["build"])
+        self.assertEqual([measurement["kind"] for measurement in content["build_measurements"]], ["initial"])
+
+    def test_a_warm_pass_shares_the_initial_passes_build_budget(self) -> None:
+        environment = {
+            deloxide_lane.COVERAGE_ATTEMPT_VARIABLE: "/collector/attempt",
+            deloxide_lane.PREPARED_TARGET_VARIABLE: str(self.fixture.target),
+        }
+        workspace = deloxide_lane.resolve_workspace(self.fixture.root, self.fixture.target / "instrumented", environment, "x86_64-unknown-linux-gnu")
+        processes = ScriptedProcesses(self.fixture.root)
+        now = [0.0]
+        run = processes.run
+
+        def advancing(launch: Launch) -> Ended:
+            ended = run(launch)
+            if launch.stdout is not None:
+                now[0] += 210.0
+            return ended
+
+        processes.run = advancing  # type: ignore[method-assign]
+        lane = Lane(self.fixture.inventory, self.fixture.inventory.selection("deloxide"), workspace, processes, clock=lambda: now[0])
+        self.assertEqual(quietly(lane.execute), 124)
+        content = record(lane)
+        self.assertEqual(content["failure"]["class"], "budget-expired")
+        self.assertEqual(content["counts"]["executed"], 0)
+        self.assertEqual([stage["name"] for stage in content["stages"]], ["build"])
+        self.assertEqual(content["stages"][0]["duration_seconds"], 1260.0)
 
     def test_a_check_that_records_no_evidence_completes_on_its_own_exit_and_report(self) -> None:
         self.fixture = Fixture(self, INVENTORY + CONFORMANCE)
@@ -1414,9 +1586,9 @@ class LaneTests(unittest.TestCase):
         _, content = self.run_failing(processes)
         self.assertEqual(content["failure"]["class"], "build-failed")
 
-        moments = iter([0.0, 0.0, 0.0, 700.0, 700.0, 700.0, 700.0, 700.0, 700.0])
+        moments = iter([0.0, 0.0, 0.0, 1300.0])
         processes = ScriptedProcesses(self.fixture.root)
-        status, content = self.run_failing(processes, clock=lambda: next(moments))
+        status, content = self.run_failing(processes, clock=lambda: next(moments, 1300.0))
         self.assertEqual(status, 124)
         self.assertEqual(content["failure"]["class"], "budget-expired")
 
@@ -1468,6 +1640,14 @@ class LaneTests(unittest.TestCase):
         with self.assertRaisesRegex(deloxide_lane.RecordError, "not of the deloxide-order selection"):
             deloxide_lane.read_complete(path, "deloxide-order")
         broken: dict[str, Callable[[dict[str, object]], None]] = {
+            "declare its instrumentation": lambda content: content["workspace"].pop("instrumented"),  # type: ignore[union-attr]
+            "missing a completed build measurement": lambda content: content.update({"build_measurements": []}),
+            "no initial build measurement": lambda content: content["build_measurements"][0].update({"kind": "warm"}),  # type: ignore[index]
+            "invalid initial build timing": lambda content: content["build_measurements"][0].update({"duration_seconds": -1}),  # type: ignore[index]
+            "both completed stages": lambda content: content.update({"stages": []}),
+            "no completed workloads stage": lambda content: content["stages"][1].update({"verdict": "running"}),  # type: ignore[index]
+            "invalid build stage timing": lambda content: content["stages"][0].update({"duration_seconds": -1}),  # type: ignore[index]
+            "invalid workloads stage timing": lambda content: content["stages"][1].update({"duration_seconds": 601}),  # type: ignore[index]
             "selected nothing": lambda content: content["counts"].update({"selected": 0, "executed": 0, "completed": 0}),  # type: ignore[union-attr]
             "do not show every selected workload complete": lambda content: content["counts"].update({"completed": 1}),  # type: ignore[union-attr]
             "has no executed count": lambda content: content["counts"].pop("executed"),  # type: ignore[union-attr]
@@ -1500,6 +1680,19 @@ class QualificationTests(unittest.TestCase):
 
     def test_a_selection_qualifies_with_the_cases_of_the_build_it_names(self) -> None:
         self.assert_order_cases_qualify(Fixture(self, SHARDS), "deloxide-order-restore")
+
+    def test_a_failed_probe_build_retains_its_stage_and_runs_no_qualification_case(self) -> None:
+        fixture = Fixture(self)
+        processes = ScriptedProcesses(fixture.root)
+        processes.endings["probes-build"] = Ended(9, Ending.EXITED, 101, None, 1.0)
+        status = quietly(lambda: deloxide_lane.qualify(fixture.inventory, processes, fixture.workspace(), fixture.inventory.selection("deloxide")))
+        self.assertEqual(status, 1)
+        path = next((fixture.target / "deloxide/test-deloxide/deloxide").glob("qualification.*/lane.json"))
+        content = json.loads(path.read_text())
+        self.assertEqual(content["verdict"], "failed")
+        self.assertEqual(content["failure"]["class"], "build-failed")
+        self.assertEqual(content["stages"][0]["verdict"], "failed")
+        self.assertEqual(content["qualification"], [])
 
     def assert_order_cases_qualify(self, fixture: Fixture, selection: str) -> None:
         processes = ScriptedProcesses(fixture.root, "deloxide-order")
@@ -1708,6 +1901,14 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(json.loads(report.read_text())["verdict"], "complete")
         self.assertEqual(self.main("run", "loom"), 1)
 
+    def test_build_records_only_the_selected_build_stage(self) -> None:
+        report = self.fixture.root / "build-measurement.json"
+        self.assertEqual(self.main("build", "deloxide", environment={deloxide_lane.REPORT_VARIABLE: str(report)}), 0)
+        content = json.loads(report.read_text())
+        self.assertEqual(content["verdict"], "built")
+        self.assertEqual([stage["name"] for stage in content["stages"]], ["build"])
+        self.assertEqual([launch["stage"] for launch in content["launches"]], ["build"] * 3)
+
     def test_order_run_records_fresh_scenario_process_and_its_evidence(self) -> None:
         self.assertEqual(self.main("run", "deloxide-order", selection="deloxide-order"), 0)
         launches = self.processes[-1].launches
@@ -1795,7 +1996,7 @@ class ContractTests(unittest.TestCase):
         qualification_limit = int(re.search(r'--kill-after=60 (\d+)m just test-deloxide-qualification "\$\{SELECTION\}"', job).group(1))  # type: ignore[union-attr]
         # The inventory's budget is the diagnostic part of the lane's bound; preparation and
         # export share the rest, and setup and the uploads the job's remaining minutes.
-        self.assertLess(inventory.bounds.budget_seconds / 60, lane_limit)
+        self.assertLess((inventory.bounds.build_budget_seconds + inventory.bounds.budget_seconds) / 60, lane_limit)
         self.assertLessEqual(lane_limit + 1 + qualification_limit + 1, job_limit - 10)
         self.assertIn("if: always()", job[job.index("Upload diagnostic lane evidence"):])
         # A selection's lane keeps its attempts in the instrumented build of the feature it compiles.

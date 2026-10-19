@@ -45,6 +45,13 @@ and unavailable-endpoint scenarios are registered for active, order and stressed
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
 tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
 
+Transaction pause release is a cold control-plane lifecycle path. Application completion uses the
+step's tracked impact recorder to recover an engaged domain pause before retaining its terminal
+outcome. The public pause-release regression controls two leadership transfers and is registered
+in the active, order and stressed lifecycle selections. The detector observes the surrounding
+tracked acquisitions; asynchronous proposal waits and the test barriers remain outside its scope.
+No new synchronization protocol or hot-path map access is introduced.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
@@ -1724,9 +1731,9 @@ Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The
 state while a stopping follower repeats the remaining handoff through a new leader. Its leadership
 observation, transport waits and shared shutdown deadline remain outside the detector's observation.
 Both scenarios carry `@deloxide_stress`, with separate stress workload registrations that reach
-their owners under bounded scheduling disturbance. The inventory also bounds the lane: one real-time
-budget for a selection's
-diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
+their owners under bounded scheduling disturbance. The inventory also bounds the lane: separate
+real-time budgets for a selection's diagnostic builds and workloads after its prerequisites, a bound
+for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.
 
@@ -1739,7 +1746,8 @@ at their applicable boundaries.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
-For each invocation the lane builds the selection's executable, lists what the build holds or reads
+The lane builds all selected executables and diagnostic drivers before starting its workload clock.
+For each prepared invocation it lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no
 longer holds or holds ignored, a discovered probe, conformance check, owner test or tagged scenario
 that is not registered, a scenario whose example runs changed, and an invocation that selects
@@ -1813,7 +1821,11 @@ description of every finding with its source sites, and `lane.json`. The record 
 and whether the tree was modified, the toolchain, Cargo and Deloxide's locked version and source, the
 inventory's digest, the selection, the features of every build and the bounds, and for every launch
 its exact command, working directory, environment additions, bound, ending, duration, discovery and
-accounting, with the qualification of every evidence file. `just test-deloxide-replay <lane.json>
+accounting, with the qualification of every evidence file. All selected test executables and
+diagnostic drivers build in a bounded stage before the workload stage starts its own clock. Each
+stage records its budget, start, verdict and duration; a failed build starts no workload. A
+`just build-deloxide-lane <selection>` measurement records `built` and cannot qualify as a completed
+lane. `just test-deloxide-replay <lane.json>
 <launch>` runs one recorded launch again, exactly, in a fresh attempt. OS schedules and stress timing
 are not recorded, so a replay can take another interleaving; deterministic reproduction belongs to
 Shuttle and Loom.
@@ -1831,11 +1843,16 @@ Under `just coverage-native-extras test-deloxide`, `test-deloxide-order`, `test-
 feature its selection compiles, with instrumentation on workspace crates only, so dependencies such
 as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
 and shared client binding from the target its prerequisites built, starts every test executable
-through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
+through Cargo's configured runner, and measures initial and warm passes of every selected build
+under the same build budget and compiler context before any workload starts. It hands `lane.json`
+to the collector, which exports nothing
 unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
-coverage stays out of ordinary coverage and its CRAP report. The [Integration Test
+coverage stays out of ordinary coverage and its CRAP report. For a pull request labeled
+`deloxide`, Check's `coverage-full` job requires each selection's complete collection with its
+complete `lane.json`, and adds their lines to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). The [Integration Test
 Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
 reserves.
 
@@ -2108,6 +2125,7 @@ A family of names means each member runs independently through the recipe.
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. `shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room` and `shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room` race a `BUFFER` engagement or the stop against a live payload waiting for such a place: the wait always ends, a new decision becomes the one the payload is decided under next and its buffer retains it, counted with its bytes, and a stop leaves nothing retained. |
 | Broker source confirmation (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestors/source.rs`, `src/runtime/ingestors/source_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch` lets a drain read the domain's ownership-handoff count at any point while the graph resolves the two confirmed roots of one batch in either order and the source's transport takes a round trip to confirm the batch. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed, and the count returns to zero once it is. The check fails under a batch acknowledgement that releases the last root before the loop drops it, and under a root released as it resolves. |
+| Refused payload confirmation (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestors/source.rs`, `src/runtime/ingestors/source_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload` hands the broker loop a batch of one payload its codec refused, and a batch whose refused payload a dispatched one follows. The host consumes the refused payload through the production `BatchRoots`, which resolves its confirmed root at once, while the graph resolves the dispatched root, the source's transport takes a round trip to confirm the batch, and a drain reads the domain's ownership-handoff count at any point. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed; the batch is confirmed and never rejected, and the count returns to zero once it is. The check fails under a consumed root whose completion is released as it resolves. |
 | Broker source reconnect (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestors/source.rs`) | `shuttle_a_reconnect_discards_rejections_the_broker_redelivers` loses the connection of a `broker_redelivered` source at any point, once or twice, while the host loop acknowledges two messages one at a time. The host never asks a connection to acknowledge or reject a delivery of a lost one. Every message is acknowledged exactly once, on the connection that delivered it, and each rejection a lost connection failed is discarded and counted exactly once. The check fails under a loop that retries the failed rejection after the reconnect. |
 | Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
 | Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing a source ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. `shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery` races a batch another node routed here against an attached consumer registering here: every consumer the batch reaches holds a share of its own, so one that fails the batch fails the source ACK. |

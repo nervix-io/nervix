@@ -499,7 +499,10 @@ as a fallback. [Domain Clock](./domain-clock.md#logical-and-physical-deadlines) 
 
 An open succeeds only after current routing and capacity are installed. During process-start
 catch-up, an endpoint open is temporarily `EndpointUnavailable`; stale local missing/stopped state
-is not exposed as terminal before the barrier. A node unable to establish the required current
+is not exposed as terminal before the barrier. The node executing the endpoint never exposes its
+local state as terminal either: one that has not installed the endpoint, since it started or for
+the revision the serving node checked, answers `EndpointUnavailable`, and only the serving node
+classifies a missing, stopped or changed endpoint from committed state. A node unable to establish the required current
 open/admission authority refuses that operation. The startup proof is not a continuous quorum
 lease that revokes already-admitted runtime work after every connectivity loss.
 

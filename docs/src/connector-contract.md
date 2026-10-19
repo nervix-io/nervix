@@ -416,6 +416,17 @@ declaration.
 
 ### Capability inventory
 
+The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
+synopsis are generated from these declarations by `just connector-matrix`. The documentation
+exporter destructures the source, destination and client declarations exhaustively, so adding a
+field requires extending the projection. It emits a temporary JSON projection for the renderer;
+this is tooling output, never a stored Model or a runtime input. The transport explanations in
+`docs/connector-matrix.toml` supply prose for absent capabilities and differences between ingest
+and emit. They supply no capability facts. Missing, empty or stale explanation keys fail the
+check. Position-class and acknowledgement-confirmation membership in this chapter is generated
+from the same projection. `just validate-connector-matrix`, included in local and CI validation,
+compares every generated region and rejects drift while preserving the surrounding prose.
+
 `tests/connector-capability-inventory.toml` registers, for every entity and every capability it
 declares, the scenarios that observe that capability at run time. The capabilities are each delivery
 or publishing mode, each option and each choice of an option, each typed metadata field, batching
@@ -486,6 +497,16 @@ group closes. Compiled field keys direct borrowed JSON values into typed columns
 tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
 it started, including any list value it left half-filled at any depth, preserving the accepted rows
 and transport positions around it: every payload decodes into its group exactly as it would alone.
+A payload its codec refuses leaves its batch instead of failing it, because presenting it again
+would repeat the refusal. The host consumes it as a decode rejection, which the ingestor's
+`ON GENERAL ERROR` policy reports and which names the transport position the payload's typed
+metadata carries; see [When The Codec Refuses A Payload](./ingestors.md#when-the-codec-refuses-a-payload).
+In an acknowledged mode the host gives the refused payload a confirmed root and resolves it at once,
+so its position is acknowledged together with the batch's other positions and a drain or an
+ownership handoff waits for that confirmation, as it waits for a dispatched payload's. In
+`MODE NO ACK` the host drops it. A payload the extension workers had no room to unfold was judged by
+nothing, so it still fails its whole batch: an acknowledged batch is rejected for its source to
+present again, and a live unacknowledged one follows its source's unacknowledged admission.
 At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
 admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
 Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
@@ -536,7 +557,7 @@ behind it until then. Its sender was already answered and its source has moved p
 host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
 than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
 and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
-rejects leaves the buffer and is reported.
+refuses leaves the buffer as a decode rejection.
 
 At the start of a graceful stop, the host closes intake on the stopping node before the control
 plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
@@ -583,11 +604,13 @@ rejection itself fails depends on the position class each source entity declares
 its positions still mean once the connection that delivered them is gone. The host handles each
 class once:
 
-| Position class | Entities | After a failed rejection |
+<!-- connector-matrix:position:start -->
+| Position class | Entities | Meaning |
 | --- | --- | --- |
-| `replayable` | Kafka, Pulsar | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
-| `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
-| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+| `broker_redelivered` | `MQTT TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+| `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+<!-- connector-matrix:position:end -->
 
 The broker host applies the same retry backoff to a failed resume, a failed read and a requested
 reconnect. A successful connection alone does not reset it: the next accepted batch resets the
@@ -675,12 +698,14 @@ source's entity declares in its acknowledgement confirmation, or with a typed ac
 failure. A source whose client returns before that declares so rather than reporting a confirmation
 it did not get:
 
-| Acknowledgement confirmation | Entities | When acknowledging returns |
+<!-- connector-matrix:confirmation:start -->
+| Acknowledgement confirmation | Entities | Meaning |
 | --- | --- | --- |
-| `answered` | SQS, Kafka, Pulsar | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
-| `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
-| `queued` | MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
-| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
+| `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
+| `queued` | `MQTT TOPIC` | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `written` | `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+<!-- connector-matrix:confirmation:end -->
 
 A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
 positions it delivered on its own cadence, `auto.commit.interval.ms`, so acknowledging such a batch
@@ -1450,8 +1475,10 @@ bind all stay beneath the ingestor's initialize failure, which names the ingesto
 Host-owned refusals, such as a missing node resolver, signaling protocol or endpoint, Kafka
 `DOMAIN` offsets this node does not own, or a delivery-mode duration that does not parse, are typed
 causes in the same place. Host decoding returns the codec's report through the ingest group
-unchanged and keeps it beneath the intake's decode failure, which a source loop reports with its
-whole chain; the host never renders a codec failure into text before that boundary. A context whose
+unchanged, and the decode rejection that replaces the refused payload renders its whole chain once
+as the rejection's message; the host never renders a codec failure into text before that boundary.
+A refusal for room keeps the executor's report beneath the intake's dispatch failure, which a source
+loop reports with its whole chain. A context whose
 parser or driver error is its `#[source]` leaves that error out of its own message, because the
 report carries the source as the frame beneath it: a rendered chain names each cause once. A
 Syslog `max_message_size` or `addr` value that does not parse therefore reads as the key and value
