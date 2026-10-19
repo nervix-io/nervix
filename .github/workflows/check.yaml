@@ -421,6 +421,11 @@ jobs:
       # The bound covers prerequisites, the inventory's separate build and workload budgets,
       # and the coverage export. At its end the collector and the lane each
       # record their attempt as interrupted and end every process they started.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Diagnostic lane
         run: |
           just toolchains-install
@@ -431,6 +436,13 @@ jobs:
 
       # Every attempt's record, logs, evidence and finding descriptions, whatever its verdict: a
       # failed lane is investigated and replayed from what it kept. The raw profiles stay here.
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-deloxide-${{ matrix.selection }}
+
       - name: Upload diagnostic lane evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -1226,10 +1238,22 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Client conformance
         run: |
           just toolchains-install
           just test-client-conformance
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-client-conformance
 
       - name: Publish kache cache
         if: always()
@@ -1370,6 +1394,11 @@ jobs:
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Capability doctests
         run: |
           just toolchains-install
@@ -1450,6 +1479,13 @@ jobs:
       # Each collection's report, completion record, executions and export diagnostics, whatever
       # its verdict: a failed or interrupted record is the evidence of what the collection saw. The
       # raw profiles stay on the runner.
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-extra-tests
+
       - name: Upload native extra coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -1593,6 +1629,11 @@ jobs:
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
       # each in its own process, then the proof that a failing schedule persists and replays.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
@@ -1600,6 +1641,13 @@ jobs:
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-shuttle
 
       - name: Upload Shuttle coverage
         if: always()
@@ -1735,10 +1783,22 @@ jobs:
       # Every registered Loom model of a production owner explored to exhaustion. The proof that
       # each model fails under the ordering weakening it exists to detect runs in the
       # loom-qualification jobs.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Loom memory-ordering models
         run: |
           just toolchains-install
           just coverage-native-extras test-loom
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-loom
 
       - name: Upload Loom coverage
         if: always()
@@ -1885,10 +1945,22 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Loom ordering qualification
         run: |
           just toolchains-install
           just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-loom-qualification-${{ matrix.shard }}
 
       - name: Publish kache cache
         if: always()
@@ -2005,6 +2077,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Turmoil simulations
         run: |
           just toolchains-install
@@ -2026,6 +2103,13 @@ jobs:
           just coverage-patch "$BASE_SHA" target/turmoil.lcov --scope turmoil \
             --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
             --output target/turmoil-patch-coverage.md
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-turmoil
 
       - name: Upload Turmoil coverage
         if: always()

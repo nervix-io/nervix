@@ -452,6 +452,18 @@ live ruleset identity, enforcement, branch scope and required check on its Click
 the checked revision and check result; changing source alone is not evidence that the setting is
 active. The check name stays stable across runner, producer and artifact changes.
 
+Producer jobs retain sampled CPU utilization, steal time, used memory and swap with their build
+and execution evidence. Tests, scenarios and fuzz shards record their load directly; native
+extras, Shuttle, Loom, Turmoil, diagnostic lanes, client conformance and the independent Loom
+weakening shards use `.github/actions/runner-load` around their workloads. Its finish phase runs
+after failure too, waits at most ten seconds for the recorder, and requires its summary before
+uploading `runner-load-<job>`; diagnostic selections and weakening shards append their matrix
+identity so their artifacts cannot overwrite one another. These are measurements of the runner,
+including build and service memory, rather than individual-process peak RSS. Workflow step times
+and collection records delimit producer work. Instrumented timings measure collection cost;
+runtime performance claims still require ordinary builds on the same host. Recording the load of
+a weakening or replay does not make that altered-source execution coverage evidence.
+
 The `coverage-full` job waits for every producer job, including one that failed or was skipped. It
 records the run's selection before downloading artifacts, then rebuilds nothing and combines:
 
