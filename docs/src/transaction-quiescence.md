@@ -369,6 +369,10 @@ and after topology at stable positions, then offers **Before**, **Changes**, and
 parallel relations, shared gates, ownership moves, rebuilds, and state resets. A domain-wide pause
 gets an explicit domain outline; a force flush outside the pictured subgraph remains visible in
 the domain summary. An incomplete or stale preview is marked, and a refresh obtains a new basis.
+A complete report of the attached transaction is the commit basis for the position it names, even
+when it arrives before the outcome of the append that reached that position, as a report read on
+the session's concurrent lane can; the console commits against it once its status reaches that
+position. A report of a position the attached status has already passed supplies no basis.
 The console reads a report again only when the inspector opens or changes its target, when the
 attached transaction's position, state, or applied count changes, or when the operator refreshes;
 a delivered report never requests itself again.

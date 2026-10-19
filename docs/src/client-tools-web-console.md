@@ -58,19 +58,20 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 ### Following the selected domain clock
 
 Selecting a domain attaches the console session to its clock once. The console selects the first
-listed domain on its own when none is selected or the selected one disappears, and selecting
-another domain, from the domain menu or with a typed `USE`, detaches the previous clock first. The
-console's session is served by the leader, so after a connection interruption or a leader change it
-attaches the selected clock again on the new session; the server releases the earlier attachment
-when its session ends. A console that holds a transaction attaches it first on a new connection,
-and while the session holds it the server refuses the clock attachment, as it refuses the
-automatic detach. The panel shows the attached clock's typed state and START generation. For a
-paced clock it also shows logical now, rate, period, skew, the logical origin and UTC anchor, and
-the latest accepted tick id and logical boundary. Logical now is projected from the committed
-mapping at the browser's UTC, refreshed four times a second; a browser whose clock differs from the
-cluster's can show a different projection. The tick is the serving node's accepted observation.
-Stopped, uninstalled, and unpaced states have no projected logical time. A refused attachment
-shows its reason and is not retried until the selection or connection changes.
+listed domain on its own when none is selected or the selected one disappears, and selecting another
+domain, from the domain menu or with a typed `USE`, detaches the previous clock first. The console's
+session is served by the leader, so after a connection interruption or a leader change it attaches
+the selected clock again on the new session; the server releases the earlier attachment when its
+session ends. A new connection attaches the clock before it attaches the console's transaction
+again, because a session that holds a transaction refuses clock attachments and detachments, so a
+console inside a transaction keeps following its clock across a reconnect. The panel shows the
+attached clock's typed state and START generation. For a paced clock it also shows logical now,
+rate, period, skew, the logical origin and UTC anchor, and the latest accepted tick id and logical
+boundary. Logical now is projected from the committed mapping at the browser's UTC, refreshed four
+times a second; a browser whose clock differs from the cluster's can show a different projection.
+The tick is the serving node's accepted observation. Stopped, uninstalled, and unpaced states have
+no projected logical time. A refused attachment shows its reason and is not retried until the
+selection or connection changes.
 
 The panel and the top bar's `CLOCK` state name the attachment's phase: `NO DOMAIN` without a
 selection, `ATTACHING` until the attach reply, `STOPPED`, `UNINSTALLED`, `UNPACED` or `PACED` while
@@ -493,12 +494,15 @@ edges, including parallel data and materialized-state paths. Role marks and the 
 shape supplement the graph colors.
 
 The summary names the transaction, domain, state, accepted and applied counts, completeness,
-freshness, aggregate quiesce level, planning basis, relocations, rebuilds, and state resets.
-An incomplete report shows its diagnostics. A stale preview must be refreshed before retrying
-`COMMIT`. The console sends the inspected whole-transaction preview identity with `COMMIT`, even
-when an operation is selected. Inspecting another transaction leaves the attached transaction's
-commit basis intact. Retained reports keep their own graph geometry when the live execution graph
-changes.
+freshness, aggregate quiesce level, planning basis, relocations, rebuilds, and state resets. An
+incomplete report shows its diagnostics. A stale preview must be refreshed before retrying `COMMIT`.
+The console sends the inspected whole-transaction preview identity with `COMMIT`, even when an
+operation is selected. Without a complete inspection of the attached transaction at the position it
+commits, the console refuses `COMMIT` and asks for one first. A statement's outcome can arrive after
+an inspection whose report already includes that statement; the report becomes the commit basis once
+the outcome brings the transaction to its position. Inspecting another transaction leaves the
+attached transaction's commit basis intact. Retained reports keep their own graph geometry when the
+live execution graph changes.
 
 The inspector receives the same complete typed report as the Rust client and CLI. It does not
 silently omit nodes, edges, operations, or steps from a large retained report; search, focus, and
