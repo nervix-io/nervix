@@ -17154,6 +17154,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
 }
 
 #[when("these NSPL commands fail")]
+#[when("these Plexus statements fail")]
 async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: &Step) {
     world.last_command_error = None;
     world.last_command_output = None;

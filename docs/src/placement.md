@@ -120,7 +120,9 @@ dependency behavior.
 
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors execute on every cluster
 node and therefore cannot be constrained by a placement rule. An ingestor's head fixes the pair it
-reads, so altering an ingestor never changes whether it can be a placement member. Member names are unqualified; a name shared by more than one
+reads, so altering an ingestor never changes whether it can be a placement member. Completion in
+`FROM` and `TO` offers only placement-eligible runtime nodes, applying the same exclusion to all
+three listener kinds. Member names are unqualified; a name shared by more than one
 eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate

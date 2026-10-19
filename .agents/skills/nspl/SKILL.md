@@ -353,8 +353,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
-  listeners. Every other ingestor, a `WEBSOCKETS CONNECTION` included, is single-owner and keeps its
-  live assignment across ordinary schedule recomputation; use drain, `RELOCATE`, or a hard
+  listeners and exclude them from placement members. Every other ingestor, a `WEBSOCKETS CONNECTION`
+  included, is single-owner and keeps its live assignment across ordinary schedule recomputation;
+  use drain, `RELOCATE`, or a hard
   colocation requirement when it must move.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
