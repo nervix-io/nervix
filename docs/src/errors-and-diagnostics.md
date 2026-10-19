@@ -646,7 +646,11 @@ and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a 
 or a certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and carries neither credentials nor a record; a
 response from the service keeps its existing description. None is a record rejection, and none
-acknowledges input.
+acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
+service that has not answered it within 10 seconds of the cancellation ends the read with
+`SqsSourceError::CancelledReceiveUnanswered`, which names that budget, beneath `SourceError::Read`.
+The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
+the receive was returning stays invisible until its visibility timeout.
 
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the

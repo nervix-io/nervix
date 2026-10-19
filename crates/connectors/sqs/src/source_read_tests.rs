@@ -1,18 +1,29 @@
 //! How a read meets the host's cancellation, observed against a loopback listener that stands in
-//! for the SQS service and answers the one receive it takes when the check lets it.
+//! for the SQS service and answers the one receive it takes when the check lets it, and against a
+//! queue that never answers on a paused clock.
 //!
 //! The stand-in stops listening once it has taken that receive, so a read that sent another one
 //! would fail to connect instead of returning a batch.
 
-use std::net::Ipv4Addr;
+use std::{future::Future, net::Ipv4Addr, pin::pin, time::Duration};
 
+use aws_sdk_sqs::types::Message as SqsMessage;
 use nervix_connector::{
-    BrokerSourceConnector as _, SourceBatch, SourceMessage as _, SourceReadCancellation,
+    BrokerSourceConnector as _, SourceBatch, SourceError, SourceMessage as _,
+    SourceReadCancellation,
 };
-use nervix_primitives::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use nervix_primitives::{
+    net::TcpListener,
+    sync::oneshot,
+    task::JoinHandle,
+    time::{Instant, timeout},
+};
 use tokio::io::AsyncWriteExt as _;
 
-use super::{SqsSource, SqsSourceMessage};
+use super::{
+    CANCELLED_RECEIVE_BUDGET, QueueReceive, SQS, SqsSource, SqsSourceError, SqsSourceMessage,
+    SqsSourceResult,
+};
 use crate::connection_tests::{
     Fixture, QUEUE, batch_request, client_config, open_source, read_request,
 };
@@ -173,4 +184,48 @@ async fn a_cancelled_read_whose_receive_brings_nothing_sends_no_further_receive(
     };
     assert!(gathered.is_empty());
     read.service.await.expect("the stand-in does not panic");
+}
+
+/// A queue whose service takes every receive and never answers it.
+struct SilentQueue;
+
+impl QueueReceive for SilentQueue {
+    fn receive(&self) -> impl Future<Output = SqsSourceResult<Vec<SqsMessage>>> + Send {
+        std::future::pending()
+    }
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_until_its_budget() {
+    let cancellation = SourceReadCancellation::new();
+    let mut read = pin!(SqsSource::read_batch(&SilentQueue, &cancellation));
+
+    // A read nobody cancelled has no budget: it waits for its receive however long that takes.
+    let uncancelled = timeout(Duration::from_secs(3_600), &mut read).await;
+    assert!(
+        uncancelled.is_err(),
+        "a read nobody cancelled ended while its receive waited"
+    );
+    let cancelled_at = Instant::now();
+    cancellation.cancel();
+    let Err(report) = read.await else {
+        panic!("a receive the service never answers cannot complete the cancelled read");
+    };
+
+    assert_eq!(
+        Instant::now().duration_since(cancelled_at),
+        CANCELLED_RECEIVE_BUDGET
+    );
+    assert_eq!(
+        report.current_context(),
+        &SourceError::Read { connector: SQS }
+    );
+    assert!(
+        matches!(
+            report.downcast_ref::<SqsSourceError>(),
+            Some(SqsSourceError::CancelledReceiveUnanswered { budget })
+                if *budget == CANCELLED_RECEIVE_BUDGET
+        ),
+        "{report:?}"
+    );
 }

@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The SQS client a source configuration declares, the queue-URL lookup each instance
-//!   makes when it resumes, long polling, message attributes as ingest headers, and deleting a
-//!   message once it is acknowledged.
+//!   makes when it resumes, long polling and how a receive in flight completes when the host
+//!   cancels a read, message attributes as ingest headers, and deleting a message once it is
+//!   acknowledged.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
@@ -21,7 +22,7 @@
     )
 )]
 
-use std::{borrow::Cow, fmt::Debug, future::Future};
+use std::{borrow::Cow, fmt::Debug, future::Future, pin::pin, time::Duration};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -42,13 +43,31 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, SqsQueueName};
+use nervix_primitives::time::timeout;
 use thiserror::Error;
 
 use crate::connection::{FailedRequest, SqsTrust};
 
 const SQS: &str = "sqs";
-/// How long one receive request waits for a message before the service answers empty.
+/// How long one receive request waits for a message before the service answers empty, in the whole
+/// seconds the request carries.
 const LONG_POLL_SECONDS: i32 = 1;
+/// The long poll as a duration.
+const LONG_POLL: Duration =
+    match Duration::from_secs(1).checked_mul(LONG_POLL_SECONDS.unsigned_abs()) {
+        Some(long_poll) => long_poll,
+        None => panic!("a long poll of a few seconds fits a duration"),
+    };
+const _: () = assert!(LONG_POLL_SECONDS > 0, "every receive long-polls");
+/// How long the service may take beyond the long poll to answer a receive: the request's and the
+/// answer's round trip on a loaded service.
+const RECEIVE_ANSWER_ALLOWANCE: Duration = Duration::from_secs(9);
+/// How long a read the host cancelled still waits for its receive in flight: the rest of the
+/// receive's long poll and its answer. A service that has not answered by then is not answering.
+const CANCELLED_RECEIVE_BUDGET: Duration = match LONG_POLL.checked_add(RECEIVE_ANSWER_ALLOWANCE) {
+    Some(budget) => budget,
+    None => panic!("a long poll and its answer allowance of a few seconds fit a duration"),
+};
 /// The JSON protocol's error type for a queue the service does not have.
 const QUEUE_DOES_NOT_EXIST: &str = "QueueDoesNotExist";
 
@@ -68,6 +87,10 @@ pub enum SqsSourceError {
     MissingQueueUrl { queue: String },
     #[error("failed to receive SQS messages")]
     Receive,
+    #[error(
+        "the SQS receive in flight did not answer within {budget:?} of its read's cancellation"
+    )]
+    CancelledReceiveUnanswered { budget: Duration },
     #[error("failed to delete an acknowledged SQS message")]
     Delete,
 }
@@ -294,21 +317,23 @@ impl SqsSource {
         }
     }
 
-    /// Long-polls `queue` until the service returns at least one message.
+    /// Long-polls `queue` until the service returns at least one message, or the host cancels the
+    /// read. The cancellation is observed between receives, so a cancelled read sends no further
+    /// receive, and a receive already in flight still completes and hands over what it brought.
     async fn read_batch<Q: QueueReceive>(
         queue: &Q,
         cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<SqsSourceMessage>> {
         loop {
             nervix_primitives::task::consume_budget().await;
-            // A cancellation abandons the receive in flight, and a message the service was
-            // returning through it stays invisible until its visibility timeout.
-            let Some(received) = cancellation.unless_cancelled(queue.receive()).await else {
+            if cancellation.is_cancelled() {
                 return Ok(SourceBatch::Interrupted {
                     gathered: Vec::new(),
                 });
-            };
-            let received = received.change_context(SourceError::Read { connector: SQS })?;
+            }
+            let received = Self::complete_receive(queue.receive(), cancellation)
+                .await
+                .change_context(SourceError::Read { connector: SQS })?;
             if received.is_empty() {
                 continue;
             }
@@ -317,6 +342,33 @@ impl SqsSource {
                 messages.push(SqsSourceMessage::new(message));
             }
             return Ok(SourceBatch::Messages(messages));
+        }
+    }
+
+    /// Waits for `receive`, which the host's cancellation does not abandon: the service takes the
+    /// messages it answers with off the queue, so an abandoned answer would leave them invisible
+    /// until their visibility timeout. A receive the host cancels while it waits is awaited for at
+    /// most `CANCELLED_RECEIVE_BUDGET` more, the rest of its long poll and the answer's round trip;
+    /// a service that has not answered by then has stopped answering, and the receive is abandoned
+    /// with a typed failure.
+    async fn complete_receive<F>(
+        receive: F,
+        cancellation: &SourceReadCancellation,
+    ) -> SqsSourceResult<Vec<SqsMessage>>
+    where
+        F: Future<Output = SqsSourceResult<Vec<SqsMessage>>>,
+    {
+        let mut receive = pin!(receive);
+        if let Some(received) = cancellation.unless_cancelled(&mut receive).await {
+            return received;
+        }
+        match timeout(CANCELLED_RECEIVE_BUDGET, receive).await {
+            Ok(received) => received,
+            Err(elapsed) => Err(Report::new(elapsed).change_context(
+                SqsSourceError::CancelledReceiveUnanswered {
+                    budget: CANCELLED_RECEIVE_BUDGET,
+                },
+            )),
         }
     }
 }

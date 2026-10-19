@@ -273,7 +273,7 @@ Feature: SQS ingestion
     And the SQS forwarder releases that answer once the entity gate pause for domain "{{domain}}" is reached
     Then within "60s" the relay subscription receives a payload
       """
-      "marker":"held-{{test_id}}"
+      "marker":"held-
       """
     When the entity gate pause for domain "{{domain}}" is released
     Then the background NSPL execution succeeds

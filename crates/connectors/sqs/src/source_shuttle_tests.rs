@@ -4,9 +4,11 @@
 //! - **Owns.** The invariants a read holds while the host cancels it at any point of its receives
 //!   from a service that answers each one: every message the service took off the queue for a
 //!   receive reaches the host, and a cancelled read sends at most the one receive it had already
-//!   decided to send.
+//!   decided to send. And, from a service that never answers, that the read ends only once the host
+//!   cancelled it and its budget passed.
 //! - **Depends on.** The source's read and its receive seam, an mpsc channel as the service's
-//!   requests and oneshot channels as its answers, and the model harness's Shuttle runner.
+//!   requests and oneshot channels as its answers, the model harness's Shuttle runner, and the
+//!   task labels and timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** The AWS SDK, HTTP, or the host loop that cancels a read.
 
 #![cfg_attr(
@@ -21,7 +23,10 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{SourceBatch, SourceMessage as _, SourceReadCancellation};
 use nervix_model_harness::shuttle::check_interleavings;
-use nervix_primitives::sync::{Arc, mpsc, oneshot};
+use nervix_primitives::{
+    sync::{Arc, mpsc, oneshot},
+    time::{clear_triggers, trigger_timeouts},
+};
 use nervix_recovery::Discarded as _;
 
 use super::{QueueReceive, SqsSource, SqsSourceError, SqsSourceResult};
@@ -180,4 +185,86 @@ fn shuttle_a_cancelled_read_hands_over_every_message_its_receives_took() {
     check_interleavings(|| {
         a_cancelled_read_hands_over_every_message_its_receives_took(&[&[], &[1]]);
     });
+}
+
+/// Marks the reading task, whose cancelled-receive budget a check's clock expires.
+#[derive(Debug, Clone, Copy)]
+struct ReadDeadline;
+
+/// A read whose service takes its receive and never answers it, which the host cancels at any
+/// point while a clock expires the reading task's deadlines at any point.
+fn a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget() {
+    // Timeout triggers are thread-local rather than per execution, so every execution starts
+    // without the trigger an earlier one registered.
+    clear_triggers();
+    shuttle::future::block_on(async {
+        shuttle::current::set_label_for_task(shuttle::current::me(), ReadDeadline);
+        let cancellation = Arc::new(SourceReadCancellation::new());
+        let (receives, mut taken) = mpsc::unbounded_channel::<Receive>();
+        // The service holds every receive it takes unanswered until the read's queue is dropped.
+        let service = nervix_primitives::task::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let Some(receive) = taken.recv().await else {
+                    return held.len();
+                };
+                held.push(receive);
+            }
+        });
+        let host = nervix_primitives::task::spawn({
+            let cancellation = Arc::clone(&cancellation);
+            async move {
+                cancellation.cancel();
+            }
+        });
+        let clock = nervix_primitives::task::spawn(async {
+            trigger_timeouts(|labels| labels.get::<ReadDeadline>().is_some());
+        });
+        let queue = ServedQueue {
+            receives,
+            cancellation: Arc::clone(&cancellation),
+        };
+
+        let ended = SqsSource::read_batch(&queue, &cancellation).await;
+
+        assert!(
+            cancellation.is_cancelled(),
+            "a read whose receive is never answered ended before the host cancelled it"
+        );
+        drop(queue);
+        host.await.assured(CHECK_TASK_JOINS);
+        clock.await.assured(CHECK_TASK_JOINS);
+        let sent = service.await.assured(CHECK_TASK_JOINS);
+        match ended {
+            Ok(SourceBatch::Interrupted { gathered }) => {
+                assert!(
+                    gathered.is_empty(),
+                    "a service that never answers brings nothing"
+                );
+                assert_eq!(
+                    sent, 0,
+                    "only a read cancelled before it sent a receive ends at once"
+                );
+            }
+            Ok(_) => panic!("a read whose receive is never answered returned a batch"),
+            Err(report) => {
+                assert_eq!(sent, 1, "a cancelled read sends no receive after its first");
+                assert!(
+                    matches!(
+                        report.downcast_ref::<SqsSourceError>(),
+                        Some(SqsSourceError::CancelledReceiveUnanswered { .. })
+                    ),
+                    "{report:?}"
+                );
+            }
+        }
+    });
+}
+
+/// A read cancelled while a receive the service never answers waits ends once its budget passes,
+/// and never before the host cancelled it.
+#[test]
+fn shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget() {
+    check_interleavings(a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget);
 }
