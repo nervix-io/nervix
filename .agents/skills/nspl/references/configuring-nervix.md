@@ -326,7 +326,8 @@ relay. Do not use them to scan across branches.
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
   `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
-  bound.
+  bound. The producer always reports every record, so `delivery.report.only.error` in a client's
+  `CONFIG` has no effect.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts

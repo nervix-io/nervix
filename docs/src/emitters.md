@@ -942,9 +942,12 @@ ends the attempt without discarding an answer the broker already gave: the recor
 confirmed are delivered and are not sent again, and only the records still awaiting a report are
 retried. When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
-the node's graceful shutdown each give that flush their deadline. Records still queued when the
-deadline passes are lost; `DESCRIBE EMITTER` reports how many as its transient error, and a
-replacement that cannot flush fails and keeps the running emitter. A definitive record-specific
+the node's graceful shutdown each give that flush their deadline. Records still awaiting their
+delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
+transient error, counting records alone and never the errors or statistics waiting in librdkafka's
+queue beside them, and a replacement that cannot flush fails and keeps the running emitter. Because
+a record counts until its delivery report arrives, the producer always reports every record and
+overrides `delivery.report.only.error` in the client's `CONFIG`. A definitive record-specific
 rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar

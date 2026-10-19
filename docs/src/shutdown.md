@@ -743,8 +743,9 @@ once the emitter will publish nothing more, and records what the hook did. An em
 drain moves to another node finishes as part of that stop, by the stop's deadline. An emitter that
 stops in place finishes at terminal teardown, which ends the emitter task wherever it is and gives
 the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flushes its
-producer's local queue within that time, ignoring `linger.ms`; records still queued when it ends are
-lost, and the emitter logs at `warn` how many and reports them as its transient error and an error
+producer's local queue within that time, ignoring `linger.ms`; records still awaiting their delivery
+report when it ends are lost, and the emitter logs at `warn` how many, counting records alone and
+not the events waiting in librdkafka's queue, and reports them as its transient error and an error
 event. Pulsar and MQTT QoS 0 discard what their clients still hold, which the emitter logs at
 `warn`. Every other sink holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
