@@ -1007,7 +1007,7 @@ jobs:
   coverage-full:
     name: coverage-full
     needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
-    if: ${{ !cancelled() && needs.test-selection.outputs.tests-required == 'true' }}
+    if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -1022,23 +1022,34 @@ jobs:
         with:
           tool: just,toml-cli
 
+      - name: Record the event, labels and producer results
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
+          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
+            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
+
       - name: Download ordinary coverage
         uses: actions/download-artifact@v4
         with:
-          name: coverage-merged
-          path: coverage-full-inputs/coverage-merged
+          pattern: coverage-merged
+          path: coverage-full-inputs
 
       - name: Download native extra coverage
         uses: actions/download-artifact@v4
         with:
-          name: coverage-native-extras
-          path: coverage-full-inputs/coverage-native-extras
+          pattern: coverage-native-extras
+          path: coverage-full-inputs
 
       - name: Download diagnostic evidence
         uses: actions/download-artifact@v4
         with:
-          name: diagnostic-evidence
-          path: coverage-full-inputs/diagnostic-evidence
+          pattern: diagnostic-evidence
+          path: coverage-full-inputs
 
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
@@ -1078,18 +1089,8 @@ jobs:
           pattern: bolero-selection
           path: coverage-full-inputs
 
-      - name: Record the event, labels and producer results
-        env:
-          EVENT: ${{ github.event_name }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
-          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
-          JOBS: ${{ toJSON(needs) }}
-        run: |
-          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
-            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
-
       - name: Combine coverage
+        if: ${{ !cancelled() }}
         run: just coverage-full coverage-full-inputs/*
 
       - name: Upload full coverage
