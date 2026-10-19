@@ -1124,10 +1124,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__task_status__tests__bolero_status_sequences_publish_complete_transitions/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "task-status-transitions"
-invariant = "Every status transition publishes the complete failure and retry, and retained observations remain immutable."
+invariant = "Each writer retains its own failure and retry, clearing one preserves the other, pending retries stay visible, and retained observations remain immutable."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-server"

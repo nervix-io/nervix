@@ -205,7 +205,7 @@ impl BranchMetricsMark {
 
 impl DataflowNodeTransientState {
     fn from_failure<R>(
-        failure: Option<StdArc<task_status::TaskFailure<R>>>,
+        failure: Option<Arc<task_status::TaskFailure<R>>>,
         retry_of: fn(&R) -> &RuntimeReconnectStatus,
     ) -> Self {
         let Some(failure) = failure else {

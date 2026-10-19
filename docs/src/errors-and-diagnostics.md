@@ -704,10 +704,14 @@ broker source's acknowledgement that its transport fails to confirm, and a rejec
 take back, become the ingestor's transient status with the innermost context of the source's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
-Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
-operations read the retained status without writing it; a transition clears an active failure.
-Reporting a different error without selecting a new retry preserves the active retry. DESCRIBE
-renders error, backoff and remaining wait from one immutable observation. A failed record obtains
+Each source or sink publishes its safe transient error and optional retry together. An emitter
+retains task-owned and connector-owned failures independently in one atomic publication. A publish
+or commit outcome clears the task failure; a retained connector's progress clears the connector
+failure. MQTT packet progress therefore preserves the host's unanswered-publish diagnostic until
+the task succeeds. Repeated healthy operations only read, and reporting a task error without
+selecting a new retry preserves that task's active retry. DESCRIBE selects an active task retry,
+then an active connector retry, then a task error without a retry, rendering error, backoff and
+remaining wait from the same immutable failure. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
 

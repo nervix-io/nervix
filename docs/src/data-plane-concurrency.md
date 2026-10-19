@@ -347,12 +347,23 @@ programs and compiled WASM modules.
 
 ## Retained Task Dependencies
 
-A source or sink retains one failure publication containing both its safe error and optional retry.
-Success reads that slot and clears it only when it holds a failure. Identical failure reports keep
-the same immutable observation. Reporting an error without a new retry keeps the active retry,
-which remains visible as publishing work to drains even when the emitter buffer is empty. DESCRIBE
-loads error, backoff and remaining wait from one observation. Emitter confirmation guards retain
-one counter resolved at startup, and task teardown removes its registry interest.
+A source or sink retains one atomic failure publication. An emitter's task and its retained
+connector background task own independent failures within that publication: task only, connector
+only, or both. Each failure contains its safe error and optional retry. A writer clears its own
+failure through a read-copy-update of the current publication, preserving the other writer's
+failure even when their transitions race. Healthy polls only read, and identical reports retain
+the same immutable failure observation.
+
+The selected observation gives an active task retry precedence over a connector retry. Otherwise
+an active connector retry stays visible ahead of a task error without a retry; with neither retry,
+the task error takes precedence. This keeps publishing work visible to drains even when the emitter
+buffer is empty. Reporting a task error without a new retry preserves that task's active retry.
+DESCRIBE loads the selected error, backoff and remaining wait from one coherent observation.
+The registered TaskStatus Bolero property and production-owner Shuttle check cover independent
+clearing, concurrent reports, coherent selection and immutable retained observations. These are
+publication interleavings; the primitive boundary owns its atomic memory-ordering implementation.
+Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
+registry interest.
 
 Every pooled Redis or SQL sink registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
