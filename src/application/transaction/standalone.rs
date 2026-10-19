@@ -146,6 +146,15 @@ impl SessionServiceImpl {
             .consensus
             .current_transaction(&transaction_id)
             .await;
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_standalone_transaction_if_armed(
+                self.inner.consensus.local_node_id(),
+                &domain,
+                crate::fault_injection::StandaloneTransactionBoundary::Lookup,
+            )
+            .await;
         let mut prepared = None;
         if current.is_none() {
             let candidate = ReplicatedTransaction::open_for_command(
@@ -158,10 +167,19 @@ impl SessionServiceImpl {
             if let Err(error) = candidate.queue_admission(&owner, &domain, &queued, limits) {
                 return command_error(error.to_string());
             }
-            let prepared_admission = match self
+            let admission = self
                 .preflight_transaction_statement(&candidate, &queued)
-                .await
-            {
+                .await;
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_standalone_transaction_if_armed(
+                    self.inner.consensus.local_node_id(),
+                    &domain,
+                    crate::fault_injection::StandaloneTransactionBoundary::Preflight,
+                )
+                .await;
+            let prepared_admission = match admission {
                 Ok(admission) => admission,
                 Err(error) => return command_error(format!("{error:#}")),
             };
@@ -358,3 +376,7 @@ impl SessionServiceImpl {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "standalone_tests.rs"]
+mod tests;

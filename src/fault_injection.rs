@@ -50,11 +50,13 @@ mod domain_clock;
 mod domain_resume;
 mod pause;
 mod restarted_voter;
+mod standalone_transaction;
 
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use pause::TestPause;
 use restarted_voter::StartupVoterGossip;
+pub use standalone_transaction::StandaloneTransactionBoundary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
@@ -337,6 +339,11 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    StandaloneTransaction {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: StandaloneTransactionBoundary,
+    },
     DomainResume {
         node: ClusterNodeName,
         domain: DomainName,

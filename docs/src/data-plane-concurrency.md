@@ -1762,6 +1762,14 @@ These async observations introduce no tracked blocking-lock owner. Deloxide cont
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
 
+The `@client_wire_standalone_preparation` scenario holds a coordinator after its standalone
+transaction lookup and after preflight, while two leadership transfers let another coordinator
+apply the same command and engage its domain pause. Its active, order-analysis and stressed
+registrations reach the transaction impact recorder's tracked locks. The lookup, preflight and
+resume barriers use the existing async pause owner, whose ordering remains outside Deloxide's
+observation; the public outcome and dependent mutation assert recovery under the original
+execution reference.
+
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
