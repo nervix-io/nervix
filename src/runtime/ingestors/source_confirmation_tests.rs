@@ -13,9 +13,11 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, future};
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceResult};
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, SourceReadCancellation, SourceResult,
+};
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::{reconnect_tests::sequential_policy, *};
@@ -133,6 +135,7 @@ impl BrokerSourceConnector for ConfirmingSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        _cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(position) = self.queue.pop_front() else {
             return Ok(SourceBatch::Closed);

@@ -81,7 +81,7 @@ use nervix_server::{
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
-    consumer::InitialPosition as PulsarInitialPosition,
+    consumer::InitialPosition as PulsarInitialPosition, message::Codec as PulsarCodec,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -103,6 +103,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
+use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
@@ -154,6 +155,9 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
         ),
     };
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long provisioning a Pulsar subscription repeats a request the broker refuses as a
+/// conflict while an ingestor's check holds a non-durable cursor of the same name.
+const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
     branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
@@ -223,8 +227,27 @@ enum ForwardingEnd {
     ResetRequested,
 }
 
+#[derive(Clone, Copy)]
+enum ForwardingProtocol {
+    Tcp,
+    Pulsar,
+}
+
 impl StallableTcpProxy {
     pub(crate) async fn start(target_host: String, target_port: u16) -> io::Result<Self> {
+        Self::start_protocol(target_host, target_port, ForwardingProtocol::Tcp).await
+    }
+
+    /// Topic discovery must keep producer and consumer connections behind the same fault gate.
+    pub(crate) async fn start_pulsar(target_host: String, target_port: u16) -> io::Result<Self> {
+        Self::start_protocol(target_host, target_port, ForwardingProtocol::Pulsar).await
+    }
+
+    async fn start_protocol(
+        target_host: String,
+        target_port: u16,
+        protocol: ForwardingProtocol,
+    ) -> io::Result<Self> {
         let listener = TokioTcpListener::bind((HOST, 0)).await?;
         let local_addr = listener.local_addr()?;
         let (paused, paused_rx) = watch::channel(false);
@@ -260,6 +283,8 @@ impl StallableTcpProxy {
                         paused,
                         resets,
                         connection_cancellation,
+                        protocol,
+                        local_addr,
                     )
                     .await;
                     if let ForwardingEnd::ResetRequested = end {
@@ -292,6 +317,26 @@ impl StallableTcpProxy {
         self.paused.send_replace(paused);
     }
 
+    /// End a scenario's timed dependency fault while another action runs. The returned future
+    /// owns its controls, so the action can borrow the scenario independently.
+    pub(crate) fn resume_after(
+        &self,
+        duration: Duration,
+    ) -> impl Future<Output = io::Result<Instant>> + use<> {
+        let paused = self.paused.clone();
+        let cancellation = self.cancellation.clone();
+        async move {
+            nervix_primitives::select! {
+                _ = cancellation.cancelled() => Err(io::Error::other("TCP proxy stopped before the timed fault ended")),
+                _ = sleep(duration) => {
+                    let resumed_at = Instant::now();
+                    paused.send_replace(false);
+                    Ok(resumed_at)
+                }
+            }
+        }
+    }
+
     /// Reset every connection the proxy forwards now, as a dependency that drops its clients
     /// does: each peer sees its connection reset. The proxy keeps listening, so a client that
     /// connects again is forwarded as before.
@@ -308,6 +353,8 @@ async fn forward_through_stall_gate(
     paused: watch::Receiver<bool>,
     mut resets: watch::Receiver<()>,
     cancellation: CancellationToken,
+    protocol: ForwardingProtocol,
+    local_addr: SocketAddr,
 ) -> ForwardingEnd {
     let (downstream_read, downstream_write) = downstream.split();
     let (upstream_read, upstream_write) = upstream.split();
@@ -317,8 +364,23 @@ async fn forward_through_stall_gate(
         paused.clone(),
         cancellation.clone(),
     );
-    let downstream_copy =
-        copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation);
+    let downstream_copy = async {
+        match protocol {
+            ForwardingProtocol::Tcp => {
+                copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation).await
+            }
+            ForwardingProtocol::Pulsar => {
+                forward_pulsar_responses(
+                    upstream_read,
+                    downstream_write,
+                    paused,
+                    cancellation,
+                    local_addr,
+                )
+                .await
+            }
+        }
+    };
     let both_directions = async { tokio::join!(upstream_copy, downstream_copy) };
     nervix_primitives::select! {
         (upstream_copied, downstream_copied) = both_directions => {
@@ -370,6 +432,45 @@ where
         }
         wait_for_proxy_resume(&mut paused, &cancellation).await?;
         writer.write_all(&buffer[..read]).await?;
+    }
+}
+
+/// Preserve Pulsar frames while advertising this forwarder in topic lookup responses. An opaque
+/// bootstrap proxy would let the client's discovered connection bypass the scenario's fault.
+async fn forward_pulsar_responses<Reader, Writer>(
+    reader: Reader,
+    writer: Writer,
+    mut paused: watch::Receiver<bool>,
+    cancellation: CancellationToken,
+    local_addr: SocketAddr,
+) -> io::Result<()>
+where
+    Reader: AsyncRead + Unpin,
+    Writer: AsyncWrite + Unpin,
+{
+    let mut reader = FramedRead::new(reader, PulsarCodec);
+    let mut writer = FramedWrite::new(writer, PulsarCodec);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        wait_for_proxy_resume(&mut paused, &cancellation).await?;
+        let message = nervix_primitives::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(()),
+            changed = paused.changed() => {
+                changed.map_err(io::Error::other)?;
+                continue;
+            }
+            message = reader.next() => message,
+        };
+        let Some(message) = message else {
+            return writer.close().await.map_err(io::Error::other);
+        };
+        let mut message = message.map_err(io::Error::other)?;
+        if let Some(lookup) = &mut message.command.lookup_topic_response {
+            lookup.broker_service_url = Some(format!("pulsar://{local_addr}"));
+        }
+        wait_for_proxy_resume(&mut paused, &cancellation).await?;
+        writer.send(message).await.map_err(io::Error::other)?;
     }
 }
 
@@ -812,6 +913,29 @@ pub(crate) enum InterconnectCredentialFault {
     WrongNodeIdentity,
     MismatchedEndpoint,
     ExpiredCertificate,
+}
+
+/// What a whole-cluster restart arms after every node has stopped and before any starts again.
+#[derive(Debug, Clone, Copy)]
+enum RestartArrangement<'a> {
+    /// Every node starts again as it stopped.
+    Unchanged,
+    /// The bootstrap node holds the first heartbeat this voter relays and fails its health probes,
+    /// so the scenario observes scheduling while the voter looks unavailable.
+    RelayedVoter(&'a str),
+    /// The first runtime installation this node begins waits until the scenario releases it.
+    HeldRuntimeInstallation(&'a str),
+}
+
+impl<'a> RestartArrangement<'a> {
+    /// The voter whose relayed heartbeat the restart holds, which the cluster cannot wait to catch
+    /// up until the scenario releases it.
+    fn relayed_voter(self) -> Option<&'a str> {
+        match self {
+            Self::RelayedVoter(voter) => Some(voter),
+            Self::Unchanged | Self::HeldRuntimeInstallation(_) => None,
+        }
+    }
 }
 
 /// What every node of one cluster uses for as long as it runs. The cluster and each of its nodes
@@ -1585,14 +1709,26 @@ impl Cluster {
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
-        self.restart_with_voter_heartbeat(None).await
+        self.restart_arranged(RestartArrangement::Unchanged).await
     }
 
     pub(crate) async fn restart_with_relayed_voter(&mut self, voter: &str) -> io::Result<()> {
-        self.restart_with_voter_heartbeat(Some(voter)).await
+        self.restart_arranged(RestartArrangement::RelayedVoter(voter))
+            .await
     }
 
-    async fn restart_with_voter_heartbeat(&mut self, voter: Option<&str>) -> io::Result<()> {
+    /// Restarts every node with the first runtime installation `node` begins held until the
+    /// scenario releases it, so the restarted cluster answers requests that reach `node` before it
+    /// has installed any committed domain again.
+    pub(crate) async fn restart_holding_runtime_installation(
+        &mut self,
+        node: &str,
+    ) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::HeldRuntimeInstallation(node))
+            .await
+    }
+
+    async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
 
@@ -1624,12 +1760,21 @@ impl Cluster {
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
         let bootstrap = self.node_id(1);
-        if let Some(voter) = voter {
-            self.fault_injection
-                .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
-            self.fault_injection
-                .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+        // Every node has stopped, so a fault armed here reaches only the nodes that start next.
+        match arrangement {
+            RestartArrangement::Unchanged => {}
+            RestartArrangement::RelayedVoter(voter) => {
+                self.fault_injection
+                    .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
+                self.fault_injection
+                    .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+            }
+            RestartArrangement::HeldRuntimeInstallation(node) => {
+                self.fault_injection
+                    .pause_runtime_installation_on(node_name(node));
+            }
         }
+        let voter = arrangement.relayed_voter();
         self.start_node_within(&bootstrap, construction).await?;
         for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
             if voter.is_some() {
@@ -2028,6 +2173,54 @@ impl Cluster {
         subscription: &str,
     ) -> io::Result<u64> {
         pulsar_subscription_backlog(&self.dependencies, topic, subscription).await
+    }
+
+    /// What the broker's admin API reports of `subscription` of `topic` now, absent when the topic
+    /// holds no subscription of that name.
+    pub(crate) async fn pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<Option<PulsarSubscriptionObservation>> {
+        pulsar_subscription(&self.dependencies, topic, subscription).await
+    }
+
+    /// Provisions `subscription` of `topic` as an operator does, through the broker's admin API:
+    /// the topic is created when it is absent, and the subscription starts at the topic's latest
+    /// message, so it holds what is published from then on.
+    pub(crate) async fn provision_pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<()> {
+        provision_pulsar_subscription(&self.dependencies, topic, subscription).await
+    }
+
+    /// Waits until the admin API's report of `subscription` of `topic` satisfies `holds`.
+    pub(crate) async fn wait_for_pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+        within: Duration,
+        holds: impl Fn(Option<&PulsarSubscriptionObservation>) -> bool,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed = pulsar_subscription(&self.dependencies, topic, subscription).await;
+            if let Ok(observation) = &observed
+                && holds(observation.as_ref())
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Pulsar subscription '{subscription}' of topic \
+                     '{topic}'; last observation: {observed:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
     }
 
     /// Waits until the backlog of `subscription` of `topic` holds `expected` messages, as the
@@ -5036,6 +5229,118 @@ async fn pulsar_subscription_backlog(
         )));
     };
     Ok(backlog)
+}
+
+/// One subscription of a topic as the Pulsar admin API reports it: whether its cursor is
+/// durable, which a probe's non-durable cursor is not, and the names its consumers registered
+/// under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PulsarSubscriptionObservation {
+    pub(crate) durable: bool,
+    pub(crate) consumer_names: Vec<String>,
+}
+
+/// The subscription `subscription` of `topic` as the admin API's topic stats report it, absent
+/// when the topic holds no subscription of that name. A topic the broker does not have holds no
+/// subscription either: the broker deletes an inactive topic without subscriptions.
+async fn pulsar_subscription(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<Option<PulsarSubscriptionObservation>> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/stats");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let stats: serde_json::Value = response
+        .error_for_status()
+        .map_err(io::Error::other)?
+        .json()
+        .await
+        .map_err(io::Error::other)?;
+    let reported = &stats["subscriptions"][subscription];
+    if reported.is_null() {
+        return Ok(None);
+    }
+    let Some(durable) = reported["isDurable"].as_bool() else {
+        return Err(io::Error::other(format!(
+            "the stats of Pulsar topic '{topic}' report no durability for subscription \
+             '{subscription}': {stats}"
+        )));
+    };
+    let mut consumer_names = Vec::new();
+    for consumer in reported["consumers"].as_array().into_iter().flatten() {
+        let Some(name) = consumer["consumerName"].as_str() else {
+            return Err(io::Error::other(format!(
+                "the stats of Pulsar topic '{topic}' report a consumer of subscription \
+                 '{subscription}' without a name: {stats}"
+            )));
+        };
+        consumer_names.push(name.to_string());
+    }
+    consumer_names.sort();
+    Ok(Some(PulsarSubscriptionObservation {
+        durable,
+        consumer_names,
+    }))
+}
+
+/// Creates `topic` when the broker does not have it, then `subscription` of it at the topic's
+/// latest message, through the admin API.
+async fn provision_pulsar_subscription(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<()> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let client = reqwest::Client::new();
+    let topic_url = format!("{admin}/admin/v2/persistent/public/default/{topic}");
+    let created = client
+        .put(&topic_url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    // A topic that already exists, such as one a probe of the subscription created, answers
+    // conflict and is used as it is.
+    if created.status() != reqwest::StatusCode::CONFLICT {
+        created.error_for_status().map_err(io::Error::other)?;
+    }
+    // An ingestor that checks for the missing subscription holds a non-durable cursor of its name
+    // for the moment of each check, and the broker refuses to create the subscription as a
+    // conflict meanwhile. An operator repeats the request, and so does this, until the broker
+    // holds the subscription durably.
+    let subscription_url = format!("{topic_url}/subscription/{subscription}");
+    let deadline = Instant::now() + PULSAR_PROVISION_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let created = client
+            .put(&subscription_url)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if created.status() != reqwest::StatusCode::CONFLICT {
+            created.error_for_status().map_err(io::Error::other)?;
+            return Ok(());
+        }
+        let observed = pulsar_subscription(dependencies, topic, subscription).await?;
+        if let Some(PulsarSubscriptionObservation { durable: true, .. }) = observed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "the broker refused to create Pulsar subscription '{subscription}' of topic \
+                 '{topic}' as a conflict for {PULSAR_PROVISION_TIMEOUT:?} without holding it \
+                 durably; last observation: {observed:?}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// The body the admin API answers `url` with, or what kept it from answering.

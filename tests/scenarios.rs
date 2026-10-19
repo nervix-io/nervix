@@ -138,7 +138,9 @@ use crate::common::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
     },
-    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
+    scenario_schedule::{
+        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+    },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -160,7 +162,9 @@ mod database_batches;
 mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
+mod domain_resume;
 mod endpoint_intake;
+mod generated_http_payloads;
 mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
@@ -169,6 +173,8 @@ mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
+mod pulsar_delivery;
+mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
 mod websocket_lifecycle;
@@ -368,6 +374,7 @@ struct ScenarioWorld {
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
+    pulsar_stop_timing: Option<pulsar_delivery::StopTiming>,
     /// When the scenario first posted an HTTP payload to a node. An input collector's window
     /// opens no earlier than the first record that reaches it, so a collection-delay assertion
     /// measures its collected output from this instant.
@@ -504,6 +511,8 @@ struct ScenarioWorld {
     producers: client_producers::ScenarioProducers,
     /// Native and console consumers and the Arrow attempts they received.
     consumers: client_consumers::ScenarioConsumers,
+    /// The distinct-tenant payloads the last generating step posted and no assertion has received.
+    generated_payloads: generated_http_payloads::GeneratedPayloads,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -693,6 +702,18 @@ impl ScenarioWorld {
         self.cluster
             .as_mut()
             .expect("cluster must be created before using it")
+    }
+
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
     }
 
     fn cluster(&self) -> &Cluster {
@@ -895,9 +916,11 @@ async fn configure_stallable_tcp_endpoint(
     let target_port = endpoint_url
         .port()
         .unwrap_or_else(|| panic!("{name} endpoint '{endpoint}' has no explicit port"));
-    let proxy = StallableTcpProxy::start(target_host, target_port)
-        .await
-        .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
+    let proxy = match name {
+        "pulsar" => StallableTcpProxy::start_pulsar(target_host, target_port).await,
+        _ => StallableTcpProxy::start(target_host, target_port).await,
+    }
+    .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
     endpoint_url
         .set_host(Some("127.0.0.1"))
         .unwrap_or_else(|_| panic!("failed to replace host in {name} endpoint '{endpoint}'"));
@@ -3152,6 +3175,7 @@ async fn start_ready_server_process_with_launch(
     );
     initialize_scenario_identity(world);
     let mut process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
@@ -3165,7 +3189,8 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
     world: &mut ScenarioWorld,
     limit: u32,
 ) {
-    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[])
+        .await;
 }
 
 #[when(
@@ -3177,7 +3202,7 @@ async fn when_nervix_server_process_is_started_with_written_option(
     value: String,
 ) {
     let option = ServerProcessOption::Written { option, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 #[when(
@@ -3189,12 +3214,12 @@ async fn when_nervix_server_process_is_started_with_environment_variable(
     value: String,
 ) {
     let option = ServerProcessOption::Environment { variable, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 /// Starts the scenario's server process without waiting for it to accept commands, for a
 /// scenario about a process that is expected to exit during startup.
-fn start_server_process_without_waiting(
+async fn start_server_process_without_waiting(
     world: &mut ScenarioWorld,
     launch: ServerProcessLaunch,
     options: &[ServerProcessOption],
@@ -3204,6 +3229,7 @@ fn start_server_process_without_waiting(
         "a scenario starts at most one nervix-server process"
     );
     let process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
@@ -12298,16 +12324,26 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
+        .await
+        .expect("failed to restart cluster");
+}
+
+/// The node's runtime installation is held from its start, so whatever reaches it after the
+/// restart finds a node that has not installed its committed domains again.
+#[when(expr = "the cluster is restarted while runtime installation on node {string} waits")]
+async fn when_the_cluster_is_restarted_holding_runtime_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.forget_session_observations();
+    world
+        .cluster_mut()
+        .restart_holding_runtime_installation(&node_id)
         .await
         .expect("failed to restart cluster");
 }
@@ -13566,6 +13602,10 @@ async fn when_exact_command_retry_begins_in_parallel(
     expr = "the active session begins this NSPL command request with execution reference {string} \
             in the background"
 )]
+#[when(
+    expr = "the active session begins this Plexus command request with execution reference \
+            {string} in the background"
+)]
 async fn when_active_session_referenced_command_begins_in_background(
     world: &mut ScenarioWorld,
     execution_reference: String,
@@ -13649,6 +13689,10 @@ async fn when_background_command_caller_deadline_expires(
 #[when(
     expr = "this NSPL command request with execution reference {string} is executed on the leader \
             node"
+)]
+#[when(
+    expr = "this Plexus command request with execution reference {string} is executed on the \
+            leader node"
 )]
 async fn when_referenced_command_request_is_executed_on_leader(
     world: &mut ScenarioWorld,
@@ -14138,6 +14182,7 @@ async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domai
 }
 
 #[when("these NSPL commands are executed on the active session")]
+#[when("these Plexus statements are executed on the active session")]
 async fn when_these_nspl_commands_are_executed_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -15612,6 +15657,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
 }
 
 #[when("this NSPL command request is executed on the leader node")]
+#[when("this Plexus command request is executed on the leader node")]
 async fn when_this_nspl_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -16791,7 +16837,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -17046,6 +17092,7 @@ async fn given_the_leader_node_is_configured_with_these_nspl_commands(
 }
 
 #[when(expr = "these NSPL commands fail with {string}")]
+#[when(expr = "these Plexus statements fail with {string}")]
 async fn when_these_nspl_commands_fail_with(
     world: &mut ScenarioWorld,
     expected_error: String,
@@ -30348,21 +30395,31 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(move |feature, _rule, scenario, world| {
+        .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
+            let rule_tags: &[String] = match rule {
+                Some(rule) => &rule.tags,
+                None => &[],
+            };
+            let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
+            let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                let registration =
-                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let registration = ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                    scenario_line,
+                    length,
+                );
                 let attempt = registration.attempt();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;

@@ -1,33 +1,39 @@
-//! The Pulsar source's acknowledgements and redelivery requests against a broker on loopback.
+//! The Pulsar source's subscriptions, its reads that the host cancels, and its acknowledgements and
+//! redelivery requests, against a broker on loopback.
 //!
 //! Each test drives the production source through the client's real consumer, which subscribes to
-//! a broker that delivers the messages a test asks for and answers each acknowledgement as the test
-//! chooses, so an acknowledgement counts as confirmed only once the broker answered it. The broker
-//! serves only its first connection: a later one, such as a reconnection, is accepted and never
-//! answered, as a broker the client cannot reach would leave it.
+//! a broker that delivers the messages a test asks for and answers each acknowledgement,
+//! non-durable subscribe and unsubscribe as the test chooses, so an acknowledgement counts as
+//! confirmed only once the broker answered it. The broker serves only its first connection: a
+//! later one, such as a reconnection, is accepted and never answered, as a broker the client cannot
+//! reach would leave it.
 
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use nervix_connector::{
     BrokerSourceConnector, SourceBatch, SourceBatchRequest, SourceConnector, SourceError,
-    SourceMessage,
+    SourceMessage, SourceReadCancellation, SourceResume,
 };
-use nervix_models::PulsarSubscriptionName;
+use nervix_models::{
+    ClientConfigEntry, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
+    PulsarTopicName,
+};
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
-    time::timeout,
+    time::{Instant, sleep, timeout},
 };
 use pulsar::{
-    OperationRetryOptions, Pulsar, TokioExecutor,
+    Error as PulsarError, OperationRetryOptions, Pulsar, TokioExecutor,
     error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
     message::{
         Codec as PulsarCodec, Message as PulsarFrame, Payload as PulsarPayload,
         proto::{
-            BaseCommand, CommandAckResponse, CommandConnected, CommandLookupTopicResponse,
-            CommandMessage, CommandPartitionedTopicMetadataResponse, CommandPong, CommandSuccess,
-            MessageIdData, MessageMetadata, base_command::Type as CommandType,
+            BaseCommand, CommandAckResponse, CommandConnected, CommandError,
+            CommandLookupTopicResponse, CommandMessage, CommandPartitionedTopicMetadataResponse,
+            CommandPong, CommandSuccess, MessageIdData, MessageMetadata,
+            base_command::Type as CommandType,
             command_lookup_topic_response::LookupType as TopicLookupType,
             command_partitioned_topic_metadata_response::LookupType as PartitionLookupType,
         },
@@ -36,8 +42,9 @@ use pulsar::{
 use tokio_util::codec::Framed;
 
 use super::{
-    PulsarAckReceipts, PulsarRefusal, PulsarServerError, PulsarSource, PulsarSourceError,
-    PulsarSourcePlan, PulsarSourcePosition, PulsarUnresolvedRequest,
+    DURABLE_SUBSCRIPTION_EXISTS, PulsarAckReceipts, PulsarRefusal, PulsarServerError, PulsarSource,
+    PulsarSourceError, PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
+    PulsarUnresolvedRequest,
 };
 
 const TOPIC: &str = "persistent://public/default/orders";
@@ -75,16 +82,78 @@ enum Received {
     Reconnection,
 }
 
-/// A Pulsar broker on loopback that serves one shared-subscription consumer: it delivers
-/// `messages` once the consumer asks for them, answers acknowledgements with `answer`, and reports
-/// what it receives.
+/// How the broker answers a subscribe command, or an unsubscribe.
+#[derive(Clone, Copy, Debug)]
+enum CommandAnswer {
+    /// The broker carries it out.
+    Accept,
+    /// The broker refuses it with this server error and reason.
+    Refuse(PulsarServerError, &'static str),
+}
+
+/// How the broker answers the subscription commands of the consumers it serves.
+#[derive(Clone, Copy, Debug)]
+struct SubscriptionAnswers {
+    /// How it answers a non-durable subscribe, whose refusal can say that a durable subscription
+    /// of the same name exists. A durable subscribe is always accepted.
+    non_durable: CommandAnswer,
+    unsubscribe: CommandAnswer,
+}
+
+impl SubscriptionAnswers {
+    /// Answers for a subscription that does not exist and is removed when asked.
+    const ABSENT: Self = Self {
+        non_durable: CommandAnswer::Accept,
+        unsubscribe: CommandAnswer::Accept,
+    };
+    /// Answers for a subscription an operator provisioned, as the broker refuses a non-durable
+    /// subscribe of its name.
+    const PROVISIONED: Self = Self {
+        non_durable: CommandAnswer::Refuse(
+            PulsarServerError::NotAllowedError,
+            "Durable subscription with the same name already exists.",
+        ),
+        unsubscribe: CommandAnswer::Accept,
+    };
+}
+
+/// A subscription command the broker received, in the order consumers sent them.
+#[derive(Debug, PartialEq, Eq)]
+enum SubscriptionCommand {
+    Subscribe {
+        durable: bool,
+        consumer_name: Option<String>,
+    },
+    Unsubscribe,
+    CloseConsumer,
+}
+
+/// What the broker tells a test it received, on two channels: the acknowledgements and redelivery
+/// requests of the consumer it serves, and the subscription commands of every consumer.
+struct Observed {
+    received: mpsc::UnboundedSender<Received>,
+    subscriptions: mpsc::UnboundedSender<SubscriptionCommand>,
+}
+
+/// A Pulsar broker on loopback that serves shared-subscription consumers: it delivers `messages`
+/// once the first durable consumer asks for them, answers acknowledgements with `answer` and
+/// subscription commands with `subscriptions`, and reports what it receives.
 struct LoopbackBroker {
     service_url: String,
     received: mpsc::UnboundedReceiver<Received>,
+    subscriptions: mpsc::UnboundedReceiver<SubscriptionCommand>,
 }
 
 impl LoopbackBroker {
     async fn start(messages: u64, answer: AckAnswer) -> Self {
+        Self::start_with(messages, answer, SubscriptionAnswers::ABSENT).await
+    }
+
+    async fn start_with(
+        messages: u64,
+        answer: AckAnswer,
+        subscriptions: SubscriptionAnswers,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port is available");
@@ -93,17 +162,23 @@ impl LoopbackBroker {
             .expect("a bound listener has an address");
         let service_url = format!("pulsar://{addr}");
         let (received_tx, received) = mpsc::unbounded_channel();
+        let (subscriptions_tx, subscriptions_rx) = mpsc::unbounded_channel();
         let lookup_url = service_url.clone();
         nervix_primitives::task::spawn(async move {
             let Ok((first, _)) = listener.accept().await else {
                 return;
+            };
+            let observed = Observed {
+                received: received_tx.clone(),
+                subscriptions: subscriptions_tx,
             };
             nervix_primitives::task::spawn(Self::serve(
                 Framed::new(first, PulsarCodec),
                 lookup_url,
                 messages,
                 answer,
-                received_tx.clone(),
+                subscriptions,
+                observed,
             ));
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -119,6 +194,7 @@ impl LoopbackBroker {
         Self {
             service_url,
             received,
+            subscriptions: subscriptions_rx,
         }
     }
 
@@ -127,9 +203,12 @@ impl LoopbackBroker {
         service_url: String,
         messages: u64,
         answer: AckAnswer,
-        received: mpsc::UnboundedSender<Received>,
+        subscriptions: SubscriptionAnswers,
+        observed: Observed,
     ) {
         let mut delivered = false;
+        // Only a durable consumer reads the messages: a non-durable probe is closed unread.
+        let mut durable_consumers = std::collections::BTreeSet::new();
         while let Some(Ok(frame)) = connection.next().await {
             nervix_primitives::task::consume_budget().await;
             let command = frame.command;
@@ -141,9 +220,32 @@ impl LoopbackBroker {
             } else if let Some(request) = command.lookup_topic {
                 replies.push(Self::served_here(&service_url, request.request_id));
             } else if let Some(request) = command.subscribe {
-                replies.push(Self::success(request.request_id));
+                let durable = request.durable.unwrap_or(true);
+                let subscribed = SubscriptionCommand::Subscribe {
+                    durable,
+                    consumer_name: request.consumer_name,
+                };
+                if observed.subscriptions.send(subscribed).is_err() {
+                    return;
+                }
+                let answer = if durable {
+                    durable_consumers.insert(request.consumer_id);
+                    CommandAnswer::Accept
+                } else {
+                    subscriptions.non_durable
+                };
+                replies.push(Self::answer(request.request_id, answer));
+            } else if let Some(request) = command.unsubscribe {
+                if observed
+                    .subscriptions
+                    .send(SubscriptionCommand::Unsubscribe)
+                    .is_err()
+                {
+                    return;
+                }
+                replies.push(Self::answer(request.request_id, subscriptions.unsubscribe));
             } else if let Some(flow) = command.flow {
-                if !delivered {
+                if !delivered && durable_consumers.contains(&flow.consumer_id) {
                     delivered = true;
                     replies
                         .extend((0..messages).map(|entry| Self::message(flow.consumer_id, entry)));
@@ -153,7 +255,7 @@ impl LoopbackBroker {
                     message_ids: ack.message_id,
                     carried_request_id: ack.request_id.is_some(),
                 };
-                if received.send(acknowledged).is_err() {
+                if observed.received.send(acknowledged).is_err() {
                     return;
                 }
                 // Only an acknowledgement that carried a request id can be answered.
@@ -176,10 +278,17 @@ impl LoopbackBroker {
                 let requested = Received::Redelivery {
                     message_ids: redelivery.message_ids,
                 };
-                if received.send(requested).is_err() {
+                if observed.received.send(requested).is_err() {
                     return;
                 }
             } else if let Some(request) = command.close_consumer {
+                if observed
+                    .subscriptions
+                    .send(SubscriptionCommand::CloseConsumer)
+                    .is_err()
+                {
+                    return;
+                }
                 replies.push(Self::success(request.request_id));
             } else if command.ping.is_some() {
                 replies.push(Self::pong());
@@ -259,6 +368,23 @@ impl LoopbackBroker {
         })
     }
 
+    /// The broker's answer to the request `request_id`: its success, or the refusal `answer`
+    /// names.
+    fn answer(request_id: u64, answer: CommandAnswer) -> PulsarFrame {
+        let CommandAnswer::Refuse(error, reason) = answer else {
+            return Self::success(request_id);
+        };
+        Self::frame(BaseCommand {
+            r#type: i32::from(CommandType::Error),
+            error: Some(CommandError {
+                request_id,
+                error: i32::from(error),
+                message: reason.to_string(),
+            }),
+            ..Default::default()
+        })
+    }
+
     fn message(consumer_id: u64, entry_id: u64) -> PulsarFrame {
         PulsarFrame {
             command: BaseCommand {
@@ -329,6 +455,22 @@ impl LoopbackBroker {
             .expect("the broker receives the consumer's next command")
             .expect("the broker keeps listening while the test runs")
     }
+
+    /// The next subscription command the broker received from any consumer.
+    async fn next_subscription_command(&mut self) -> SubscriptionCommand {
+        timeout(DEADLINE, self.subscriptions.recv())
+            .await
+            .expect("the broker receives the next subscription command")
+            .expect("the broker keeps listening while the test runs")
+    }
+
+    /// The client entries of a source that reads through this broker.
+    fn config(&self) -> Vec<ClientConfigEntry> {
+        vec![ClientConfigEntry {
+            key: "addr".to_string(),
+            value: self.service_url.clone(),
+        }]
+    }
 }
 
 /// The id of the loopback broker's message at `entry_id`.
@@ -347,6 +489,19 @@ async fn open(broker: &LoopbackBroker) -> PulsarSource {
 }
 
 async fn open_with(broker: &LoopbackBroker, ack_receipts: PulsarAckReceipts) -> PulsarSource {
+    let plan = plan(broker, ack_receipts, PulsarSubscriptionOwnership::Ingestor).await;
+    PulsarSource::open(&plan, 0)
+        .await
+        .expect("the loopback broker serves the subscription")
+}
+
+/// The plan of a source on `broker` whose subscription `ownership` says who owns, through a client
+/// whose operation timeout is short enough for a test to outlast.
+async fn plan(
+    broker: &LoopbackBroker,
+    ack_receipts: PulsarAckReceipts,
+    ownership: PulsarSubscriptionOwnership,
+) -> PulsarSourcePlan {
     let client = Pulsar::builder(broker.service_url.clone(), TokioExecutor)
         .with_operation_retry_options(OperationRetryOptions {
             operation_timeout: OPERATION_TIMEOUT,
@@ -355,17 +510,41 @@ async fn open_with(broker: &LoopbackBroker, ack_receipts: PulsarAckReceipts) -> 
         .build()
         .await
         .expect("the loopback broker serves the client's handshake");
-    let plan = PulsarSourcePlan {
+    PulsarSourcePlan {
         client,
         topic: TOPIC.to_string(),
-        subscription: PulsarSubscriptionName::parse("orders-ingestor")
-            .expect("the test subscription is a valid Pulsar subscription name"),
+        subscription: subscription(ownership),
         consumer_name: "orders".to_string(),
         ack_receipts,
-    };
-    PulsarSource::open(&plan, 0)
-        .await
-        .expect("the loopback broker serves the subscription")
+    }
+}
+
+/// The subscription every test source reads through, owned as `ownership` says.
+fn subscription(ownership: PulsarSubscriptionOwnership) -> PulsarSubscription {
+    PulsarSubscription {
+        name: PulsarSubscriptionName::parse("orders-ingestor")
+            .expect("the test subscription is a valid Pulsar subscription name"),
+        ownership,
+    }
+}
+
+/// The topic every test source reads.
+fn topic() -> PulsarTopicName {
+    PulsarTopicName::parse(TOPIC).expect("the test topic is a valid Pulsar topic name")
+}
+
+/// The settings that remove the owned subscription of a source on the broker `config` names.
+fn removal_settings<'a>(
+    config: &'a [ClientConfigEntry],
+    topic: &'a PulsarTopicName,
+) -> PulsarSourceSettings<'a> {
+    PulsarSourceSettings {
+        config,
+        topic,
+        subscription: subscription(PulsarSubscriptionOwnership::Ingestor),
+        consumer_name: "orders".to_string(),
+        ack_receipts: PulsarAckReceipts::Awaited,
+    }
 }
 
 /// The positions of the first `count` messages the source reads.
@@ -376,16 +555,71 @@ async fn read(source: &mut PulsarSource, count: usize) -> Vec<PulsarSourcePositi
             max_messages: std::num::NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let batch = timeout(DEADLINE, source.next_batch(request))
-            .await
-            .expect("the source reads the broker's next message")
-            .expect("the loopback broker delivers its messages");
+        let batch = timeout(
+            DEADLINE,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the source reads the broker's next message")
+        .expect("the loopback broker delivers its messages");
         let SourceBatch::Messages(messages) = batch else {
             panic!("an open source reads messages");
         };
         positions.extend(messages.iter().map(|message| message.position().clone()));
     }
     positions
+}
+
+/// How long a test lets the consumer receive before it reads again.
+const RECEIVE_INTERVAL: Duration = Duration::from_millis(10);
+
+#[nervix_primitives::test]
+async fn a_cancelled_parallel_read_returns_every_message_it_gathered() {
+    let broker = LoopbackBroker::start(4, AckAnswer::Confirm).await;
+    let mut source = open(&broker).await;
+    // The first read waits until the broker has delivered its messages.
+    let mut entries = Vec::new();
+    for position in read(&mut source, 1).await {
+        entries.push(position.message_id.entry_id);
+    }
+
+    // A read the host has already cancelled takes only what the consumer holds and then ends, so
+    // the test reads again until the consumer has received every message.
+    let cancellation = SourceReadCancellation::new();
+    cancellation.cancel();
+    let request = SourceBatchRequest {
+        max_messages: std::num::NonZeroUsize::new(8).expect("eight is a nonzero batch bound"),
+        batch_timeout: Some(Duration::from_secs(3600)),
+    };
+    let deadline = Instant::now()
+        .checked_add(DEADLINE)
+        .expect("thirty seconds after now fits the monotonic clock");
+    while entries.len() < 4 {
+        let batch = source
+            .next_batch(request, &cancellation)
+            .await
+            .expect("the loopback broker delivers its messages");
+        let SourceBatch::Interrupted { gathered } = batch else {
+            panic!("a read the host cancelled ends as interrupted");
+        };
+        if gathered.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the consumer received the delivered messages within the deadline"
+            );
+            sleep(RECEIVE_INTERVAL).await;
+            continue;
+        }
+        for message in &gathered {
+            entries.push(message.position().message_id.entry_id);
+        }
+    }
+
+    assert_eq!(
+        entries,
+        [0, 1, 2, 3],
+        "the interrupted reads returned every message they took, each exactly once"
+    );
 }
 
 /// The Pulsar failure a source operation reports beneath its connector context.
@@ -679,4 +913,347 @@ fn a_refusal_names_the_server_error_and_the_reason_the_broker_gave() {
         "the Pulsar broker did not confirm an acknowledgement: the client's operation timeout \
          passed first"
     );
+}
+
+/// Whether `error` holds the Pulsar failure `matches` accepts in any of its frames.
+fn holds_pulsar_failure(
+    error: &error_stack::Report<PulsarSourceError>,
+    matches: impl Fn(&PulsarSourceError) -> bool,
+) -> bool {
+    error
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<PulsarSourceError>())
+        .any(matches)
+}
+
+#[nervix_primitives::test]
+async fn an_instance_joins_its_owned_subscription_at_open_under_its_indexed_consumer_name() {
+    let mut broker = LoopbackBroker::start(0, AckAnswer::Confirm).await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Ingestor,
+    )
+    .await;
+
+    let mut source = PulsarSource::open(&plan, 1)
+        .await
+        .expect("the loopback broker serves the subscription");
+
+    assert!(
+        !source.needs_resume(),
+        "an owned subscription is joined at open"
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: true,
+            consumer_name: Some("orders-1".to_string()),
+        }
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
+    let mut broker =
+        LoopbackBroker::start_with(1, AckAnswer::Confirm, SubscriptionAnswers::PROVISIONED).await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Provisioned,
+    )
+    .await;
+    let mut source = PulsarSource::open(&plan, 0)
+        .await
+        .expect("opening a provisioned subscription asks the broker nothing");
+    assert!(
+        source.needs_resume(),
+        "a provisioned subscription is joined on resume"
+    );
+
+    let resumed = source
+        .resume()
+        .await
+        .expect("the broker refuses the probe because the subscription exists");
+
+    assert!(matches!(resumed, SourceResume::Ready));
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: false,
+            consumer_name: Some("orders-0".to_string()),
+        }
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: true,
+            consumer_name: Some("orders-0".to_string()),
+        }
+    );
+    assert_eq!(read(&mut source, 1).await.len(), 1);
+}
+
+#[nervix_primitives::test]
+async fn a_missing_provisioned_subscription_is_reported_and_never_created() {
+    let mut broker =
+        LoopbackBroker::start_with(1, AckAnswer::Confirm, SubscriptionAnswers::ABSENT).await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Provisioned,
+    )
+    .await;
+    let mut source = PulsarSource::open(&plan, 0)
+        .await
+        .expect("opening a provisioned subscription asks the broker nothing");
+
+    let error = source
+        .resume()
+        .await
+        .expect_err("a subscription nobody provisioned is missing");
+
+    let PulsarSourceError::MissingSubscription {
+        subscription,
+        topic,
+    } = pulsar_failure(&error)
+    else {
+        panic!("a missing subscription is named, got {error:?}");
+    };
+    assert_eq!(subscription.as_str(), "orders-ingestor");
+    assert_eq!(topic, TOPIC);
+    assert!(matches!(
+        error.current_context(),
+        SourceError::Resume {
+            connector: "pulsar"
+        }
+    ));
+    assert_eq!(
+        pulsar_failure(&error).to_string(),
+        "PULSAR subscription 'orders-ingestor' of topic 'persistent://public/default/orders' does \
+         not exist"
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: false,
+            consumer_name: Some("orders-0".to_string()),
+        }
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::CloseConsumer
+    );
+    assert!(
+        source.needs_resume(),
+        "the source joins no subscription it would create"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists() {
+    let answers = SubscriptionAnswers {
+        non_durable: CommandAnswer::Refuse(
+            PulsarServerError::NotAllowedError,
+            "Exceed the maximum number of subscriptions of the topic: \
+             persistent://public/default/orders",
+        ),
+        unsubscribe: CommandAnswer::Accept,
+    };
+    let mut broker = LoopbackBroker::start_with(0, AckAnswer::Confirm, answers).await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Provisioned,
+    )
+    .await;
+    let mut source = PulsarSource::open(&plan, 0)
+        .await
+        .expect("opening a provisioned subscription asks the broker nothing");
+
+    let error = source
+        .resume()
+        .await
+        .expect_err("a refused probe leaves the subscription unverified");
+
+    assert!(
+        matches!(
+            pulsar_failure(&error),
+            PulsarSourceError::VerifySubscription { .. }
+        ),
+        "the refusal is a verification failure, got {error:?}"
+    );
+    assert!(
+        error.contains::<PulsarError>(),
+        "the refusal stays beneath the failure"
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: false,
+            consumer_name: Some("orders-0".to_string()),
+        }
+    );
+    assert!(source.needs_resume());
+}
+
+#[nervix_primitives::test]
+async fn removing_an_owned_subscription_joins_it_and_unsubscribes() {
+    let mut broker = LoopbackBroker::start(0, AckAnswer::Confirm).await;
+    let config = broker.config();
+    let topic = topic();
+
+    PulsarSourcePlan::remove_subscription_within(removal_settings(&config, &topic), DEADLINE)
+        .await
+        .expect("the broker removes the subscription");
+
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: true,
+            consumer_name: Some("orders-removal".to_string()),
+        }
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Unsubscribe
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_unsubscribe_the_broker_refuses_is_reported_and_closes_the_joined_consumer() {
+    let answers = SubscriptionAnswers {
+        non_durable: CommandAnswer::Accept,
+        unsubscribe: CommandAnswer::Refuse(
+            PulsarServerError::MetadataError,
+            "Unconnected or shared consumer attempting to unsubscribe",
+        ),
+    };
+    let mut broker = LoopbackBroker::start_with(0, AckAnswer::Confirm, answers).await;
+    let config = broker.config();
+    let topic = topic();
+
+    let error =
+        PulsarSourcePlan::remove_subscription_within(removal_settings(&config, &topic), DEADLINE)
+            .await
+            .expect_err("the broker refuses the unsubscribe");
+
+    let PulsarSourceError::RemoveSubscription {
+        subscription,
+        topic,
+    } = error.current_context()
+    else {
+        panic!("a failed removal names its subscription, got {error:?}");
+    };
+    assert_eq!(subscription.as_str(), "orders-ingestor");
+    assert_eq!(topic, TOPIC);
+    assert!(
+        holds_pulsar_failure(&error, |failure| matches!(
+            failure,
+            PulsarSourceError::Unsubscribe
+        )),
+        "the refused unsubscribe is beneath the removal, got {error:?}"
+    );
+    assert!(
+        error.contains::<PulsarError>(),
+        "the refusal stays beneath the failure"
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: true,
+            consumer_name: Some("orders-removal".to_string()),
+        }
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Unsubscribe
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::CloseConsumer
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_removal_the_broker_never_answers_ends_at_its_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port is available");
+    let addr = listener
+        .local_addr()
+        .expect("a bound listener has an address");
+    nervix_primitives::task::spawn(async move {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let Ok((connection, _)) = listener.accept().await else {
+                return;
+            };
+            nervix_primitives::task::spawn(LoopbackBroker::hold_unanswered(connection));
+        }
+    });
+    let config = vec![ClientConfigEntry {
+        key: "addr".to_string(),
+        value: format!("pulsar://{addr}"),
+    }];
+    let topic = topic();
+    let budget = Duration::from_millis(200);
+    let started = Instant::now();
+
+    let error =
+        PulsarSourcePlan::remove_subscription_within(removal_settings(&config, &topic), budget)
+            .await
+            .expect_err("a broker that never answers removes nothing");
+
+    assert!(started.elapsed() >= budget);
+    assert!(matches!(
+        error.current_context(),
+        PulsarSourceError::RemoveSubscription { .. }
+    ));
+    assert!(
+        holds_pulsar_failure(&error, |failure| matches!(
+            failure,
+            PulsarSourceError::RemovalDeadline { budget: actual } if *actual == budget
+        )),
+        "the removal ends at its budget, got {error:?}"
+    );
+}
+
+#[test]
+fn only_a_refusal_for_a_durable_subscription_says_the_subscription_exists() {
+    let exists = format!("{DURABLE_SUBSCRIPTION_EXISTS}.");
+    let refusal = |error: PulsarServerError, reason: &str| {
+        PulsarConnectionError::PulsarError(Some(error), Some(reason.to_string()))
+    };
+    let found = [
+        PulsarError::Connection(refusal(PulsarServerError::NotAllowedError, &exists)),
+        PulsarError::Consumer(PulsarConsumerError::Connection(refusal(
+            PulsarServerError::NotAllowedError,
+            &exists,
+        ))),
+    ];
+    for error in &found {
+        assert!(
+            PulsarSourcePlan::refused_for_a_durable_subscription(error),
+            "{error}"
+        );
+    }
+    let not_found = [
+        PulsarError::Connection(refusal(
+            PulsarServerError::NotAllowedError,
+            "Exceed the maximum number of subscriptions of the topic: orders",
+        )),
+        PulsarError::Connection(refusal(PulsarServerError::ServiceNotReady, &exists)),
+        PulsarError::Connection(PulsarConnectionError::PulsarError(
+            Some(PulsarServerError::NotAllowedError),
+            None,
+        )),
+        PulsarError::Connection(PulsarConnectionError::Disconnected),
+    ];
+    for error in &not_found {
+        assert!(
+            !PulsarSourcePlan::refused_for_a_durable_subscription(error),
+            "{error}"
+        );
+    }
 }

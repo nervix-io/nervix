@@ -370,6 +370,19 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_domain_resume_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::DomainResumeBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_domain_resume_if_armed(node, domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,

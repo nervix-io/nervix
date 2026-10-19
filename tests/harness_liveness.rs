@@ -2,16 +2,18 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, node-startup, node-stop, phase-deadline,
-//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag and
-//!   runner-offload regressions with Rust's test runner, and the stand-in nodes and clients those
-//!   regressions talk to.
+//! - **Owns.** Registration of the focused node-liveness, readiness-history, node-startup,
+//!   node-stop, phase-deadline, status-request, port-pool, process-cluster convergence,
+//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
+//!   materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
+//!   server-executable and process-observation regressions with Rust's test runner, and the
+//!   stand-in nodes, clients, images and processes those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
-//!   port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   gRPC-receiver, NATS-observer, runner-lag, runner-offload and materialized-state diagnostic
-//!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
-//!   client wire session protocol the stand-in nodes answer status requests with.
+//!   port-pool, process-cluster convergence, cluster-teardown, scenario-phase, suite-watchdog,
+//!   Redis-client, HTTP-receiver, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
+//!   server-executable, process-observation and materialized-state diagnostic harness modules,
+//!   the product's shutdown coordinator a stopping node is read through, and the client wire
+//!   session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -42,6 +44,14 @@ mod node_stop;
 mod phase_deadline;
 #[path = "common/port_pool.rs"]
 mod port_pool;
+#[path = "common/process_cluster_convergence.rs"]
+mod process_cluster_convergence;
+#[path = "common/process_observation.rs"]
+mod process_observation;
+#[path = "common/process_observation_tests.rs"]
+mod process_observation_tests;
+#[path = "common/readiness_history_tests.rs"]
+mod readiness_history_tests;
 #[path = "common/redis_client.rs"]
 mod redis_client;
 #[path = "common/runner_lag.rs"]
@@ -64,6 +74,10 @@ mod scenario_phase;
     reason = "the scenario binary uses the admission APIs shared by this harness test"
 )]
 mod scenario_schedule;
+#[path = "common/server_executable.rs"]
+mod server_executable;
+#[path = "common/server_executable_tests.rs"]
+mod server_executable_tests;
 #[path = "common/status_request.rs"]
 mod status_request;
 #[path = "common/suite_watchdog.rs"]
@@ -95,7 +109,7 @@ mod tests {
             Arc, CancellationToken, Notify, StdArc,
             atomic::{AtomicUsize, Ordering},
             blocking::{LazyLock, Mutex},
-            mpsc, oneshot,
+            mpsc, oneshot, watch,
         },
         task::JoinHandle,
         time::{Instant, timeout},
@@ -135,6 +149,9 @@ mod tests {
         port_pool::{
             PORT_DRAW_LIMIT, PortPoolError, next_port, next_ports, release_test_ports, reserve,
         },
+        process_cluster_convergence::{
+            ClusterConvergence, ConvergenceError, Divergence, PeerReachability,
+        },
         scenario_phase::{
             ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         },
@@ -151,12 +168,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_retry_runs_before_the_remaining_first_attempts() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         let slots = ScenarioRunSlots::new(1);
         let current = slots
             .admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "current",
                 ScenarioAttempt::First,
                 |_| {},
@@ -164,6 +184,7 @@ mod tests {
             .await;
         let mut first = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
             "queued first attempt",
             ScenarioAttempt::First,
             |_| {},
@@ -171,6 +192,7 @@ mod tests {
         assert!(futures_util::poll!(first.as_mut()).is_pending());
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
             "retry",
             ScenarioAttempt::Retry,
             |_| {},
@@ -188,7 +210,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_ready_retry_runs_before_first_attempts_of_limited_features() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         for limit in [FeatureLimit::WebConsole, FeatureLimit::WasmStateReset] {
             nervix_primitives::task::consume_budget().await;
@@ -196,6 +220,7 @@ mod tests {
             let current = slots
                 .admit_with(
                     FeatureLimit::Unlimited,
+                    ScenarioLength::Ordinary,
                     "current",
                     ScenarioAttempt::First,
                     |_| {},
@@ -203,6 +228,7 @@ mod tests {
                 .await;
             let mut first = Box::pin(slots.admit_with(
                 limit,
+                ScenarioLength::Ordinary,
                 "limited first attempt",
                 ScenarioAttempt::First,
                 |_| {},
@@ -210,6 +236,7 @@ mod tests {
             assert!(futures_util::poll!(first.as_mut()).is_pending());
             let mut retry = Box::pin(slots.admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "retry",
                 ScenarioAttempt::Retry,
                 |_| {},
@@ -227,12 +254,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_retry_waiting_for_its_feature_does_not_hold_a_free_run_slot() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         let slots = ScenarioRunSlots::new(3);
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "console",
                 ScenarioAttempt::First,
                 |_| {},
@@ -241,6 +271,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "console",
                 ScenarioAttempt::First,
                 |_| {},
@@ -248,6 +279,7 @@ mod tests {
             .await;
         let mut retry = Box::pin(slots.admit_with(
             FeatureLimit::WebConsole,
+            ScenarioLength::Ordinary,
             "console retry",
             ScenarioAttempt::Retry,
             |_| {},
@@ -255,6 +287,7 @@ mod tests {
         assert!(futures_util::poll!(retry.as_mut()).is_pending());
         let mut ordinary = Box::pin(slots.admit_with(
             FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
             "ordinary first attempt",
             ScenarioAttempt::First,
             |_| {},
@@ -270,7 +303,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_cancelled_retry_returns_its_feature_and_run_capacity() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         for limit in [
             FeatureLimit::WebConsole,
@@ -280,18 +315,30 @@ mod tests {
             nervix_primitives::task::consume_budget().await;
             let slots = ScenarioRunSlots::new(1);
             let current = slots
-                .admit_with(limit, "current", ScenarioAttempt::First, |_| {})
+                .admit_with(
+                    limit,
+                    ScenarioLength::Ordinary,
+                    "current",
+                    ScenarioAttempt::First,
+                    |_| {},
+                )
                 .await;
             let mut retry = Box::pin(slots.admit_with(
                 limit,
+                ScenarioLength::Ordinary,
                 "cancelled retry",
                 ScenarioAttempt::Retry,
                 |_| {},
             ));
             assert!(futures_util::poll!(retry.as_mut()).is_pending());
             drop(retry);
-            let mut successor =
-                Box::pin(slots.admit_with(limit, "successor", ScenarioAttempt::First, |_| {}));
+            let mut successor = Box::pin(slots.admit_with(
+                limit,
+                ScenarioLength::Ordinary,
+                "successor",
+                ScenarioAttempt::First,
+                |_| {},
+            ));
             assert!(futures_util::poll!(successor.as_mut()).is_pending());
             drop(current);
             assert!(futures_util::poll!(successor.as_mut()).is_ready());
@@ -300,12 +347,15 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_queued_web_console_scenario_does_not_hold_a_run_slot() {
-        use crate::scenario_schedule::{FeatureLimit, ScenarioAttempt, ScenarioRunSlots};
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
 
         let slots = StdArc::new(ScenarioRunSlots::new(3));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -314,6 +364,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -324,6 +375,7 @@ mod tests {
             waiting
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |_| {},
@@ -335,6 +387,7 @@ mod tests {
             Duration::from_millis(100),
             slots.admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "ordinary",
                 ScenarioAttempt::First,
                 |_| {},
@@ -355,13 +408,14 @@ mod tests {
     #[nervix_primitives::test]
     async fn the_next_limited_scenario_gets_a_slot_beside_bulk_work() {
         use crate::scenario_schedule::{
-            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
         };
 
         let slots = StdArc::new(ScenarioRunSlots::new(1));
         let current = slots
             .admit_with(
                 FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
                 "ordinary",
                 ScenarioAttempt::First,
                 |_| {},
@@ -374,6 +428,7 @@ mod tests {
             ordinary_slots
                 .admit_with(
                     FeatureLimit::Unlimited,
+                    ScenarioLength::Ordinary,
                     "ordinary",
                     ScenarioAttempt::First,
                     |reason| {
@@ -398,6 +453,7 @@ mod tests {
             limited_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |reason| {
@@ -432,13 +488,14 @@ mod tests {
     #[nervix_primitives::test]
     async fn releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain() {
         use crate::scenario_schedule::{
-            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
         };
 
         let slots = StdArc::new(ScenarioRunSlots::new(2));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -447,6 +504,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -460,6 +518,7 @@ mod tests {
             next_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |reason| {
@@ -483,6 +542,7 @@ mod tests {
             ordinary_slots
                 .admit_with(
                     FeatureLimit::Unlimited,
+                    ScenarioLength::Ordinary,
                     "ordinary",
                     ScenarioAttempt::First,
                     |reason| {
@@ -517,13 +577,14 @@ mod tests {
     #[nervix_primitives::test]
     async fn each_web_console_feature_starts_before_one_feature_consumes_the_group() {
         use crate::scenario_schedule::{
-            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioRunSlots,
+            AdmissionWait, FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
         };
 
         let slots = StdArc::new(ScenarioRunSlots::new(2));
         let first = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -532,6 +593,7 @@ mod tests {
         let second = slots
             .admit_with(
                 FeatureLimit::WebConsole,
+                ScenarioLength::Ordinary,
                 "Web console execution graph",
                 ScenarioAttempt::First,
                 |_| {},
@@ -545,6 +607,7 @@ mod tests {
             graph_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console execution graph",
                     ScenarioAttempt::First,
                     |reason| {
@@ -568,6 +631,7 @@ mod tests {
             repl_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console NSPL REPL",
                     ScenarioAttempt::First,
                     |reason| {
@@ -591,6 +655,7 @@ mod tests {
             inspector_slots
                 .admit_with(
                     FeatureLimit::WebConsole,
+                    ScenarioLength::Ordinary,
                     "Web console transaction inspector",
                     ScenarioAttempt::First,
                     |reason| {
@@ -626,6 +691,189 @@ mod tests {
         drop(repl_admission);
         drop(inspector_admission);
         graph.await.expect("graph successor eventually runs");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts() {
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
+
+        let slots = ScenarioRunSlots::new(1);
+        let current = slots
+            .admit_with(
+                FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
+                "current",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let mut ordinary = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
+            "ordinary first attempt queued earlier",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(ordinary.as_mut()).is_pending());
+        let mut long = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::LongRunning,
+            "long-running first attempt queued later",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(long.as_mut()).is_pending());
+
+        drop(current);
+        let std::task::Poll::Ready(long_admission) = futures_util::poll!(long.as_mut()) else {
+            panic!("the released run slot must go to the long-running scenario queued later");
+        };
+        assert!(futures_util::poll!(ordinary.as_mut()).is_pending());
+        drop(long_admission);
+        assert!(futures_util::poll!(ordinary.as_mut()).is_ready());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_retry_runs_before_a_declared_long_first_attempt() {
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
+
+        let slots = ScenarioRunSlots::new(1);
+        let current = slots
+            .admit_with(
+                FeatureLimit::Unlimited,
+                ScenarioLength::Ordinary,
+                "current",
+                ScenarioAttempt::First,
+                |_| {},
+            )
+            .await;
+        let mut long = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::LongRunning,
+            "long-running first attempt",
+            ScenarioAttempt::First,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(long.as_mut()).is_pending());
+        let mut retry = Box::pin(slots.admit_with(
+            FeatureLimit::Unlimited,
+            ScenarioLength::Ordinary,
+            "ordinary retry",
+            ScenarioAttempt::Retry,
+            |_| {},
+        ));
+        assert!(futures_util::poll!(retry.as_mut()).is_pending());
+
+        drop(current);
+        let std::task::Poll::Ready(retried) = futures_util::poll!(retry.as_mut()) else {
+            panic!("an eligible retry must precede a long-running first attempt");
+        };
+        assert!(futures_util::poll!(long.as_mut()).is_pending());
+        drop(retried);
+        assert!(futures_util::poll!(long.as_mut()).is_ready());
+    }
+
+    /// Two run slots take up four ordinary attempts of ten seconds, queued in feature order before
+    /// a declared long-running attempt of thirty. In queue order the long attempt starts at twenty
+    /// seconds, once the four have ended, and runs on alone until fifty: the shape of the suite
+    /// tail in which one transaction-report attempt, admitted in the run's last quarter, outlasted
+    /// every other scenario. Admitted ahead of them, it runs beside them and the suite ends with
+    /// its bulk, at forty.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it() {
+        use crate::scenario_schedule::{
+            FeatureLimit, ScenarioAttempt, ScenarioLength, ScenarioRunSlots,
+        };
+
+        const ORDINARY_ATTEMPT: Duration = Duration::from_secs(10);
+        const LONG_ATTEMPT: Duration = Duration::from_secs(30);
+        const BULK_END: Duration = Duration::from_secs(40);
+
+        async fn attempt(
+            slots: &ScenarioRunSlots,
+            length: ScenarioLength,
+            time: Duration,
+            began: Instant,
+        ) -> Duration {
+            let admission = slots
+                .admit_with(
+                    FeatureLimit::Unlimited,
+                    length,
+                    "Suite tail",
+                    ScenarioAttempt::First,
+                    |_| {},
+                )
+                .await;
+            nervix_primitives::time::sleep(time).await;
+            drop(admission);
+            began.elapsed()
+        }
+
+        let slots = ScenarioRunSlots::new(2);
+        let began = Instant::now();
+        let mut attempts = Vec::new();
+        for _ in 0..4 {
+            attempts.push(Box::pin(attempt(
+                &slots,
+                ScenarioLength::Ordinary,
+                ORDINARY_ATTEMPT,
+                began,
+            )));
+        }
+        attempts.push(Box::pin(attempt(
+            &slots,
+            ScenarioLength::LongRunning,
+            LONG_ATTEMPT,
+            began,
+        )));
+        // Queue every attempt in feature order, the order in which Cucumber takes them up.
+        for queued in &mut attempts {
+            assert!(futures_util::poll!(queued.as_mut()).is_pending());
+        }
+
+        let ends = futures_util::future::join_all(attempts).await;
+        let suite_end = ends
+            .into_iter()
+            .max()
+            .verified("the suite above ran five attempts");
+        assert_eq!(
+            suite_end, BULK_END,
+            "the long-running attempt must run beside the bulk instead of after it"
+        );
+    }
+
+    #[test]
+    fn long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature() {
+        use crate::scenario_schedule::ScenarioLength;
+
+        assert_eq!(
+            ScenarioLength::declared_by(["transaction_quiesce_qualification", "long_running"]),
+            ScenarioLength::LongRunning
+        );
+        assert_eq!(
+            ScenarioLength::declared_by(["transaction_quiesce_qualification"]),
+            ScenarioLength::Ordinary
+        );
+        assert_eq!(
+            ScenarioLength::declared_by(std::iter::empty::<&str>()),
+            ScenarioLength::Ordinary
+        );
+    }
+
+    #[test]
+    fn an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running() {
+        use crate::scenario_schedule::{LONG_RUNNING_ATTEMPT, ScenarioLength};
+
+        let shorter = LONG_RUNNING_ATTEMPT
+            .checked_sub(Duration::from_millis(1))
+            .verified("the long-running bound is two minutes");
+        assert!(ScenarioLength::Ordinary.lacks_declaration_for(LONG_RUNNING_ATTEMPT));
+        assert!(!ScenarioLength::Ordinary.lacks_declaration_for(shorter));
+        assert!(!ScenarioLength::LongRunning.lacks_declaration_for(LONG_RUNNING_ATTEMPT));
     }
 
     #[test]
@@ -681,6 +929,12 @@ mod tests {
     /// be told apart from another gives its own line rather than sharing this one.
     const STAND_IN_SCENARIO_LINE: usize = 1;
     const TEST_AUTHORIZATION: &str = "Basic c3RhbmQtaW46c3RhbmQtaW4=";
+    /// How long a convergence regression gives its stand-in members to converge. Only a wait that
+    /// never ends while its members converge reaches it.
+    const CONVERGENCE_TEST_BUDGET: Duration = Duration::from_secs(30);
+    /// The budget a convergence regression lets pass on purpose. Its stand-in members answer at
+    /// once, so the wait asks them many times within it.
+    const CONVERGENCE_EXPIRY_BUDGET: Duration = Duration::from_secs(1);
     const HEALTHY_STATUS: &str = "raft.state: Leader\nraft.current_leader: node-1";
     /// How often a startup regression probes its stand-in. The startup regressions run on a
     /// paused clock, so this only decides how many probes one attempt performs.
@@ -708,6 +962,8 @@ mod tests {
     enum StandInBehavior {
         /// Answers the session's command with this outcome.
         Answer(CommandOutcome),
+        /// Answers the session's command with the answer published when the command arrives.
+        AnswerPublished(watch::Receiver<PublishedAnswer>),
         /// Answers the session's command once `gate` opens.
         AnswerAfter {
             result: CommandOutcome,
@@ -729,6 +985,139 @@ mod tests {
 
     type StandInResponses = mpsc::Sender<Result<EncodedFrame<ServerFrame>, Status>>;
 
+    /// One answer a stand-in gives every status session that arrives while it is published, and how
+    /// many sessions it has answered.
+    #[derive(Clone)]
+    struct PublishedAnswer {
+        result: CommandOutcome,
+        answered: Arc<watch::Sender<usize>>,
+    }
+
+    impl PublishedAnswer {
+        fn status(text: &str) -> Self {
+            Self {
+                result: command_result(completed(), text),
+                answered: Arc::new(watch::Sender::new(0)),
+            }
+        }
+
+        /// Waits until the stand-in has answered `count` sessions with this answer.
+        async fn answered(&self, count: usize) {
+            let mut answered = self.answered.subscribe();
+            answered
+                .wait_for(|answered| *answered >= count)
+                .await
+                .assured("the answer keeps its own counter");
+        }
+    }
+
+    /// What a stand-in member answers, replaced as a regression moves the member's view along.
+    struct PublishedMember {
+        answer: watch::Sender<PublishedAnswer>,
+    }
+
+    impl PublishedMember {
+        fn new(answer: &PublishedAnswer) -> Self {
+            Self {
+                answer: watch::Sender::new(answer.clone()),
+            }
+        }
+
+        fn behavior(&self) -> StandInBehavior {
+            StandInBehavior::AnswerPublished(self.answer.subscribe())
+        }
+
+        fn publish(&self, answer: &PublishedAnswer) {
+            self.answer.send_replace(answer.clone());
+        }
+    }
+
+    /// The application-health target a stand-in member reports for one peer.
+    struct PeerTargetLine {
+        peer: &'static str,
+        generation: u64,
+        status: &'static str,
+    }
+
+    /// The cluster status one member of a stand-in three-member cluster reports, in the form
+    /// `SHOW CLUSTER STATUS` renders it: its view of the Raft leader and voters, and the
+    /// application-health target it observes each peer through.
+    fn member_status(member: &str, leader: &str, targets: &[PeerTargetLine]) -> String {
+        let role = if member == leader {
+            "Leader"
+        } else {
+            "Follower"
+        };
+        let mut lines = vec![
+            "[chitchat]".to_string(),
+            "cluster_id: cucumber".to_string(),
+            "seed_nodes: (none)".to_string(),
+            "self:".to_string(),
+            format!("- node_id: {member}"),
+            "live_nodes:".to_string(),
+            String::new(),
+            "[raft]".to_string(),
+            format!("raft.id: {member}"),
+            format!("raft.current_leader: {leader}"),
+            "raft.current_term: 3".to_string(),
+            format!("raft.state: {role}"),
+            "raft.cordoned_nodes: (none)".to_string(),
+            "raft.last_log_index: 40".to_string(),
+            "raft.last_applied: 40".to_string(),
+            "raft.membership:".to_string(),
+            "- node-1 [voter] 127.0.0.1:41001".to_string(),
+            "- node-2 [voter] 127.0.0.1:41002".to_string(),
+            "- node-3 [voter] 127.0.0.1:41003".to_string(),
+            String::new(),
+            "[interconnect]".to_string(),
+        ];
+        let mut warnings = Vec::new();
+        for target in targets {
+            let observation = match target.status {
+                "connected" => "healthy",
+                "unknown" => "none",
+                _ => "failure",
+            };
+            lines.push(format!(
+                "- {}: addr=127.0.0.1:4100{} generation={} observation={observation} \
+                 observation_age=200ms status={}",
+                target.peer,
+                target.peer.trim_start_matches("node-"),
+                target.generation,
+                target.status
+            ));
+            if target.status == "unavailable" {
+                warnings.push(format!(
+                    "- raft member '{}' is marked unavailable by application health",
+                    target.peer
+                ));
+            }
+        }
+        if warnings.is_empty() {
+            warnings.push("- none".to_string());
+        }
+        lines.extend([
+            String::new(),
+            "[domains]".to_string(),
+            "- none".to_string(),
+            String::new(),
+            "[schedule]".to_string(),
+            "- none".to_string(),
+            String::new(),
+            "[warnings]".to_string(),
+        ]);
+        lines.extend(warnings);
+        lines.join("\n")
+    }
+
+    fn target(peer: &'static str, generation: u64, status: &'static str) -> PeerTargetLine {
+        PeerTargetLine {
+            peer,
+            generation,
+            status,
+        }
+    }
+
     impl StandInBehavior {
         async fn answer(
             self,
@@ -743,6 +1132,11 @@ mod tests {
                 .request_id;
             match self {
                 Self::Answer(result) => Self::send_result(&responses, request_id, result).await,
+                Self::AnswerPublished(published) => {
+                    let answer = published.borrow().clone();
+                    Self::send_result(&responses, request_id, answer.result).await;
+                    answer.answered.send_modify(|answered| *answered += 1);
+                }
                 Self::AnswerAfter { result, gate } => {
                     gate.notified().await;
                     Self::send_result(&responses, request_id, result).await;
@@ -852,6 +1246,7 @@ mod tests {
                         ));
                     }
                     StandInBehavior::Answer(_)
+                    | StandInBehavior::AnswerPublished(_)
                     | StandInBehavior::AnswerAfter { .. }
                     | StandInBehavior::WithholdResponse { .. }
                     | StandInBehavior::FloodResponses
@@ -1672,6 +2067,690 @@ mod tests {
             stalled_error,
             StatusOperation::ReceiveResponse
         ));
+    }
+
+    /// A relaunched member's killed process never left the voter configuration, so the members agree
+    /// on their leader and voters as soon as the new process follows the leader. The leader still
+    /// judges the member by the target it observed the killed process through until it discovers
+    /// the new process, and refuses to place work on it until then.
+    #[nervix_primitives::test]
+    async fn a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process() {
+        for stale in ["unavailable", "connected"] {
+            nervix_primitives::task::consume_budget().await;
+            // node-2's process has exited. node-1 leads and observes it through generation 4,
+            // node-3 through generation 6.
+            let leader = PublishedMember::new(&PublishedAnswer::status(&member_status(
+                "node-1",
+                "node-1",
+                &[target("node-2", 4, stale), target("node-3", 2, "connected")],
+            )));
+            let relaunched = PublishedMember::new(&PublishedAnswer {
+                result: command_result(CommandDisposition::Failed, "the process has exited"),
+                answered: Arc::new(watch::Sender::new(0)),
+            });
+            let other = PublishedMember::new(&PublishedAnswer::status(&member_status(
+                "node-3",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-2", 6, "unavailable"),
+                ],
+            )));
+            let node_1 = StandInNode::serve(leader.behavior()).await;
+            let node_2 = StandInNode::serve(relaunched.behavior()).await;
+            let node_3 = StandInNode::serve(other.behavior()).await;
+            let convergence = ClusterConvergence::new(
+                BTreeMap::from([
+                    ("node-1".to_string(), node_1.endpoint()),
+                    ("node-2".to_string(), node_2.endpoint()),
+                    ("node-3".to_string(), node_3.endpoint()),
+                ]),
+                CONVERGENCE_TEST_BUDGET,
+            );
+            // The new process follows the leader and reaches both peers, and node-3 has discovered
+            // it through a new target, while node-1 still observes the killed process.
+            let unaware = PublishedAnswer::status(&member_status(
+                "node-1",
+                "node-1",
+                &[target("node-2", 4, stale), target("node-3", 2, "connected")],
+            ));
+            let relaunch = async {
+                relaunched.publish(&PublishedAnswer::status(&member_status(
+                    "node-2",
+                    "node-1",
+                    &[
+                        target("node-1", 1, "connected"),
+                        target("node-3", 2, "connected"),
+                    ],
+                )));
+                other.publish(&PublishedAnswer::status(&member_status(
+                    "node-3",
+                    "node-1",
+                    &[
+                        target("node-1", 1, "connected"),
+                        target("node-2", 7, "connected"),
+                    ],
+                )));
+                leader.publish(&unaware);
+                Ok(())
+            };
+            let mut converging = std::pin::pin!(convergence.relaunch("node-2", relaunch));
+
+            let premature = nervix_primitives::select! {
+                converged = &mut converging => Some(converged),
+                () = unaware.answered(2) => None,
+            };
+            if let Some(converged) = premature {
+                panic!(
+                    "the relaunch converged while node-1 still observed the killed process \
+                     through a {stale} target: {converged:?}"
+                );
+            }
+            leader.publish(&PublishedAnswer::status(&member_status(
+                "node-1",
+                "node-1",
+                &[
+                    target("node-2", 5, "connected"),
+                    target("node-3", 2, "connected"),
+                ],
+            )));
+            timeout(CONVERGENCE_TEST_BUDGET, converging)
+                .await
+                .assured("the relaunch ends within its own budget")
+                .assured("every member reaches the new process once node-1 discovers it");
+        }
+    }
+
+    /// A start ends only once every member's latest application-health probe of every other member
+    /// reached it, as an in-process cluster's construction does.
+    #[nervix_primitives::test]
+    async fn a_started_cluster_converges_once_every_member_reaches_every_peer() {
+        let first = PublishedMember::new(&PublishedAnswer::status(&member_status(
+            "node-1",
+            "node-1",
+            &[
+                target("node-2", 1, "connected"),
+                target("node-3", 2, "connected"),
+            ],
+        )));
+        let second = PublishedMember::new(&PublishedAnswer::status(&member_status(
+            "node-2",
+            "node-1",
+            &[
+                target("node-1", 1, "connected"),
+                target("node-3", 2, "connected"),
+            ],
+        )));
+        let unprobed = PublishedAnswer::status(&member_status(
+            "node-3",
+            "node-1",
+            &[
+                target("node-1", 1, "unknown"),
+                target("node-2", 2, "connected"),
+            ],
+        ));
+        let third = PublishedMember::new(&unprobed);
+        let node_1 = StandInNode::serve(first.behavior()).await;
+        let node_2 = StandInNode::serve(second.behavior()).await;
+        let node_3 = StandInNode::serve(third.behavior()).await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), node_1.endpoint()),
+                ("node-2".to_string(), node_2.endpoint()),
+                ("node-3".to_string(), node_3.endpoint()),
+            ]),
+            CONVERGENCE_TEST_BUDGET,
+        );
+        let mut converging = std::pin::pin!(convergence.wait());
+
+        let premature = nervix_primitives::select! {
+            converged = &mut converging => Some(converged),
+            () = unprobed.answered(2) => None,
+        };
+        if let Some(converged) = premature {
+            panic!("the cluster converged while node-3 had not reached node-1: {converged:?}");
+        }
+        third.publish(&PublishedAnswer::status(&member_status(
+            "node-3",
+            "node-1",
+            &[
+                target("node-1", 1, "connected"),
+                target("node-2", 2, "connected"),
+            ],
+        )));
+        timeout(CONVERGENCE_TEST_BUDGET, converging)
+            .await
+            .assured("the start ends within its own budget")
+            .assured("every member reaches every peer once node-3 reaches node-1");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_one_member_cluster_converges_without_peers() {
+        let alone = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            "raft.current_leader: node-1\nraft.membership:\n- node-1 [voter] \
+             127.0.0.1:41001\n\n[interconnect]\n- (none)",
+        )))
+        .await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([("node-1".to_string(), alone.endpoint())]),
+            CONVERGENCE_TEST_BUDGET,
+        );
+
+        timeout(CONVERGENCE_TEST_BUDGET, convergence.wait())
+            .await
+            .assured("the start ends within its own budget")
+            .assured("a member with no peers converges on its own leadership");
+    }
+
+    /// The status format is the server's, so a line the wait cannot read would be read the same way
+    /// on every later attempt: the wait ends at once, naming the member and the line.
+    #[nervix_primitives::test]
+    async fn a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line() {
+        const VOTER: &str = "- node-1 [voter] 127.0.0.1:41001";
+        const TARGET: &str = "- node-2: addr=127.0.0.1:41002 generation=2 status=connected";
+        // Each garbled membership item replaces the voter, and each garbled target the target.
+        let garbled_membership = [
+            "- node-1 voter 127.0.0.1:41001",
+            "- node-1 [voter 127.0.0.1:41001",
+        ];
+        let garbled_targets = [
+            "- node-2 addr=127.0.0.1:41002 generation=2 status=connected",
+            "- node-2: addr 127.0.0.1:41002 generation=2 status=connected",
+            "- node-2: addr=127.0.0.1:41002 generation=two status=connected",
+            "- node-2: addr=127.0.0.1:41002 generation=2 status=reachable",
+            "- node-2: addr=127.0.0.1:41002 status=connected",
+            "- node-2: addr=127.0.0.1:41002 generation=2",
+        ];
+        /// One status with a single line the wait cannot read.
+        struct GarbledStatus {
+            garbled: &'static str,
+            voter: &'static str,
+            target: &'static str,
+        }
+
+        let mut statuses = Vec::new();
+        for garbled in garbled_membership {
+            statuses.push(GarbledStatus {
+                garbled,
+                voter: garbled,
+                target: TARGET,
+            });
+        }
+        for garbled in garbled_targets {
+            statuses.push(GarbledStatus {
+                garbled,
+                voter: VOTER,
+                target: garbled,
+            });
+        }
+        for status in statuses {
+            nervix_primitives::task::consume_budget().await;
+            let garbled = status.garbled;
+            let text = [
+                "raft.current_leader: node-1",
+                "raft.membership:",
+                status.voter,
+                "",
+                "[interconnect]",
+                status.target,
+            ]
+            .join("\n");
+            let garbling =
+                StandInNode::serve(StandInBehavior::Answer(command_result(completed(), &text)))
+                    .await;
+            let convergence = ClusterConvergence::new(
+                BTreeMap::from([("node-1".to_string(), garbling.endpoint())]),
+                CONVERGENCE_TEST_BUDGET,
+            );
+
+            let failure = timeout(STALLED_REQUEST_GUARD, convergence.wait())
+                .await
+                .assured("an unreadable status ends the wait before any budget does")
+                .expect_err("a status the wait cannot read must fail it");
+
+            let ConvergenceError::UnreadableStatus { member, line } = failure.current_context()
+            else {
+                panic!("the wait must name the unreadable status {garbled:?}, got {failure:#}");
+            };
+            assert_eq!(member, "node-1");
+            assert_eq!(line, garbled);
+        }
+    }
+
+    /// The wait names, by its budget, each condition of convergence a member's latest answer did
+    /// not meet.
+    #[nervix_primitives::test]
+    async fn an_expired_wait_names_the_condition_a_member_did_not_meet() {
+        struct UnmetCondition {
+            first: String,
+            second: String,
+            expected: Divergence,
+        }
+
+        let connected_to = |peer| [target(peer, 1, "connected")];
+        let cases = [
+            UnmetCondition {
+                first: member_status("node-1", "(none)", &connected_to("node-2")),
+                second: member_status("node-2", "node-1", &connected_to("node-1")),
+                expected: Divergence::NoLeader {
+                    member: "node-1".to_string(),
+                },
+            },
+            UnmetCondition {
+                first: member_status("node-1", "node-3", &connected_to("node-2")),
+                second: member_status("node-2", "node-3", &connected_to("node-1")),
+                expected: Divergence::LeaderOutsideCluster {
+                    member: "node-1".to_string(),
+                    leader: "node-3".to_string(),
+                },
+            },
+            UnmetCondition {
+                first: member_status("node-1", "node-1", &connected_to("node-2")),
+                second: member_status("node-2", "node-2", &connected_to("node-1")),
+                expected: Divergence::LeadersDiffer {
+                    member: "node-2".to_string(),
+                    leader: "node-2".to_string(),
+                    other: "node-1".to_string(),
+                    other_leader: "node-1".to_string(),
+                },
+            },
+            UnmetCondition {
+                first: member_status("node-1", "node-1", &connected_to("node-2"))
+                    .replace("- node-2 [voter]", "- node-2 [learner]"),
+                second: member_status("node-2", "node-1", &connected_to("node-1")),
+                expected: Divergence::VoterMissing {
+                    member: "node-1".to_string(),
+                    voter: "node-2".to_string(),
+                },
+            },
+            UnmetCondition {
+                first: member_status("node-1", "node-1", &connected_to("node-3")),
+                second: member_status("node-2", "node-1", &connected_to("node-1")),
+                expected: Divergence::PeerUnobserved {
+                    member: "node-1".to_string(),
+                    peer: "node-2".to_string(),
+                },
+            },
+        ];
+        /// How one case's wait ended, beside the condition it should name.
+        struct ExpiredWait {
+            expected: Divergence,
+            waited: Result<(), Report<ConvergenceError>>,
+        }
+
+        let mut stand_ins = Vec::new();
+        let mut waits = Vec::new();
+        for case in cases {
+            let first = StandInNode::serve(StandInBehavior::Answer(command_result(
+                completed(),
+                &case.first,
+            )))
+            .await;
+            let second = StandInNode::serve(StandInBehavior::Answer(command_result(
+                completed(),
+                &case.second,
+            )))
+            .await;
+            let convergence = ClusterConvergence::new(
+                BTreeMap::from([
+                    ("node-1".to_string(), first.endpoint()),
+                    ("node-2".to_string(), second.endpoint()),
+                ]),
+                CONVERGENCE_EXPIRY_BUDGET,
+            );
+            stand_ins.push(first);
+            stand_ins.push(second);
+            waits.push(async move {
+                ExpiredWait {
+                    expected: case.expected,
+                    waited: convergence.wait().await,
+                }
+            });
+        }
+
+        let outcomes = timeout(
+            CONVERGENCE_TEST_BUDGET,
+            futures_util::future::join_all(waits),
+        )
+        .await
+        .assured("every wait ends at its budget");
+        for outcome in outcomes {
+            let failure = outcome
+                .waited
+                .expect_err("members that never converge must fail the wait");
+            let ConvergenceError::NotConverged { divergence, .. } = failure.current_context()
+            else {
+                panic!("the wait must end by its budget, got {failure:#}");
+            };
+            assert_eq!(divergence, &outcome.expected);
+        }
+    }
+
+    /// Every member must answer the round that converges, so a member that stops answering keeps
+    /// the cluster from converging even when its last answer had converged.
+    #[nervix_primitives::test]
+    async fn a_member_that_stops_answering_keeps_the_cluster_from_converging() {
+        let unprobed = PublishedAnswer::status(&member_status(
+            "node-1",
+            "node-1",
+            &[target("node-2", 1, "unknown")],
+        ));
+        let first = PublishedMember::new(&unprobed);
+        let answering = PublishedAnswer::status(&member_status(
+            "node-2",
+            "node-1",
+            &[target("node-1", 1, "connected")],
+        ));
+        let second = PublishedMember::new(&answering);
+        let node_1 = StandInNode::serve(first.behavior()).await;
+        let node_2 = StandInNode::serve(second.behavior()).await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), node_1.endpoint()),
+                ("node-2".to_string(), node_2.endpoint()),
+            ]),
+            CONVERGENCE_EXPIRY_BUDGET,
+        );
+        let mut converging = std::pin::pin!(convergence.wait());
+
+        // node-2 answers with a converged status, then fails every later request, while node-1
+        // reaches node-2 only after node-2 has stopped answering.
+        let premature = nervix_primitives::select! {
+            converged = &mut converging => Some(converged),
+            () = answering.answered(1) => None,
+        };
+        if let Some(converged) = premature {
+            panic!("the cluster converged while node-1 had not reached node-2: {converged:?}");
+        }
+        second.publish(&PublishedAnswer {
+            result: command_result(CommandDisposition::Failed, "the node is stopping"),
+            answered: Arc::new(watch::Sender::new(0)),
+        });
+        first.publish(&PublishedAnswer::status(&member_status(
+            "node-1",
+            "node-1",
+            &[target("node-2", 1, "connected")],
+        )));
+        let failure = timeout(CONVERGENCE_TEST_BUDGET, converging)
+            .await
+            .assured("a wait that never converges ends at its budget")
+            .expect_err("a member that stopped answering must keep the cluster from converging");
+
+        let ConvergenceError::NotConverged { divergence, .. } = failure.current_context() else {
+            panic!("the wait must end by its budget, got {failure:#}");
+        };
+        assert_eq!(
+            divergence,
+            &Divergence::StatusUnanswered {
+                member: "node-2".to_string(),
+            }
+        );
+        let rendered = format!("{failure:#}");
+        assert!(rendered.contains("- node-2 last reported "), "{rendered}");
+        assert!(
+            rendered.contains("- node-2 did not answer its latest request: "),
+            "{rendered}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said()
+    {
+        let first = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            &member_status(
+                "node-1",
+                "node-1",
+                &[
+                    target("node-2", 1, "probe-failed"),
+                    target("node-3", 2, "connected"),
+                ],
+            ),
+        )))
+        .await;
+        let second = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            &member_status(
+                "node-2",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-3", 2, "connected"),
+                ],
+            ),
+        )))
+        .await;
+        let refused_address = RefusedAddress::bind();
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), first.endpoint()),
+                ("node-2".to_string(), second.endpoint()),
+                (
+                    "node-3".to_string(),
+                    plaintext_endpoint(refused_address.address),
+                ),
+            ]),
+            CONVERGENCE_EXPIRY_BUDGET,
+        );
+        let started = Instant::now();
+
+        let failure = timeout(CONVERGENCE_TEST_BUDGET, convergence.wait())
+            .await
+            .assured("a wait that never converges ends at its budget")
+            .expect_err("members that never converge must fail the wait");
+
+        assert!(started.elapsed() >= CONVERGENCE_EXPIRY_BUDGET);
+        let ConvergenceError::NotConverged {
+            budget, divergence, ..
+        } = failure.current_context()
+        else {
+            panic!("the wait must end by its budget, got {failure:#}");
+        };
+        assert_eq!(*budget, CONVERGENCE_EXPIRY_BUDGET);
+        assert_eq!(
+            divergence,
+            &Divergence::PeerUnreached {
+                member: "node-1".to_string(),
+                peer: "node-2".to_string(),
+                reachability: PeerReachability::ProbeFailed,
+            }
+        );
+        let rendered = format!("{failure:#}");
+        assert!(rendered.contains("- node-1 last reported "), "{rendered}");
+        assert!(rendered.contains("- node-2 last reported "), "{rendered}");
+        assert!(
+            rendered.contains("- node-3 did not answer its latest request: "),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("- node-3 last reported "), "{rendered}");
+    }
+
+    /// A running member that had already stopped observing the exited process holds no target for
+    /// it, so the first target it reports after the relaunch observes the new process.
+    #[nervix_primitives::test]
+    async fn a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target()
+    {
+        let leader = PublishedMember::new(&PublishedAnswer::status(&member_status(
+            "node-1",
+            "node-1",
+            &[target("node-3", 2, "connected")],
+        )));
+        let relaunched = PublishedMember::new(&PublishedAnswer {
+            result: command_result(CommandDisposition::Failed, "the process has exited"),
+            answered: Arc::new(watch::Sender::new(0)),
+        });
+        let other = PublishedMember::new(&PublishedAnswer::status(&member_status(
+            "node-3",
+            "node-1",
+            &[target("node-1", 1, "connected")],
+        )));
+        let node_1 = StandInNode::serve(leader.behavior()).await;
+        let node_2 = StandInNode::serve(relaunched.behavior()).await;
+        let node_3 = StandInNode::serve(other.behavior()).await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), node_1.endpoint()),
+                ("node-2".to_string(), node_2.endpoint()),
+                ("node-3".to_string(), node_3.endpoint()),
+            ]),
+            CONVERGENCE_TEST_BUDGET,
+        );
+        let relaunch = async {
+            relaunched.publish(&PublishedAnswer::status(&member_status(
+                "node-2",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-3", 1, "connected"),
+                ],
+            )));
+            leader.publish(&PublishedAnswer::status(&member_status(
+                "node-1",
+                "node-1",
+                &[
+                    target("node-2", 1, "connected"),
+                    target("node-3", 2, "connected"),
+                ],
+            )));
+            other.publish(&PublishedAnswer::status(&member_status(
+                "node-3",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-2", 1, "connected"),
+                ],
+            )));
+            Ok(())
+        };
+
+        timeout(
+            CONVERGENCE_TEST_BUDGET,
+            convergence.relaunch("node-2", relaunch),
+        )
+        .await
+        .assured("the relaunch ends within its own budget")
+        .assured("a member with no target for the exited process converges on its first one");
+    }
+
+    /// The targets the running members observed the exited process through decide what counts as
+    /// the new process, so a relaunch does not start before every running member has reported
+    /// them.
+    #[nervix_primitives::test]
+    async fn a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets() {
+        let leader = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            &member_status(
+                "node-1",
+                "node-1",
+                &[
+                    target("node-2", 4, "unavailable"),
+                    target("node-3", 2, "connected"),
+                ],
+            ),
+        )))
+        .await;
+        let exited = StandInNode::serve(StandInBehavior::EndSession).await;
+        let refusing = StandInNode::serve(StandInBehavior::RejectSession).await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), leader.endpoint()),
+                ("node-2".to_string(), exited.endpoint()),
+                ("node-3".to_string(), refusing.endpoint()),
+            ]),
+            CONVERGENCE_EXPIRY_BUDGET,
+        );
+        let relaunches = AtomicUsize::new(0);
+        let relaunch = async {
+            relaunches.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let failure = timeout(
+            CONVERGENCE_TEST_BUDGET,
+            convergence.relaunch("node-2", relaunch),
+        )
+        .await
+        .assured("reading the targets ends at its budget")
+        .expect_err("a member that never reports its targets must fail the relaunch");
+
+        assert_eq!(relaunches.load(Ordering::SeqCst), 0);
+        let ConvergenceError::ExitedTargetsUnread {
+            relaunched, budget, ..
+        } = failure.current_context()
+        else {
+            panic!("the relaunch must name the unread targets, got {failure:#}");
+        };
+        assert_eq!(relaunched, "node-2");
+        assert_eq!(*budget, CONVERGENCE_EXPIRY_BUDGET);
+        let rendered = format!("{failure:#}");
+        assert!(
+            rendered.contains("- node-3 did not answer its latest request: "),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("- node-2 last reported"), "{rendered}");
+        assert!(!rendered.contains("- node-2 did not answer"), "{rendered}");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched() {
+        let leader = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            &member_status(
+                "node-1",
+                "node-1",
+                &[
+                    target("node-2", 4, "unavailable"),
+                    target("node-3", 2, "connected"),
+                ],
+            ),
+        )))
+        .await;
+        let exited = StandInNode::serve(StandInBehavior::EndSession).await;
+        let other = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            &member_status(
+                "node-3",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-2", 6, "unavailable"),
+                ],
+            ),
+        )))
+        .await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), leader.endpoint()),
+                ("node-2".to_string(), exited.endpoint()),
+                ("node-3".to_string(), other.endpoint()),
+            ]),
+            CONVERGENCE_TEST_BUDGET,
+        );
+
+        let failure = timeout(
+            CONVERGENCE_TEST_BUDGET,
+            convergence.relaunch("node-2", async {
+                Err(io::Error::other(
+                    "the relaunched process exited during startup",
+                ))
+            }),
+        )
+        .await
+        .assured("a failed relaunch ends the wait at once")
+        .expect_err("a relaunch that fails must fail the restart");
+
+        assert!(matches!(
+            failure.current_context(),
+            ConvergenceError::Relaunch { member } if member == "node-2"
+        ));
+        let Some(cause) = failure.downcast_ref::<io::Error>() else {
+            panic!("the relaunch's own failure must stay beneath it, got {failure:#}");
+        };
+        assert_eq!(
+            cause.to_string(),
+            "the relaunched process exited during startup"
+        );
     }
 
     #[nervix_primitives::test]
@@ -2651,10 +3730,13 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn the_finished_phase_is_published_only_once_cleanup_has_completed() {
+        use crate::scenario_schedule::ScenarioLength;
+
         let scenario = Arc::new(ActiveScenarioRegistration::start(
             "Harness liveness",
             "cleanup publishes truthful phases",
             STAND_IN_SCENARIO_LINE,
+            ScenarioLength::Ordinary,
         ));
         let log = Arc::new(CleanupLog::default());
         let mut nodes = [
@@ -2681,10 +3763,13 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn an_active_scenario_publishes_its_phase_and_the_age_of_that_phase() {
+        use crate::scenario_schedule::ScenarioLength;
+
         let scenario = ActiveScenarioRegistration::start(
             "Harness liveness",
             "phase ages",
             STAND_IN_SCENARIO_LINE,
+            ScenarioLength::Ordinary,
         );
         let queued = published(&scenario);
         assert_eq!(&queued.identity, scenario.identity());
@@ -3514,8 +4599,14 @@ mod tests {
             phase: ScenarioPhase,
             nodes: &[(&str, StandInStopBehavior)],
         ) -> Self {
-            let scenario =
-                ActiveScenarioRegistration::start("Harness liveness", scenario_name, line);
+            use crate::scenario_schedule::ScenarioLength;
+
+            let scenario = ActiveScenarioRegistration::start(
+                "Harness liveness",
+                scenario_name,
+                line,
+                ScenarioLength::Ordinary,
+            );
             scenario.enter(phase);
             let identity = scenario.identity().clone();
             let cluster = LiveClusterRegistration::start(identity.clone());
@@ -3798,15 +4889,25 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_retried_scenario_publishes_which_attempt_is_running() {
-        use crate::scenario_schedule::ScenarioAttempt;
+        use crate::scenario_schedule::{ScenarioAttempt, ScenarioLength};
 
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
-        let first = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        let first = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a retried scenario",
+            50,
+            ScenarioLength::Ordinary,
+        );
         assert_eq!(published(&first).attempt, 1);
         assert_eq!(first.attempt(), ScenarioAttempt::First);
         drop(first);
 
-        let retry = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        let retry = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a retried scenario",
+            50,
+            ScenarioLength::Ordinary,
+        );
         assert_eq!(retry.attempt(), ScenarioAttempt::Retry);
         assert_eq!(
             published(&retry).attempt,
@@ -3816,11 +4917,90 @@ mod tests {
 
         // An outline expands into one scenario per example row, and those rows share the outline's
         // name. They are separate scenarios, so neither counts as a retry of the other.
-        let example =
-            ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 51);
+        let example = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a retried scenario",
+            51,
+            ScenarioLength::Ordinary,
+        );
         assert_eq!(published(&example).attempt, 1);
         assert_eq!(example.attempt(), ScenarioAttempt::First);
         assert_ne!(published(&retry).identity, published(&example).identity);
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running() {
+        use crate::{
+            scenario_phase::suite_summary,
+            scenario_schedule::{LONG_RUNNING_ATTEMPT, ScenarioLength},
+        };
+
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let start_body = |scenario, declared| {
+            let registration = ActiveScenarioRegistration::start(
+                "Harness liveness",
+                scenario,
+                STAND_IN_SCENARIO_LINE,
+                declared,
+            );
+            registration.enter(ScenarioPhase::Body);
+            registration
+        };
+        let undeclared = start_body(
+            "an undeclared attempt that ran for two minutes",
+            ScenarioLength::Ordinary,
+        );
+        let _running = start_body(
+            "an undeclared attempt still running after two minutes",
+            ScenarioLength::Ordinary,
+        );
+        let declared = start_body(
+            "a declared attempt that ran for two minutes",
+            ScenarioLength::LongRunning,
+        );
+        let shorter = start_body(
+            "an undeclared attempt that ended just short of two minutes",
+            ScenarioLength::Ordinary,
+        );
+
+        let short_of_the_bound = Duration::from_millis(100);
+        let just_short = LONG_RUNNING_ATTEMPT
+            .checked_sub(short_of_the_bound)
+            .verified("the long-running bound is two minutes, far above 100 milliseconds");
+        nervix_primitives::time::advance(just_short).await;
+        shorter.enter(ScenarioPhase::Finished);
+        nervix_primitives::time::advance(short_of_the_bound).await;
+        undeclared.enter(ScenarioPhase::Finished);
+        declared.enter(ScenarioPhase::Finished);
+
+        // The section is the summary's last, and rows of other tests' scenarios may share it.
+        let summary = suite_summary();
+        let Some((_, section)) =
+            summary.split_once("### Attempts of at least 120s without @long_running")
+        else {
+            panic!("the summary must have a section for undeclared long attempts:\n{summary}");
+        };
+        let row = |scenario: &str| {
+            format!(
+                "| 120.0s | 1 | Harness liveness / {scenario} (line {STAND_IN_SCENARIO_LINE}) |"
+            )
+        };
+        assert!(
+            section.contains(&row("an undeclared attempt that ran for two minutes")),
+            "{summary}"
+        );
+        assert!(
+            section.contains(&row("an undeclared attempt still running after two minutes")),
+            "an attempt still in its body counts as long as it has run so far:\n{summary}"
+        );
+        assert!(
+            !section.contains("a declared attempt that ran for two minutes"),
+            "{summary}"
+        );
+        assert!(
+            !section.contains("an undeclared attempt that ended just short of two minutes"),
+            "{summary}"
+        );
     }
 
     /// A command line that carries only the suite watchdog's own options, so the injection point

@@ -133,7 +133,15 @@ not pay for a window's state, and a window width does not bound a correlator.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's
-  ordering slot. Management subquotas independently reserve streams for discovery, liveness,
+  ordering slot. A receiving node also keeps, for every peer, a watermark for each channel that
+  peer opened in the last ten minutes, up to a fixed 8,192 per peer at about 180 bytes each.
+  Branches that end and return open new channels, so size branch turnover between two nodes
+  against that budget: beyond it the least recently used watermarks are forgotten first rather
+  than new channels refused. A branch whose channel was forgotten while it was still in use fails
+  its next delivery as indeterminate and opens a new channel; a source that waits for
+  acknowledgements redelivers the batch, and one in `NO ACK` mode loses it as it loses any failed
+  delivery. Keep the branches that are active at once between two nodes below the budget, and read
+  `nervix_interconnect_relay_channel_watermarks_evicted_total` to see when turnover exceeds it. Management subquotas independently reserve streams for discovery, liveness,
   replaceable domain-clock progress, relay admission, cancellation, and terminal outcomes even when
   ordinary management requests are full.
   Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft

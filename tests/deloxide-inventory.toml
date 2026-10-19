@@ -104,6 +104,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@client_wire_pause_leadership",
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
@@ -132,6 +133,7 @@ tags = [
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
   "@mqtt_source_retirement",
+  "@pulsar_source_retirement",
   "@forced_failover_delivery",
 ]
 target = "test:scenarios"
@@ -639,6 +641,16 @@ id = "scenario.emitter-finish-at-stop"
 invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
 invocation = "scenarios"
 scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "STOP on one and three nodes reaches the Pulsar sink's finish after NO ACK delivered one record or a full 100-record producer queue while its broker connection was paused. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; receipt futures and the proxy's asynchronous gate are untracked."
+examples = 4
+feature = "tests/features/runtime/pulsar_delivery.feature"
+id = "scenario.pulsar-finish-at-stop"
+invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
+invocation = "scenarios"
+scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1705,6 +1717,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes reaches the Pulsar sink's finish while one NO ACK record or a full 100-record producer queue is held behind a paused broker connection. Source controls and domain teardown reach tracked locks; the receipt futures and asynchronous fault gate remain untracked."
+examples = 4
+feature = "tests/features/runtime/pulsar_delivery.feature"
+id = "stress.pulsar-finish-at-stop"
+invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
+invocation = "stress-scenarios"
+scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: a three-node ownership handoff of a Kafka ingestor whose entity gate waits for the source's delayed transport confirmation, with tracked entity-gate state, source controls and ACK completion during the stop. The confirmation delay, the Kafka client and transport waits remain untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -1875,6 +1897,26 @@ scenario = "An MQTT input moves away from an unavailable endpoint without retain
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "scenario.pulsar-subscription-drop"
+invariant = "DROP while running or stopped retires each locally owned Pulsar input before its typed execution plan is withdrawn, on one and three nodes."
+invocation = "scenarios"
+scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 4
+feature = "tests/features/runtime/pulsar_subscriptions.feature"
+id = "stress.pulsar-subscription-drop"
+invariant = "DROP while running or stopped retires each locally owned Pulsar input before its typed execution plan is withdrawn, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Forced emitter recovery while the former owner's relay admission and runtime preparation remain held. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/forced_failover_delivery.feature"
@@ -1892,6 +1934,26 @@ id = "stress.forced-failover-delivery"
 invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
 invocation = "stress-scenarios"
 scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Transaction model application, tracked impact recording and domain pause release across two controlled leadership transfers. Async proposal waits and fault barriers remain untracked."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.transaction-pause-release"
+invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
+invocation = "scenarios"
+scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: transaction model application, tracked impact recording and pause cleanup across two leadership transfers."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.transaction-pause-release"
+invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
+invocation = "stress-scenarios"
+scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
 selections = ["deloxide-stress"]
 
 [[owner]]
@@ -2110,6 +2172,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "stress.diagnostic-nodes",
@@ -2194,6 +2258,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-rejection",
   "stress.diagnostic-nodes",
@@ -2203,6 +2269,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
   "stress.client-alter-drain",
@@ -2346,12 +2414,16 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.pulsar-finish-at-stop",
+  "stress.pulsar-finish-at-stop",
   "scenario.mqtt-session-drop",
   "scenario.mqtt-topic-replacement",
   "scenario.mqtt-endpoint-replacement",
   "stress.mqtt-session-drop",
   "stress.mqtt-topic-replacement",
   "stress.mqtt-endpoint-replacement",
+  "scenario.pulsar-subscription-drop",
+  "stress.pulsar-subscription-drop",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",
