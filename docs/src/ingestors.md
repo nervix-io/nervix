@@ -1029,8 +1029,10 @@ the subscription, because the broker cannot say later who created one:
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
 driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
-not have creates the topic. A subscription that disappears between the check and the join is
-created by the join.
+not have creates the topic. While a check holds its cursor, the broker refuses to create a
+subscription of that name as a conflict, so an operator's request that arrives in that moment fails
+with HTTP 409 and succeeds when repeated. A subscription that disappears between the check and the
+join is created by the join.
 
 Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
 indices, so ingestors of the same name in different domains are told apart in the broker's

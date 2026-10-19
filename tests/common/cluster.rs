@@ -154,6 +154,9 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
         ),
     };
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long provisioning a Pulsar subscription repeats a request the broker refuses as a
+/// conflict while an ingestor's check holds a non-durable cursor of the same name.
+const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
     branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
@@ -5210,14 +5213,36 @@ async fn provision_pulsar_subscription(
     if created.status() != reqwest::StatusCode::CONFLICT {
         created.error_for_status().map_err(io::Error::other)?;
     }
-    client
-        .put(format!("{topic_url}/subscription/{subscription}"))
-        .send()
-        .await
-        .map_err(io::Error::other)?
-        .error_for_status()
-        .map_err(io::Error::other)?;
-    Ok(())
+    // An ingestor that checks for the missing subscription holds a non-durable cursor of its name
+    // for the moment of each check, and the broker refuses to create the subscription as a
+    // conflict meanwhile. An operator repeats the request, and so does this, until the broker
+    // holds the subscription durably.
+    let subscription_url = format!("{topic_url}/subscription/{subscription}");
+    let deadline = Instant::now() + PULSAR_PROVISION_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let created = client
+            .put(&subscription_url)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if created.status() != reqwest::StatusCode::CONFLICT {
+            created.error_for_status().map_err(io::Error::other)?;
+            return Ok(());
+        }
+        let observed = pulsar_subscription(dependencies, topic, subscription).await?;
+        if let Some(PulsarSubscriptionObservation { durable: true, .. }) = observed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "the broker refused to create Pulsar subscription '{subscription}' of topic \
+                 '{topic}' as a conflict for {PULSAR_PROVISION_TIMEOUT:?} without holding it \
+                 durably; last observation: {observed:?}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// The body the admin API answers `url` with, or what kept it from answering.

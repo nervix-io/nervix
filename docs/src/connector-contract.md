@@ -759,7 +759,8 @@ exists, the broker refuses that with `NotAllowedError` and the reason `Durable s
 the same name already exists`; the reason, not the error code the broker also answers for other
 refusals such as a topic's subscription limit, is what says the subscription exists. Otherwise the
 broker opens the non-durable cursor, which the instance closes again before reporting the
-subscription missing. Each instance's consumer registers under `<domain>~<ingestor>-<instance>`.
+subscription missing; while the cursor is open, the broker refuses to create a subscription of
+that name as a conflict. Each instance's consumer registers under `<domain>~<ingestor>-<instance>`.
 The [ingestor manual](./ingestors.md#pulsar) owns the public behavior.
 
 ### Confirmed acknowledgements
