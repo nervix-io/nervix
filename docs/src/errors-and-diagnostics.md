@@ -1470,6 +1470,13 @@ the alteration's failure first, so a consensus leadership loss in either still a
 with a leader redirect. The failed command, the session's error broadcast, a backup's capture
 failure and the step's impact diagnostic render the whole chain.
 
+Transaction application completion also recovers any engaged domain pause before proposing its
+terminal result. A failure there remains a typed `TransactionCommitError::RecoverQuiescence`
+report above the domain lifecycle and consensus or runtime cause, and leaves the step applying.
+A refused resume updates the coordinator's current quiescence diagnostics; it does not become a
+definitive application failure merely because the coordinator temporarily lost its authority. An existing
+definitive effect failure is retained when cleanup succeeds in that same completion attempt.
+
 ### Domain Clock Attachment
 
 A domain clock attachment answers with its own typed disposition rather than a command disposition.

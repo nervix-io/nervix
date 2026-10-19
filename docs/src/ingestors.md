@@ -620,14 +620,33 @@ CREATE CLIENT PRODUCER INGESTOR orders_in
   ON GENERAL ERROR LOG;
 ```
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] CLIENT PRODUCER INGESTOR <name>
+<!-- connector-matrix:ingest-client-producer:start -->
+```plexus,ignore
+CREATE CLIENT PRODUCER INGESTOR <name>
   FROM SCHEMA <schema>
-  MODE ACK SEQUENTIAL | ACK PARALLEL MAX <n>
-  ACK TIMEOUT <duration>
-  RETRY POLICY BACKOFF <duration> MAX <duration>
-  ON QUIESCE SUSPEND
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SCHEMA &lt;schema&gt; |
+| Locator and validation rule | Not offered: The body references the native schema; there is no external topic, queue or table to locate. |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| Metadata | Not offered: Application batches carry their declared schema; there is no separate transport metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [CLIENT PRODUCER capability and mirror reference](connector-capabilities.md#client-producer-ingest).
+<!-- connector-matrix:ingest-client-producer:end -->
 
 Every clause is required and there are no defaults:
 
@@ -819,13 +838,35 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 
 ### `HTTP REQUEST`
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] HTTP REQUEST INGESTOR <name>
-  FROM <client> EVERY <duration>
-  MODE NO ACK
-  ON QUIESCE SUSPEND
-    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+<!-- connector-matrix:ingest-http-request:start -->
+```plexus,ignore
+CREATE HTTP REQUEST INGESTOR <name>
+  FROM <client>
+  (EVERY 1s)
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | HTTP client |
+| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | `EVERY 1s` (duration); required |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
+| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
+<!-- connector-matrix:ingest-http-request:end -->
 
 - polls a configured HTTP endpoint periodically
 - issues the first request immediately, then follows an anchored domain-clock cadence; slow
@@ -838,18 +879,36 @@ CREATE [IF NOT EXISTS] HTTP REQUEST INGESTOR <name>
 
 ### Kafka
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] KAFKA TOPIC INGESTOR <name>
-  FROM <client>
-  TOPIC '<topic>'
-  OFFSET BY CONSUMER GROUP '<group>'|DOMAIN
-  [INSTANCES <count>]
-  MODE NO ACK
-    | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-    | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration>
-        RETRY POLICY BACKOFF <duration> MAX <duration>
-  ON QUIESCE SUSPEND
+<!-- connector-matrix:ingest-kafka-topic:start -->
+```plexus,ignore
+CREATE KAFKA TOPIC INGESTOR <name>
+  FROM <client> TOPIC 'orders'
+  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers')
+  [INSTANCES 2]
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | KAFKA client |
+| Locator and validation rule | TOPIC 'orders' (kafka_topic) |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
+| Every live node | no; scheduled owner |
+| Position class | replayable |
+| Acknowledgement confirmation | answered |
+
+See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
+<!-- connector-matrix:ingest-kafka-topic:end -->
 
 Kafka is the richest ingestion surface today.
 
@@ -918,18 +977,36 @@ does not change the auto-commit loss windows of `MODE NO ACK`.
 
 ### Pulsar
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] PULSAR TOPIC INGESTOR <name>
-  FROM <client>
-  TOPIC '<topic>'
-  SUBSCRIPTION '<subscription>' OWNED BY INGESTOR|PROVISIONED
-  [INSTANCES <count>]
-  MODE NO ACK
-    | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-    | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration>
-        RETRY POLICY BACKOFF <duration> MAX <duration>
-  ON QUIESCE SUSPEND
+<!-- connector-matrix:ingest-pulsar-topic:start -->
+```plexus,ignore
+CREATE PULSAR TOPIC INGESTOR <name>
+  FROM <client> TOPIC 'orders'
+  (SUBSCRIPTION 'readers' OWNED BY INGESTOR | SUBSCRIPTION 'readers' PROVISIONED)
+  [INSTANCES 2]
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | PULSAR client |
+| Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | replayable |
+| Acknowledgement confirmation | answered |
+
+See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
+<!-- connector-matrix:ingest-pulsar-topic:end -->
 
 Pulsar ingestors read through a shared, durable subscription. The subscription name is required by
 Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
@@ -1002,14 +1079,35 @@ provisions it again.
 
 ### RabbitMQ
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] RABBITMQ QUEUE INGESTOR <name>
-  FROM <client>
-  QUEUE '<queue>'
-  [INSTANCES <count>]
-  MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-  ON QUIESCE SUSPEND
+<!-- connector-matrix:ingest-rabbitmq-queue:start -->
+```plexus,ignore
+CREATE RABBITMQ QUEUE INGESTOR <name>
+  FROM <client> QUEUE 'orders'
+  [INSTANCES 2]
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | RABBITMQ client |
+| Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | broker_redelivered |
+| Acknowledgement confirmation | written |
+
+See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
+<!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
 Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
 records decoded from it have been acknowledged through the graph. A delivery whose acknowledgement
@@ -1041,14 +1139,34 @@ anything.
 
 ### Redis Pub/Sub
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] REDIS PUBSUB INGESTOR <name>
-  FROM <client>
-  CHANNEL '<channel>'
-  MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-    | DROP
+<!-- connector-matrix:ingest-redis-pubsub:start -->
+```plexus,ignore
+CREATE REDIS PUBSUB INGESTOR <name>
+  FROM <client> CHANNEL 'orders'
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | REDIS client |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |
+| Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
+<!-- connector-matrix:ingest-redis-pubsub:end -->
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
@@ -1062,21 +1180,37 @@ source's existing retry cadence; Redis Pub/Sub does not replay messages missed w
 
 ### MQTT
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] MQTT TOPIC INGESTOR <name>
-  FROM <client>
-  TOPIC '<topic-filter>'
-  [INSTANCES <count>]
-  [SESSION CLEAN|PERSISTENT]
-  [QOS 0|1]
-  MODE NO ACK
-    | ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-    | ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration>
-        RETRY POLICY BACKOFF <duration> MAX <duration>
-  ON QUIESCE SUSPEND
-    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-    | DROP
+<!-- connector-matrix:ingest-mqtt-topic:start -->
+```plexus,ignore
+CREATE MQTT TOPIC INGESTOR <name>
+  FROM <client> TOPIC 'devices/+/orders'
+  [INSTANCES 2]
+  [SESSION CLEAN | SESSION PERSISTENT]
+  [QOS 0 | QOS 1]
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | MQTT client |
+| Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1) |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); optional; default CLEAN<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); optional; default 0 |
+| Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | broker_redelivered |
+| Acknowledgement confirmation | queued |
+
+See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
+<!-- connector-matrix:ingest-mqtt-topic:end -->
 
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
 wildcards it may hold.
@@ -1124,16 +1258,36 @@ again on its declared `RETRY POLICY`, or on the host's reconnect cadence in `MOD
 
 ### NATS
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] NATS SUBJECT INGESTOR <name>
-  FROM <client>
-  SUBJECT '<subject>'
-  QUEUE GROUP '<queue_group>'
-  INSTANCES <count>
-  MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-    | DROP
+<!-- connector-matrix:ingest-nats-subject:start -->
+```plexus,ignore
+CREATE NATS SUBJECT INGESTOR <name>
+  FROM <client> SUBJECT 'orders.created'
+  (QUEUE GROUP 'workers')
+  (INSTANCES 2)
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | NATS client |
+| Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-ingest).
+<!-- connector-matrix:ingest-nats-subject:end -->
 
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
@@ -1151,14 +1305,34 @@ that is not connected, so messages published while the instance reconnects never
 
 ### ZeroMQ
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] ZEROMQ PULL INGESTOR <name>
+<!-- connector-matrix:ingest-zeromq-pull:start -->
+```plexus,ignore
+CREATE ZEROMQ PULL INGESTOR <name>
   FROM <client>
-  MODE NO ACK
-  ON QUIESCE SUSPEND
-    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-    | DROP
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | ZEROMQ client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | Not offered: Payload frames have no broker position or typed transport metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [ZEROMQ PULL capability and mirror reference](connector-capabilities.md#zeromq-pull-ingest).
+<!-- connector-matrix:ingest-zeromq-pull:end -->
 
 The source is a PULL socket. `SUSPEND` keeps it open but unread, so transport buffers fill and the
 peer's own high-water-mark policy determines whether sends queue, block, or drop. Buffered transport
@@ -1166,14 +1340,34 @@ data is read on resume. `BUFFER` and `DROP` keep reading locally.
 
 ### Syslog
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] SYSLOG LISTENER INGESTOR <name>
+<!-- connector-matrix:ingest-syslog-listener:start -->
+```plexus,ignore
+CREATE SYSLOG LISTENER INGESTOR <name>
   FROM <client>
-  MODE NO ACK
-  ON QUIESCE SUSPEND
-    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-    | DROP
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SYSLOG client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | metadata.peer_addr: STRING OPTIONAL |
+| Every live node | yes |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities.md#syslog-listener-ingest).
+<!-- connector-matrix:ingest-syslog-listener:end -->
 
 The client binds a UDP, TCP, or TLS listener. UDP treats one datagram as one message; TCP detects
 RFC 6587 octet-counted or LF-terminated framing per frame; TLS uses RFC 5425 octet counting.
@@ -1187,14 +1381,35 @@ diagnostic. These failures do not acknowledge a message; Syslog has no applicati
 
 ### SQS
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] SQS QUEUE INGESTOR <name>
-  FROM <client>
-  QUEUE '<queue>'
-  [INSTANCES <count>]
-  MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY BACKOFF <duration> MAX <duration>
-  ON QUIESCE SUSPEND
+<!-- connector-matrix:ingest-sqs-queue:start -->
+```plexus,ignore
+CREATE SQS QUEUE INGESTOR <name>
+  FROM <client> QUEUE 'orders'
+  [INSTANCES 2]
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SQS client |
+| Locator and validation rule | QUEUE 'orders' (sqs_queue) |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
+| Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | broker_redelivered |
+| Acknowledgement confirmation | answered |
+
+See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
+<!-- connector-matrix:ingest-sqs-queue:end -->
 
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
@@ -1217,15 +1432,36 @@ is deleted only once it is acknowledged, so a lookup failure never removes one f
 
 ### Prometheus
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] PROMETHEUS QUERY INGESTOR <name>
+<!-- connector-matrix:ingest-prometheus-query:start -->
+```plexus,ignore
+CREATE PROMETHEUS QUERY INGESTOR <name>
   FROM <client>
-  QUERY '<promql>'
-  EVERY <duration>
-  MODE NO ACK
-  ON QUIESCE SUSPEND
-    | BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
+  (QUERY 'up')
+  (EVERY 15s)
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | PROMETHEUS client |
+| Locator and validation rule | Not offered: QUERY is a PromQL expression option rather than an external entity name. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | `QUERY 'up'` (string literal); required<br>`EVERY 15s` (duration); required |
+| Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
+| Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
+<!-- connector-matrix:ingest-prometheus-query:end -->
 
 Prometheus samples are flattened into JSON before codec decoding.
 The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
@@ -1238,17 +1474,67 @@ the node's extension workers full waits for them; see
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] HTTP ENDPOINT INGESTOR <name>
-  FROM <endpoint> MODE NO ACK
-  ON QUIESCE REJECT RETRY AFTER <duration>
-    | BUFFER MAX SIZE <bytes>
+#### HTTP ENDPOINT
 
-CREATE [IF NOT EXISTS] WEBSOCKETS ENDPOINT INGESTOR <name>
-  FROM <endpoint> MODE NO ACK
-  ON QUIESCE REJECT RETRY AFTER <duration>
-    | BUFFER MAX SIZE <bytes>
+<!-- connector-matrix:ingest-http-endpoint:start -->
+```plexus,ignore
+CREATE HTTP ENDPOINT INGESTOR <name>
+  FROM <endpoint>
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | Http endpoint |
+| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | No entity-specific options. |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
+| Every live node | yes |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [HTTP ENDPOINT capability and mirror reference](connector-capabilities.md#http-endpoint-ingest).
+<!-- connector-matrix:ingest-http-endpoint:end -->
+
+#### WEBSOCKETS ENDPOINT
+
+<!-- connector-matrix:ingest-websockets-endpoint:start -->
+```plexus,ignore
+CREATE WEBSOCKETS ENDPOINT INGESTOR <name>
+  FROM <endpoint>
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | Websockets endpoint |
+| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | No entity-specific options. |
+| Headers | `read_header`, `read_headers` |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Every live node | yes |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [WEBSOCKETS ENDPOINT capability and mirror reference](connector-capabilities.md#websockets-endpoint-ingest).
+<!-- connector-matrix:ingest-websockets-endpoint:end -->
 
 This is how Nervix receives inbound HTTP requests and WebSocket connections on its own server-side
 endpoints. An `HTTP ENDPOINT` ingestor reads an endpoint declared `TYPE HTTP`, and a
@@ -1314,12 +1600,34 @@ The referenced resource bundle must contain:
 
 ### `WEBSOCKETS CONNECTION`
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] WEBSOCKETS CONNECTION INGESTOR <name>
-  FROM <client> MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
-    | DROP
+<!-- connector-matrix:ingest-websockets-connection:start -->
+```plexus,ignore
+CREATE WEBSOCKETS CONNECTION INGESTOR <name>
+  FROM <client>
+  MODE <mode>
+  ON QUIESCE <quiesce>
+  DECODE USING <codec>
+  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table. Choose a compatible quiesce form and satisfy its option requirements.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | WEBSOCKETS client |
+| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Modes (complete bodies after MODE) | NO ACK |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |
+| Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
+| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Every live node | no; scheduled owner |
+| Position class | none |
+| Acknowledgement confirmation | none |
+
+See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
+<!-- connector-matrix:ingest-websockets-connection:end -->
 
 This opens an outbound WebSocket connection through a `TYPE WEBSOCKETS` client and decodes text or
 binary frames.
@@ -1486,14 +1794,15 @@ decode failure to reject a frame.
 
 ## Instancing
 
-`INSTANCES <count>` is accepted by the entities that can safely scale through competing consumers
-or parallel pollers on one node:
+The following entities declare `INSTANCES`; presence and defaults follow the vocabulary.
 
-- `KAFKA TOPIC`
-- `PULSAR TOPIC`
-- `MQTT TOPIC`
-- `RABBITMQ QUEUE`
-- `SQS QUEUE`
-- `NATS SUBJECT`
-
-`NATS SUBJECT` requires the clause. For the others, if omitted, the default is `INSTANCES 1`.
+<!-- connector-matrix:instancing:start -->
+| Entity | INSTANCES |
+| --- | --- |
+| KAFKA TOPIC | optional; default 1 |
+| PULSAR TOPIC | optional; default 1 |
+| MQTT TOPIC | optional; default 1 |
+| NATS SUBJECT | required |
+| RABBITMQ QUEUE | optional; default 1 |
+| SQS QUEUE | optional; default 1 |
+<!-- connector-matrix:instancing:end -->

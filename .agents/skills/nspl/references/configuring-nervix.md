@@ -30,6 +30,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Plexus entity modes, ordered options, typed metadata, CONFIG ownership and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |

@@ -22,6 +22,7 @@ pub(crate) mod node_trace_export;
 pub(crate) mod peer_addressing;
 pub(crate) mod phase_deadline;
 pub(crate) mod port_pool;
+pub(crate) mod process_cluster_convergence;
 pub(crate) mod process_observation;
 pub(crate) mod producer_session;
 pub(crate) mod raw_session;
