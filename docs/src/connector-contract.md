@@ -689,12 +689,12 @@ the quiesce control, the control decides on each of its messages, and under a sh
 ownership handoff a payload already received still dispatches. Each source meets the cancellation
 in one of these ways:
 
-| Source | A cancelled read |
+| Entities | A cancelled read |
 | --- | --- |
-| Kafka, Pulsar | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| MQTT | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
-| NATS, Redis Pub/Sub, RabbitMQ, ZeroMQ, WebSocket client, Syslog | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| SQS | Abandons the `ReceiveMessage` in flight. A message the service was returning through it stays invisible until its visibility timeout. |
+| `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
+| `MQTT TOPIC` | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
+| `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
+| `SQS QUEUE` | Abandons the `ReceiveMessage` in flight. A message the service was returning through it stays invisible until its visibility timeout. |
 
 ### MQTT session retirement
 
