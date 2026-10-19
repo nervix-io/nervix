@@ -400,6 +400,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
     And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
     And selector ".create-ingestor-general-error [data-error='log']" is clicked
+    And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "owns the subscription"
     When selector ".create-ingestor-subscription-ownership [data-ownership='ingestor']" is clicked
     Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR"
