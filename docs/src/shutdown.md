@@ -274,6 +274,12 @@ generators stop producing. Intake never reopens: there is no resume path out of 
 If a broker-style source is still resuming, the host cancels that pending resume when shutdown
 arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
 change also cancels an in-progress resume so the next loop turn observes the new intake state.
+A broker read in flight when intake stops is cancelled, never dropped: the source returns what it
+already took from its transport, the host takes that in as a payload already received, which still
+dispatches, and only then suspends the source. A read the ingestor's final stop meets is taken in
+the same way before the source closes. See
+[Interrupted reads](./connector-contract.md#interrupted-reads) for how each source ends a cancelled
+read.
 
 Source-instance readiness retirement is final and names the ending host's exact handle. Shutdown
 retires installed readiness before withdrawing the registry. Terminal domain execution teardown

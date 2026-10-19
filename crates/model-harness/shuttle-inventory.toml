@@ -134,6 +134,7 @@ checks = [
   "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload",
   "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
   "runtime::ingestors::source::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
+  "runtime::ingestors::source::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
   "runtime::ingestors::source::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",
