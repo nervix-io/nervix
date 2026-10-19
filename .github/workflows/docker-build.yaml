@@ -88,7 +88,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -156,7 +156,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -222,7 +222,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker
+          tool: just@latest,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -615,7 +615,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk
+          tool: just@latest,trunk
 
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the

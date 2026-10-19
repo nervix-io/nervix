@@ -99,7 +99,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,toml-cli,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -244,7 +244,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,wild-linker
+          tool: just@latest,cargo-llvm-cov,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -350,7 +350,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -497,7 +497,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -689,7 +689,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -885,7 +885,7 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -1017,11 +1017,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The justfile reads the repository toolchain with toml-cli whenever it loads.
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just
 
       - name: Download ordinary coverage
         uses: actions/download-artifact@v4
@@ -1137,7 +1137,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1297,7 +1297,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-mutants,just@latest,toml-cli,trunk,wild-linker
+          tool: cargo-llvm-cov,cargo-mutants,just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1522,7 +1522,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1680,7 +1680,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1816,7 +1816,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1956,7 +1956,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker,cargo-llvm-cov
+          tool: just@latest,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
