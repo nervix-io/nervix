@@ -781,7 +781,13 @@ invalid-model failure naming the node and output in its diagnostic. An ingestor 
 client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
 or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
-in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. Planning failures
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `TYPE
+PROMETHEUS` client's `CONFIG` is held to the keys the vocabulary declares for it when the client
+is created. The refusal names the connector, the client and the domain, with the vocabulary's
+`PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
+or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
+domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
+Planning failures
 likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
 a member that does not exist names the domain and the member, a server-listener ingestor names the

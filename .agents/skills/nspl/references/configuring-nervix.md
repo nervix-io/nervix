@@ -329,6 +329,10 @@ relay. Do not use them to scan across branches.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
+- Every `TYPE PROMETHEUS` client sets `addr` to the API root, an `http` or `https` URL without a
+  query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
+  the paired `tls_cert_file` and `tls_key_file`; `CREATE CLIENT` refuses any other. Read
+  `Ingestors` → `Prometheus` for the keys.
 - Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
