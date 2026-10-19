@@ -416,6 +416,17 @@ declaration.
 
 ### Capability inventory
 
+The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
+synopsis are generated from these declarations by `just connector-matrix`. The documentation
+exporter destructures the source, destination and client declarations exhaustively, so adding a
+field requires extending the projection. It emits a temporary JSON projection for the renderer;
+this is tooling output, never a stored Model or a runtime input. The transport explanations in
+`docs/connector-matrix.toml` supply prose for absent capabilities and differences between ingest
+and emit. They supply no capability facts. Missing, empty or stale explanation keys fail the
+check. Position-class and acknowledgement-confirmation membership in this chapter is generated
+from the same projection. `just validate-connector-matrix`, included in local and CI validation,
+compares every generated region and rejects drift while preserving the surrounding prose.
+
 `tests/connector-capability-inventory.toml` registers, for every entity and every capability it
 declares, the scenarios that observe that capability at run time. The capabilities are each delivery
 or publishing mode, each option and each choice of an option, each typed metadata field, batching
@@ -593,11 +604,13 @@ rejection itself fails depends on the position class each source entity declares
 its positions still mean once the connection that delivered them is gone. The host handles each
 class once:
 
-| Position class | Entities | After a failed rejection |
+<!-- connector-matrix:position:start -->
+| Position class | Entities | Meaning |
 | --- | --- | --- |
-| `replayable` | Kafka, Pulsar | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
-| `broker_redelivered` | RabbitMQ, SQS, MQTT | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
-| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+| `broker_redelivered` | `MQTT TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | Nothing is pending. The host keeps no position and reads again after its retry delay. |
+| `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+<!-- connector-matrix:position:end -->
 
 The broker host applies the same retry backoff to a failed resume, a failed read and a requested
 reconnect. A successful connection alone does not reset it: the next accepted batch resets the
@@ -685,12 +698,14 @@ source's entity declares in its acknowledgement confirmation, or with a typed ac
 failure. A source whose client returns before that declares so rather than reporting a confirmation
 it did not get:
 
-| Acknowledgement confirmation | Entities | When acknowledging returns |
+<!-- connector-matrix:confirmation:start -->
+| Acknowledgement confirmation | Entities | Meaning |
 | --- | --- | --- |
-| `answered` | SQS, Kafka, Pulsar | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
-| `written` | RabbitMQ | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
-| `queued` | MQTT | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
-| `none` | Every source with only `NO ACK`, the paced sources, endpoints and client producers | The source acknowledges nothing on its transport. |
+| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
+| `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
+| `queued` | `MQTT TOPIC` | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
+| `written` | `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+<!-- connector-matrix:confirmation:end -->
 
 A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
 positions it delivered on its own cadence, `auto.commit.interval.ms`, so acknowledging such a batch

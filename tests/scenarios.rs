@@ -162,6 +162,7 @@ mod database_batches;
 mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
+mod domain_resume;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod ingestion_time;
@@ -13590,6 +13591,10 @@ async fn when_exact_command_retry_begins_in_parallel(
     expr = "the active session begins this NSPL command request with execution reference {string} \
             in the background"
 )]
+#[when(
+    expr = "the active session begins this Plexus command request with execution reference \
+            {string} in the background"
+)]
 async fn when_active_session_referenced_command_begins_in_background(
     world: &mut ScenarioWorld,
     execution_reference: String,
@@ -13673,6 +13678,10 @@ async fn when_background_command_caller_deadline_expires(
 #[when(
     expr = "this NSPL command request with execution reference {string} is executed on the leader \
             node"
+)]
+#[when(
+    expr = "this Plexus command request with execution reference {string} is executed on the \
+            leader node"
 )]
 async fn when_referenced_command_request_is_executed_on_leader(
     world: &mut ScenarioWorld,
@@ -15637,6 +15646,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
 }
 
 #[when("this NSPL command request is executed on the leader node")]
+#[when("this Plexus command request is executed on the leader node")]
 async fn when_this_nspl_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
