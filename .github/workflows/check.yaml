@@ -1406,6 +1406,9 @@ jobs:
       - name: Kache remote contract
         run: just coverage-kache-ci
 
+      - name: Plexus connector matrix renderer
+        run: just coverage-connector-matrix
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1440,6 +1443,9 @@ jobs:
       - name: NSPL completion walk
         run: just coverage-native-extras nspl-completion-walk
 
+      - name: Plexus connector declaration export
+        run: just coverage-native-extras validate-connector-matrix
+
       # Each collection's report, completion record, executions and export diagnostics, whatever
       # its verdict: a failed or interrupted record is the evidence of what the collection saw. The
       # raw profiles stay on the runner.
@@ -1463,6 +1469,7 @@ jobs:
             target/paced-simulation/python.lcov
             target/release-evidence-coverage/python.lcov
             target/kache-ci/python.lcov
+            target/connector-matrix/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn

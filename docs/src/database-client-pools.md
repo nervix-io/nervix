@@ -130,6 +130,10 @@ credential or a complete connection address.
 
 ## Bounds and connector configuration
 
+The generated [Connector Capabilities](connector-capabilities.md#clients) reference lists every
+client kind's declared pooling and CONFIG owner class. A driver's pass-through keys and the
+Nervix-owned keys keep their respective entity contracts.
+
 The bounds are structured client configuration, independent of the connector's string-valued
 `CONFIG`. Endpoint, authentication, database, TLS, and supported session options continue to belong
 to `CONFIG`. Connection-pool sizing is declared only through the `POOL SIZE` clause. Native

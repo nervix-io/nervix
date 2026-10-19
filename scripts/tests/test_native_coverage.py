@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
             [producer.name for producer in native_coverage.PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom", "test-turmoil",
+             "test-primitives-deloxide", "nspl-completion-walk", "validate-connector-matrix", "test-shuttle", "test-loom", "test-turmoil",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
              "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
