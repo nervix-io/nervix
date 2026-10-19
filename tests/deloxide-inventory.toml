@@ -104,6 +104,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@client_wire_pause_leadership",
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
@@ -1886,6 +1887,26 @@ invocation = "stress-scenarios"
 scenario = "A forced failover and a later revision install while the former owner remains paused"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Transaction model application, tracked impact recording and domain pause release across two controlled leadership transfers. Async proposal waits and fault barriers remain untracked."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.transaction-pause-release"
+invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
+invocation = "scenarios"
+scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: transaction model application, tracked impact recording and pause cleanup across two leadership transfers."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.transaction-pause-release"
+invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
+invocation = "stress-scenarios"
+scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2102,6 +2123,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "stress.diagnostic-nodes",
@@ -2186,6 +2209,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-rejection",
   "stress.diagnostic-nodes",
@@ -2195,6 +2220,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.transaction-pause-release",
+  "stress.transaction-pause-release",
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
   "stress.client-alter-drain",

@@ -154,6 +154,23 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         actual: &TransactionStepImpactRecorder,
     ) -> Result<(), Report<TransactionCommitError>> {
+        Box::pin(self.recover_applying_domain_quiescence(transaction, actual)).await?;
+        for attempt in actual.pending_entity_attempts() {
+            actual.uncertain(
+                attempt,
+                nervix_models::ImpactDiagnosticKind::Recovery,
+                "the original coordinator left while the gate was engaged; its fenced lease owns \
+                 cleanup",
+            );
+        }
+        Ok(())
+    }
+
+    async fn recover_applying_domain_quiescence(
+        &self,
+        transaction: &ReplicatedTransaction,
+        actual: &TransactionStepImpactRecorder,
+    ) -> Result<(), Report<TransactionCommitError>> {
         if let Some(attempt) = actual.pending_domain_attempt() {
             let domain = &transaction.domain;
             let status = self
@@ -162,19 +179,21 @@ impl SessionServiceImpl {
                 .current_domain(domain)
                 .await
                 .map(|state| state.status);
+            // A resume may have committed even when its coordinator lost the response. Install
+            // that current state before confirming release, including when it is already running.
+            if let Err(error) = self.apply_current_cluster_state().await {
+                actual.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Recovery,
+                    format!("{error:#}"),
+                );
+                return Err(
+                    error.change_context(TransactionCommitError::RecoverQuiescence {
+                        id: transaction.id.clone(),
+                    }),
+                );
+            }
             if matches!(status, Some(DomainStatus::Paused)) {
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    actual.fail(
-                        attempt,
-                        nervix_models::ImpactDiagnosticKind::Recovery,
-                        format!("{error:#}"),
-                    );
-                    return Err(
-                        error.change_context(TransactionCommitError::RecoverQuiescence {
-                            id: transaction.id.clone(),
-                        }),
-                    );
-                }
                 if let Err(error) = self.wait_for_paused_domain_drain(domain).await {
                     actual.fail(
                         attempt,
@@ -204,14 +223,6 @@ impl SessionServiceImpl {
             } else {
                 actual.release(attempt);
             }
-        }
-        for attempt in actual.pending_entity_attempts() {
-            actual.uncertain(
-                attempt,
-                nervix_models::ImpactDiagnosticKind::Recovery,
-                "the original coordinator left while the gate was engaged; its fenced lease owns \
-                 cleanup",
-            );
         }
         Ok(())
     }
@@ -349,11 +360,22 @@ impl SessionServiceImpl {
                 id: transaction.id.clone(),
             })
         })?;
+        let actual = match actual {
+            Some(actual) => actual,
+            None => applying.result.impact.actual().clone(),
+        };
+        let actual = TransactionStepImpactRecorder::from_actual(
+            applying.result.operation_range().first(),
+            actual,
+        );
+        // A terminal result releases mutation ownership. Finish the pause under that ownership
+        // first, including when the effect has a definitive failure to record.
+        Box::pin(self.recover_applying_domain_quiescence(transaction, &actual)).await?;
         let outcome = match application_failure {
             Some(error) => TransactionApplicationOutcome::Failed { error },
             None => Box::pin(self.https_listener_outcome(transaction, applying)).await,
         };
-        let actual = actual.unwrap_or_else(|| applying.result.impact.actual().clone());
+        let actual = actual.snapshot();
         let rolls_back = matches!(outcome, TransactionApplicationOutcome::RolledBack { .. });
         let completed = self
             .inner

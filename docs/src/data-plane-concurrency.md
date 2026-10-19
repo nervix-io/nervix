@@ -45,6 +45,13 @@ and unavailable-endpoint scenarios are registered for active, order and stressed
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
 tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
 
+Transaction pause release is a cold control-plane lifecycle path. Application completion uses the
+step's tracked impact recorder to recover an engaged domain pause before retaining its terminal
+outcome. The public pause-release regression controls two leadership transfers and is registered
+in the active, order and stressed lifecycle selections. The detector observes the surrounding
+tracked acquisitions; asynchronous proposal waits and the test barriers remain outside its scope.
+No new synchronization protocol or hot-path map access is introduced.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
