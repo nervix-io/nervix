@@ -228,6 +228,10 @@ The shared mode vocabulary is:
   cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an acknowledged body is never
   discarded by buffer policy.
 
+A read already in progress when an ingestor quiesces ends without losing what its source took from
+the transport: under `SUSPEND` those payloads still dispatch before the source suspends, and under
+`BUFFER` and `DROP` the mode decides on them like any payload received during the quiesce.
+
 A source accepts only the modes it can honor, and completion of its body offers only those.
 `SET QUIESCE` parses every body and refuses one the stored source does not honor:
 

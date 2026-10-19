@@ -36,8 +36,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, SqsQueueName};
@@ -335,21 +336,28 @@ impl BrokerSourceConnector for SqsSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(queue_url) = self.queue_url.as_deref() else {
             return Ok(SourceBatch::ResumeRequired);
         };
         loop {
             nervix_primitives::task::consume_budget().await;
-            let received = self
+            let receive = self
                 .client
                 .receive_message()
                 .queue_url(queue_url)
                 .max_number_of_messages(1)
                 .message_attribute_names("All")
                 .wait_time_seconds(LONG_POLL_SECONDS)
-                .send()
-                .await;
+                .send();
+            // A cancellation abandons the receive in flight, and a message the service was
+            // returning through it stays invisible until its visibility timeout.
+            let Some(received) = cancellation.unless_cancelled(receive).await else {
+                return Ok(SourceBatch::Interrupted {
+                    gathered: Vec::new(),
+                });
+            };
             let response = match received {
                 Ok(response) => response,
                 Err(error) => {

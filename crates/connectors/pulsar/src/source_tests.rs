@@ -1,4 +1,5 @@
-//! The Pulsar source's acknowledgements and redelivery requests against a broker on loopback.
+//! The Pulsar source's reads that the host cancels, and its acknowledgements and redelivery
+//! requests, against a broker on loopback.
 //!
 //! Each test drives the production source through the client's real consumer, which subscribes to
 //! a broker that delivers the messages a test asks for and answers each acknowledgement as the test
@@ -11,13 +12,13 @@ use std::time::Duration;
 use futures_util::{SinkExt as _, StreamExt as _};
 use nervix_connector::{
     BrokerSourceConnector, SourceBatch, SourceBatchRequest, SourceConnector, SourceError,
-    SourceMessage,
+    SourceMessage, SourceReadCancellation,
 };
 use nervix_models::PulsarSubscriptionName;
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
-    time::timeout,
+    time::{Instant, sleep, timeout},
 };
 use pulsar::{
     OperationRetryOptions, Pulsar, TokioExecutor,
@@ -376,16 +377,71 @@ async fn read(source: &mut PulsarSource, count: usize) -> Vec<PulsarSourcePositi
             max_messages: std::num::NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let batch = timeout(DEADLINE, source.next_batch(request))
-            .await
-            .expect("the source reads the broker's next message")
-            .expect("the loopback broker delivers its messages");
+        let batch = timeout(
+            DEADLINE,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the source reads the broker's next message")
+        .expect("the loopback broker delivers its messages");
         let SourceBatch::Messages(messages) = batch else {
             panic!("an open source reads messages");
         };
         positions.extend(messages.iter().map(|message| message.position().clone()));
     }
     positions
+}
+
+/// How long a test lets the consumer receive before it reads again.
+const RECEIVE_INTERVAL: Duration = Duration::from_millis(10);
+
+#[nervix_primitives::test]
+async fn a_cancelled_parallel_read_returns_every_message_it_gathered() {
+    let broker = LoopbackBroker::start(4, AckAnswer::Confirm).await;
+    let mut source = open(&broker).await;
+    // The first read waits until the broker has delivered its messages.
+    let mut entries = Vec::new();
+    for position in read(&mut source, 1).await {
+        entries.push(position.message_id.entry_id);
+    }
+
+    // A read the host has already cancelled takes only what the consumer holds and then ends, so
+    // the test reads again until the consumer has received every message.
+    let cancellation = SourceReadCancellation::new();
+    cancellation.cancel();
+    let request = SourceBatchRequest {
+        max_messages: std::num::NonZeroUsize::new(8).expect("eight is a nonzero batch bound"),
+        batch_timeout: Some(Duration::from_secs(3600)),
+    };
+    let deadline = Instant::now()
+        .checked_add(DEADLINE)
+        .expect("thirty seconds after now fits the monotonic clock");
+    while entries.len() < 4 {
+        let batch = source
+            .next_batch(request, &cancellation)
+            .await
+            .expect("the loopback broker delivers its messages");
+        let SourceBatch::Interrupted { gathered } = batch else {
+            panic!("a read the host cancelled ends as interrupted");
+        };
+        if gathered.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the consumer received the delivered messages within the deadline"
+            );
+            sleep(RECEIVE_INTERVAL).await;
+            continue;
+        }
+        for message in &gathered {
+            entries.push(message.position().message_id.entry_id);
+        }
+    }
+
+    assert_eq!(
+        entries,
+        [0, 1, 2, 3],
+        "the interrupted reads returned every message they took, each exactly once"
+    );
 }
 
 /// The Pulsar failure a source operation reports beneath its connector context.

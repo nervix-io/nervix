@@ -14,10 +14,14 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future,
+};
 
 use nervix_connector::{
-    IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices, SourceResult,
+    IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices,
+    SourceReadCancellation, SourceResult,
 };
 use nervix_primitives::sync::blocking::Mutex;
 
@@ -181,6 +185,7 @@ impl BrokerSourceConnector for RedeliveringSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        _cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let mut broker = self.broker.lock();
         if !broker.serves(self.connection) {
@@ -433,10 +438,11 @@ impl BrokerSourceConnector for ClosingSource {
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         self.reads.lock().push(Instant::now());
         match self.steps.pop_front() {
-            Some(ScriptedRead::Deliver) => self.source.next_batch(request).await,
+            Some(ScriptedRead::Deliver) => self.source.next_batch(request, cancellation).await,
             Some(ScriptedRead::Failure) => {
                 self.reconnect = true;
                 Err(Report::new(SourceError::Read {

@@ -545,7 +545,7 @@ The host runs three source loop families, with a listener using the broker loop:
 
 | Family | Host behavior | Source behavior |
 | --- | --- | --- |
-| Broker and listener | Open instances, manage readiness and quiesce, request batches, decode and dispatch, wait for ACK roots when configured, then acknowledge or reject positions and pace retry. | Subscribe, receive, expose transport positions and metadata, and perform transport ACK or rejection. Syslog is a listener with no broker ACK. |
+| Broker and listener | Open instances, manage readiness and quiesce, request batches and await each read to completion, cancelling a read that a quiesce change or a stop meets, decode and dispatch, wait for ACK roots when configured, then acknowledge or reject positions and pace retry. | Subscribe, receive and end a cancelled read with what it already took, expose transport positions and metadata, and perform transport ACK or rejection. Syslog is a listener with no broker ACK. |
 | Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. |
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
 | Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
@@ -617,7 +617,8 @@ reconnect. A successful connection alone does not reset it: the next accepted ba
 backoff and clears the transient failure. This prevents a peer that accepts and immediately closes
 from keeping every reconnect at the floor delay. A source with no declared retry policy uses the
 host's 250 ms initial delay, doubling to at most 30 seconds. Stop and quiesce changes interrupt the
-wait.
+wait, including the change that cancelled the read the delay follows; see
+[Interrupted reads](#interrupted-reads).
 
 The outbound WebSocket source sends a Close frame on suspension or close and waits for the peer's
 Close within a one-second budget covering both the send and the reply. The transport is detached
@@ -658,6 +659,42 @@ sequenceDiagram
         Host->>Host: Apply declared retry policy
     end
 ```
+
+### Interrupted reads
+
+The broker loop awaits every `next_batch` it starts and never drops a read in flight. A source may
+already have taken messages from its transport when its read is dropped, and dropping the read
+loses them: a QoS 0 MQTT publish is not delivered again, an SQS message stays invisible until its
+visibility timeout, and a Kafka record its consumer has moved past is skipped once a later position
+is committed.
+
+Three events reach the loop while a read waits:
+
+| Event | What the host does |
+| --- | --- |
+| The ingest group falls due for a flush | It flushes the group and keeps waiting for the same read, because a flush needs nothing from the source. |
+| The ingestor's quiesce state changes | It cancels the read, waits for it to return, and takes in what the read returned. Its next turn then follows the new state: it suspends the source, passes what the source reads to the quiesce control, or reads on. |
+| The source stops | It cancels the read, waits for it to return, and takes in what the read returned. It then ends the loop and closes the source. |
+
+`next_batch` receives a `SourceReadCancellation` for each read. Once the host cancels it, the read
+ends as soon as it can and returns `SourceBatch::Interrupted` with every message it had already
+taken, possibly none. A read that completes with messages after the cancellation is taken in the
+same way. The quiesce change or the stop also ends the retry delay that the outcome of the batch
+would otherwise wait out, as it ends any retry wait. A source that returns `Interrupted` for a read
+the host did not cancel violates the contract: the host reports it as an ingestor error and still
+takes in the messages it returned.
+
+A taken-in batch follows the same intake as any other: under a quiesce that passes intake through
+the quiesce control, the control decides on each of its messages, and under a shutdown or an
+ownership handoff a payload already received still dispatches. Each source meets the cancellation
+in one of these ways:
+
+| Entities | A cancelled read |
+| --- | --- |
+| `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
+| `MQTT TOPIC` | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
+| `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
+| `SQS QUEUE` | Abandons the `ReceiveMessage` in flight. A message the service was returning through it stays invisible until its visibility timeout. |
 
 ### MQTT session retirement
 
@@ -1552,8 +1589,10 @@ drain boundary. This chapter does not redefine those output formats.
    source or sink contract implementation. A brokered sink that awaits its broker's answers in
    `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. A
    sink answers `finish` for what its client can still hold once a publish returns, as
-   [Finishing a sink](#finishing-a-sink) describes, and adds its row to that table. Add
-   its composition mapping in the server; do not teach the contract or registry about the driver.
+   [Finishing a sink](#finishing-a-sink) describes, and adds its row to that table. A broker
+   source ends a read the host cancels with every message it already took, as
+   [Interrupted reads](#interrupted-reads) describes, and adds its row to that table. Add its
+   composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
    three-node execution and failure paths, and register the scenarios that observe each declared
    capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
