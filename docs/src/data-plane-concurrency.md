@@ -1991,6 +1991,15 @@ verdicts stay the scenarios' own, with the product's deadlines and the suite's b
 
 ## Deterministic Concurrency Verification
 
+The Pulsar sink uses the shared `ConfirmationWindow` and its registered property and Shuttle
+checks for concurrent broker answers, timeout and enqueue failure. Under `NO_ACK`, one sink task
+owns its retained send receipts and the first failed receipt; it collects completed receipts
+while publishing and awaits the rest at finish under the host's deadline. No receipt or outcome
+is persisted or published through a shared map. The driver and its asynchronous channels remain
+outside Deloxide's tracked locks. The registered `scenario.pulsar-finish-at-stop` and
+`stress.pulsar-finish-at-stop` workloads exercise that finish through one- and three-node STOP,
+including the host's tracked quiesce and teardown paths.
+
 The ordering contracts above are checked against the production owners under Shuttle. A check
 runs several tasks or threads through one scheduler, which chooses an interleaving at visible
 synchronization points. It can expose a lost notification, an early drain, a double completion, or

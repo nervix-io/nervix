@@ -2770,6 +2770,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/pulsar/src/__fuzz__/receipt_tests__bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure/corpus"
+domain_version = 1
+features = []
+id = "pulsar-unconfirmed-receipts"
+invariant = "For bounded NO ACK hand-overs whose receipts confirm, fail or remain unanswered, collection and finish retain exactly the unanswered count, preserve the first typed driver failure, report Flushed only when held receipts complete, and never exceed the producer's 100 outstanding receipt slots."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-pulsar"
+random_iterations = 256
+source = "crates/connectors/pulsar/src/receipt_tests.rs"
+test = "receipt_tests::bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_batch_packing__tests__bolero_subdivision_follows_the_documented_rule_for_any_encoding_size/corpus"
 domain_version = 1
 features = []

@@ -81,7 +81,7 @@ use nervix_server::{
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
-    consumer::InitialPosition as PulsarInitialPosition,
+    consumer::InitialPosition as PulsarInitialPosition, message::Codec as PulsarCodec,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -103,6 +103,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
+use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
@@ -223,8 +224,27 @@ enum ForwardingEnd {
     ResetRequested,
 }
 
+#[derive(Clone, Copy)]
+enum ForwardingProtocol {
+    Tcp,
+    Pulsar,
+}
+
 impl StallableTcpProxy {
     pub(crate) async fn start(target_host: String, target_port: u16) -> io::Result<Self> {
+        Self::start_protocol(target_host, target_port, ForwardingProtocol::Tcp).await
+    }
+
+    /// Topic discovery must keep producer and consumer connections behind the same fault gate.
+    pub(crate) async fn start_pulsar(target_host: String, target_port: u16) -> io::Result<Self> {
+        Self::start_protocol(target_host, target_port, ForwardingProtocol::Pulsar).await
+    }
+
+    async fn start_protocol(
+        target_host: String,
+        target_port: u16,
+        protocol: ForwardingProtocol,
+    ) -> io::Result<Self> {
         let listener = TokioTcpListener::bind((HOST, 0)).await?;
         let local_addr = listener.local_addr()?;
         let (paused, paused_rx) = watch::channel(false);
@@ -260,6 +280,8 @@ impl StallableTcpProxy {
                         paused,
                         resets,
                         connection_cancellation,
+                        protocol,
+                        local_addr,
                     )
                     .await;
                     if let ForwardingEnd::ResetRequested = end {
@@ -292,6 +314,26 @@ impl StallableTcpProxy {
         self.paused.send_replace(paused);
     }
 
+    /// End a scenario's timed dependency fault while another action runs. The returned future
+    /// owns its controls, so the action can borrow the scenario independently.
+    pub(crate) fn resume_after(
+        &self,
+        duration: Duration,
+    ) -> impl Future<Output = io::Result<Instant>> + use<> {
+        let paused = self.paused.clone();
+        let cancellation = self.cancellation.clone();
+        async move {
+            nervix_primitives::select! {
+                _ = cancellation.cancelled() => Err(io::Error::other("TCP proxy stopped before the timed fault ended")),
+                _ = sleep(duration) => {
+                    let resumed_at = Instant::now();
+                    paused.send_replace(false);
+                    Ok(resumed_at)
+                }
+            }
+        }
+    }
+
     /// Reset every connection the proxy forwards now, as a dependency that drops its clients
     /// does: each peer sees its connection reset. The proxy keeps listening, so a client that
     /// connects again is forwarded as before.
@@ -308,6 +350,8 @@ async fn forward_through_stall_gate(
     paused: watch::Receiver<bool>,
     mut resets: watch::Receiver<()>,
     cancellation: CancellationToken,
+    protocol: ForwardingProtocol,
+    local_addr: SocketAddr,
 ) -> ForwardingEnd {
     let (downstream_read, downstream_write) = downstream.split();
     let (upstream_read, upstream_write) = upstream.split();
@@ -317,8 +361,23 @@ async fn forward_through_stall_gate(
         paused.clone(),
         cancellation.clone(),
     );
-    let downstream_copy =
-        copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation);
+    let downstream_copy = async {
+        match protocol {
+            ForwardingProtocol::Tcp => {
+                copy_through_stall_gate(upstream_read, downstream_write, paused, cancellation).await
+            }
+            ForwardingProtocol::Pulsar => {
+                forward_pulsar_responses(
+                    upstream_read,
+                    downstream_write,
+                    paused,
+                    cancellation,
+                    local_addr,
+                )
+                .await
+            }
+        }
+    };
     let both_directions = async { tokio::join!(upstream_copy, downstream_copy) };
     nervix_primitives::select! {
         (upstream_copied, downstream_copied) = both_directions => {
@@ -370,6 +429,45 @@ where
         }
         wait_for_proxy_resume(&mut paused, &cancellation).await?;
         writer.write_all(&buffer[..read]).await?;
+    }
+}
+
+/// Preserve Pulsar frames while advertising this forwarder in topic lookup responses. An opaque
+/// bootstrap proxy would let the client's discovered connection bypass the scenario's fault.
+async fn forward_pulsar_responses<Reader, Writer>(
+    reader: Reader,
+    writer: Writer,
+    mut paused: watch::Receiver<bool>,
+    cancellation: CancellationToken,
+    local_addr: SocketAddr,
+) -> io::Result<()>
+where
+    Reader: AsyncRead + Unpin,
+    Writer: AsyncWrite + Unpin,
+{
+    let mut reader = FramedRead::new(reader, PulsarCodec);
+    let mut writer = FramedWrite::new(writer, PulsarCodec);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        wait_for_proxy_resume(&mut paused, &cancellation).await?;
+        let message = nervix_primitives::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(()),
+            changed = paused.changed() => {
+                changed.map_err(io::Error::other)?;
+                continue;
+            }
+            message = reader.next() => message,
+        };
+        let Some(message) = message else {
+            return writer.close().await.map_err(io::Error::other);
+        };
+        let mut message = message.map_err(io::Error::other)?;
+        if let Some(lookup) = &mut message.command.lookup_topic_response {
+            lookup.broker_service_url = Some(format!("pulsar://{local_addr}"));
+        }
+        wait_for_proxy_resume(&mut paused, &cancellation).await?;
+        writer.send(message).await.map_err(io::Error::other)?;
     }
 }
 

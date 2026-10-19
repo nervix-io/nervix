@@ -745,8 +745,11 @@ stops in place finishes at terminal teardown, which ends the emitter task wherev
 the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flushes its
 producer's local queue within that time, ignoring `linger.ms`; records still queued when it ends are
 lost, and the emitter logs at `warn` how many and reports them as its transient error and an error
-event. Pulsar and MQTT QoS 0 discard what their clients still hold, which the emitter logs at
-`warn`. Every other sink holds nothing once a publish returns, so the publish itself is the
+event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
+that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
+expired deadline reports their count, without claiming the broker did not receive them. MQTT
+QoS 0 discards what its client still holds, which the emitter logs at `warn`. Every other sink
+holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
 holds and does.
 
@@ -1197,7 +1200,7 @@ the `sink` and the `ending`: `stop` for a stop that drained it, `teardown` for t
 and `interaction_stopped` when its relay interaction ended without either:
 `emitter sent the records its transport client held` at `info`,
 `emitter closed a transport client that may still hold records it delivered` at `warn` for a
-Pulsar or MQTT QoS 0 client, and
+MQTT QoS 0 client, and
 `emitter stopped before its transport client sent every record it held` at `warn` with the
 `error`, which counts the records the client still held. That failure is also the emitter's
 transient error and an error event.

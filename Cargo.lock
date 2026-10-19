@@ -7061,10 +7061,11 @@ dependencies = [
 name = "nervix-connector-pulsar"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
- "humantime",
  "meticulous",
  "nervix-connector",
  "nervix-execution",
@@ -7765,6 +7766,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tower-service",

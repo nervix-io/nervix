@@ -197,6 +197,9 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
+- For Pulsar receipt deadlines and the final wait after `NO_ACK` acceptance, read
+  [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
+  [Finishing a sink](../../../docs/src/connector-contract.md#finishing-a-sink).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
