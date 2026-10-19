@@ -10,7 +10,12 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-connector/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -27,11 +32,14 @@ nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-simd-kernels = { workspace = true }
+shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-model-harness = { workspace = true }
+nervix-recovery = { workspace = true }
 nervix-test-environment = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
