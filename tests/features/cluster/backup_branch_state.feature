@@ -57,7 +57,7 @@ Feature: Deduplicator and window state in backup archives
       START;
       """
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -196,7 +196,7 @@ Feature: Deduplicator and window state in backup archives
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured

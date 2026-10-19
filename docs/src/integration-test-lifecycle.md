@@ -48,6 +48,22 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The Pulsar finish scenario runs a public `STOP` concurrently with a timed resumption of its
+paused dependency forwarder. The forwarder's resumption future owns its control and cancellation
+handles and is awaited beside the command, so no timer task outlives the scenario. It records
+the resumption instant before reopening the gate; the command records its completion instant
+when it returns. The scenario requires completion after resumption and observes the retained payloads
+exactly once after recovery. The longer receipt scenario uses the same fault control to delay the broker
+beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOUT`. These
+dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
+
+The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
+in topic lookup responses, retaining every other command and payload field. The driver's discovered
+producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
+An opaque bootstrap proxy alone does not establish a Pulsar broker fault because discovery can
+otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
+recovery, including a producer with all 100 receipt slots occupied.
+
 The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
 write locks. It observes a pending metadata lock on the server before queuing the next writer,
 and observes each emitter's public pool-wait state to establish the borrowing order. Releasing
@@ -71,7 +87,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Element | Where it runs | Owner |
 | --- | --- | --- |
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
-| Scenario admission and timing | Feature permits, prioritized run slots, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
+| Scenario admission and timing | Feature permits, prioritized run slots, the long-running declaration, queue reasons, and accumulated attempt times in the runner process | `scenario_schedule.rs` and `scenario_phase.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
@@ -311,6 +327,26 @@ the web-console group retains its feature fairness. The finite retry count bound
 first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
 capacities before dispatch continues.
 
+A scenario whose attempts run for minutes declares itself with the `@long_running` tag, on the
+scenario, its outline's examples, its rule, or its feature. A free run slot takes a declared first
+attempt before any ordinary first attempt, after retries and the limited chains, so the scenario
+runs beside the bulk of the suite rather than after it. Without the declaration, feature order
+decides when a long scenario starts. It admitted the multi-mebibyte transaction-report scenario of
+a late feature in the run's last quarter: in one canonical producer of 17 October 2026, at
+1,650.8 seconds, and it then ran alone for the last 22.7 seconds; in another, at 1,465.0 seconds,
+where its attempt failed after 329.1 seconds, so the attempt and its retry ran alone from
+1,739.2 seconds to 1,937.7 seconds. That run needed 1,725.8 seconds at full occupancy and took
+1,939.5, at 89.0% utilization. When a run's work fills its budget, as in the overrun at
+116,962.9 of the 118,080 slot-seconds that 48 slots supply in 41 minutes, no order can end it in
+time; a declared scenario keeps the order from adding a tail to a run that would otherwise fit.
+
+A scenario declares itself long-running when its attempts reach two minutes in a canonical
+producer. In the first run above, 34 attempts outside the limited features reached two minutes,
+about one in a hundred, while the median attempt took 25 seconds. The suite summary lists every
+attempt that reached two minutes without the declaration. The declaration orders admission only. A declared scenario takes one run slot like
+any other and runs beside the rest of the suite, and its retries, deadlines and budgets are
+unchanged.
+
 The CI jobs divide the work at the scenario boundary:
 
 | Job | Work |
@@ -318,6 +354,7 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 3, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, publishes the [ordinary workspace report](./coverage-reports.md#the-ordinary-workspace-report). Merge and analysis integrity are mandatory; patch percentages and CRAP scores are advisory |
+| `coverage-full` | After every producer job, including a skipped or failed one: `just coverage-full` combines the ordinary report, the modeled and diagnostic native collections and the requested live fuzz campaigns into the [full workspace union](./coverage-reports.md#the-full-workspace-union), validated against the run's event and label snapshot and every producer job's result. It downloads artifacts only, fails on a missing, stale or incomplete input, and publishes its contributor breakdown as the job summary and the `coverage-full` artifact |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
@@ -487,7 +524,14 @@ The boundary between them is kept in four places.
   records its disposition.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
-  retain the protocol's received dispositions. A paced-driver file fixture writes only the
+  retain the protocol's received dispositions. A restore completion probe explicitly requesting
+  outcome recovery repeats its same reference, statement and archive against the cluster's nodes
+  after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
+  its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a
+  definitive failure or upload refusal immediately, and keeps the terminal reply's actual origin
+  and complete report. The staging scenario transfers leadership while publication is paused on
+  three nodes, while retaining the one-node example and its staging and branch-state checks.
+  A paced-driver file fixture writes only the
   scenario's ledger or effect file before the driver starts. The published driver reads that
   file, and the scenario checks the process exit and the occurrence count of its terminal cause.
   No harness deadline shortens
@@ -506,14 +550,33 @@ The boundary between them is kept in four places.
   See [Shutdown And Recovery](./shutdown.md#stop-requests).
   A real-process cluster can deliver `SIGKILL` to all three voters before waiting for any child to
   exit. On restart it launches all existing stores before awaiting readiness, so no one voter is
-  required to answer without the persisted quorum. Each node must then report the same leader and
-  all three voters through its public status endpoint.
+  required to answer without the persisted quorum. A start and a whole restart end once every node
+  reports, through its public status endpoint, the same leader, all three voters, and a
+  `connected` application-health target for every other node, as an in-process cluster's
+  construction does.
   It can also fault one voter while the other two keep the quorum: `SIGKILL`, after which a step
   waits for that child to exit and checks the signal, or `SIGSTOP`, which freezes the process with
   its connections open, so its peers hear nothing from it and see no reset until `SIGCONT` lets it
-  run again. A killed voter restarts from its own database and ports, and the step then waits for
-  the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
-  fixture asks only the running ones which node leads.
+  run again. A killed voter restarts from its own database and ports. Its killed process never left
+  the voter configuration, so the nodes agree on their leader and voters again as soon as the new
+  process follows the leader, while each peer still judges the voter by what it learned of the
+  killed process. The leader's effective availability, which placement, failover and `RELOCATE`
+  read, lists the new process only once the leader's gossip has seen it live and its application
+  health no longer holds the killed process's target, as
+  [Application Health And Availability](./interconnect.md#application-health-and-availability)
+  describes. Before the relaunch the step therefore reads the generation of the target each running
+  node observes the killed process through, and afterwards it waits for the same leader and voters
+  and for every node to report every other node `connected`, the relaunched voter through a newer
+  generation. A peer begins a target only for a process it has discovered, and it never discovers
+  the exited process again, so a stale observation of the killed process cannot end the wait, and
+  a `RELOCATE` onto the relaunched voter that follows finds it live. While a voter is killed or
+  frozen, the fixture asks only the running ones which node leads.
+  The held-installation restart fixture also stops every in-process node first. It then holds the
+  first runtime installation one named node begins, before that node's process-start catch-up, so
+  the restarted cluster answers opens that reach the node before it has installed any committed
+  domain again. Startup waits only for Raft catch-up and the interconnect, which the hold does not
+  stop, and the scenario releases the installation. Arming the hold after the stop keeps an
+  installation the stopping node began from taking it.
   The restarted-voter observation fixture stops every in-process node before arming its fault.
   It blocks direct gossip between the first leader and one voter, then holds that voter's first
   relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's
@@ -571,7 +634,7 @@ second module runs the operation, it is named after the owner.
 | A status wait: leadership, voters, a consistent leader, interconnect status, applied index, a status fragment | `status_request.rs`, run by `cluster.rs` | 40 seconds from the start of the wait | The step fails with the elapsed time, the last status text, and the last typed failure |
 | Status snapshots of every node, for teardown or for a failure message | `status_request.rs`, run by `cluster.rs` | 10 seconds for the whole cluster | Each node keeps its status, its typed failure, or the operation its request was in |
 | Readiness of one startup attempt | `node_startup.rs`, run by `node_liveness.rs` | 36 seconds, inside the node's startup budget | The attempt fails naming the node, attempt, elapsed time, task state, and last readiness outcome |
-| Cleanup after a failed startup attempt | `node_startup.rs` | 5 seconds, inside what the startup budget has left | The node keeps its task, and the startup ends rather than launching over a node that is still stopping |
+| Cleanup after a failed startup attempt | `node_startup.rs` | Whatever remains of the node's one 84-second startup budget | The node keeps its task, storage and listeners if the budget expires before it ends; a new launch requires that exact task to have ended |
 | One node's startup, every attempt included | `node_startup.rs` | 84 seconds | The startup fails with the typed record of every attempt |
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
 | A node a scenario stops itself | `cluster.rs`, recorded by `node_stop.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The step fails naming how long the node had been stopping and the shutdown phase it was in, and the node keeps its task and everything it holds |
@@ -579,8 +642,8 @@ second module runs the operation, it is named after the owner.
 | Stopping a scenario's HTTP and gRPC receivers | `http_receiver.rs` and `grpc_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
-| A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
-| Convergence of a started or restarted real-process cluster, or of one restarted member | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
+| A server process's startup, its exit, or a log line | `server_process.rs`, reading the executable through `server_executable.rs` | 120 seconds from the launch for reading the executable, spawning the process and waiting until it accepts commands; 120 and 60 seconds | The step fails, quoting the last 80 lines of the process log. A failed startup also says how reading the executable went, which kinds of answer the readiness probes got and when, and, when its deadline passed, what the still-running process and its host were doing |
+| Convergence of a started or restarted real-process cluster, or of one restarted member | `process_cluster_convergence.rs`, run by `server_process_cluster.rs` | 120 seconds for the running members to report the targets they observe a killed member through before it is relaunched, then 120 seconds for convergence after the start or relaunch, with each status request capped at 10 seconds | The step fails naming the first condition the members' latest answers did not meet in the last round that ended before the deadline, with every member's latest status and any later failed request; a status line the wait cannot read fails it at once |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, the duration the step names for a clock line, between 10 and 60 seconds, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
@@ -635,7 +698,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Status request, 10 seconds | The 40-second status wait divided by the four requests it must outlast when none of them replies | The slowest healthy reply, 3.7 seconds, times a headroom of 2 fits in one request |
 | Status snapshots, 10 seconds | One request timeout, because every node is asked at once | None of its own |
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
-| Node startup, 84 seconds | Two full attempts, each 36 seconds of readiness, a 5-second cleanup slice, and a 1-second pause | Stays under a 90-second ceiling |
+| Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
 | Suite, 41 minutes | The 60-minute scenario job limit, less 14 minutes allowed for pre-suite work and a 5-minute reserve after it | Split-job runs took 11m37s and 10m08s before the suite, then 21m49s and 20m26s for the suite; the 22-minute ceiling leaves at least 15 minutes of slack |
 
@@ -644,8 +707,8 @@ The assertions keep these orderings, among others:
 - A status request is materially shorter than the waits and startup attempts that repeat it, and one
   attempt outlasts three readiness requests that never reply.
 - Status snapshots are shorter than the waits whose failures they explain.
-- A startup attempt outlasts the slowest healthy startup, a cleanup slice is short beside the
-  attempt it ends, and the node startup budget stays under its ceiling.
+- A startup attempt outlasts the measured healthy readiness, the cleanup allowance used to fund the
+  total is short beside readiness, and the node startup budget stays under its ceiling.
 - The cluster cleanup budget is shorter than the watchdog of a node a scenario stops itself, and the
   test shutdown timeout lies between the default shutdown phases and that watchdog.
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
@@ -820,51 +883,56 @@ every pause between attempts receives only what is left of it.
 ```text
            one startup budget: 84 s, fixed before the first launch
  |<------------------------------------------------------------------->|
- | readiness | cleanup | pause | readiness | cleanup | pause | launch 3  |
- |  <= 36 s  |  <= 5 s |  1 s  |  <= 36 s  |  <= 5 s |  1 s  | remainder |
- |<-------- attempt 1 -------->|<-------- attempt 2 -------->|
+ | readiness | cleanup to task end | pause | readiness | cleanup | ...   |
+ |  <= 36 s  | within remainder   |  1 s  |  <= 36 s  | within remainder |
 ```
 
-The budget pays for two attempts at their full length. A third launch is allowed because a launch
-that fails at once, such as one whose listen address another process took first, leaves most of the
-budget unspent; that launch receives whatever the earlier ones left.
+The budget is derived from two readiness attempts with cleanup and backoff allowances. The cleanup
+allowance funds that total; the actual wait for a node's ending shares the remaining absolute
+deadline. A cleanup that takes longer leaves a later readiness attempt less time. A third launch
+is allowed because an attempt that fails at once, such as a listener bind failure, leaves most of
+the budget unspent. Every launch receives only what the earlier ones left.
 
-After an attempt fails, the harness classifies the failure, cleans up, and records the attempt.
+After an attempt fails, the harness requests its stop, waits for the exact task it launched,
+classifies the failure using both observations, and records the attempt.
 
 | Failure | Classification |
 | --- | --- |
 | The harness could not launch the node: an address it could not parse, the test certificate authority, or the node's database directory | Terminal: the harness's own configuration, which the next launch repeats |
-| Readiness did not arrive before the attempt's deadline | Transient, selecting all listeners: the resource pressure the budget exists for |
+| Readiness did not arrive before the attempt's deadline, and the requested stop ended cleanly | Transient, selecting all listeners: the resource pressure the budget exists for |
 | The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient, selecting that listener family: another process took the port first, and its fresh addresses resolve it |
-| The task ended with any other application error, a clean exit, a panic, or a cancellation | Terminal: the node decided it from its configuration, its stored state, or its own code |
+| The task ended with any other application error, a panic, a cancellation, or a clean exit before cleanup requested stop | Terminal: the node decided it from its configuration, its stored state, or its own code |
 
-Cleanup requests the node's stop and waits for its task within a 5-second slice of what the budget
-has left. A node that never became ready has no drain to finish, so the product's shutdown deadline
-plays no part here. A node whose task ended inside the slice gives back its consensus fault
-registration, and after a transient failure it moves the selected listeners to freshly allocated
-ports. A bind failure preserves unrelated addresses; a readiness timeout selects all seven ports.
-The harness pauses one second before launching again.
+Cleanup can reveal an initialization failure while a status request was still establishing its
+session. That joined application error, panic or cancellation determines the retry decision, with
+its typed cause retained in the cleanup outcome. A late bind error selects only its listener
+family. A successful stop of a task whose readiness timed out retains that timeout as the retry
+cause.
 
-A node still stopping when the slice passes is never launched again. It still holds its database
-and its listeners, and it will until its own shutdown has finished, so a fresh launch into the same
-directory could only fail on the lock its predecessor holds. The node keeps its task, its shutdown
-coordinator and its fault registration, the startup ends, and whatever stops the cluster afterwards
-waits for the node or leaves it stopping.
+Cleanup receives the remaining node startup budget, and the product's shutdown deadline cannot
+restart it. Once the task ends, the node gives back its consensus fault registration. A transient
+failure may then move the selected listeners to fresh ports and pause one second before another
+launch, provided the same budget still has time. A bind failure preserves unrelated addresses; a
+readiness timeout selects all seven ports.
 
-The startup ends in one of five ways, each reported with the node, its budget, the time spent, and
+A node still stopping when that budget expires keeps its task, its shutdown coordinator, its fault
+registration, its database and its listeners until its own shutdown has finished. The startup
+reports exhaustion, and cluster teardown waits for that node or leaves it stopping under its
+keeper. It never launches a replacement into resources a running predecessor still holds.
+
+The startup ends in one of four ways, each reported with the node, its budget, the time spent, and
 the record of every attempt:
 
 - the last attempt failed for a terminal reason;
 - every launch the attempt limit allows was spent;
-- the budget ran out before another launch could start;
-- the node the last attempt launched had not stopped when its cleanup slice ended;
+- the budget ran out during readiness, cleanup, or the preparation for another launch;
 - fresh ports for the next launch could not be allocated.
 
 Each attempt's record names its number out of three, its classification, how much of the budget had
 been spent once it was cleaned up, its typed failure, and its cleanup: nothing was launched, the
 task stopped with its terminal outcome, or the node was still stopping at the cleanup deadline. A
-cleanup that the spent budget left no time for records the node as still stopping too, and that
-startup ends as the spent budget or the spent attempts rather than as a node that would not stop.
+cleanup that the spent budget left no time for records the node as still stopping too. Budget
+exhaustion preserves that pending task even when the launch limit has not been reached.
 
 The harness prints every transition to standard error as it happens, so a run heading for exhaustion
 is legible while it is still going:
@@ -1165,13 +1233,61 @@ node that executes its ingestor or serves its session is killed or frozen, runs 
 cluster and faults one member, because only a real process death closes, or stops answering on,
 every connection the node held at once without running any of its shutdown.
 
-Readiness uses the same probe outcomes as an in-process node, probing every 100 milliseconds within
-120 seconds, and fails at once with the exit status when the process exits first. Waiting for an
-exit is bounded by 120 seconds, and waiting for a log line or an HTTP admission by 60 seconds. Those
-failures quote the last 80 lines of the process log. Dropping the fixture kills the process, so
-cleanup never waits for a graceful stop and a failed scenario never leaves a server running. What
-the process does between a signal and its exit is product behavior; see [Shutdown And
-Recovery](./shutdown.md#exit-status).
+Each launch has 120 seconds from its start until the process accepts commands. Reading the
+executable, spawning the process and waiting for its readiness share that one deadline, and a
+restart starts a deadline of its own. Readiness uses the same probe outcomes as an in-process node,
+probing every 100 milliseconds until the deadline, and fails at once with the exit status when the
+process exits first. Waiting for an exit is bounded by 120 seconds, and waiting for a log line or an
+HTTP admission by 60 seconds. Those failures quote the last 80 lines of the process log. Dropping
+the fixture kills the process, so cleanup never waits for a graceful stop and a failed scenario
+never leaves a server running. What the process does between a signal and its exit is product
+behavior; see [Shutdown And Recovery](./shutdown.md#exit-status).
+
+**Reading the executable first.** A process does not read its executable when it starts. The kernel
+maps the file, and every page the process first touches is read when the process faults on it: one
+page at a time, in the order its code happens to run. A debug server executable maps about 450 MB,
+the loadable segments of a file of about 2.9 GB whose rest is debug information that is never
+mapped, and its first start touches code all over those megabytes. When the file is not in memory
+and the storage under it is busy, each of those reads waits for the storage on its own, and on a
+rotational disk each one pays a seek. So each launch first reads every range the executable's
+loadable segments map, in file order and nothing else, and the process then faults its pages in
+from memory. The read runs off the runner task, a 4 MiB chunk at a time, and every chunk receives
+only what is left of the launch's deadline. A read that the storage cannot serve in time ends the
+startup at that deadline, naming how many of the mapped bytes it had read, and spawns nothing. A
+read of an executable that is already in memory costs one copy of its mapped bytes.
+
+The read is what the retained first failure of the stressed lane needed. On 13 October 2026 the
+one-node diagnostic process cluster started on a host whose data disk was rotational and busy:
+about 78 seconds passed before the server's first log line, and when the 2-minute deadline passed
+the server was still initialising its stores and the last probe was still establishing its session.
+The next launch of the same executable logged within 0.8 seconds and finished the same
+initialisation in 70 ms, then spent 17 seconds in consensus code the first process had not reached.
+A later observation on that host counted 26,094 major page faults in a first start, half of its
+samples in disk sleep at function entries. Serving the executable through a filesystem that delays
+every read that does not continue where the previous one ended by 10 ms reproduces the failure
+without the read: the first log line came 111 seconds after the launch, and the deadline passed with
+the last probe still establishing its session. The start made 8,667 such reads before that
+deadline, and 19,151 for the whole scenario.
+
+**A startup that fails.** A failed startup describes itself before anything kills the process. It
+says how reading the executable went, and lists the readiness probes as runs of consecutive probes
+that got the same kind of answer, with when each run began and ended: the first eight runs and the
+latest eight, with a count of the runs between them. When the deadline passed it adds an observation
+of the still-running process and its host, read from procfs: the process's state, CPU time, major
+and minor page faults, resident memory and storage reads; its threads grouped by state and the
+kernel function each waits in, with their total run-queue wait; and the host's load and pressure
+stall averages. That separates what the startup waited for without stopping the process to read its
+stacks. A thread in disk sleep waits for storage, in a page fault or a read. A thread asleep in a
+futex waits for a lock or a condition variable, or for work, as an idle runtime worker does. A
+thread asleep in epoll waits for network or timer events. The run-queue wait is time the threads
+were ready to run without a CPU. The description has a fixed bound: at most 16 groups of threads,
+each with at most 4 names.
+
+In a diagnostic build, a real-process cluster whose start fails retains what its launched members
+leave before they are killed and their stores deleted: every member's deadlock evidence and whole
+log, and the failure in `start-failure.txt`, in a directory of its own under `process-clusters/` of
+the evidence directory the run keeps. A cluster that started retains its evidence and logs there
+when its scenario ends.
 
 ## Test Dependencies
 
@@ -1532,7 +1648,10 @@ beside it, and `just coverage-merge` maps that report onto the repository.
 export flags, checkout-root mapping, tracked-source policy, ordinary merge record and integrity
 failures. That chapter also owns the advisory patch/CRAP reports and the separate deterministic
 complexity verdict. The `coverage-merged` artifact retains the ordinary report, its merge record
-and both advisory reports.
+and both advisory reports. The `coverage-full` job later reads that report unchanged and adds the
+modeled, diagnostic and fuzz collections the run selected to form the
+[full workspace union](./coverage-reports.md#the-full-workspace-union); their counters never enter
+the ordinary report, its patch coverage or its CRAP report.
 
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
@@ -1894,7 +2013,7 @@ artifact carries `tests/logs`.
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
 | Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus commands scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
-| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, and the ten longest attempts; captured at watchdog expiry before cleanup on a timed-out run |
+| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 
@@ -2000,6 +2119,9 @@ The harness guarantees:
 - `finished` is published only after cleanup has completed.
 - A gate a step holds is released its injected duration after the hold observed it, however long
   the runner task is stalled.
+- A server process launch reads every range its executable maps, in file order, within its startup
+  deadline and before it spawns the process, and a failed startup is described before anything
+  kills the process.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -2031,12 +2153,19 @@ Its limits:
   of them.
 - A construction's convergence checks are separate 40-second waits after its startup deadline.
 - The suite budget's derivation holds with no margin.
+- Reading a server executable keeps nothing in memory. Under memory pressure the kernel may evict
+  what the read brought in before the process touches it, and the shared libraries a server loads
+  are not read.
+- A process observation reads procfs at one moment. A thread's wait channel names the kernel
+  function it waits in, not the call in the process that led there, and a futex wait does not say
+  whether the thread waits for a lock or for work.
 
 ## Qualification Evidence
 
 `just test-harness-liveness` runs the focused regressions that hold this contract. They drive
-stand-in session services and a stand-in NATS server on real loopback sockets, and stand-in node
-tasks, most of them on a paused clock. The `tests` job runs them beside the separate scenario job.
+stand-in session services and a stand-in NATS server on real loopback sockets, stand-in node
+tasks, most of them on a paused clock, stand-in executable images and stand-in child processes. The
+`tests` job runs them beside the separate scenario job.
 
 | Contract | Regressions |
 | --- | --- |
@@ -2044,13 +2173,18 @@ tasks, most of them on a paused clock. The `tests` job runs them beside the sepa
 | A wait ends at its original deadline | `status_wait_ends_at_its_original_deadline_when_the_final_request_never_replies`, `nested_deadline_never_outlives_its_phase`, `startup_readiness_failure_reports_the_timed_out_status_operation` |
 | Node task outcomes are distinct, the task is joined once, and its owner never aborts it | `running_task_reports_the_last_failed_probe_at_the_deadline`, `clean_application_exit_before_readiness_is_terminal`, `application_error_before_readiness_is_retained`, `panic_and_cancellation_have_distinct_terminal_outcomes`, `stop_and_keeper_paths_use_the_task_inspected_for_diagnostics`, `a_wait_past_its_deadline_leaves_the_task_running_with_its_owner` |
 | One startup budget with classified retries | `repeated_readiness_failure_spends_one_budget_across_every_attempt`, `a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over`, `exhaustion_reports_every_attempt_with_its_typed_cause`, `ports_that_cannot_be_reallocated_end_the_startup`, `a_bound_address_is_retried_until_a_launch_becomes_ready`, `a_last_attempt_still_becomes_ready_with_what_the_budget_left`, `an_application_error_ends_the_startup_without_another_launch`, `a_panicking_node_ends_the_startup_without_another_launch`, `a_launch_failure_ends_the_startup_before_anything_is_cleaned_up`, `sequential_cluster_construction_stays_inside_its_derived_budget` |
+| Failed-attempt cleanup spends the remaining startup budget and its joined result determines retry and listener selection | `a_failed_attempt_finishes_its_owned_cleanup_before_retrying_with_the_remaining_budget`, `an_initialization_failure_observed_during_cleanup_keeps_its_terminal_cause`, `a_bind_failure_observed_during_cleanup_moves_only_its_own_listeners` |
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
+| A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
+| A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched` |
+| A server process launch reads exactly the ranges its executable maps, refuses an image it cannot read, and reads nothing once its deadline has passed | `a_preparation_reads_each_mapped_range_once_and_nothing_else`, `the_server_executable_maps_less_than_its_whole_file`, `a_file_that_is_not_an_elf_image_is_refused`, `a_file_shorter_than_an_elf_header_is_refused`, `a_program_header_table_outside_the_file_is_refused`, `program_headers_of_another_size_are_refused`, `a_mapped_range_past_the_end_of_the_file_is_refused`, `a_preparation_whose_deadline_has_passed_reads_nothing` |
+| A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |

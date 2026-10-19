@@ -247,14 +247,18 @@ Feature: Web console Plexus REPL
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
     And selector ".prompt-row" contains "{{domain}} tx"
+    And selector ".terminal" contains "domain clock [{{domain}}] attached" exactly 2 times
+    Given command response delivery on node "{{new_leader}}" pauses after execution
     When selector ".prompt-row input" is filled with "CREATE SCHEMA after_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    Then the command response delivery pause on node "{{new_leader}}" is reached
     When selector ".transaction-indicator" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
     And selector ".transaction-inspector .inspector-item[data-name='before_switchover']" contains "SCHEMA"
     And selector ".transaction-inspector .inspector-item[data-name='after_switchover']" contains "SCHEMA"
     When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    And the command response delivery pause on node "{{new_leader}}" is released
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
     When selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 3 times

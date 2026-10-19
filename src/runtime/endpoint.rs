@@ -58,6 +58,8 @@ pub(crate) struct EndpointIngestBinding {
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) metrics: MessageMetricsHandle,
     pub(super) branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    /// Consumes a body the ingestor's codec refuses.
+    pub(super) decode_rejections: DecodeRejections,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -306,21 +308,20 @@ impl Runtime {
                 );
                 return EndpointBindingDispatch::NotAdmitted;
             }
-            Err(PayloadDecodeFailure::Codec(error)) => {
-                // The codec's context names the codec and field; the causes beneath it say why.
-                let reason = format!("{error:#}");
-                self.inner.events.report_error(format!(
-                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': \
-                     {reason}",
-                    binding.ingestor.as_str(),
-                    binding.domain.as_str(),
-                ));
-                warn!(
-                    domain = binding.domain.as_str(),
-                    ingestor = binding.ingestor.as_str(),
-                    error = %reason,
-                    protocol,
-                    "failed to decode endpoint message"
+            Err(PayloadDecodeFailure::Codec(report)) => {
+                // Sending the body again would only repeat the refusal, so the endpoint accepts it
+                // and consumes it as a decode rejection.
+                let rejection = DecodeRejection::new(
+                    &binding.codec,
+                    &payload.first_metadata_row(),
+                    &report,
+                    payload.observed_at(),
+                );
+                binding.decode_rejections.consume(
+                    self,
+                    &binding.domain,
+                    &binding.ingestor,
+                    rejection,
                 );
             }
         }

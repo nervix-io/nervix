@@ -417,8 +417,10 @@ pub(super) mod tests {
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
+    /// A body its codec refuses is accepted and consumed as a decode rejection, which the
+    /// ingestor's `ON GENERAL ERROR LOG` reports with the codec's whole chain, counts and describes.
     #[nervix_primitives::test]
-    async fn a_payload_its_codec_rejects_is_reported_with_the_whole_codec_chain() {
+    async fn a_body_its_codec_refuses_is_consumed_as_a_decode_rejection() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
@@ -435,12 +437,28 @@ pub(super) mod tests {
         let RuntimeEvent::Error(message) = events
             .recv()
             .await
-            .expect("the rejected payload is reported to the node's observers");
+            .expect("the refused body is reported to the node's observers");
+        let described = runtime
+            .describe_local_ingestor(&domain, &ingestor)
+            .expect("the fixture's ingestor describes itself");
+        let rejection = described
+            .last_decode_rejection
+            .assured("the refused body is the ingestor's last decode rejection");
         assert_eq!(
             message,
-            "failed to decode http message for ingestor 'event_source' in domain 'default': codec \
-             'event_json' failed to parse field 'user_id': expected Integer, found a JSON string"
+            format!(
+                "ingestor 'event_source' general error in domain 'default': decode rejection \
+                 {rejection}"
+            )
         );
+        assert!(
+            rejection.to_string().ends_with(
+                ": codec 'event_json' refused the payload: codec 'event_json' failed to parse \
+                 field 'user_id': expected Integer, found a JSON string"
+            ),
+            "the rejection renders the codec's whole chain: {rejection}"
+        );
+        assert_eq!(described.decode_rejections_total, 1);
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
@@ -581,10 +599,9 @@ pub(super) mod tests {
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
-    /// A body its codec rejects as it drains after resume is reported and leaves the buffer, as any
-    /// retained body that fails after its 202 does.
+    /// A body its codec refuses as it drains after resume leaves the buffer as a decode rejection.
     #[nervix_primitives::test]
-    async fn a_retained_body_its_codec_rejects_is_reported_and_leaves_the_buffer() {
+    async fn a_retained_body_its_codec_refuses_leaves_the_buffer_as_a_decode_rejection() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
@@ -610,8 +627,14 @@ pub(super) mod tests {
         let RuntimeEvent::Error(message) =
             nervix_primitives::time::timeout(Duration::from_secs(10), errors.recv())
                 .await
-                .expect("the drain reports the body its codec rejected")
+                .expect("the drain reports the body its codec refused")
                 .expect("the node keeps its observers while it runs");
+        assert!(
+            message.starts_with(
+                "ingestor 'event_source' general error in domain 'default': decode rejection "
+            ),
+            "the drain reports a decode rejection: {message}"
+        );
         assert!(
             message.contains(
                 "codec 'event_json' failed to parse field 'user_id': expected Integer, found a \

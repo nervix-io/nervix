@@ -411,6 +411,49 @@ async fn an_open_needs_an_installed_execution_and_exactly_its_schema() {
     assert_eq!(description.admission, ClientProducerAdmission::Open);
 }
 
+/// What a session asks this node for when it opens a producer on `ingestor` of `domain`.
+fn local_open(domain: &DomainName, ingestor: &IngestorName) -> ClientProducerOpenRequest {
+    ClientProducerOpenRequest {
+        domain: domain.clone(),
+        ingestor: ingestor.clone(),
+        expected_fields: fields(&["id"]),
+        limits: limits(4, 4096),
+        max_batch_bytes: NonZeroU64::new(1024).assured("a literal non-zero size"),
+        retention: ClientProducerRetention::Local,
+    }
+}
+
+/// A node that runs no endpoint of the ingestor, whether it has not installed the ingestor's domain
+/// since it started or not yet the domain's execution, refuses an open as temporarily unavailable.
+/// The serving node already checked the open against the committed domain and schedule, which this
+/// node's installation trails right after a restart; naming the domain missing would end a
+/// restored producer for good while its endpoint is about to start.
+#[nervix_primitives::test]
+async fn an_open_on_a_node_without_the_endpoint_installed_is_temporarily_unavailable() {
+    let runtime = Runtime::default();
+    let domain = domain("tenant");
+    let ingestor = named::<IngestorName>("orders_in");
+
+    let before_the_domain = runtime
+        .open_client_producer(local_open(&domain, &ingestor))
+        .await;
+    install_unpaced_test_domain(&runtime, &domain);
+    let before_the_execution = runtime
+        .open_client_producer(local_open(&domain, &ingestor))
+        .await;
+
+    assert_eq!(
+        before_the_domain.err(),
+        Some(ClientProducerRefusal::EndpointUnavailable),
+        "a node that has not installed the domain since it started classified the open"
+    );
+    assert_eq!(
+        before_the_execution.err(),
+        Some(ClientProducerRefusal::EndpointUnavailable),
+        "a node that has not installed the domain's execution classified the open"
+    );
+}
+
 #[nervix_primitives::test]
 async fn producers_take_the_one_window_in_turn() {
     let mut fixture = Fixture::start();

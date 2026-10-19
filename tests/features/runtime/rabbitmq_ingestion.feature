@@ -408,3 +408,80 @@ Feature: RabbitMQ ingestion
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  @decode_rejection
+  Scenario Outline: RabbitMQ ACK SEQUENTIAL acknowledges a payload its codec refuses, reports its record and delivers the next one
+    Given RabbitMQ is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And RabbitMQ queue "poison_{{test_id}}" exists
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT rabbit_main
+        TYPE RABBITMQ
+        CONFIG {
+          'addr' = '{{rabbitmq_addr}}'
+        };
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_poison
+        FROM rabbit_main QUEUE 'poison_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then RabbitMQ queue "poison_{{test_id}}" eventually has 1 consumers
+    When RabbitMQ message is published to queue "poison_{{test_id}}"
+      """
+      {"user_id":"one"}
+      """
+    And RabbitMQ message is published to queue "poison_{{test_id}}"
+      """
+      {"user_id":2}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":2
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      ingestor 'rabbit_poison' general error in domain '{{domain}}': decode rejection
+      """
+    And the last server error contains
+      """
+      codec 'notification_codec' refused the payload: codec 'notification_codec' failed to parse field 'user_id'
+      """
+    And within "30s" DESCRIBE INGESTOR "rabbit_poison" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 1
+      """
+    # A delivery the ingestor still held would return to the queue once its consumer leaves.
+    When these Plexus commands are executed
+      """
+      STOP;
+      """
+    Then RabbitMQ queue "poison_{{test_id}}" eventually has 0 consumers
+    And RabbitMQ queue "poison_{{test_id}}" holds 0 messages
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

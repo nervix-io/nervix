@@ -1,7 +1,7 @@
 Feature: Restore staging reclamation and storage accounting
   Failed unpublished installations are reclaimed while durable activation gates stay closed.
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Restore quota failures reclaim storage across restart and preserve an active retry on <cluster_size> nodes
     Given restore checkpoint staging is limited to 524288 bytes
     And Kafka is running
@@ -97,11 +97,13 @@ Feature: Restore staging reclamation and storage accounting
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     And restoring domain "{{domain}}_copy" by coordinator "{{leader}}" pauses before state publication
-    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "{{test_id}}-active-restore" in the background
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "{{test_id}}-active-restore" in the background with outcome recovery
     Then restoring domain "{{domain}}_copy" by coordinator "{{leader}}" has reached state publication
     And an active restore retains its staging through completed maintenance sweeps on every node
-    When state publication of domain "{{domain}}_copy" by coordinator "{{leader}}" is released
-    Then the background restore stream's outcome is "completed" as "executed"
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And state publication of domain "{{domain}}_copy" by coordinator "{{leader}}" is released
+    Then the background restore stream completes with a known outcome
+    And the restore stream's report shows every step applied
     And restore checkpoint staging usage is zero on every node
     Given the active domain is "{{domain}}_copy"
     When these Plexus commands are executed on the leader node

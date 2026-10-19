@@ -714,6 +714,12 @@ presents none while a lease is held, a different one, or one from a superseded a
 refused, and so are automatic schedule changes and clock-authority updates while any lease is held.
 The command or transaction releases the lease when it finishes, whatever its outcome.
 
+A transaction that paused its domain for a model alteration completes that pause's release before
+it publishes a terminal outcome. Losing leadership during release leaves the applying step and its
+mutation lease available to recovery under the same execution identity. The successor completes
+cleanup before another mutation can acquire the domain; a refused release alone does not turn an
+otherwise applied alteration into a definitive failure.
+
 Because the lease lives in replicated state rather than in a leader's memory, it survives leadership
 changes and restarts. A new leader resumes the applying record, or the committing transaction, that
 holds the lease and continues under it; a deposed leader can no longer propose, and a stale
@@ -781,15 +787,18 @@ the console refuse `USE` and `LIST DOMAINS` themselves.
 
 **Committing.** `COMMIT` may name the preview identity the client reviewed: the transaction
 identity, its accepted position, and the fingerprint of its planning basis, taken from the last
-append's admission or from inspecting the attached transaction. If that preview no longer describes
-the transaction, the commit is refused with `PreviewStale` naming the expected and the current
-identity, nothing applies, and the transaction stays open and bound. A preview fences only a commit
-of a transaction that the same request did not itself begin or append to, because such a request has
-already moved the transaction past what the client reviewed. A commit that is admitted runs its
-frozen plan step by step; each step is atomic, and a failed step leaves the applied prefix in place
-rather than rolling back the transaction. A commit's outcome arrives only when the final step is
-usable on every live node, and a client waits through `COMMITTING` for the outcome recorded under
-the commit's own reference.
+append's admission or from inspecting the attached transaction. An inspection runs on the concurrent
+lane, so its report can already include an append whose own outcome has not arrived yet. The Rust
+client and the web console therefore keep an inspected preview under the position its report names,
+and use it once the append's outcome brings the client's status to that position. If the named
+preview no longer describes the transaction, the commit is refused with `PreviewStale` naming the
+expected and the current identity, nothing applies, and the transaction stays open and bound. A
+preview fences only a commit of a transaction that the same request did not itself begin or append
+to, because such a request has already moved the transaction past what the client reviewed. A commit
+that is admitted runs its frozen plan step by step; each step is atomic, and a failed step leaves
+the applied prefix in place rather than rolling back the transaction. A commit's outcome arrives
+only when the final step is usable on every live node, and a client waits through `COMMITTING` for
+the outcome recorded under the commit's own reference.
 
 **Inactivity and retention.** An `OPEN` transaction expires once it has been inactive for its idle
 timeout, 15 minutes by default, whether or not a session is bound to it. Attaching it, appending to
@@ -933,9 +942,9 @@ new session follow them. Reading subscription or clock events opens a new sessio
 while one waits to be restored; reading notices never does, and waits for the session something
 else opens. A failed attempt to open one is returned to the reader, and its next read tries again.
 
-The web console follows the same order on every connection: it selects its domain, opens again the
-subscription of every tab the server had acknowledged, and attaches its transaction before any
-ordered request it holds goes out. A restoration belongs to the connection that sent it; when that
+The web console follows the same order on every connection: it selects its domain, attaches the
+selected domain's clock, opens again the subscription of every tab the server had acknowledged, and
+attaches its transaction before any ordered request it holds goes out. A restoration belongs to the connection that sent it; when that
 connection ends before the reply, the next connection restores the tab again. A transaction that
 has finished, or can no longer be attached, ends only the commands issued in it: restorations,
 subscription changes, and commands issued outside the transaction keep their place.
@@ -1287,7 +1296,8 @@ as a new attachment. The shared binding exposes this event stream through
 client holds for each followed domain, starting with the one the attach reply carried, through
 `nx_session_domain_clock` and a retained `nx_domain_clock` handle. The web console
 attaches the selected domain clock once per session, detaches it on selection changes, and restores
-it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
+it on reconnect before it attaches its transaction again; its REPL sends the same typed requests for
+explicit attach and detach statements.
 These requests enter the console's bounded session hand-off; a local refusal is shown to the
 operator and sends no request. Both requests are refused while the session holds a transaction,
 like every other session-local request.
@@ -1434,6 +1444,15 @@ refuses producer and consumer opens as `EndpointUnavailable`. Its local domain s
 show the state before a committed `START`, so it does not classify a missing or stopped endpoint as
 terminal until that barrier passes. The client retries this temporary refusal with its bounded
 restoration backoff.
+
+The node that executes the endpoint answers only for the endpoint it runs. The serving node has
+already checked the open against the committed domain and schedule, and the executing node's
+installation trails them until it has installed its domains again after it started, or the
+revision the serving node read. An open that finds no endpoint there is therefore
+`EndpointUnavailable`, never `DomainNotFound`, `DomainStopped`, `IngestorNotFound` or
+`NotClientIngestor`. A restored producer whose open reaches a restarted executing node before that
+node installs its domain retries instead of requiring an explicit new open, and a removed or
+stopped endpoint is still classified, by the serving node, on the next attempt.
 
 ## Emitter Consumers
 

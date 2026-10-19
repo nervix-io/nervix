@@ -331,3 +331,74 @@ Feature: Interconnect relay admission
       {"tenant":"shared","seq":1}
       """
     And the background http publish succeeds
+
+  # Every node-3 branch opens its own relay channel to the relay's owner on node-1. The first 600
+  # tenants' branches expire, and then the same tenants return with new branches, so 1,201 channels
+  # from node-3 reach node-1 within the ten minutes the receiver retains a channel's watermark,
+  # more than the incoming queue capacity of 1,024 that bounds the work a peer has in flight.
+  @relay_channel_turnover @long_running
+  Scenario: A node keeps delivering to another node's relay owner after more than 1,024 of its branch channels turn over
+    Given branched relay expiration scan interval is configured as "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN turnover_{{test_id}};
+      """
+    Given the active domain is "turnover_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event (
+        tenant STRING,
+        seq I64
+      );
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30s;
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE VHOST edge turnover-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER output FROM events
+        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Then node "node-3" eventually forwards http traffic for host "turnover-{{test_id}}.example.com" path "/events" to the observed broker
+      """
+      {"tenant":"warmup","seq":0}
+      """
+    When 600 http payloads with distinct tenants and sequence 1 are posted to node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
+    Then within "120s" the observed broker receives every generated payload exactly once
+    And within "120s" node "node-3" observability metric "nervix_branch_evictions_total" with labels eventually equals 601
+      """
+      domain="turnover_{{test_id}}"
+      branch="by_tenant"
+      physical_node_id="node-3"
+      reason="ttl"
+      """
+    When 600 http payloads with distinct tenants and sequence 2 are posted to node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
+    Then within "120s" the observed broker receives every generated payload exactly once

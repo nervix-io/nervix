@@ -283,6 +283,7 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 zeromq = { workspace = true }
 
 [[test]]

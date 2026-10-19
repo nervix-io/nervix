@@ -77,6 +77,7 @@ Feature: Resource version bindings
       | 1            | DENSE TENSOR<F32> |
       | 3            | DENSE TENSOR<F32> |
 
+  @long_running
   Scenario Outline: VERSION LATEST pins and renders every binding kind before rebinding at its contract level
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

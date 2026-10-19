@@ -435,9 +435,10 @@ mod tests {
         IngestQuiesceOverflow, KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource,
         MqttIngestMode, MqttIngestorAlteration, MqttQos, MqttSession, MqttSource, MqttTopicSource,
         NatsIngestMode, NatsSource, NatsSubjectSource, PrometheusIngestMode, PrometheusQuerySource,
-        PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
-        RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
-        RetryPolicy, SchemaName, SqsIngestMode, SqsQueueSource, SqsSource, SyslogIngestMode,
+        PrometheusSource, PulsarIngestMode, PulsarSource, PulsarSubscription,
+        PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
+        RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource, RetryPolicy,
+        SchemaName, SqsIngestMode, SqsQueueSource, SqsSource, SyslogIngestMode,
         SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
         WebsocketsIngestMode, WebsocketsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
     };
@@ -488,8 +489,10 @@ mod tests {
         let sources = [
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              SUSPEND",
-            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' MODE NO ACK ON QUIESCE \
-             SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR MODE NO \
+             ACK ON QUIESCE SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED MODE NO ACK ON \
+             QUIESCE SUSPEND",
             "RABBITMQ QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
              POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
             "SQS QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
@@ -549,7 +552,7 @@ mod tests {
             ),
             (
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'public/default/orders' SUBSCRIPTION 's' \
-                 MODE NO ACK ON QUIESCE SUSPEND",
+                 PROVISIONED MODE NO ACK ON QUIESCE SUSPEND",
                 "invalid pulsar_topic 'public/default/orders': holds '/' without naming its \
                  domain, one of persistent, non-persistent",
             ),
@@ -1079,7 +1082,7 @@ mod tests {
     fn parses_create_ingestor_pulsar_ack_sequential() {
         let input = r#"
             CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1096,10 +1099,11 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::PulsarTopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                subscription: nervix_models::PulsarSubscriptionName::try_from(
-                    "nervix_subscription"
-                )
-                .expect("valid subscription identifier"),
+                subscription: PulsarSubscription {
+                    name: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
+                        .expect("valid subscription identifier"),
+                    ownership: PulsarSubscriptionOwnership::Ingestor,
+                },
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
@@ -1263,7 +1267,8 @@ mod tests {
 
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
-        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' MODE ";
+        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' OWNED \
+                     BY INGESTOR MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1278,6 +1283,89 @@ mod tests {
         assert!(suggestions.contains(&"pulsar_subscription".to_string()));
         assert!(!suggestions.contains(&"SHARED".to_string()));
         assert!(!suggestions.contains(&"MODE".to_string()));
+    }
+
+    #[test]
+    fn parses_who_owns_a_pulsar_subscription_in_any_case() {
+        for (ownership, expected) in [
+            ("OWNED BY INGESTOR", PulsarSubscriptionOwnership::Ingestor),
+            ("owned by Ingestor", PulsarSubscriptionOwnership::Ingestor),
+            ("PROVISIONED", PulsarSubscriptionOwnership::Provisioned),
+            ("Provisioned", PulsarSubscriptionOwnership::Provisioned),
+        ] {
+            let source = format!(
+                "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'Readers' {ownership} \
+                 INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
+            );
+            let parsed = parse_create_ingestor(&ingestor_with_source(&source))
+                .unwrap_or_else(|error| panic!("`{source}` should parse: {error:?}"));
+            let IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+                subscription,
+                instances,
+                ..
+            })) = &transport(&parsed).source
+            else {
+                panic!("expected a Pulsar topic source from `{source}`");
+            };
+            assert_eq!(subscription.name.as_str(), "Readers", "{source}");
+            assert_eq!(subscription.ownership, expected, "{source}");
+            assert_eq!(*instances, nonzero!(2u64), "{source}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_pulsar_subscription_whose_ownership_is_missing_or_misspelled() {
+        for ownership in [
+            "",
+            "OWNED",
+            "OWNED BY",
+            "OWNED BY DOMAIN",
+            "BY INGESTOR",
+            "PROVISIONED OWNED BY INGESTOR",
+            "OWNED BY INGESTOR PROVISIONED",
+        ] {
+            let source = format!(
+                "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'readers' {ownership} \
+                 MODE NO ACK ON QUIESCE SUSPEND"
+            );
+            let error = parse_create_ingestor(&ingestor_with_source(&source)).expect_err(&format!(
+                "`{source}` declares no single ownership of its subscription"
+            ));
+            assert!(
+                matches!(error.current_context(), ParseFromSourceError::Parse { .. }),
+                "the grammar refuses `{source}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulsar_subscription_name_is_followed_by_exactly_its_ownership_choices() {
+        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' ";
+        let suggestions = suggest_create_ingestor(input, input.len());
+        assert!(suggestions.contains(&"OWNED BY INGESTOR".to_string()));
+        assert!(suggestions.contains(&"PROVISIONED".to_string()));
+        for leaked in ["MODE", "INSTANCES", "OWNED", "BY", "INGESTOR", "OFFSET BY"] {
+            assert!(
+                !suggestions.contains(&leaked.to_string()),
+                "{leaked} offered after the subscription name: {suggestions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulsar_ownership_is_followed_by_the_instances_and_the_mode() {
+        for ownership in ["OWNED BY INGESTOR", "PROVISIONED"] {
+            let input = format!(
+                "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' {ownership} "
+            );
+            let suggestions = suggest_create_ingestor(&input, input.len());
+            assert!(suggestions.contains(&"INSTANCES".to_string()), "{input}");
+            assert!(suggestions.contains(&"MODE".to_string()), "{input}");
+            assert!(
+                !suggestions.contains(&"PROVISIONED".to_string()),
+                "{input}: {suggestions:?}"
+            );
+        }
     }
 
     #[test]

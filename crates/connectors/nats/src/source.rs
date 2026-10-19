@@ -27,8 +27,8 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, ServiceUrl, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
 use nervix_primitives::sync::mpsc::{self, error::TrySendError};
@@ -299,11 +299,20 @@ impl BrokerSourceConnector for NatsSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(subscription) = self.subscription.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let NatsReceipt::Message(message) = subscription.next_message().await else {
+        let Some(receipt) = cancellation
+            .unless_cancelled(subscription.next_message())
+            .await
+        else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let NatsReceipt::Message(message) = receipt else {
             // The subscription ended with its connection. The host shows the loss as a transient
             // status and resumes the instance on its reconnect cadence, which connects again.
             self.subscription = None;
@@ -333,7 +342,7 @@ impl BrokerSourceConnector for NatsSource {
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
-    use nervix_primitives::time::timeout;
+    use nervix_primitives::{sync::oneshot, time::timeout};
 
     use super::*;
     use crate::scripted_server::ScriptedServer;
@@ -348,6 +357,76 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cancelled_read_takes_nothing_and_leaves_the_next_message_to_the_next_read() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let (allow_delivery, delivery_allowed) = oneshot::channel::<()>();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let subscription = connection.expect_subscription().await;
+            connection.answer_ping().await;
+            delivery_allowed
+                .await
+                .expect("the test allows the delivery once its read was cancelled");
+            connection
+                .deliver(&subscription, b"delivered after the cancelled read")
+                .await;
+            // The connection stays open until the test has read the delivery.
+            connection
+        });
+        let plan = NatsSourcePlan::new(
+            vec![entry("addr", &addr)],
+            NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
+            NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
+        );
+        let request = SourceBatchRequest {
+            max_messages: NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let mut source = NatsSource::open(&plan, 0)
+            .await
+            .expect("opening a NATS source does not connect");
+        source
+            .resume()
+            .await
+            .expect("the source subscribes through the stand-in server");
+
+        let cancellation = SourceReadCancellation::new();
+        cancellation.cancel();
+        let interrupted = timeout(OBSERVATION_BOUND, source.next_batch(request, &cancellation))
+            .await
+            .expect("a cancelled read ends at once")
+            .expect("a cancelled read is not a failure");
+        let SourceBatch::Interrupted { gathered } = interrupted else {
+            panic!("a read the host cancelled ends as interrupted");
+        };
+        assert!(gathered.is_empty(), "nothing was delivered to take");
+
+        allow_delivery
+            .send(())
+            .expect("the scripted server waits for the delivery to be allowed");
+        let batch = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the delivered message reaches the source")
+        .expect("the delivered message is read");
+        let SourceBatch::Messages(messages) = batch else {
+            panic!("the source reads the delivered message as a batch");
+        };
+        let payloads = messages
+            .iter()
+            .map(|message| message.payload().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads,
+            vec![b"delivered after the cancelled read".to_vec()]
+        );
+        let _connection = script.await.expect("the scripted server ran its script");
     }
 
     #[nervix_primitives::test]
@@ -389,10 +468,13 @@ mod tests {
             .expect("the source subscribes through the stand-in server");
         assert_eq!(resumed, SourceResume::Ready);
 
-        let batch = timeout(OBSERVATION_BOUND, source.next_batch(request))
-            .await
-            .expect("the delivered message reaches the source")
-            .expect("the delivered message is read");
+        let batch = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the delivered message reaches the source")
+        .expect("the delivered message is read");
         let SourceBatch::Messages(messages) = batch else {
             panic!("the source reads the delivered message as a batch");
         };
@@ -403,9 +485,12 @@ mod tests {
         assert_eq!(payloads, vec![b"delivered before the loss".to_vec()]);
         script.await.expect("the scripted server ran its script");
 
-        let ended = timeout(OBSERVATION_BOUND, source.next_batch(request))
-            .await
-            .expect("the lost connection ends the wait for the next message");
+        let ended = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the lost connection ends the wait for the next message");
         let Err(error) = ended else {
             panic!("a lost connection ends the subscription with an error");
         };

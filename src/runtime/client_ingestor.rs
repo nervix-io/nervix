@@ -645,8 +645,13 @@ impl Runtime {
 
     /// Attaches one producer to a client ingestor this node executes.
     ///
-    /// The refusal names why nothing was attached: the domain, the ingestor or its kind, an
-    /// execution this node does not run, the expected schema, the limits, or the budget.
+    /// The refusal names why nothing was attached: an endpoint this node does not run, the expected
+    /// schema, the limits, or the budget. The serving node checked the domain, the ingestor and its
+    /// kind against committed state before the open reached this node, whose installation trails
+    /// that state until it has installed its domains again after it started, or the revision the
+    /// serving node read. An endpoint this node does not run is therefore only unavailable here:
+    /// naming the domain missing or stopped, or the ingestor removed, from this node's installation
+    /// would end a restored producer for good while its endpoint is about to start.
     pub(crate) async fn open_client_producer(
         &self,
         request: ClientProducerOpenRequest,
@@ -662,10 +667,10 @@ impl Runtime {
         if !limits.is_within_bounds() {
             return Err(ClientProducerRefusal::InvalidLimits);
         }
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeRef::node_in(domain, ModelKind::Ingestor, ingestor);
         let commands = match self.inner.client_ingestors.get(&key) {
             Some(endpoint) => endpoint.commands.clone(),
-            None => return Err(self.client_producer_refusal(&domain, &ingestor)),
+            None => return Err(ClientProducerRefusal::EndpointUnavailable),
         };
         let serving = match retention {
             ClientProducerRetention::Local => ProducerServing::Local,
@@ -708,39 +713,6 @@ impl Runtime {
             handle,
             events,
         })
-    }
-
-    /// Why this node cannot attach a producer to an ingestor it runs no endpoint for.
-    fn client_producer_refusal(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-    ) -> ClientProducerRefusal {
-        let status = self
-            .inner
-            .domains
-            .get(domain)
-            .map(|state| state.status.clone());
-        match status {
-            None => return ClientProducerRefusal::DomainNotFound,
-            Some(nervix_models::DomainStatus::Stopped) => {
-                return ClientProducerRefusal::DomainStopped;
-            }
-            Some(_) => {}
-        }
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return ClientProducerRefusal::EndpointUnavailable;
-        };
-        match execution
-            .revision
-            .entrypoints
-            .ingestor(ingestor)
-            .map(|plan| &plan.input)
-        {
-            None => ClientProducerRefusal::IngestorNotFound,
-            Some(IngestorInputPlan::Transport(_)) => ClientProducerRefusal::NotClientIngestor,
-            Some(IngestorInputPlan::Client(_)) => ClientProducerRefusal::EndpointUnavailable,
-        }
     }
 
     /// Starts a client ingestor's execution on this node: its admission worker and the watch that

@@ -120,25 +120,42 @@ impl Runtime {
         let IngestorInputPlan::Transport(input) = &retirement.previous.input else {
             return Ok(());
         };
-        let SourceStartPlan::Mqtt(source) = &input.source else {
-            return Ok(());
-        };
-        let replacement = match retirement.replacement.as_deref() {
-            Some(IngestorStartPlan {
-                input: IngestorInputPlan::Transport(input),
-                ..
-            }) => {
-                if let SourceStartPlan::Mqtt(source) = &input.source {
-                    Some(source)
-                } else {
-                    None
-                }
+        match &input.source {
+            SourceStartPlan::Mqtt(source) => {
+                let replacement = match retirement.replacement.as_deref() {
+                    Some(IngestorStartPlan {
+                        input: IngestorInputPlan::Transport(input),
+                        ..
+                    }) => {
+                        if let SourceStartPlan::Mqtt(source) = &input.source {
+                            Some(source)
+                        } else {
+                            None
+                        }
+                    }
+                    Some(_) | None => None,
+                };
+                source
+                    .retire_before(self, &retirement.previous.ingestor, replacement)
+                    .await
             }
-            Some(_) | None => None,
-        };
-        source
-            .retire_before(self, &retirement.previous.ingestor, replacement)
-            .await
+            // The plan retires a Pulsar input only once no replacement reads in its place.
+            SourceStartPlan::Pulsar(source) => {
+                source.retire(self, &retirement.previous.ingestor).await;
+                Ok(())
+            }
+            SourceStartPlan::Http(_)
+            | SourceStartPlan::Kafka(_)
+            | SourceStartPlan::Nats(_)
+            | SourceStartPlan::RabbitMq(_)
+            | SourceStartPlan::RedisPubSub(_)
+            | SourceStartPlan::Prometheus(_)
+            | SourceStartPlan::ZeroMq(_)
+            | SourceStartPlan::Sqs(_)
+            | SourceStartPlan::Endpoint(_)
+            | SourceStartPlan::Websockets(_)
+            | SourceStartPlan::Syslog(_) => Ok(()),
+        }
     }
 
     /// Starts one ingestor. Every source takes this path.

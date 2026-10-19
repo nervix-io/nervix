@@ -11,6 +11,10 @@ Use Plexus, the Nervix graph definition language, to turn a user's streaming req
 needed for the request. Treat that versioned documentation as the authority; never reconstruct
 clause order or connector options from memory.
 
+For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
+alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
+requirements, metadata types, headers, batching and the reasons ingest and emit differ.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
@@ -29,9 +33,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
-- Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
-  expectations, emitter publishing mode, confirmation window and timeout where applicable, retry
-  pacing, ordering, and offsets.
+- Source and sink: connector kinds, externally provisioned entity names, whether an operator
+  provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
+  emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
+  ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
@@ -296,6 +301,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   without a message. A payload is decoded or rejected as a whole, unfolds into at most 65,536
   messages, and stays the unit of source acknowledgement. `ON EMITTING` must yield exactly one
   value per record.
+- A payload its codec refuses is consumed, never redelivered: the ingestor's `ON GENERAL ERROR LOG`
+  reports it as a decode rejection, `IGNORE` only counts it, and an acknowledged source commits past
+  it. Read `Ingestors` → `When The Codec Refuses A Payload` before relying on a broker's
+  redelivery or dead-lettering for malformed payloads.
 - Unfolding runs on the node's extension workers. Before relying on a `MODE NO ACK` source to keep
   its payloads while those workers are full, read `Ingestors` → `When The Extension Workers Are
   Full`: some sources wait for them, and others refuse the payload and count it.

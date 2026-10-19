@@ -288,7 +288,9 @@ mounts and keeps both mount leases until network cleanup and replacement prepara
 It can resolve the preceding client from a stopped domain's typed plan. A missing preceding
 mount is a reported best-effort cleanup failure; preparing the explicitly selected replacement
 still requires that replacement's complete binding. Retirement never changes a binding or
-selects a newer resource version.
+selects a newer resource version. Pulsar input retirement resolves the dropped input's client the
+same way, from a stopped domain's typed plan too, and keeps its mount lease until the
+subscription's removal finishes; a missing mount is likewise a reported best-effort failure.
 
 ### The Pinning Invariant
 

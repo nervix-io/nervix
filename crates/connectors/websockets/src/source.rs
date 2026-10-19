@@ -33,7 +33,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, ClientConfigResult, IngestMessageHeaders, IngestMetadataRow,
     NoIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest, SourceConnector,
-    SourceError, SourceMessage, SourceResult, SourceResume, client_config_value,
+    SourceError, SourceMessage, SourceReadCancellation, SourceResult, SourceResume,
+    client_config_value,
 };
 use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
@@ -361,6 +362,7 @@ impl BrokerSourceConnector for WebsocketSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         if let Some(payload) = self.pending.pop_front() {
             return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
@@ -372,7 +374,12 @@ impl BrokerSourceConnector for WebsocketSource {
             let Some(relay) = self.relay.as_mut() else {
                 return Ok(SourceBatch::ResumeRequired);
             };
-            let message = futures_util::StreamExt::next(relay).await;
+            let next = futures_util::StreamExt::next(relay);
+            let Some(message) = cancellation.unless_cancelled(next).await else {
+                return Ok(SourceBatch::Interrupted {
+                    gathered: Vec::new(),
+                });
+            };
             match message {
                 Some(Ok(Message::Text(text))) => {
                     return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
@@ -530,6 +537,41 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_cancelled_read_takes_no_frame_and_leaves_the_next_one_to_the_next_read() {
+        use futures_util::SinkExt as _;
+
+        let (mut source, mut peer) = connected_pair().await;
+        let request = SourceBatchRequest {
+            max_messages: std::num::NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let cancellation = SourceReadCancellation::new();
+        cancellation.cancel();
+        let interrupted = source
+            .next_batch(request, &cancellation)
+            .await
+            .assured("a cancelled read is not a failure");
+        let SourceBatch::Interrupted { gathered } = interrupted else {
+            panic!("a read the host cancelled ends as interrupted");
+        };
+        assert!(gathered.is_empty(), "the peer sent nothing to take");
+
+        peer.send(Message::Text("sent after the cancelled read".into()))
+            .await
+            .assured("the peer sends a frame");
+        let batch = source
+            .next_batch(request, &SourceReadCancellation::new())
+            .await
+            .assured("the frame is read");
+        let SourceBatch::Messages(messages) = batch else {
+            panic!("the source reads the frame as a batch");
+        };
+        let message = messages.first().assured("the read returned the frame");
+        assert_eq!(message.payload(), b"sent after the cancelled read");
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[nervix_primitives::test]
     async fn a_peer_close_is_a_transient_read_failure_with_its_status() {
         use futures_util::StreamExt as _;
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
@@ -542,10 +584,13 @@ mod tests {
         .await
         .assured("the peer sends its close");
         let error = source
-            .next_batch(SourceBatchRequest {
-                max_messages: std::num::NonZeroUsize::MIN,
-                batch_timeout: None,
-            })
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
             .await
             .err()
             .assured("a peer close must reach the host's transient failure path");
@@ -572,10 +617,13 @@ mod tests {
             .await
             .assured("the peer sends an empty Close");
         let error = source
-            .next_batch(SourceBatchRequest {
-                max_messages: std::num::NonZeroUsize::MIN,
-                batch_timeout: None,
-            })
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
             .await
             .err()
             .assured("an empty Close still requires a paced reconnect");
@@ -621,10 +669,13 @@ mod tests {
         let (mut source, peer) = connected_pair().await;
         drop(peer);
         let error = source
-            .next_batch(SourceBatchRequest {
-                max_messages: std::num::NonZeroUsize::MIN,
-                batch_timeout: None,
-            })
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
             .await
             .err()
             .assured("TCP ended without the closing handshake");

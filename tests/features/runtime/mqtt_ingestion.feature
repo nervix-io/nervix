@@ -604,3 +604,73 @@ Feature: MQTT ingestion
       | 3            | 1             | noack    | MODE NO ACK                                                                                      |
       | 1            | 0             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
       | 3            | 1             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
+
+  @decode_rejection
+  Scenario Outline: MQTT NO ACK drops a payload its codec refuses with its record and delivers the next one
+    Given MQTT is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_main
+        TYPE MQTT
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-poison-{{test_id}}'
+        };
+      CREATE MQTT TOPIC INGESTOR mqtt_poison
+        FROM mqtt_main TOPIC 'poison_{{test_id}}' QOS 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_poison" on the leader node contains
+      """
+      ready: true
+      """
+    When these MQTT messages are rapidly published to topic "poison_{{test_id}}"
+      """
+      {"user_id":"one"}
+      {"user_id":2}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":2
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      ingestor 'mqtt_poison' general error in domain '{{domain}}': decode rejection
+      """
+    And the last server error contains
+      """
+      codec 'notification_codec' refused the payload: codec 'notification_codec' failed to parse field 'user_id'
+      """
+    And within "30s" DESCRIBE INGESTOR "mqtt_poison" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

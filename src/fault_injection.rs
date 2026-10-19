@@ -47,10 +47,12 @@ use crate::registry::SchedulerMode;
 
 mod consensus;
 mod domain_clock;
+mod domain_resume;
 mod pause;
 mod restarted_voter;
 
 use domain_clock::DomainClockProgressPausePoint;
+pub use domain_resume::DomainResumeBoundary;
 use pause::TestPause;
 use restarted_voter::StartupVoterGossip;
 
@@ -335,6 +337,11 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    DomainResume {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: DomainResumeBoundary,
+    },
     Admission(ClusterNodeName),
     RuntimeInstallation(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),

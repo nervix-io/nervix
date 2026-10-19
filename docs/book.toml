@@ -32,6 +32,7 @@ include = [
   "common.md",
   "syslog.md",
   "database-client-pools.md",
+  "connector-capabilities.md",
   "resources.md",
   "relay.md",
   "ingestors.md",

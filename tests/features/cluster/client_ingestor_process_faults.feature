@@ -77,6 +77,8 @@ Feature: Client producers across real node process faults
     And batch "third" is not admitted because "producer ended"
     And batch "fourth" is not admitted because "producer ended"
     When HTTP receiver "sink" releases its held responses with "respond 200"
+    # The restart ends once every node reaches the restarted process, so the leader the relocation
+    # reaches already counts the owner as a live voter.
     And server process node "{{owner}}" restarts from its existing database
     And these Plexus commands are executed on the server process cluster
       """

@@ -27,7 +27,7 @@ Feature: Pulsar ingestion
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' OWNED BY INGESTOR INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -84,7 +84,7 @@ Feature: Pulsar ingestion
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' MODE <mode>
+      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' OWNED BY INGESTOR MODE <mode>
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -150,7 +150,7 @@ Feature: Pulsar ingestion
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -216,7 +216,7 @@ Feature: Pulsar ingestion
       };
       CREATE PULSAR TOPIC INGESTOR confirmed_notifications
         FROM pulsar_ingress TOPIC 'confirmed_acks_in_{{test_id}}'
-          SUBSCRIPTION 'nervix_confirmed_acks_{{test_id}}'
+          SUBSCRIPTION 'nervix_confirmed_acks_{{test_id}}' OWNED BY INGESTOR
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -305,7 +305,7 @@ Feature: Pulsar ingestion
       };
       CREATE PULSAR TOPIC INGESTOR rejected_notifications
         FROM pulsar_ingress TOPIC 'unsent_redeliveries_in_{{test_id}}'
-          SUBSCRIPTION 'nervix_unsent_redeliveries_{{test_id}}'
+          SUBSCRIPTION 'nervix_unsent_redeliveries_{{test_id}}' OWNED BY INGESTOR
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications

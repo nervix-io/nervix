@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, optional_client_config_value,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, optional_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
 use thiserror::Error;
@@ -174,13 +174,19 @@ impl BrokerSourceConnector for ZeroMqSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let Some(socket) = self.socket.as_mut() else {
                 return Ok(SourceBatch::ResumeRequired);
             };
-            let message = match socket.recv().await {
+            let Some(received) = cancellation.unless_cancelled(socket.recv()).await else {
+                return Ok(SourceBatch::Interrupted {
+                    gathered: Vec::new(),
+                });
+            };
+            let message = match received {
                 Ok(message) => message,
                 Err(error) => {
                     self.socket = None;

@@ -23,13 +23,13 @@ use nervix_models::{
     KafkaTopicSource, ModelName, MqttIngestMode, MqttQos, MqttSession, MqttSourceEntity,
     MqttTopicFilter, MqttTopicSource, NatsIngestMode, NatsQueueGroupName, NatsSourceEntity,
     NatsSubjectName, NatsSubjectSource, NodeRef, PrometheusIngestMode, PrometheusQuerySource,
-    PrometheusSourceEntity, PulsarSourceEntity, PulsarSubscriptionName, PulsarTopicName,
-    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueName, RabbitMqQueueSource,
-    RabbitMqSourceEntity, RedisChannelName, RedisPubSubIngestMode, RedisPubSubSource,
-    RedisSourceEntity, RetryPolicy, SqsIngestMode, SqsQueueName, SqsQueueSource, SqsSourceEntity,
-    SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity, WebsocketsConnectionSource,
-    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode,
-    ZeroMqPullSource, ZeroMqSourceEntity,
+    PrometheusSourceEntity, PulsarSourceEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicName, PulsarTopicSource, RabbitMqIngestMode,
+    RabbitMqQueueName, RabbitMqQueueSource, RabbitMqSourceEntity, RedisChannelName,
+    RedisPubSubIngestMode, RedisPubSubSource, RedisSourceEntity, RetryPolicy, SqsIngestMode,
+    SqsQueueName, SqsQueueSource, SqsSourceEntity, SyslogIngestMode, SyslogListenerSource,
+    SyslogSourceEntity, WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode,
+    WebsocketsSourceEntity, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSourceEntity,
 };
 use thiserror::Error;
 
@@ -108,6 +108,7 @@ pub(super) struct IngestSourceDraft {
     pub(super) subject: String,
     pub(super) queue_group: String,
     pub(super) subscription: String,
+    pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) query: String,
     pub(super) every: String,
     pub(super) instances: String,
@@ -296,8 +297,7 @@ impl IngestSourceDraft {
                 client: self.client()?,
                 topic: PulsarTopicName::parse(&self.topic)
                     .change_context(IngestSourceDraftError::Topic)?,
-                subscription: PulsarSubscriptionName::parse(&self.subscription)
-                    .change_context(IngestSourceDraftError::Subscription)?,
+                subscription: self.pulsar_subscription()?,
                 instances: self.instances()?,
                 mode: self.kafka_mode()?,
                 quiesce,
@@ -445,6 +445,19 @@ impl IngestSourceDraft {
             .map_err(|_| Report::new(IngestSourceDraftError::Every))
     }
 
+    /// The subscription a Pulsar source reads through, and who the draft says owns it, which
+    /// every statement declares.
+    fn pulsar_subscription(
+        &self,
+    ) -> error_stack::Result<PulsarSubscription, IngestSourceDraftError> {
+        let name = PulsarSubscriptionName::parse(&self.subscription)
+            .change_context(IngestSourceDraftError::Subscription)?;
+        let Some(ownership) = self.subscription_ownership else {
+            return Err(Report::new(IngestSourceDraftError::SubscriptionOwnership));
+        };
+        Ok(PulsarSubscription { name, ownership })
+    }
+
     fn offset_mode(&self) -> error_stack::Result<KafkaOffsetMode, IngestSourceDraftError> {
         match self.offset {
             Some(OffsetChoice::Domain) => Ok(KafkaOffsetMode::Domain),
@@ -582,6 +595,8 @@ pub(super) enum IngestSourceDraftError {
     QueueGroup,
     #[error("Enter a valid subscription")]
     Subscription,
+    #[error("Choose whether the ingestor owns the subscription or an operator provisioned it")]
+    SubscriptionOwnership,
     #[error("Enter a Prometheus query")]
     Query,
     #[error("EVERY must be a positive domain-clock duration")]
@@ -631,9 +646,10 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         CodecName, CreateStatement, GeneralErrorPolicy, HttpSourceEntity, IngestQuiesceOverflow,
-        IngestSourceKind, KafkaSourceEntity, Model, ModelKind, ModelName, MqttQos, MqttSession,
-        MqttSourceEntity, NatsSourceEntity, NodeRef, PulsarSourceEntity, RedisSourceEntity,
-        RequestedResourceVersion, Statement, WebsocketsSourceEntity,
+        IngestSource, IngestSourceKind, KafkaSourceEntity, Model, ModelKind, ModelName, MqttQos,
+        MqttSession, MqttSourceEntity, NatsSourceEntity, NodeRef, PulsarSource, PulsarSourceEntity,
+        PulsarSubscriptionOwnership, RedisSourceEntity, RequestedResourceVersion, Statement,
+        WebsocketsSourceEntity,
     };
     use nervix_plexus::statement::parse_statement;
 
@@ -658,6 +674,7 @@ mod tests {
         draft.subject = "events".into();
         draft.queue_group = "workers".into();
         draft.subscription = "workers".into();
+        draft.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned);
         draft.query = "up".into();
         draft.every = "1s".into();
         draft.instances = "1".into();
@@ -779,6 +796,32 @@ mod tests {
         let mut endpoint = complete(IngestSourceKind::Http(HttpSourceEntity::Endpoint));
         endpoint.quiesce = Some(QuiesceChoice::Drop);
         assert!(endpoint.build().is_err());
+    }
+
+    #[test]
+    fn a_pulsar_source_builds_only_once_its_subscription_ownership_is_chosen() {
+        let mut draft = complete(IngestSourceKind::Pulsar(PulsarSourceEntity::Topic));
+        draft.subscription_ownership = None;
+        let error = draft
+            .build()
+            .expect_err("a Pulsar source declares who owns its subscription");
+        assert_eq!(
+            error.current_context(),
+            &super::IngestSourceDraftError::SubscriptionOwnership
+        );
+        for ownership in [
+            PulsarSubscriptionOwnership::Ingestor,
+            PulsarSubscriptionOwnership::Provisioned,
+        ] {
+            draft.subscription_ownership = Some(ownership);
+            let IngestSource::Pulsar(PulsarSource::Topic(source)) =
+                draft.build().assured("a complete Pulsar draft builds")
+            else {
+                panic!("a Pulsar draft builds a Pulsar topic source");
+            };
+            assert_eq!(source.subscription.ownership, ownership);
+            assert_eq!(source.subscription.name.as_str(), "workers");
+        }
     }
 
     #[test]

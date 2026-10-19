@@ -16,14 +16,15 @@ use std::fs;
 
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
-    CodecName, CodecWireFormat, CreateClientHttp, CreateClientS3, CreateClientSqs,
-    CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend, IcebergTableSink,
-    IngestSource, IngestorName, JsonType, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState,
-    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource,
-    OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink,
-    ProcessorInputs, ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink,
+    CodecName, CodecWireFormat, CreateClientHttp, CreateClientPrometheus, CreateClientS3,
+    CreateClientSqs, CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
+    GeneralErrorPolicy, HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend,
+    IcebergTableSink, IngestSource, IngestorName, JsonType, KafkaConsumerGroupName,
+    KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
+    MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource,
+    MqttTopicSource, OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink,
+    PostgresTableSink, ProcessorInputs, ProcessorOutputs, PrometheusApiRootError,
+    PrometheusClientConfigError, PrometheusClientKey, RetryPolicy, SentryEventSink, SentrySink,
     SignalingProtobufConfig, SyslogCollectorSink, SyslogListenerSource, SyslogSink,
     WireSchemaField, WireSchemaName, ZeroMqPushSink, ZeroMqSink,
 };
@@ -1891,6 +1892,81 @@ fn apply_batch_rejects_duplicate_vhost_hostnames() {
         format!("{err}").contains("hostname 'api.example.com' is already assigned"),
         "unexpected error: {err}"
     );
+
+    let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn a_prometheus_client_is_created_only_with_a_config_its_source_can_use() {
+    let path = temp_db_path();
+    let registry = Registry::open(&path).expect("registry should open");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let prometheus_client = |config: &[(&str, &str)]| {
+        Model::ClientPrometheus(CreateClientPrometheus {
+            name: named("prom_main"),
+            mount: None,
+            config: config
+                .iter()
+                .map(|(key, value)| ClientConfigEntry {
+                    key: (*key).to_string(),
+                    value: (*value).to_string(),
+                })
+                .collect(),
+        })
+    };
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![prometheus_client(&[("addr", "http://prometheus:9090")])],
+        )
+        .expect_err("a Prometheus client without timeout_ms must be refused");
+    assert_eq!(
+        error.current_context(),
+        &RegistryError::InvalidPrometheusClientConfig {
+            domain: domain.clone(),
+            client: named("prom_main"),
+            issue: PrometheusClientConfigError::MissingKey {
+                key: PrometheusClientKey::TimeoutMs,
+            },
+        }
+    );
+    assert_eq!(
+        error.downcast_ref::<PrometheusClientConfigError>(),
+        Some(&PrometheusClientConfigError::MissingKey {
+            key: PrometheusClientKey::TimeoutMs,
+        })
+    );
+    assert_eq!(
+        error.to_string(),
+        "PROMETHEUS client 'prom_main' in domain 'default' cannot use its CONFIG: 'timeout_ms' is \
+         required"
+    );
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![prometheus_client(&[
+                ("addr", "http://prometheus:9090/?stale=true"),
+                ("timeout_ms", "5000"),
+            ])],
+        )
+        .expect_err("a Prometheus address with a query string must be refused");
+    assert_eq!(
+        error.downcast_ref::<PrometheusApiRootError>(),
+        Some(&PrometheusApiRootError::Query)
+    );
+
+    registry
+        .apply_batch(
+            &domain,
+            vec![prometheus_client(&[
+                ("addr", "https://prometheus.example.com/monitoring"),
+                ("timeout_ms", "5000"),
+                ("tls_ca_file", "/etc/nervix/tls/ca.pem"),
+            ])],
+        )
+        .expect("a Prometheus client with an API root and a timeout must be created");
 
     let _ = fs::remove_dir_all(path);
 }

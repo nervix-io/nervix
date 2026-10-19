@@ -651,6 +651,11 @@ An ingestor additionally declares its node-level general policy after the source
 ON GENERAL ERROR IGNORE | LOG
 ```
 
+An ingestor's general policy also reports the decode rejection that replaces every payload its
+codec refuses. Either form consumes the payload rather than having its source present it again:
+`LOG` reports the rejection and `IGNORE` does not. See
+[When The Codec Refuses A Payload](ingestors.md#when-the-codec-refuses-a-payload).
+
 Emitters attach `ON MESSAGE ERROR` to their single external route and retain `ON GENERAL ERROR` at
 node level. WASM processors keep `ON GLOBAL ERROR` at node level for guest failures that are not
 tied to a message.

@@ -275,6 +275,10 @@ durable completion boundary; [Errors And Diagnostics](./errors-and-diagnostics.m
 failure propagation and public diagnostic rendering.
 
 A new leader resumes a `COMMITTING` transaction from its recorded applying step and frozen plan.
+Before recording application completion, the coordinator resolves every engaged domain pause in
+that step's actual report under the transaction's mutation lease. A resume refusal leaves the step
+applying, including when its effect has a definitive failure to report. Recovery releases the pause
+before retaining the terminal result, so a completed transaction cannot strand its domain paused.
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery
@@ -367,6 +371,10 @@ and after topology at stable positions, then offers **Before**, **Changes**, and
 parallel relations, shared gates, ownership moves, rebuilds, and state resets. A domain-wide pause
 gets an explicit domain outline; a force flush outside the pictured subgraph remains visible in
 the domain summary. An incomplete or stale preview is marked, and a refresh obtains a new basis.
+A complete report of the attached transaction is the commit basis for the position it names, even
+when it arrives before the outcome of the append that reached that position, as a report read on
+the session's concurrent lane can; the console commits against it once its status reaches that
+position. A report of a position the attached status has already passed supplies no basis.
 The console reads a report again only when the inspector opens or changes its target, when the
 attached transaction's position, state, or applied count changes, or when the operator refreshes;
 a delivered report never requests itself again.

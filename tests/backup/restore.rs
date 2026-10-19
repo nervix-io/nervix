@@ -3,7 +3,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Restores the CLI runs and the checks of their reports, restore streams a scenario
-//!   shapes itself, archives altered to probe a restore's refusals, restore step pauses, the model
+//!   shapes itself, outcome recovery for explicit completion probes, archives altered to probe a
+//!   restore's refusals, restore step pauses, the model
 //!   and resource descriptions a scenario saves to compare across clusters and domains, and
 //!   replacing a scenario's cluster with a fresh one.
 //! - **Depends on.** The public CLI, the harness's own restore streams and sessions, the archive
@@ -30,7 +31,8 @@ use nervix_primitives::task::AbortOnDropHandle;
 use super::*;
 use crate::common::{
     cluster::node_name,
-    raw_session::{TestRestore, TestRestoreEnd, send_restore},
+    phase_deadline::PhaseDeadline,
+    raw_session::{TestRestore, TestRestoreEnd, outcome_awaits_leader, send_restore},
 };
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
@@ -329,6 +331,35 @@ fn when_restore_publication_released(
         &scenario_domain(world, &domain),
         &node_name(&expand_placeholders(world, &coordinator)),
     );
+}
+
+#[when(expr = "restore coordinator {string} yields leadership in a multi-node cluster")]
+async fn when_restore_coordinator_yields_leadership(
+    world: &mut ScenarioWorld,
+    coordinator: String,
+) {
+    let coordinator = expand_placeholders(world, &coordinator);
+    let nodes = world.cluster().node_ids();
+    if nodes.len() == 1 {
+        return;
+    }
+    let successor = nodes
+        .into_iter()
+        .find(|node| node != &coordinator)
+        .assured("a multi-node cluster has another voter");
+    world
+        .cluster()
+        .transfer_leadership(&coordinator, &successor);
+    world
+        .cluster()
+        .wait_for_leader(&successor, Some(&successor))
+        .await
+        .assured("the successor leads before the restore resumes");
+    world
+        .cluster()
+        .wait_for_leader(&coordinator, Some(&successor))
+        .await
+        .assured("the paused coordinator observes its lost leadership");
 }
 
 #[then(expr = "state publication of domain {string} by coordinator {string} is refused")]
@@ -1134,6 +1165,54 @@ struct RestoreStreamRequest {
     archive: Vec<u8>,
 }
 
+impl RestoreStreamRequest {
+    /// Repeats one immutable restore request until a node knows its outcome. Only the destination
+    /// changes; a refusal or definitive failure returns with its actual origin and report.
+    async fn complete(mut self, servers: Vec<String>) -> TestRestoreEnd {
+        let deadline = PhaseDeadline::after(RESTORE_PAUSE_TIMEOUT);
+        let mut routes = servers.iter().cycle();
+        let mut end = stream_restore(&self, None, None).await;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let pending = match &end {
+                TestRestoreEnd::Replied(reply) => match &reply.disposition {
+                    RestoreDisposition::Outcome(outcome) => {
+                        assert_eq!(
+                            outcome.execution_reference, self.reference,
+                            "each attempt answers the same restore execution"
+                        );
+                        outcome_awaits_leader(outcome)
+                    }
+                    RestoreDisposition::UploadFailed { .. } => false,
+                },
+                TestRestoreEnd::Status(status) => matches!(
+                    status.code(),
+                    tonic::Code::Cancelled
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::Unavailable
+                        | tonic::Code::Unknown
+                ),
+                TestRestoreEnd::Abandoned => false,
+            };
+            if !pending {
+                return end;
+            }
+            tracing::debug!(reference = %self.reference, ?end, "learning a restore probe's outcome");
+            deadline.pause(Duration::from_millis(100)).await;
+            assert!(
+                !deadline.has_passed(),
+                "restore {} did not reach a known outcome: {end:?}",
+                self.reference
+            );
+            self.server = routes
+                .next()
+                .assured("a scenario cluster has at least one restore endpoint")
+                .clone();
+            end = stream_restore(&self, None, None).await;
+        }
+    }
+}
+
 async fn restore_stream_request(
     world: &mut ScenarioWorld,
     restore: &str,
@@ -1277,6 +1356,36 @@ async fn when_restore_is_streamed_in_the_background(
     )));
 }
 
+#[when(
+    expr = "restore {string} of backup archive {string} is streamed to node {string} under \
+            execution reference {string} in the background with outcome recovery"
+)]
+async fn when_restore_is_streamed_with_outcome_recovery(
+    world: &mut ScenarioWorld,
+    restore: String,
+    file: String,
+    node: String,
+    reference: String,
+) {
+    assert!(
+        world.background_restore.is_none(),
+        "a background restore stream is already running"
+    );
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
+    let mut servers = Vec::new();
+    for node in world.cluster().node_ids() {
+        servers.push(
+            world
+                .cluster()
+                .grpc_uri(&node)
+                .assured("each scenario node has a restore endpoint"),
+        );
+    }
+    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        request.complete(servers),
+    )));
+}
+
 /// The command outcome a restore stream was answered with.
 fn restore_outcome(end: &TestRestoreEnd) -> &WireCommandOutcome {
     let reply = match end {
@@ -1345,6 +1454,25 @@ async fn then_background_restore_stream_outcome(
         .await
         .expect("the background restore stream does not panic");
     assert_restore_outcome(&end, &disposition, &origin);
+    world.last_restore_end = Some(end);
+}
+
+#[then("the background restore stream completes with a known outcome")]
+async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
+    let task = world
+        .background_restore
+        .take()
+        .assured("a preceding step streamed a restore in the background");
+    let end = task
+        .await
+        .assured("the background restore completion probe does not panic");
+    let outcome = restore_outcome(&end);
+    assert!(
+        matches!(outcome.disposition, CommandDisposition::Completed { .. }),
+        "the background restore completes: {:?}: {}",
+        outcome.disposition,
+        outcome.message
+    );
     world.last_restore_end = Some(end);
 }
 

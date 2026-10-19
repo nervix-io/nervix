@@ -1869,11 +1869,17 @@ impl SessionServiceImpl {
                     .await
                     {
                         if transaction_step.is_some() {
-                            transaction_application_failure = Some(format!(
-                                "committed transaction model step in domain '{}' failed to \
-                                 release its pause: {error:#}",
-                                domain.as_str()
-                            ));
+                            // Application completion recovers this hold under the same mutation
+                            // lease before it can record a terminal outcome.
+                            if let DomainAlterError::RestoreIngestion { .. } =
+                                error.current_context()
+                            {
+                                transaction_application_failure = Some(format!(
+                                    "committed transaction model step in domain '{}' failed to \
+                                     restore ingestion after releasing its pause: {error:#}",
+                                    domain.as_str()
+                                ));
+                            }
                             self.broadcast_error(format!(
                                 "failed to release transaction-owned pause in domain '{}': \
                                  {error:#}",

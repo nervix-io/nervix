@@ -32,7 +32,17 @@ use channels::{RelayBranchChannels, RelayChannels};
 mod shuttle_tests;
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
+/// A channel that carried no batch this long, counted from its opening or its last batch, opens a
+/// fresh incarnation for its next batch. It stays below the receiver's watermark retention, so a
+/// channel its sender resumes still finds its watermark there, and a receiver's sweep of watermarks
+/// unreconciled for the whole retention raises its retired-channel floor over a live channel's next
+/// batch only when that batch is delayed for longer than the difference.
 const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
+const _: () = assert!(
+    RELAY_CHANNEL_IDLE_ROTATION.as_nanos()
+        < nervix_interconnect::RELAY_CHANNEL_RETENTION.as_nanos(),
+    "an idle relay channel rotates before its receiver's watermark retention ends"
+);
 
 /// A count Plexus configures, narrowed to the width this node addresses memory with.
 ///
@@ -126,16 +136,28 @@ pub(super) struct RelayOutboundSlot {
     )
 )]
 struct RelayOutboundSequence {
+    /// A version 7 UUID. Every one this process creates sorts after the ones it created before,
+    /// because uuid orders them through one process-wide context, and a receiver relies on that
+    /// order to refuse a channel it forgot.
     channel_incarnation: [u8; 16],
     next_sequence: u64,
-    last_delivery_at: Option<Instant>,
+    /// When the incarnation opened or last carried a batch. Idleness counts from the opening too,
+    /// so a channel that opened and carried nothing never sends its first batch under an
+    /// incarnation older than the idle rotation.
+    last_active_at: Instant,
 }
 
 impl RelayOutboundSequence {
-    fn reopen(&mut self) {
-        self.channel_incarnation = uuid::Uuid::now_v7().into_bytes();
-        self.next_sequence = 0;
-        self.last_delivery_at = None;
+    fn opened_at(now: Instant) -> Self {
+        Self {
+            channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
+            next_sequence: 0,
+            last_active_at: now,
+        }
+    }
+
+    fn reopen(&mut self, now: Instant) {
+        *self = Self::opened_at(now);
     }
 }
 
@@ -148,11 +170,9 @@ impl RelayOutboundSlot {
     fn with_cancellation(cancellation: CancellationToken) -> Self {
         Self {
             gate: Mutex::new(()),
-            sequence: nervix_primitives::sync::blocking::Mutex::new(RelayOutboundSequence {
-                channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
-                next_sequence: 0,
-                last_delivery_at: None,
-            }),
+            sequence: nervix_primitives::sync::blocking::Mutex::new(
+                RelayOutboundSequence::opened_at(Instant::now()),
+            ),
             cancellation,
         }
     }
@@ -194,7 +214,8 @@ impl RelayOutboundSlot {
         )
     )]
     pub(super) fn reopen_delivery_channel(&self) {
-        self.sequence.lock().reopen();
+        let mut channel = self.sequence.lock();
+        channel.reopen(Instant::now());
     }
 
     pub(super) fn next_delivery(&self) -> RelayDelivery {
@@ -213,19 +234,17 @@ impl RelayOutboundSlot {
     )]
     fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
         let mut channel = self.sequence.lock();
-        if let Some(last_delivery_at) = channel.last_delivery_at
-            && now
-                .checked_duration_since(last_delivery_at)
-                .assured("a relay channel's monotonic delivery time does not move backwards")
-                >= RELAY_CHANNEL_IDLE_ROTATION
+        // Activity recorded after `now` was read, such as a reopening, leaves no idle time.
+        if let Some(idle) = now.checked_duration_since(channel.last_active_at)
+            && idle >= RELAY_CHANNEL_IDLE_ROTATION
         {
-            channel.reopen();
+            channel.reopen(now);
         }
         let sequence = channel.next_sequence;
         channel.next_sequence = sequence
             .checked_add(1)
             .assured("a process cannot deliver u64::MAX batches before a channel rotates");
-        channel.last_delivery_at = Some(now);
+        channel.last_active_at = channel.last_active_at.max(now);
         RelayDelivery {
             channel_incarnation: channel.channel_incarnation,
             sequence,

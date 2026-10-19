@@ -571,3 +571,87 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  # A NO ACK emitter delivers a record once its producer takes it. The broker refuses every write
+  # with an answer the producer retries, so the producer still holds the three records when STOP
+  # tears the domain down. The finish counts the records the producer holds without a served
+  # delivery report, never the events librdkafka queues beside them.
+  @emitter_unsent_at_stop
+  Scenario Outline: STOP reports exactly how many records a NO ACK Kafka emitter's producer still holds
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And schema change drain timeout is configured as "5s"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And a mock Kafka broker serves topic "unsent_out_{{test_id}}"
+    And the mock Kafka broker refuses every write
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA unsent_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA unsent_event_wire MODE STRICT ( sequence integer );
+      CREATE CODEC unsent_event_codec FROM WIRE JSON SCHEMA unsent_event_wire TO SCHEMA unsent_event;
+      CREATE RELAY unsent_events SCHEMA unsent_event UNBRANCHED;
+      CREATE VHOST edge unsent-stop-{{test_id}}.example.com;
+      CREATE ENDPOINT unsent_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR unsent_source
+        FROM unsent_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING unsent_event_codec
+        TIMESTAMP NOW
+        TO unsent_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT refusing_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
+      };
+      CREATE EMITTER unsent_output FROM unsent_events
+        TO KAFKA refusing_kafka TOPIC unsent_out_{{test_id}} MODE NO_ACK
+          RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING unsent_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "unsent-stop-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    And http payload is posted to node "node-1" with host "unsent-stop-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":2}
+      """
+    And http payload is posted to node "node-1" with host "unsent-stop-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":3}
+      """
+    Then within "30s" DESCRIBE EMITTER "unsent_output" on the leader node contains
+      """
+      messages_total sent relay=unsent_events
+      """
+    And the last command output owner is saved as placeholder "unsent_owner"
+    And within "30s" DESCRIBE EMITTER "unsent_output" on the leader node contains
+      """
+      messages_total sent relay=unsent_events physical_node={{unsent_owner}} total=3
+      """
+    # The broker refuses every write, so the producer still holds all three records when STOP gives
+    # the emitter's finish the five-second domain drain timeout. STOP runs on the session that is
+    # already open, which therefore observes the error the teardown reports while STOP runs.
+    When these Plexus statements are executed on the active session
+      """
+      STOP;
+      """
+    Then within "30s" the active session observes a server error containing
+      """
+      kafka sink's transport client still held 3 records when its finish deadline passed
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

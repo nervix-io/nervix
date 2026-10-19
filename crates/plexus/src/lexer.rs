@@ -141,6 +141,8 @@ pub enum Identifier {
     Timestamp,
     Session,
     Subscription,
+    Owned,
+    Provisioned,
     Vhost,
     Endpoint,
     Signaling,

@@ -277,6 +277,10 @@ sequenceDiagram
 
 A leadership change resumes a `COMMITTING` transaction from its recorded applying step and frozen
 plan. It does not replan, repeat a completed effect, or advance past an incompletely applied effect.
+An engaged domain pause belongs to that applying step until its mutation owner releases it and
+the resumed runtime state becomes usable. A refused resume proposal keeps the step recoverable;
+it cannot finish the transaction or release its mutation lease while leaving the domain paused.
+This cleanup boundary applies to successful steps and definitive application failures alike.
 A reconnecting commit waiter attaches to the transaction and continues waiting for that terminal
 result. A definitive failure records one `FAILED` outcome, the failing step, and the committed
 prefix. The final operation and topology report remains with the transaction tombstone until the

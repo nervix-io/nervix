@@ -256,6 +256,10 @@ PRODUCERS: tuple[Producer, ...] = (
         finish=(),
     ),
     Producer(
+        name="validate-connector-matrix", mode="ordinary", prepare=("test-connector-matrix",),
+        instrumented="validate-connector-matrix-render", finish=(),
+    ),
+    Producer(
         name="test-shuttle", mode="shuttle",
         prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime"),
         instrumented="test-shuttle-checks", finish=(), filterable=True,

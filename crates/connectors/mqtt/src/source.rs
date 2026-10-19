@@ -33,8 +33,9 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, ConnectorKind, MqttQos, MqttSession};
@@ -692,6 +693,7 @@ impl BrokerSourceConnector for MqttSource {
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         if let Some(messages) = self.replayed_batch(request.max_messages) {
             return Ok(SourceBatch::Messages(messages));
@@ -699,7 +701,15 @@ impl BrokerSourceConnector for MqttSource {
         let Some(connection) = self.connection.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let first = match Self::next_publish(connection).await {
+        let Some(first) = cancellation
+            .unless_cancelled(Self::next_publish(connection))
+            .await
+        else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let first = match first {
             Ok(publish) => publish,
             Err(error) => {
                 self.disconnect();
@@ -718,6 +728,8 @@ impl BrokerSourceConnector for MqttSource {
             return Err(Report::new(MqttSourceError::BatchDeadline)
                 .change_context(SourceError::Read { connector: MQTT }));
         };
+        // A cancellation that arrives while the batch gathers waits for the batch deadline, which
+        // bounds the gathering, so the publishes already taken still reach the host.
         let mut failure = None;
         while messages.len() < request.max_messages.get() {
             nervix_primitives::task::consume_budget().await;
@@ -1250,10 +1262,13 @@ mod tests {
             .expect("rejecting queues the replay");
 
         let batch = source
-            .next_batch(SourceBatchRequest {
-                max_messages: nonzero!(2usize),
-                batch_timeout: None,
-            })
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: nonzero!(2usize),
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
             .await
             .expect("the replay is delivered without a connection");
         let SourceBatch::Messages(messages) = batch else {

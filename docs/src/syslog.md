@@ -175,6 +175,10 @@ configuration error, with the setting or path that failed. They do not include T
 
 ## Ingestor
 
+The generated [SYSLOG LISTENER ingest table](connector-capabilities.md#syslog-listener-ingest)
+and [SYSLOG COLLECTOR emit table](connector-capabilities.md#syslog-collector-emit) record the
+Plexus declarations, including peer metadata, header availability, quiesce and batching.
+
 A `SYSLOG LISTENER` ingestor reads through a `TYPE SYSLOG` client. It has one delivery mode,
 `NO ACK`, and no `INSTANCES` clause:
 
