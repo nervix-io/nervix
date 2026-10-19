@@ -32,7 +32,8 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceAckPolicy, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, KafkaTopicName, Timestamp};
 use nervix_primitives::{
@@ -540,6 +541,7 @@ impl BrokerSourceConnector for KafkaSource {
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let first = match &mut self.offset_mode {
             KafkaSourceOffsetMode::Domain { rebalance, .. } => {
@@ -552,9 +554,22 @@ impl BrokerSourceConnector for KafkaSource {
                         };
                     }
                     message = self.consumer.recv() => message,
+                    () = cancellation.cancelled() => {
+                        return Ok(SourceBatch::Interrupted {
+                            gathered: Vec::new(),
+                        });
+                    }
                 }
             }
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => self.consumer.recv().await,
+            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
+                let Some(message) = cancellation.unless_cancelled(self.consumer.recv()).await
+                else {
+                    return Ok(SourceBatch::Interrupted {
+                        gathered: Vec::new(),
+                    });
+                };
+                message
+            }
         };
         let first = first
             .map_err(|source| {
@@ -591,6 +606,9 @@ impl BrokerSourceConnector for KafkaSource {
                             warn!(error = %error, "failed to receive another Kafka batch message");
                         }
                     }
+                }
+                () = cancellation.cancelled() => {
+                    return Ok(SourceBatch::Interrupted { gathered: messages });
                 }
             }
         }
@@ -1421,3 +1439,11 @@ mod tests {
 )]
 #[path = "source_commit_tests.rs"]
 mod commit_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_read_tests.rs"]
+mod read_tests;

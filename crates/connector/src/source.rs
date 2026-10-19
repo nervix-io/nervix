@@ -3,10 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The typed source plan, broker and paced-polling connector traits, source messages,
-//!   acknowledgement policies, lifecycle operations, typed source failures, and the opaque host
-//!   handle through which a source delivers messages and reports lifecycle state.
+//!   acknowledgement policies, lifecycle operations, typed source failures, the cancellation
+//!   through which the host ends a broker read in flight, and the opaque host handle through which
+//!   a source delivers messages and reports lifecycle state.
 //! - **Depends on.** Typed ingest metadata, the vocabulary's metadata scopes and timestamps,
-//!   `error-stack`, and Tokio's monotonic clock.
+//!   `error-stack`, and the primitive boundary's monotonic clock and cancellation token.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
@@ -20,6 +21,7 @@
 
 use std::{
     fmt::Debug,
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
@@ -27,7 +29,7 @@ use std::{
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_models::{PositionClass, SourceMetadataScope, Timestamp};
-use nervix_primitives::time::Instant;
+use nervix_primitives::{sync::CancellationToken, time::Instant};
 use thiserror::Error;
 
 use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
@@ -164,8 +166,62 @@ pub struct SourceBatchRequest {
 /// One source poll result.
 pub enum SourceBatch<M> {
     Messages(Vec<M>),
+    /// The read ended early because the host cancelled it. `gathered` holds every message the
+    /// source had already taken from its transport for this batch, possibly none, and the host
+    /// takes them in before it acts on what made it cancel.
+    Interrupted {
+        gathered: Vec<M>,
+    },
     ResumeRequired,
     Closed,
+}
+
+/// The host's request that a read in flight end and return what it already took.
+///
+/// The host hands one to each [`BrokerSourceConnector::next_batch`] and cancels it when a quiesce
+/// change or a stop needs its loop back while the read waits. It never drops a read in flight:
+/// after cancelling it keeps awaiting the read, takes in what the read returns, and only then acts
+/// on the change or the stop.
+#[derive(Debug, Default)]
+pub struct SourceReadCancellation {
+    token: CancellationToken,
+}
+
+impl SourceReadCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Asks the read to end. Only the host that started the read cancels it.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Resolves once the host has cancelled the read.
+    pub async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
+
+    /// Waits for `read` unless the host cancels first, which returns `None`.
+    ///
+    /// A read that is ready completes even after the host cancelled, so a message its transport
+    /// already delivered is taken rather than left behind. A read still waiting when the host
+    /// cancels is dropped, and anything it holds is dropped with it, so a source passes only a read
+    /// that holds nothing it took from its transport while it waits.
+    pub async fn unless_cancelled<F>(&self, read: F) -> Option<F::Output>
+    where
+        F: Future,
+    {
+        nervix_primitives::select! {
+            biased;
+            output = read => Some(output),
+            () = self.token.cancelled() => None,
+        }
+    }
 }
 
 /// A source message whose transport values remain owned by its connector.
@@ -274,9 +330,18 @@ pub trait BrokerSourceConnector: SourceConnector {
     type Message: SourceMessage<Position = Self::Position>;
     type Position: Clone + Debug + Send + Sync + 'static;
 
+    /// Reads the next batch, up to `request.max_messages`.
+    ///
+    /// The host awaits every read to completion, so a read never loses what it took from its
+    /// transport to a dropped future. Once the host cancels `cancellation`, the read ends as soon
+    /// as it can and returns [`SourceBatch::Interrupted`] with every message it had already taken.
+    /// A source that gathers several messages observes the cancellation between its transport
+    /// reads, and a read it cannot interrupt without losing what that read returns completes
+    /// within its own bounded wait first.
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>>;
 
     /// Settles `positions` as processed on the transport.
@@ -519,5 +584,47 @@ impl SourceHost {
 
     pub fn record_unconfirmed_stop(&self, positions: usize) {
         self.services.record_unconfirmed_stop(positions);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use std::{
+        future::{self, poll_fn},
+        pin::pin,
+        task::Poll,
+    };
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn a_read_that_is_ready_completes_after_the_host_cancelled() {
+        let cancellation = SourceReadCancellation::new();
+        cancellation.cancel();
+
+        let output = cancellation.unless_cancelled(future::ready(7)).await;
+
+        assert_eq!(output, Some(7));
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_read_still_waiting_when_the_host_cancels_ends_without_output() {
+        let cancellation = SourceReadCancellation::new();
+        let mut waiting = pin!(cancellation.unless_cancelled(future::pending::<u8>()));
+
+        let first = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+        assert!(
+            first.is_pending(),
+            "a read nobody cancelled keeps waiting for its transport"
+        );
+        assert!(!cancellation.is_cancelled());
+        cancellation.cancel();
+
+        assert_eq!(waiting.await, None);
     }
 }

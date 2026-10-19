@@ -32,9 +32,9 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths, optional_bool_client_config_value,
-    optional_client_config_value, read_tls_file,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, client_tls_paths,
+    optional_bool_client_config_value, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, PulsarSubscription, PulsarSubscriptionName,
@@ -676,11 +676,17 @@ impl BrokerSourceConnector for PulsarSource {
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let first = match consumer.next().await {
+        let Some(first) = cancellation.unless_cancelled(consumer.next()).await else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let first = match first {
             Some(Ok(message)) => message,
             Some(Err(error)) => {
                 return Err(Report::new(PulsarSourceError::Receive)
@@ -717,6 +723,9 @@ impl BrokerSourceConnector for PulsarSource {
                         }
                         None => break,
                     }
+                }
+                () = cancellation.cancelled() => {
+                    return Ok(SourceBatch::Interrupted { gathered: messages });
                 }
             }
         }

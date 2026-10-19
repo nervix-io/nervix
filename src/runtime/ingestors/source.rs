@@ -18,7 +18,7 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use std::{future, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use error_stack::{FrameKind, Report, ResultExt as _};
@@ -45,6 +45,10 @@ use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryE
 #[path = "source_acknowledgement.rs"]
 mod acknowledgement;
 use acknowledgement::{BatchRoots, RuntimeBatchAcknowledgement};
+
+#[path = "source_read.rs"]
+mod read;
+use read::{ReadOutcome, read_batch};
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
@@ -1768,79 +1772,66 @@ pub(super) async fn run_source_instance_with_retry<C>(
         }
 
         let request = batch_request(acknowledgement);
-        let next_flush = host.next_flush();
-        let batch = nervix_primitives::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-                continue;
-            }
-            _ = host.wait_for_quiesce_change() => {
-                continue;
-            }
-            _ = wait_for_flush(next_flush) => {
-                flush_for_lifecycle(&mut host).await;
-                continue;
-            }
-            batch = source.next_batch(request) => batch,
-        };
-
-        let messages = match batch {
-            Ok(SourceBatch::Messages(messages)) => messages,
-            Ok(SourceBatch::ResumeRequired) => {
+        let read = read_batch(&mut source, &mut host, &mut shutdown, request).await;
+        let end = read.end;
+        let messages = match read.into_outcome(&host) {
+            ReadOutcome::TakeIn(messages) => messages,
+            ReadOutcome::ResumeRequired => {
                 ready = false;
                 host.mark_unready();
                 let delay = source_retry_delay(retry_delay);
-                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
                 retry_delay = next_retry_delay(retry_delay, retry_policy);
                 continue;
             }
-            Ok(SourceBatch::Closed) => break,
-            Err(error) => {
+            ReadOutcome::Closed => break,
+            ReadOutcome::Failed(error) => {
                 let delay = source_retry_delay(retry_delay);
                 host.record_transient_error(source_failure_reason(&error), delay);
                 host.report_error(format!("{error:#}"));
-                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
                     break;
                 }
                 retry_delay = next_retry_delay(retry_delay, retry_policy);
                 continue;
             }
         };
-        if messages.is_empty() {
-            host.report_error("source returned an empty message batch".to_string());
-            continue;
-        }
 
-        let retry_after = source_retry_delay(retry_delay);
-        match handle_batch(&mut source, &mut host, policy, retry_after, messages).await {
-            BatchDisposition::Accepted => {
-                retry_delay = retry_policy.backoff;
-            }
-            BatchDisposition::Retry => {
-                let delay = source_retry_delay(retry_delay);
-                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
-                    break;
+        // What a cancelled read returns is taken in before the loop acts on the quiesce change or
+        // the stop that cancelled it.
+        if !messages.is_empty() {
+            let retry_after = source_retry_delay(retry_delay);
+            match handle_batch(&mut source, &mut host, policy, retry_after, messages).await {
+                BatchDisposition::Accepted => {
+                    retry_delay = retry_policy.backoff;
                 }
-                retry_delay = next_retry_delay(retry_delay, retry_policy);
-            }
-            BatchDisposition::RetryRejection(positions) => {
-                pending_rejection = Some(positions);
-                if let Err(error) = source.suspend().await {
-                    host.report_error(format!("{error:#}"));
+                BatchDisposition::Retry => {
+                    let delay = source_retry_delay(retry_delay);
+                    if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
+                        break;
+                    }
+                    retry_delay = next_retry_delay(retry_delay, retry_policy);
                 }
-                ready = false;
-                host.mark_unready();
-                let delay = source_retry_delay(retry_delay);
-                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
-                    break;
+                BatchDisposition::RetryRejection(positions) => {
+                    pending_rejection = Some(positions);
+                    if let Err(error) = source.suspend().await {
+                        host.report_error(format!("{error:#}"));
+                    }
+                    ready = false;
+                    host.mark_unready();
+                    let delay = source_retry_delay(retry_delay);
+                    if !end.wait_for_retry(&mut host, &mut shutdown, delay).await {
+                        break;
+                    }
+                    retry_delay = next_retry_delay(retry_delay, retry_policy);
                 }
-                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                BatchDisposition::Shutdown => break,
             }
-            BatchDisposition::Shutdown => break,
+        }
+        if end.stops() {
+            break;
         }
     }
 
@@ -2045,13 +2036,6 @@ async fn wait_for_retry(
     }
 }
 
-async fn wait_for_flush(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => sleep_until(deadline).await,
-        None => future::pending().await,
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -2062,7 +2046,7 @@ mod tests {
 
     use nervix_connector::{
         IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices,
-        SourceConnector, SourceError, SourceResult,
+        SourceConnector, SourceError, SourceReadCancellation, SourceResult,
     };
     use nervix_primitives::sync::{Notify, blocking::Mutex};
 
@@ -2192,6 +2176,7 @@ mod tests {
         async fn next_batch(
             &mut self,
             request: SourceBatchRequest,
+            _cancellation: &SourceReadCancellation,
         ) -> SourceResult<SourceBatch<Self::Message>> {
             let mut observations = self.observations.lock();
             observations.requests.push(request);
@@ -2972,6 +2957,10 @@ mod reconnect_tests;
 #[cfg(test)]
 #[path = "source_confirmation_tests.rs"]
 mod confirmation_tests;
+
+#[cfg(test)]
+#[path = "source_read_tests.rs"]
+mod read_tests;
 
 impl Drop for RuntimeSourceHost {
     fn drop(&mut self) {

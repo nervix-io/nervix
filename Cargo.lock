@@ -6886,10 +6886,12 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
  "rdkafka",
+ "shuttle",
  "thiserror 2.0.21",
  "tracing",
 ]
