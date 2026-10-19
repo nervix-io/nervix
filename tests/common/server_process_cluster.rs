@@ -21,13 +21,14 @@ use std::{
     time::Duration,
 };
 
+use error_stack::Report;
 use nix::sys::signal::Signal;
 use tempfile::TempDir;
 
 use super::{
     cluster::{InterconnectTestCa, TestSession},
     phase_deadline::PhaseDeadline,
-    process_cluster_convergence::ClusterConvergence,
+    process_cluster_convergence::{ClusterConvergence, ConvergenceError},
     server_process::{ServerProcess, ServerProcessLaunch, ServerProcessOption, describe_exit},
     status_request::STATUS_REQUEST_TIMEOUT,
 };
@@ -174,8 +175,8 @@ impl ServerProcessCluster {
     }
 
     /// Launches the bootstrap member and then each joining member, waiting until each accepts
-    /// commands before launching the next, and then until all of them agree on their voters. A
-    /// member joins the cluster before its readiness wait, so a failed start still holds it.
+    /// commands before launching the next, and then until all of them converge. A member joins the
+    /// cluster before its readiness wait, so a failed start still holds it.
     async fn start_members(
         &mut self,
         certificate_authority: &InterconnectTestCa,
@@ -215,7 +216,7 @@ impl ServerProcessCluster {
             self.nodes.insert(node_id.clone(), process);
             self.member_mut(&node_id)?.wait_until_ready().await?;
         }
-        self.convergence().wait().await
+        self.convergence().wait().await.map_err(convergence_failure)
     }
 
     pub(crate) fn node_ids(&self) -> Vec<String> {
@@ -248,11 +249,14 @@ impl ServerProcessCluster {
     }
 
     /// Starts an exited member again from its own database and ports, then waits until every
-    /// member reports the same leader and all configured voters.
+    /// member has converged on the new process.
     pub(crate) async fn restart(&mut self, node_id: &str) -> io::Result<()> {
         let convergence = self.convergence();
         let member = self.member_mut(node_id)?;
-        convergence.relaunch(node_id, member.restart()).await
+        convergence
+            .relaunch(node_id, member.restart())
+            .await
+            .map_err(convergence_failure)
     }
 
     /// The node the running members report as leader.
@@ -299,8 +303,8 @@ impl ServerProcessCluster {
         Ok(())
     }
 
-    /// Starts all persisted voters before awaiting readiness, then observes their common leader
-    /// and voter set through each process's public status endpoint.
+    /// Starts all persisted voters before awaiting readiness, then waits until they converge
+    /// through each process's public status endpoint.
     pub(crate) async fn restart_all(&mut self) -> io::Result<()> {
         for process in self.nodes.values_mut() {
             nervix_primitives::task::consume_budget().await;
@@ -310,7 +314,7 @@ impl ServerProcessCluster {
             nervix_primitives::task::consume_budget().await;
             process.wait_until_ready().await?;
         }
-        self.convergence().wait().await
+        self.convergence().wait().await.map_err(convergence_failure)
     }
 
     async fn leader(&self) -> io::Result<&ServerProcess> {
@@ -365,4 +369,9 @@ impl ServerProcessCluster {
         }
         ClusterConvergence::new(members, CLUSTER_READY_TIMEOUT)
     }
+}
+
+/// The failure a step reports when its cluster did not converge, with its whole chain of causes.
+fn convergence_failure(report: Report<ConvergenceError>) -> io::Error {
+    io::Error::other(format!("{report:#}"))
 }
