@@ -880,7 +880,7 @@ event. What a stop leaves to a finish, and what the finish does with it, differs
 
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
-| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts what is still queued when the deadline passes |
+| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO_ACK`: messages the producer accepted and has not sent. `ACK`: nothing | Discards them with the producer |
 | MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
@@ -894,6 +894,20 @@ librdkafka's flush without waiting and polls in between, so on a loaded node the
 that instant and the records linger past the deadline. The Kafka finish therefore waits inside
 librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
 the delivery reports that end the flush.
+
+The Kafka sink counts the records its producer holds itself. librdkafka's out-queue length adds
+every event waiting in the producer's queue, its errors, statistics and unserved delivery reports
+among them, so it would report events as unsent records and take a producer that holds only events
+for one that still holds records. Each record instead carries a retention as its delivery opaque,
+from just before the sink hands it over until librdkafka gives the opaque back: with the refusal
+when the producer does not take the record, or to the producer's polling thread with the record's
+served delivery report. The report ends the record's retention before it reaches a confirmed
+publish awaiting it, so a publish that read every answer leaves nothing a finish counts. A finish
+that finds no retained record has nothing to send. A finish whose flush gives up while librdkafka
+still holds a message whose report its polling thread is serving, after every record's report was
+served, has flushed, since no record is left. Otherwise `Unsent` counts the records still retained.
+Because a record stays retained until its report is served, the producer always asks for every
+record's report and sets `delivery.report.only.error` to `false` after the client's own entries.
 
 A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's

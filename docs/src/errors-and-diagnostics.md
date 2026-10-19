@@ -604,7 +604,9 @@ record itself, an invalid or oversized message, timestamp or record, rejects tha
 `SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
-beneath `SinkFinishError::Unsent`, which counts the records still queued; a flush that fails
+beneath `SinkFinishError::Unsent`, which counts the records whose delivery report has not been
+served and never the errors, statistics or other events waiting in the producer's queue; a flush
+that gives up only after every record's report was served is no failure. A flush that fails
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `SinkFinishError::Flush`.
 

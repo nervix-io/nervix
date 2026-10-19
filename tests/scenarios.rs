@@ -14171,6 +14171,7 @@ async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domai
 }
 
 #[when("these NSPL commands are executed on the active session")]
+#[when("these Plexus statements are executed on the active session")]
 async fn when_these_nspl_commands_are_executed_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
