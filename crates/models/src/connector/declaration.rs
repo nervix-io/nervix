@@ -108,7 +108,8 @@ pub struct OptionChoice {
     /// What names the choice: its keywords, the literal it writes, or the kind of value it takes
     /// in angle brackets. A requirement and a capability name the choice by it.
     pub name: &'static str,
-    /// The value a statement writes after the choice's own words, where it takes one.
+    /// The value a statement writes with the choice, where it takes one: after the choice's own
+    /// words, or before them where the example writes it there.
     pub value: Option<OptionValue>,
     /// The option written in full with this choice, its keywords included.
     pub example: &'static str,

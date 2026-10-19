@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use nervix_models::{
     HttpSourceEntity, IngestQuiesceOverflow, IngestSourceKind, KafkaSourceEntity, MqttQos,
     MqttSession, MqttSourceEntity, NatsSourceEntity, PrometheusSourceEntity, PulsarSourceEntity,
-    RabbitMqSourceEntity, RedisSourceEntity, SqsSourceEntity,
+    PulsarSubscriptionOwnership, RabbitMqSourceEntity, RedisSourceEntity, SqsSourceEntity,
 };
 
 use super::{
@@ -219,6 +219,23 @@ pub(super) fn IngestorEditor(
         </Show>
         <Show when=move || source_kind() == Some(IngestSourceKind::Pulsar(PulsarSourceEntity::Topic)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Subscription />
+            <fieldset class="create-field create-ingestor-subscription-ownership">
+                <legend>"Subscription ownership"</legend>
+                <button type="button" data-ownership="ingestor"
+                    class:active=move || signals.ingestor.get().source.subscription_ownership == Some(PulsarSubscriptionOwnership::Ingestor)
+                    disabled=pending
+                    on:click=move |_| {
+                        signals.ingestor.update(|draft| draft.source.subscription_ownership = Some(PulsarSubscriptionOwnership::Ingestor));
+                        signals.edit();
+                    }>{PulsarSubscriptionOwnership::Ingestor.keywords()}</button>
+                <button type="button" data-ownership="provisioned"
+                    class:active=move || signals.ingestor.get().source.subscription_ownership == Some(PulsarSubscriptionOwnership::Provisioned)
+                    disabled=pending
+                    on:click=move |_| {
+                        signals.ingestor.update(|draft| draft.source.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned));
+                        signals.edit();
+                    }>{PulsarSubscriptionOwnership::Provisioned.keywords()}</button>
+            </fieldset>
         </Show>
         <Show when=move || source_kind() == Some(IngestSourceKind::Prometheus(PrometheusSourceEntity::Query)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=SourceField::Query />

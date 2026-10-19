@@ -298,6 +298,12 @@ relay. Do not use them to scan across branches.
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
+  `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
+  domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
+  the operator must create before the ingestor reads. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
+  failures and what `ALTER` keeps.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The

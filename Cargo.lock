@@ -7072,6 +7072,7 @@ dependencies = [
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "pulsar",
  "tempfile",
  "thiserror 2.0.21",

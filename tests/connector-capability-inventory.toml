@@ -626,10 +626,17 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "SUBSCRIPTION"
+capability = "SUBSCRIPTION OWNED BY INGESTOR"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "Pulsar ingestor delivers JSON payloads to a subscribed relay" },
+  { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "Dropping a Pulsar ingestor removes the subscription it owns" },
+]
+
+[[capability]]
+capability = "SUBSCRIPTION PROVISIONED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "A provisioned Pulsar subscription outlives its dropped ingestor and keeps what arrives meanwhile" },
 ]
 
 [[capability]]

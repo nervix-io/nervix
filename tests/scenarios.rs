@@ -173,6 +173,7 @@ mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
+mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
 mod websocket_lifecycle;
@@ -16826,7 +16827,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
