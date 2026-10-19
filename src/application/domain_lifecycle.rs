@@ -558,13 +558,30 @@ impl SessionServiceImpl {
         domain: &DomainName,
         mutation: Option<&DomainMutationLease>,
     ) -> Result<(), Report<DomainAlterError>> {
-        self.inner
+        #[cfg(feature = "testing")]
+        Box::pin(self.inner.runtime.pause_domain_resume_if_armed(
+            self.inner.consensus.local_node_id(),
+            domain,
+            crate::fault_injection::DomainResumeBoundary::Proposal,
+        ))
+        .await;
+        let resumed = self
+            .inner
             .consensus
             .resume_domain(domain.clone(), mutation)
-            .await
-            .change_context_lazy(|| DomainAlterError::ResumeDomain {
-                domain: domain.clone(),
-            })?;
+            .await;
+        #[cfg(feature = "testing")]
+        if resumed.is_err() {
+            Box::pin(self.inner.runtime.pause_domain_resume_if_armed(
+                self.inner.consensus.local_node_id(),
+                domain,
+                crate::fault_injection::DomainResumeBoundary::Failure,
+            ))
+            .await;
+        }
+        resumed.change_context_lazy(|| DomainAlterError::ResumeDomain {
+            domain: domain.clone(),
+        })?;
         self.apply_current_cluster_state()
             .await
             .change_context_lazy(|| DomainAlterError::RestoreIngestion {

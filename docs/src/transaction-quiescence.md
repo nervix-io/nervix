@@ -273,6 +273,10 @@ durable completion boundary; [Errors And Diagnostics](./errors-and-diagnostics.m
 failure propagation and public diagnostic rendering.
 
 A new leader resumes a `COMMITTING` transaction from its recorded applying step and frozen plan.
+Before recording application completion, the coordinator resolves every engaged domain pause in
+that step's actual report under the transaction's mutation lease. A resume refusal leaves the step
+applying, including when its effect has a definitive failure to report. Recovery releases the pause
+before retaining the terminal result, so a completed transaction cannot strand its domain paused.
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery
