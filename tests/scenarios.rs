@@ -8167,15 +8167,13 @@ async fn then_the_sqs_forwarder_holds_that_answer(world: &mut ScenarioWorld) {
         .as_ref()
         .expect("a forwarder that can hold an SQS answer must be configured first")
         .holding();
-    nervix_primitives::time::timeout(SQS_ANSWER_HOLD_TIMEOUT, holding)
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "the SQS forwarder held no answer carrying the armed text within \
-                 {SQS_ANSWER_HOLD_TIMEOUT:?}"
-            )
-        })
-        .expect("the forwarder keeps its hold state while it waits");
+    match nervix_primitives::time::timeout(SQS_ANSWER_HOLD_TIMEOUT, holding).await {
+        Ok(held) => held.expect("the forwarder keeps its hold state while it waits"),
+        Err(_elapsed) => panic!(
+            "the SQS forwarder held no answer carrying the armed text within \
+             {SQS_ANSWER_HOLD_TIMEOUT:?}"
+        ),
+    }
 }
 
 /// Releases the held answer as soon as the entity gate pause for `domain` is reached. The release
@@ -8199,15 +8197,13 @@ async fn when_the_sqs_forwarder_releases_that_answer_at_the_entity_gate_pause(
         .as_ref()
         .expect("a forwarder that can hold an SQS answer must be configured first")
         .release_once(reached);
-    nervix_primitives::time::timeout(ENTITY_GATE_PAUSE_TIMEOUT, released)
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "the entity gate pause that releases the held SQS answer was not reached within \
-                 {ENTITY_GATE_PAUSE_TIMEOUT:?}"
-            )
-        })
-        .expect("the release task does not panic");
+    match nervix_primitives::time::timeout(ENTITY_GATE_PAUSE_TIMEOUT, released).await {
+        Ok(release) => release.expect("the release task does not panic"),
+        Err(_elapsed) => panic!(
+            "the entity gate pause that releases the held SQS answer was not reached within \
+             {ENTITY_GATE_PAUSE_TIMEOUT:?}"
+        ),
+    }
 }
 
 /// The URL of the started dependency placeholder `source` names.

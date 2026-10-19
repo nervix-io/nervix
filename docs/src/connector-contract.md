@@ -694,7 +694,7 @@ in one of these ways:
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
 | `MQTT TOPIC` | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service took the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
 ### MQTT session retirement
 

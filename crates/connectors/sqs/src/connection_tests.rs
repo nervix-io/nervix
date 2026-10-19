@@ -425,7 +425,7 @@ fn a_service_response_keeps_its_short_description() {
 }
 
 /// A port on the loopback address nothing listens on, so every connection to it is refused.
-async fn closed_port() -> u16 {
+pub(crate) async fn closed_port() -> u16 {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("a loopback port is available");

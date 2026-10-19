@@ -25,7 +25,7 @@ use super::{
     SqsSourceResult,
 };
 use crate::connection_tests::{
-    Fixture, QUEUE, batch_request, client_config, open_source, read_request,
+    Fixture, QUEUE, batch_request, client_config, closed_port, open_source, read_request,
 };
 
 /// The body of the one message a stand-in answers a receive with.
@@ -105,16 +105,29 @@ async fn polling_source(fixture: &Fixture, listener: &TcpListener) -> SqsSource 
     source
 }
 
-/// What a read cancelled while its receive waited returned, and the stand-in that held the receive.
-struct CancelledRead {
+/// What the host does once the read's receive reached the stand-in, before the stand-in answers it.
+#[derive(Clone, Copy, Debug)]
+enum HostAction {
+    /// The host keeps waiting for the read.
+    Waits,
+    /// The host cancels the read.
+    Cancels,
+}
+
+/// What a read returned while the stand-in held its receive, and the stand-in that held it.
+struct HeldRead {
     batch: SourceBatch<SqsSourceMessage>,
     /// Returns the receive the stand-in took.
     service: JoinHandle<String>,
 }
 
-/// Starts a read of a source polling a stand-in that answers its receive with `answer`, cancels the
-/// read once its receive reached the stand-in, and only then lets the stand-in answer.
-async fn cancel_while_the_receive_waits(fixture: &Fixture, answer: ReceiveAnswer) -> CancelledRead {
+/// Starts a read of a source polling a stand-in that answers its receive with `answer`, lets the
+/// host act once the receive reached the stand-in, and only then lets the stand-in answer.
+async fn read_while_the_receive_is_held(
+    fixture: &Fixture,
+    answer: ReceiveAnswer,
+    action: HostAction,
+) -> HeldRead {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("a loopback port is available");
@@ -129,26 +142,44 @@ async fn cancel_while_the_receive_waits(fixture: &Fixture, answer: ReceiveAnswer
         receive_arrived
             .await
             .expect("the read sends its receive to the stand-in");
-        cancellation.cancel();
-        // The read observes the cancellation while its receive still waits for the answer.
-        nervix_primitives::task::yield_now().await;
+        if let HostAction::Cancels = action {
+            cancellation.cancel();
+            // The read observes the cancellation while its receive still waits for the answer.
+            nervix_primitives::task::yield_now().await;
+        }
         answer_now
             .send(())
             .expect("the stand-in waits to answer the receive it holds");
     };
     let (batch, ()) = tokio::join!(read, host);
 
-    CancelledRead {
+    HeldRead {
         batch: batch.expect("a receive the service answers fails no read"),
         service,
     }
 }
 
 #[nervix_primitives::test]
+async fn a_read_hands_over_the_message_its_receive_brings() {
+    let fixture = Fixture::start().await;
+
+    let read =
+        read_while_the_receive_is_held(&fixture, ReceiveAnswer::Message, HostAction::Waits).await;
+
+    let SourceBatch::Messages(messages) = read.batch else {
+        panic!("a receive that brings a message completes the read with it");
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].payload(), BODY.as_bytes());
+    read.service.await.expect("the stand-in does not panic");
+}
+
+#[nervix_primitives::test]
 async fn a_receive_in_flight_when_the_host_cancels_the_read_still_hands_over_its_message() {
     let fixture = Fixture::start().await;
 
-    let read = cancel_while_the_receive_waits(&fixture, ReceiveAnswer::Message).await;
+    let read =
+        read_while_the_receive_is_held(&fixture, ReceiveAnswer::Message, HostAction::Cancels).await;
 
     let SourceBatch::Messages(messages) = read.batch else {
         panic!(
@@ -177,7 +208,8 @@ async fn a_receive_in_flight_when_the_host_cancels_the_read_still_hands_over_its
 async fn a_cancelled_read_whose_receive_brings_nothing_sends_no_further_receive() {
     let fixture = Fixture::start().await;
 
-    let read = cancel_while_the_receive_waits(&fixture, ReceiveAnswer::Empty).await;
+    let read =
+        read_while_the_receive_is_held(&fixture, ReceiveAnswer::Empty, HostAction::Cancels).await;
 
     let SourceBatch::Interrupted { gathered } = read.batch else {
         panic!("a cancelled read that took nothing ends interrupted");
@@ -225,6 +257,37 @@ async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_u
             report.downcast_ref::<SqsSourceError>(),
             Some(SqsSourceError::CancelledReceiveUnanswered { budget })
                 if *budget == CANCELLED_RECEIVE_BUDGET
+        ),
+        "{report:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_receive_that_cannot_reach_the_service_fails_the_read() {
+    let fixture = Fixture::start().await;
+    let port = closed_port().await;
+    let mut source = open_source(
+        &client_config(&format!("http://127.0.0.1:{port}")),
+        fixture.dns(),
+    )
+    .await;
+    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+
+    let Err(report) = source
+        .next_batch(batch_request(), &SourceReadCancellation::new())
+        .await
+    else {
+        panic!("a refused connection cannot return a batch");
+    };
+
+    assert_eq!(
+        report.current_context(),
+        &SourceError::Read { connector: SQS }
+    );
+    assert!(
+        matches!(
+            report.downcast_ref::<SqsSourceError>(),
+            Some(SqsSourceError::Receive)
         ),
         "{report:?}"
     );
