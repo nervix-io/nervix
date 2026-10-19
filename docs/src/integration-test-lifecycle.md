@@ -46,6 +46,22 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The Pulsar finish scenario runs a public `STOP` concurrently with a timed resumption of its
+paused dependency forwarder. The forwarder's resumption future owns its control and cancellation
+handles and is awaited beside the command, so no timer task outlives the scenario. It records
+the resumption instant before reopening the gate; the command records its completion instant
+when it returns. The scenario requires completion after resumption and observes the retained payloads
+exactly once after recovery. The longer receipt scenario uses the same fault control to delay the broker
+beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOUT`. These
+dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
+
+The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
+in topic lookup responses, retaining every other command and payload field. The driver's discovered
+producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
+An opaque bootstrap proxy alone does not establish a Pulsar broker fault because discovery can
+otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
+recovery, including a producer with all 100 receipt slots occupied.
+
 The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
 write locks. It observes a pending metadata lock on the server before queuing the next writer,
 and observes each emitter's public pool-wait state to establish the borrowing order. Releasing
@@ -506,7 +522,14 @@ The boundary between them is kept in four places.
   records its disposition.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
-  retain the protocol's received dispositions. A paced-driver file fixture writes only the
+  retain the protocol's received dispositions. A restore completion probe explicitly requesting
+  outcome recovery repeats its same reference, statement and archive against the cluster's nodes
+  after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
+  its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a
+  definitive failure or upload refusal immediately, and keeps the terminal reply's actual origin
+  and complete report. The staging scenario transfers leadership while publication is paused on
+  three nodes, while retaining the one-node example and its staging and branch-state checks.
+  A paced-driver file fixture writes only the
   scenario's ledger or effect file before the driver starts. The published driver reads that
   file, and the scenario checks the process exit and the occurrence count of its terminal cause.
   No harness deadline shortens
@@ -525,14 +548,27 @@ The boundary between them is kept in four places.
   See [Shutdown And Recovery](./shutdown.md#stop-requests).
   A real-process cluster can deliver `SIGKILL` to all three voters before waiting for any child to
   exit. On restart it launches all existing stores before awaiting readiness, so no one voter is
-  required to answer without the persisted quorum. Each node must then report the same leader and
-  all three voters through its public status endpoint.
+  required to answer without the persisted quorum. A start and a whole restart end once every node
+  reports, through its public status endpoint, the same leader, all three voters, and a
+  `connected` application-health target for every other node, as an in-process cluster's
+  construction does.
   It can also fault one voter while the other two keep the quorum: `SIGKILL`, after which a step
   waits for that child to exit and checks the signal, or `SIGSTOP`, which freezes the process with
   its connections open, so its peers hear nothing from it and see no reset until `SIGCONT` lets it
-  run again. A killed voter restarts from its own database and ports, and the step then waits for
-  the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
-  fixture asks only the running ones which node leads.
+  run again. A killed voter restarts from its own database and ports. Its killed process never left
+  the voter configuration, so the nodes agree on their leader and voters again as soon as the new
+  process follows the leader, while each peer still judges the voter by what it learned of the
+  killed process. The leader's effective availability, which placement, failover and `RELOCATE`
+  read, lists the new process only once the leader's gossip has seen it live and its application
+  health no longer holds the killed process's target, as
+  [Application Health And Availability](./interconnect.md#application-health-and-availability)
+  describes. Before the relaunch the step therefore reads the generation of the target each running
+  node observes the killed process through, and afterwards it waits for the same leader and voters
+  and for every node to report every other node `connected`, the relaunched voter through a newer
+  generation. A peer begins a target only for a process it has discovered, and it never discovers
+  the exited process again, so a stale observation of the killed process cannot end the wait, and
+  a `RELOCATE` onto the relaunched voter that follows finds it live. While a voter is killed or
+  frozen, the fixture asks only the running ones which node leads.
   The held-installation restart fixture also stops every in-process node first. It then holds the
   first runtime installation one named node begins, before that node's process-start catch-up, so
   the restarted cluster answers opens that reach the node before it has installed any committed
@@ -605,7 +641,7 @@ second module runs the operation, it is named after the owner.
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's startup, its exit, or a log line | `server_process.rs`, reading the executable through `server_executable.rs` | 120 seconds from the launch for reading the executable, spawning the process and waiting until it accepts commands; 120 and 60 seconds | The step fails, quoting the last 80 lines of the process log. A failed startup also says how reading the executable went, which kinds of answer the readiness probes got and when, and, when its deadline passed, what the still-running process and its host were doing |
-| Convergence of a started or restarted real-process cluster, or of one restarted member | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
+| Convergence of a started or restarted real-process cluster, or of one restarted member | `process_cluster_convergence.rs`, run by `server_process_cluster.rs` | 120 seconds for the running members to report the targets they observe a killed member through before it is relaunched, then 120 seconds for convergence after the start or relaunch, with each status request capped at 10 seconds | The step fails naming the first condition the members' latest answers did not meet in the last round that ended before the deadline, with every member's latest status and any later failed request; a status line the wait cannot read fails it at once |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, the duration the step names for a clock line, between 10 and 60 seconds, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
@@ -2144,6 +2180,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
+| A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched` |
 | A server process launch reads exactly the ranges its executable maps, refuses an image it cannot read, and reads nothing once its deadline has passed | `a_preparation_reads_each_mapped_range_once_and_nothing_else`, `the_server_executable_maps_less_than_its_whole_file`, `a_file_that_is_not_an_elf_image_is_refused`, `a_file_shorter_than_an_elf_header_is_refused`, `a_program_header_table_outside_the_file_is_refused`, `program_headers_of_another_size_are_refused`, `a_mapped_range_past_the_end_of_the_file_is_refused`, `a_preparation_whose_deadline_has_passed_reads_nothing` |
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |

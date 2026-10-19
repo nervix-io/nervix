@@ -40,6 +40,7 @@
     - [Database Client Connection Pools](./database-client-pools.md)
   - [Resources](./resources.md)
   - [Ingestors](./ingestors.md)
+  - [Connector Capabilities](./connector-capabilities.md)
   - [Runtime Nodes](./processors.md)
   - [WASM Processor Guests](./wasm-processor-guests.md)
   - [Emitters](./emitters.md)

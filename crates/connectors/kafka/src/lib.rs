@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer and producer configuration, source polling and offset handling,
-//!   record and header publication, delivery-report classification, the delivery bound a
-//!   confirmed publish gives the producer, and producer queue shutdown.
+//!   record and header publication, delivery-report classification, the records the producer
+//!   holds until their delivery reports are served, the delivery bound a confirmed publish gives
+//!   the producer, and producer queue shutdown.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
 //!   `error-stack`, Tokio, and `rust-rdkafka`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -26,6 +27,7 @@
 #[doc(hidden)]
 pub use rdkafka as testing_rdkafka;
 
+mod delivery;
 mod source;
 
 use std::{
@@ -37,6 +39,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use delivery::{HandedOverRecord, KafkaDeliveryReport, KafkaProducerContext};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
@@ -45,12 +48,12 @@ use nervix_connector::{
     SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
 use nervix_models::{ClientConfigEntry, TopicName};
-use nervix_primitives::time::Instant;
+use nervix_primitives::{sync::oneshot, time::Instant};
 use rdkafka::{
     config::ClientConfig,
     error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, OwnedHeaders},
-    producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer},
+    producer::{BaseRecord, Producer, ThreadedProducer},
 };
 pub use source::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
@@ -72,6 +75,10 @@ const MESSAGE_TIMEOUT_PROPERTY: &str = "message.timeout.ms";
 /// The other name librdkafka reads `message.timeout.ms` from.
 const DELIVERY_TIMEOUT_PROPERTY: &str = "delivery.timeout.ms";
 
+/// The librdkafka property that, set to `true`, withholds the delivery report of every record the
+/// broker took.
+const ONLY_ERROR_REPORTS_PROPERTY: &str = "delivery.report.only.error";
+
 /// The longest `message.timeout.ms` librdkafka accepts, which it holds as a C `int` of
 /// milliseconds.
 const LONGEST_MESSAGE_TIMEOUT_MILLIS: u32 = i32::MAX.unsigned_abs();
@@ -90,7 +97,7 @@ pub struct KafkaSinkConfig {
 }
 
 pub struct KafkaSink {
-    producer: FutureProducer,
+    producer: ThreadedProducer<KafkaProducerContext>,
     topic: TopicName,
     mode: BrokerPublishingMode,
 }
@@ -159,14 +166,14 @@ impl TryFrom<Duration> for KafkaMessageTimeout {
 /// The broker's answer for one record handed to the producer, read from the delivery report
 /// librdkafka gives for it.
 struct KafkaAnswer {
-    delivery: DeliveryFuture,
+    report: oneshot::Receiver<KafkaDeliveryReport>,
 }
 
 impl Future for KafkaAnswer {
     type Output = BrokerAnswer;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<BrokerAnswer> {
-        let report = match Pin::new(&mut self.delivery).poll(context) {
+        let report = match Pin::new(&mut self.report).poll(context) {
             Poll::Ready(report) => report,
             Poll::Pending => return Poll::Pending,
         };
@@ -188,9 +195,12 @@ impl KafkaSink {
     /// The configuration of a producer that publishes in `mode` through a client whose entries are
     /// `entries`.
     ///
-    /// The entries pass through as written. A confirmed publish then sets `message.timeout.ms` to
-    /// its `ACK TIMEOUT` and drops the other name librdkafka reads that bound from, so no entry can
-    /// keep the producer trying to deliver a record after the publish stopped waiting for it.
+    /// The entries pass through as written, except that the producer always asks for the delivery
+    /// report of every record: a record stays retained until its report is served, so a record the
+    /// broker took without a report would count as unsent forever. A confirmed publish then sets
+    /// `message.timeout.ms` to its `ACK TIMEOUT` and drops the other name librdkafka reads that
+    /// bound from, so no entry can keep the producer trying to deliver a record after the publish
+    /// stopped waiting for it.
     fn producer_config(
         entries: &[ClientConfigEntry],
         mode: BrokerPublishingMode,
@@ -199,6 +209,7 @@ impl KafkaSink {
         for entry in entries {
             config.set(&entry.key, &entry.value);
         }
+        config.set(ONLY_ERROR_REPORTS_PROPERTY, "false");
         let BrokerPublishingMode::Ack(settings) = mode else {
             return Ok(config);
         };
@@ -216,8 +227,10 @@ impl KafkaSink {
         Ok(config)
     }
 
-    fn create_producer(config: &ClientConfig) -> SinkStartResult<FutureProducer> {
-        match config.create() {
+    fn create_producer(
+        config: &ClientConfig,
+    ) -> SinkStartResult<ThreadedProducer<KafkaProducerContext>> {
+        match config.create_with_context(KafkaProducerContext::new()) {
             Ok(producer) => Ok(producer),
             Err(error) => {
                 let description = error.to_string();
@@ -237,11 +250,8 @@ impl KafkaSink {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
-            match self.enqueue(&record) {
-                Ok(delivery) => {
-                    drop(delivery);
-                    outcome.deliver(record.id);
-                }
+            match self.hand_over(&record, None) {
+                Ok(()) => outcome.deliver(record.id),
                 Err(error) if Self::is_record_rejection(&error) => {
                     outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
                 }
@@ -269,16 +279,17 @@ impl KafkaSink {
             ConfirmationWindow::new(KAFKA, settings, records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
-            let handed_over = self.enqueue(&record);
-            let delivery = match handed_over {
-                Ok(delivery) => delivery,
+            let (answer, report) = oneshot::channel();
+            let handed_over = self.hand_over(&record, Some(answer));
+            match handed_over {
+                Ok(()) => {}
                 Err(error) if Self::is_record_rejection(&error) => {
                     window.reject(record.rejected(format!("kafka rejected record: {error}")));
                     continue;
                 }
                 Err(error) => return window.fail(Self::refused_hand_over(error)),
-            };
-            let answer = KafkaAnswer { delivery };
+            }
+            let answer = KafkaAnswer { report };
             if let Err(failure) = window.admit(record.id, record.occurred_at, answer).await {
                 return window.fail(failure);
             }
@@ -286,9 +297,23 @@ impl KafkaSink {
         window.finish().await
     }
 
-    fn enqueue(&self, message: &SinkRecord) -> Result<DeliveryFuture, KafkaError> {
-        let mut record =
-            FutureRecord::<str, [u8]>::to(self.topic.as_str()).payload(message.payload.as_slice());
+    /// Hands `message` to the producer, which retains it until librdkafka serves its delivery
+    /// report.
+    ///
+    /// `answer` is where a confirmed publish awaits that report; a `NO ACK` publish awaits none. A
+    /// record the producer refuses is never retained: its delivery opaque comes back with the
+    /// refusal and is dropped here.
+    fn hand_over(
+        &self,
+        message: &SinkRecord,
+        answer: Option<oneshot::Sender<KafkaDeliveryReport>>,
+    ) -> Result<(), KafkaError> {
+        let handed_over = self.producer.context().retain(answer);
+        let mut record = BaseRecord::<str, [u8], Box<HandedOverRecord>>::with_opaque_to(
+            self.topic.as_str(),
+            handed_over,
+        )
+        .payload(message.payload.as_slice());
         if let Some(key) = message.key.as_deref() {
             record = record.key(key);
         }
@@ -305,7 +330,7 @@ impl KafkaSink {
             record = record.headers(owned_headers);
         }
         self.producer
-            .send_result(record)
+            .send(record)
             .map_err(|(source, _record)| source)
     }
 
@@ -314,15 +339,17 @@ impl KafkaSink {
     /// A delivered record is confirmed, and a delivery error about the record itself refuses it
     /// for good. Any other ending leaves the record's outcome unknown: the broker, the connection
     /// or the producer failed, or the producer dropped the record without a report.
-    fn broker_answer(report: <DeliveryFuture as Future>::Output) -> BrokerAnswer {
+    fn broker_answer(
+        report: Result<KafkaDeliveryReport, oneshot::error::RecvError>,
+    ) -> BrokerAnswer {
         match report {
-            Ok(Ok(_delivery)) => Ok(BrokerVerdict::Confirmed),
-            Ok(Err((error, _record))) if Self::is_record_rejection(&error) => {
+            Ok(KafkaDeliveryReport::Delivered) => Ok(BrokerVerdict::Confirmed),
+            Ok(KafkaDeliveryReport::Failed(error)) if Self::is_record_rejection(&error) => {
                 Ok(BrokerVerdict::Rejected {
                     message: format!("kafka rejected record: {error}"),
                 })
             }
-            Ok(Err((error, _record))) => {
+            Ok(KafkaDeliveryReport::Failed(error)) => {
                 let description = format!("kafka delivery failed: {error}");
                 Err(Report::new(error)
                     .change_context(SinkPublishError::Publish { sink: KAFKA })
@@ -352,7 +379,10 @@ impl KafkaSink {
     /// that instant keeps lingering, and a loaded node reaches the deadline with every record still
     /// queued. This waits inside librdkafka's flush instead, one step at a time, while the
     /// producer's polling thread takes the delivery reports that let the flush end.
-    fn flush_until(producer: &FutureProducer, deadline: Instant) -> Result<(), KafkaError> {
+    fn flush_until(
+        producer: &ThreadedProducer<KafkaProducerContext>,
+        deadline: Instant,
+    ) -> Result<(), KafkaError> {
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -374,10 +404,12 @@ impl KafkaSink {
         }
     }
 
-    /// How many records the producer holds that have no delivery report yet.
-    fn queued_records(&self) -> u64 {
-        u64::try_from(self.producer.in_flight_count())
-            .assured("librdkafka counts the messages a producer holds with a non-negative int")
+    /// How many records the producer holds whose delivery report librdkafka has not served yet.
+    ///
+    /// The errors, statistics and other events waiting in the producer's queue are not records, so
+    /// this is not librdkafka's own out-queue length, which counts them too.
+    fn retained_records(&self) -> u64 {
+        self.producer.context().retained_records()
     }
 
     fn is_record_rejection(error: &KafkaError) -> bool {
@@ -400,8 +432,11 @@ impl SinkLifecycle for KafkaSink {
     /// Flushes the producer's queue, which holds the records a `NO ACK` publish delivered and
     /// librdkafka has not sent yet, and any record a publish handed over and then gave up on. A
     /// flush sends them at once, whatever `linger.ms` says.
+    ///
+    /// The outcome counts records alone, each until librdkafka serves its delivery report, and never
+    /// the events waiting in the producer's queue beside them.
     async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
-        if self.queued_records() == 0 {
+        if self.retained_records() == 0 {
             return Ok(SinkFinish::NothingHeld);
         }
         let producer = self.producer.clone();
@@ -413,7 +448,13 @@ impl SinkLifecycle for KafkaSink {
         match flushed {
             Ok(()) => Ok(SinkFinish::Flushed),
             Err(error @ KafkaError::Flush(RDKafkaErrorCode::OperationTimedOut)) => {
-                let records = self.queued_records();
+                let records = self.retained_records();
+                if records == 0 {
+                    // The flush waits until librdkafka holds no message, and librdkafka still holds
+                    // one while the polling thread serves its report, so a flush can give up after
+                    // the last record's report was served. Every record then left the producer.
+                    return Ok(SinkFinish::Flushed);
+                }
                 Err(Report::new(error).change_context(SinkFinishError::Unsent {
                     sink: KAFKA,
                     records,
@@ -453,15 +494,12 @@ mod tests {
         AckConfirmation, BrokerPublishingMode, BrokerVerdict, SinkPublishError, SinkStartError,
     };
     use nervix_models::ClientConfigEntry;
-    use rdkafka::{
-        Timestamp as KafkaTimestamp,
-        error::{KafkaError, RDKafkaErrorCode},
-        message::OwnedMessage,
-        producer::future_producer::Delivery,
-    };
+    use nervix_primitives::sync::oneshot;
+    use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 
     use super::{
-        KafkaMessageTimeout, KafkaMessageTimeoutError, KafkaSink, LONGEST_MESSAGE_TIMEOUT_MILLIS,
+        KafkaDeliveryReport, KafkaMessageTimeout, KafkaMessageTimeoutError, KafkaSink,
+        LONGEST_MESSAGE_TIMEOUT_MILLIS,
     };
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -478,19 +516,6 @@ mod tests {
         })
     }
 
-    /// The record a failed delivery report hands back.
-    fn returned_record() -> OwnedMessage {
-        OwnedMessage::new(
-            Some(b"{\"user_id\":42}".to_vec()),
-            None,
-            "orders".to_string(),
-            KafkaTimestamp::NotAvailable,
-            0,
-            0,
-            None,
-        )
-    }
-
     /// How an emitter describes `report`: its first printable attachment.
     fn description<C: Context>(report: &Report<C>) -> Option<String> {
         report.frames().find_map(|frame| match frame.kind() {
@@ -503,13 +528,7 @@ mod tests {
 
     #[test]
     fn a_delivered_record_is_confirmed() {
-        let delivery = Delivery {
-            partition: 0,
-            offset: 7,
-            timestamp: KafkaTimestamp::NotAvailable,
-        };
-
-        let answer = KafkaSink::broker_answer(Ok(Ok(delivery)));
+        let answer = KafkaSink::broker_answer(Ok(KafkaDeliveryReport::Delivered));
 
         let Ok(verdict) = answer else {
             panic!("a delivered record has an answer, got {answer:?}");
@@ -521,7 +540,7 @@ mod tests {
     fn a_delivery_error_about_the_record_refuses_it_for_good() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::MessageSizeTooLarge);
 
-        let answer = KafkaSink::broker_answer(Ok(Err((error.clone(), returned_record()))));
+        let answer = KafkaSink::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
 
         let Ok(verdict) = answer else {
             panic!("a refused record has an answer, got {answer:?}");
@@ -538,7 +557,7 @@ mod tests {
     fn any_other_delivery_error_leaves_the_record_unknown_under_its_typed_cause() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::MessageTimedOut);
 
-        let answer = KafkaSink::broker_answer(Ok(Err((error.clone(), returned_record()))));
+        let answer = KafkaSink::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
 
         let Err(failure) = answer else {
             panic!("a timed out record has no answer, got {answer:?}");
@@ -551,6 +570,33 @@ mod tests {
         assert_eq!(
             description(&failure),
             Some(format!("kafka delivery failed: {error}"))
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_report_the_producer_dropped_leaves_the_record_unknown() {
+        let (answer, report) = oneshot::channel::<KafkaDeliveryReport>();
+        drop(answer);
+        let dropped = report.await;
+
+        let answer = KafkaSink::broker_answer(dropped);
+
+        let Err(failure) = answer else {
+            panic!("a record without a report has no answer, got {answer:?}");
+        };
+        assert_eq!(
+            failure.current_context(),
+            &SinkPublishError::Publish { sink: "kafka" }
+        );
+        assert!(
+            failure
+                .downcast_ref::<oneshot::error::RecvError>()
+                .is_some(),
+            "the closed report channel stays beneath the publish failure"
+        );
+        assert_eq!(
+            description(&failure),
+            Some("kafka producer dropped the record without a delivery report".to_string())
         );
     }
 
@@ -637,6 +683,29 @@ mod tests {
 
         assert_eq!(config.get("delivery.timeout.ms"), Some("300000"));
         assert_eq!(config.get("message.timeout.ms"), None);
+    }
+
+    #[test]
+    fn a_producer_reports_every_record_whatever_the_client_says() {
+        let entries = [
+            entry("bootstrap.servers", "127.0.0.1:9092"),
+            entry("delivery.report.only.error", "true"),
+        ];
+
+        for mode in [
+            BrokerPublishingMode::NoAck,
+            confirmed(Duration::from_secs(5)),
+        ] {
+            let config = KafkaSink::producer_config(&entries, mode)
+                .expect("the client entries pass through");
+
+            assert_eq!(
+                config.get("delivery.report.only.error"),
+                Some("false"),
+                "a record stays retained until its report is served, in {mode:?}"
+            );
+            assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+        }
     }
 
     #[test]

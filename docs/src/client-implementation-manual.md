@@ -345,8 +345,11 @@ retained reference, query and transaction expectations.
   state or counts, including `COMMITTED`.
 - **X-4.** A client SHOULD send `COMMIT` with `expected_preview` set to the preview identity the
   user reviewed: the one from the last append's admission, or from an inspection of the attached
-  transaction at its current position. It MUST NOT refresh that preview from a `PreviewStale` reply,
-  from an inspection of another transaction, or from an inspection at an older position.
+  transaction at its current position. An inspection runs on the concurrent lane, so its report can
+  already include an append whose outcome has not arrived; the client MUST keep that preview under
+  the position the report names and use it once the append's outcome reports that position, rather
+  than discard it. It MUST NOT refresh that preview from a `PreviewStale` reply, from an inspection
+  of another transaction, or from an inspection at an older position.
 - **X-5.** While a commit is `COMMITTING`, a client MUST keep waiting for the commit's own outcome,
   repeating the commit under its reference after any interruption.
 - **X-6.** On `TransactionDetached`, a client MUST send `AttachTransactionRequest` for the

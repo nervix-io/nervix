@@ -124,11 +124,13 @@ pub use connector::{
     OtelAggregationTemporality, OtelConfigEntry, OtelLogsSink, OtelMappings, OtelMetric,
     OtelMetricKind, OtelMetricsSink, OtelScope, OtelSink, OtelSinkEntity, OtelTracesSink,
     OtelValueMapping, PositionClass, PostgresConfigEntry, PostgresConflictAction, PostgresSink,
-    PostgresSinkEntity, PostgresTableSink, PostgresValueMapping, PrometheusConfigEntry,
-    PrometheusIngestMode, PrometheusIngestorAlteration, PrometheusQuerySource, PrometheusSource,
-    PrometheusSourceEntity, PropertyDeclaration, PulsarConfigEntry, PulsarIngestMode,
-    PulsarIngestorAlteration, PulsarSink, PulsarSinkEntity, PulsarSource, PulsarSourceEntity,
-    PulsarSubscriptionName, PulsarTopicName, PulsarTopicSink, PulsarTopicSource,
+    PostgresSinkEntity, PostgresTableSink, PostgresValueMapping, PrometheusApiRoot,
+    PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey,
+    PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestorAlteration,
+    PrometheusQuerySource, PrometheusSource, PrometheusSourceEntity, PropertyDeclaration,
+    PulsarConfigEntry, PulsarIngestMode, PulsarIngestorAlteration, PulsarSink, PulsarSinkEntity,
+    PulsarSource, PulsarSourceEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicName, PulsarTopicSink, PulsarTopicSource,
     RabbitMqConfigEntry, RabbitMqIngestMode, RabbitMqIngestorAlteration, RabbitMqQueueName,
     RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink, RabbitMqSinkEntity, RabbitMqSource,
     RabbitMqSourceEntity, RedisChannelName, RedisConfigEntry, RedisIngestorAlteration,
@@ -169,7 +171,7 @@ pub use expression::{
 };
 pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
-    HttpRequestFieldError, HttpTarget,
+    HttpRequestFieldError, HttpRequestTimeout, HttpRequestTimeoutError, HttpTarget,
 };
 pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};

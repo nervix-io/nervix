@@ -17,7 +17,7 @@ use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
     CreateEndpoint, DomainName, EndpointType, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
-    RelayName, SourceReference, parse_duration_text,
+    PrometheusApiRoot, RelayName, SourceReference, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -239,7 +239,6 @@ impl DomainState {
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
                 | Model::ClientOtel(_)
-                | Model::ClientPrometheus(_)
                 | Model::ClientRabbitMq(_)
                 | Model::ClientRedis(_)
                 | Model::ClientMqtt(_)
@@ -277,6 +276,21 @@ impl DomainState {
                             identifier: identifier.as_str().to_string(),
                             reason: "UDF code exceeds the 64 KiB limit".to_string(),
                         }));
+                    }
+                }
+                Model::ClientPrometheus(client) => {
+                    if let Err(report) = PrometheusApiRoot::of_client_config(&client.config) {
+                        // The refusal quotes the issue, which names the key, so the one message a
+                        // failed command shows states the whole reason; the vocabulary's report
+                        // stays beneath it.
+                        let issue = report.current_context().clone();
+                        return Err(report.change_context(
+                            RegistryError::InvalidPrometheusClientConfig {
+                                domain: domain.clone(),
+                                client: client.name.clone(),
+                                issue,
+                            },
+                        ));
                     }
                 }
                 Model::ClientWebsockets(client) => {

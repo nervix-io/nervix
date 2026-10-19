@@ -11,6 +11,10 @@ Turn a user's streaming requirements into an explicit, deployable Nervix graph. 
 needed for the request. Treat that versioned documentation as the authority; never reconstruct
 clause order or connector options from memory.
 
+For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
+alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
+requirements, metadata types, headers, batching and the reasons ingest and emit differ.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
@@ -29,9 +33,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
-- Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
-  expectations, emitter publishing mode, confirmation window and timeout where applicable, retry
-  pacing, ordering, and offsets.
+- Source and sink: connector kinds, externally provisioned entity names, whether an operator
+  provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
+  emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
+  ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or

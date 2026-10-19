@@ -16,6 +16,13 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
+The Pulsar sink's running publishing choice keeps related state together: the `NO_ACK` variant
+owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
+confirmation settings. An empty receipt collection means there are no outstanding receipts,
+and an absent failure means none has been observed. These are task-owned execution values,
+never persisted state or substitutes for a missing publishing mode. The
+[connector contract](./connector-contract.md#finishing-a-sink) owns their completion semantics.
+
 A forced-recovery destination that has not installed its execution schedule yet retains that
 absence as an installation wait, rather than inferring that its checkpoints are missing. The
 installation publication and application sequence establish the execution before its fingerprint
