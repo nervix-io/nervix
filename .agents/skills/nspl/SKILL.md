@@ -392,6 +392,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
   outage follows the emitter's declared retry policy.
+- Client deadline keys mean the same thing everywhere: `timeout_ms` bounds a whole request,
+  name resolution, connection and TLS included, and `connect_timeout_ms` bounds establishing a
+  connection, the protocol handshake included. RabbitMQ, Redis, Syslog emitter and WebSocket
+  clients take `connect_timeout_ms` and allow 30 seconds without it; a RabbitMQ client's deadline
+  ends before the AMQP handshake, which has none. Read `Ingestors` or
+  `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
+  bounds them.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,

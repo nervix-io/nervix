@@ -662,14 +662,15 @@ impl RabbitMqSink {
 
     /// A failed connection as a start failure: the client's configuration when it is at fault,
     /// otherwise the sink's initialization, which the host retries. The connection failure is kept
-    /// as the typed cause and its message leads the report.
+    /// as the typed cause, and its chain, down to a `connect_timeout_ms` it ran out of, leads the
+    /// report.
     fn connect_error(report: Report<RabbitMqConnectError>) -> Report<SinkStartError> {
         let context = if report.current_context().is_configuration() {
             SinkStartError::InvalidConfiguration { sink: RABBITMQ }
         } else {
             SinkStartError::Initialize { sink: RABBITMQ }
         };
-        let message = report.current_context().to_string();
+        let message = format!("{report:#}");
         report.change_context(context).attach_printable(message)
     }
 
@@ -964,6 +965,25 @@ mod tests {
             Some("resolving RabbitMQ host 'rabbitmq.nervix.test' failed: the name does not exist")
         );
         assert!(unresolved.downcast_ref::<RabbitMqConnectError>().is_some());
+
+        let connect_timeout = nervix_connector::ConfiguredDeadline::connect(&[])
+            .expect("a client without the key takes the default");
+        let stalled = RabbitMqSink::connect_error(
+            Report::new(connect_timeout.elapsed("the TLS handshake with the RabbitMQ broker"))
+                .change_context(RabbitMqConnectError::TlsHandshake {
+                    host: "rabbitmq.nervix.test".to_string(),
+                }),
+        );
+        let leading = stalled
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            leading.map(String::as_str),
+            Some(
+                "the TLS handshake with RabbitMQ host 'rabbitmq.nervix.test' failed: the TLS \
+                 handshake with the RabbitMQ broker did not finish within connect_timeout_ms 30s"
+            )
+        );
     }
 
     fn returned_message(reply_code: u16, reply_text: &str) -> BasicReturnMessage {

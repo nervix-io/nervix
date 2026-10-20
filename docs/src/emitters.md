@@ -177,6 +177,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | batches retained for consumers on a node: at most 134217728 bytes; when full, holds back what fills it |
+| Network waits | a delivery attempt: `ACK TIMEOUT` |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [CLIENT CONSUMER capability and mirror reference](connector-capabilities.md#client-consumer-emit).
 <!-- connector-matrix:emit-client-consumer:end -->
@@ -256,6 +260,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | a request: name resolution, connection, TLS, writing it and its final response headers: `timeout_ms`; required |
+| Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-emit).
 <!-- connector-matrix:emit-http-request:end -->
@@ -973,6 +981,24 @@ CREATE IF NOT EXISTS CLIENT kafka_tls
   };
 ```
 
+## Client Deadlines
+
+A client's `timeout_ms` and `connect_timeout_ms` mean the same thing for every connector that reads
+them. `timeout_ms` bounds the whole of one request or operation: name resolution, connection setup,
+TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name resolution, the
+address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
+milliseconds.
+
+`HTTP`, `SENTRY`, `OTEL`, `SQS` and `CLICKHOUSE` clients read `timeout_ms`; an `HTTP` request
+emitter's client requires it. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and
+allow 30 seconds when it is left out; a `REDIS` command pool also waits no longer than that to check
+out a connection. A `RABBITMQ` client's deadline covers resolving the broker, the address attempts
+and TLS; the AMQP handshake that follows has no deadline. A request or connection that runs out of
+its deadline becomes the emitter's transient status, and the emitter retries on its policy; a
+connection that runs out of `connect_timeout_ms` is reported naming the key and its bound.
+[Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
+bounds each one, including the waits nothing bounds yet.
+
 ## Supported Emitter Sinks
 
 ### Kafka
@@ -1006,6 +1032,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | records the producer queues: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT` |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000 |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
 <!-- connector-matrix:emit-kafka-topic:end -->
@@ -1065,6 +1095,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | receipts held under NO ACK: at most 100 receipts; when full, holds back what fills it<br>messages the driver queues for its connection: driver default, 100 messages; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 10 s per address<br>topic lookup, producer creation and receipts: driver default, the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK |
+| Driver limits | Messages above the broker's announced maximum are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-emit).
 <!-- connector-matrix:emit-pulsar-topic:end -->
@@ -1129,6 +1163,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and confirm select: unbounded<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: unbounded |
+| Driver limits | A frame above the negotiated frame_max ends the connection. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
@@ -1187,6 +1225,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | checking out a connection, a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to a PUBLISH: driver default, 500 ms |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
 <!-- connector-matrix:emit-redis-pubsub:end -->
@@ -1234,6 +1276,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | publishes queued for the driver: set by 1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2; when full, fails the publish for the host to retry |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded |
+| Driver limits | Packets above the broker's maximum packet size are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
@@ -1289,6 +1335,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush: unbounded<br>a JetStream acknowledgement: `ACK TIMEOUT` |
+| Driver limits | Messages above the server's max_payload are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
@@ -1336,6 +1386,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | bytes queued for a peer: unbounded |
+| Network waits | connecting and the ZMTP handshake: unbounded<br>a send: unbounded |
+| Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [ZEROMQ PUSH capability and mirror reference](connector-capabilities.md#zeromq-push-emit).
 <!-- connector-matrix:emit-zeromq-push:end -->
@@ -1374,6 +1428,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [SYSLOG COLLECTOR capability and mirror reference](connector-capabilities.md#syslog-collector-emit).
 <!-- connector-matrix:emit-syslog-collector:end -->
@@ -1421,6 +1479,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |
+| Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-emit).
 <!-- connector-matrix:emit-sqs-queue:end -->
@@ -1502,6 +1564,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | yes |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; unbounded when omitted |
+| Driver limits | An event above 1,000,000 bytes is rejected. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [SENTRY EVENT capability and mirror reference](connector-capabilities.md#sentry-event-emit).
 <!-- connector-matrix:emit-sentry-event:end -->
@@ -1596,6 +1662,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | the export request of a publish without BATCH: unbounded |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | gRPC responses above 4 MiB are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [OTEL LOGS capability and mirror reference](connector-capabilities.md#otel-logs-emit).
 <!-- connector-matrix:emit-otel-logs:end -->
@@ -1634,6 +1704,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | the export request of a publish without BATCH: unbounded |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | gRPC responses above 4 MiB are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [OTEL TRACES capability and mirror reference](connector-capabilities.md#otel-traces-emit).
 <!-- connector-matrix:emit-otel-traces:end -->
@@ -1673,6 +1747,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | the export request of a publish without BATCH: unbounded |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | gRPC responses above 4 MiB are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [OTEL METRICS capability and mirror reference](connector-capabilities.md#otel-metrics-emit).
 <!-- connector-matrix:emit-otel-metrics:end -->
@@ -1851,6 +1929,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [CLICKHOUSE TABLE capability and mirror reference](connector-capabilities.md#clickhouse-table-emit).
 <!-- connector-matrix:emit-clickhouse-table:end -->
@@ -1977,6 +2059,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | a pool acquire: name resolution, connection, TLS and authentication: fixed 30s<br>an insert and its metadata query: unbounded |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
@@ -2065,6 +2151,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | connection, its handshake and an insert: unbounded |
+| Driver limits | The driver has no connect, read or write timeout. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -2150,6 +2240,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |
+| Driver limits | A document above 16 MiB is rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MONGODB COLLECTION capability and mirror reference](connector-capabilities.md#mongodb-collection-emit).
 <!-- connector-matrix:emit-mongodb-collection:end -->
@@ -2208,6 +2302,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |
+| Network waits | catalog requests: unbounded<br>object-store operations: driver default, 60 s per operation and 10 s per read or write, retried 3 times |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [ICEBERG TABLE capability and mirror reference](connector-capabilities.md#iceberg-table-emit).
 <!-- connector-matrix:emit-iceberg-table:end -->

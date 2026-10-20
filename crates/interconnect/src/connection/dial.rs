@@ -60,7 +60,7 @@ impl TransportState {
             OutboundDial::Advertised => {
                 let resolved = self
                     .resolver
-                    .resolve(key.endpoint.host(), key.endpoint.port(), budget.remaining())
+                    .resolve(key.endpoint.host(), key.endpoint.port(), budget.lookup())
                     .await;
                 match resolved {
                     Ok(addresses) => addresses,

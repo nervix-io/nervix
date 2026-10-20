@@ -27,6 +27,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     entity_union::{ALTERED_PAIR_CHECKED, connector_sinks, connector_source_kinds},
     source::AlteredIngestorSource,
 };
@@ -89,6 +93,41 @@ const CLIENT_ACK_PARALLEL: DeclaredDelivery = DeclaredDelivery {
     requires: &[],
 };
 
+/// What the connector of a CLIENT PRODUCER holds and how long it waits.
+const PRODUCER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "batches one producer submits ahead of their outcomes",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Items {
+                count: 1024,
+                unit: "batches, within 32 MiB, per producer grant",
+            },
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[DeclaredWait {
+        wait: "the acknowledgement of an admitted batch",
+        bound: WaitBound::Clause("ACK TIMEOUT"),
+    }],
+    driver_limits: &[],
+};
+
+/// What the connector of a CLIENT CONSUMER holds and how long it waits.
+const CONSUMER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "batches retained for consumers on a node",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Bytes(134217728),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[DeclaredWait {
+        wait: "a delivery attempt",
+        bound: WaitBound::Clause("ACK TIMEOUT"),
+    }],
+    driver_limits: &[],
+};
+
 impl SourceEntity for ClientProducerSource {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
     /// that no program may read.
@@ -103,6 +142,7 @@ impl SourceEntity for ClientProducerSource {
         quiesce: &[DeclaredQuiesce::SUSPEND],
         locator: None,
         options: &[],
+        bounds: PRODUCER_BOUNDS,
     };
 }
 
@@ -207,6 +247,7 @@ impl SinkEntity for ClientConsumerSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: CONSUMER_BOUNDS,
     };
 }
 

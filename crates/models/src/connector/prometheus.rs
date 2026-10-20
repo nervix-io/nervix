@@ -22,7 +22,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use super::{configured_client::configured_client, entity_union::connector_sources};
+use super::{
+    bounds::{
+        BufferBound, DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sources,
+};
 use crate::{
     AcknowledgementConfirmation, ClientConfigEntry, ClientDeadline, ClientDeadlineError,
     ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod,
@@ -208,6 +215,22 @@ pub struct PrometheusQuerySource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a PROMETHEUS QUERY holds and how long it waits.
+const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "the query response",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[DeclaredWait {
+        wait: "a query: name resolution, connection, TLS and the response",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Required,
+        },
+    }],
+    driver_limits: &["Response heads above 100 headers or 417,792 bytes are refused."],
+};
+
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers
 /// of its own, so a query source reads none.
 impl SourceEntity for PrometheusQuerySource {
@@ -239,6 +262,7 @@ impl SourceEntity for PrometheusQuerySource {
                 },
             },
         ],
+        bounds: PROMETHEUS_SOURCE_BOUNDS,
     };
 }
 

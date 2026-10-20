@@ -29,9 +29,9 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
 
 use super::{
-    ChoiceRequirement, ClientIngestorAlteration, ClientSourceEntity, HttpIngestorAlteration,
-    HttpSource, HttpSourceEntity, KafkaIngestorAlteration, KafkaSource, KafkaSourceEntity,
-    LocatorDeclaration, MqttIngestorAlteration, MqttSource, MqttSourceEntity,
+    ChoiceRequirement, ClientIngestorAlteration, ClientSourceEntity, DeclaredBounds,
+    HttpIngestorAlteration, HttpSource, HttpSourceEntity, KafkaIngestorAlteration, KafkaSource,
+    KafkaSourceEntity, LocatorDeclaration, MqttIngestorAlteration, MqttSource, MqttSourceEntity,
     NatsIngestorAlteration, NatsSource, NatsSourceEntity, OptionDeclaration,
     PrometheusIngestorAlteration, PrometheusSource, PrometheusSourceEntity,
     PulsarIngestorAlteration, PulsarSource, PulsarSourceEntity, RabbitMqIngestorAlteration,
@@ -414,6 +414,8 @@ pub struct IngestSourceCapabilities {
     pub locator: Option<LocatorDeclaration>,
     /// The options its body writes after the locator, in the order a statement writes them.
     pub options: &'static [OptionDeclaration],
+    /// What its connector holds and how long it waits.
+    pub bounds: DeclaredBounds,
 }
 
 impl IngestSourceCapabilities {
@@ -442,7 +444,8 @@ impl IngestSourceCapabilities {
     }
 
     /// What a statement can make every source of the entity do at run time: deliver in each
-    /// declared mode, write each option or choice, and read each typed metadata field.
+    /// declared mode, write each option or choice, read each typed metadata field, and report a
+    /// stalled peer within each deadline key its waits name.
     pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
         let mut capabilities = Vec::new();
         for delivery in self.delivery {
@@ -452,6 +455,7 @@ impl IngestSourceCapabilities {
         for field in self.metadata.declared_fields() {
             capabilities.push(RuntimeCapability::Metadata { field: field.name });
         }
+        capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
         capabilities
     }
 

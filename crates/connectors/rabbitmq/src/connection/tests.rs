@@ -11,8 +11,9 @@ use std::{
 };
 
 use meticulous::ResultExt as _;
+use nervix_connector::DeadlineElapsed;
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, DnsResolver, NameServers};
-use nervix_models::ClientConfigEntry;
+use nervix_models::{ClientConfigEntry, DeadlineKey};
 use nervix_primitives::{
     net::{TcpListener, TcpSocket, TcpStream},
     task::JoinHandle,
@@ -32,6 +33,16 @@ const AMQP_PROTOCOL_HEADER: [u8; 8] = *b"AMQP\x00\x00\x09\x01";
 const GENEROUS_BUDGET: Duration = Duration::from_secs(30);
 /// How long a listener waits for the client to close its side after the handshake failed.
 const CLOSE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The connection deadline a client whose `connect_timeout_ms` is `budget` takes.
+fn connect_deadline(budget: Duration) -> ConfiguredDeadline {
+    let millis = budget.as_millis().to_string();
+    ConfiguredDeadline::connect(&[ClientConfigEntry {
+        key: "connect_timeout_ms".to_string(),
+        value: millis,
+    }])
+    .assured("each check's budget is a positive whole number of milliseconds")
+}
 
 /// A resolver asking one local authority, with the files it was loaded from.
 struct Fixture {
@@ -228,7 +239,10 @@ async fn connections_dial_the_first_answer_that_accepts_and_hand_lapin_the_trans
     let broker_side = stand_in_broker(listener);
 
     let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
-    let Err(report) = broker.connect_within(GENEROUS_BUDGET).await else {
+    let Err(report) = broker
+        .connect_within(connect_deadline(GENEROUS_BUDGET))
+        .await
+    else {
         panic!("a listener that does not speak AMQP cannot complete the handshake");
     };
 
@@ -256,7 +270,10 @@ async fn an_address_that_never_answers_leaves_time_for_the_next() {
     let broker_side = stand_in_broker(listener);
 
     let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
-    let Err(report) = broker.connect_within(Duration::from_secs(4)).await else {
+    let Err(report) = broker
+        .connect_within(connect_deadline(Duration::from_secs(4)))
+        .await
+    else {
         panic!("a listener that does not speak AMQP cannot complete the handshake");
     };
 
@@ -285,7 +302,7 @@ async fn no_answer_that_accepts_ends_within_the_budget() {
     let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
     let budget = Duration::from_secs(1);
     let started = Instant::now();
-    let Err(report) = broker.connect_within(budget).await else {
+    let Err(report) = broker.connect_within(connect_deadline(budget)).await else {
         panic!("neither answer accepts a connection");
     };
 
@@ -293,6 +310,12 @@ async fn no_answer_that_accepts_ends_within_the_budget() {
         report.current_context(),
         RabbitMqConnectError::Unreachable { host } if host == BROKER
     ));
+    let elapsed = report.downcast_ref::<DeadlineElapsed>().copied();
+    assert_eq!(
+        elapsed.map(|elapsed| (elapsed.key, elapsed.bound)),
+        Some((DeadlineKey::ConnectTimeout, budget)),
+        "the silent answer ran the connection out of its deadline: {report:?}"
+    );
     let attempts: Vec<&String> = report
         .frames()
         .filter_map(|frame| frame.downcast_ref::<String>())
@@ -322,7 +345,10 @@ async fn names_that_do_not_resolve_keep_their_dns_failure() {
     ] {
         fixture.authority.set(BROKER, answer);
         let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}.:5672/%2f"));
-        let Err(report) = broker.connect_within(GENEROUS_BUDGET).await else {
+        let Err(report) = broker
+            .connect_within(connect_deadline(GENEROUS_BUDGET))
+            .await
+        else {
             panic!("a name that does not resolve cannot be dialled");
         };
         let RabbitMqConnectError::Resolve { host, failure } = report.current_context() else {
@@ -349,7 +375,10 @@ async fn ipv6_literals_are_dialled_as_written() {
     let broker_side = stand_in_broker(listener);
 
     let broker = fixture.broker(&format!("amqp://guest:guest@[::1]:{port}/%2f"));
-    let Err(report) = broker.connect_within(GENEROUS_BUDGET).await else {
+    let Err(report) = broker
+        .connect_within(connect_deadline(GENEROUS_BUDGET))
+        .await
+    else {
         panic!("a listener that does not speak AMQP cannot complete the handshake");
     };
 
@@ -404,7 +433,7 @@ async fn amqps_handshakes_that_fail_or_stall_are_tls_failures() {
     ] {
         fixture.answer_name(name, vec![address]);
         let broker = fixture.broker(&format!("amqps://guest:guest@{name}:{port}/%2f"));
-        let Err(report) = broker.connect_within(budget).await else {
+        let Err(report) = broker.connect_within(connect_deadline(budget)).await else {
             panic!("a listener that does not speak TLS cannot complete the handshake");
         };
         assert!(
@@ -414,6 +443,17 @@ async fn amqps_handshakes_that_fail_or_stall_are_tls_failures() {
             ),
             "{name}: {report:?}"
         );
+        // Only the handshake that stalled ran out of the deadline, and its failure names the key.
+        let elapsed = report.downcast_ref::<DeadlineElapsed>().copied();
+        if budget == GENEROUS_BUDGET {
+            assert_eq!(elapsed, None, "{name}: {report:?}");
+        } else {
+            assert_eq!(
+                elapsed.map(|elapsed| (elapsed.key, elapsed.bound)),
+                Some((DeadlineKey::ConnectTimeout, budget)),
+                "{name}: {report:?}"
+            );
+        }
     }
     closes.await.assured("the closing listener does not panic");
     stalls.await.assured("the stalling listener does not panic");
@@ -436,7 +476,10 @@ fn every_runtime_connects_through_the_resolver_it_was_given() {
             fixture.answer(vec![loopback(12)]);
             let broker_side = stand_in_broker(listener);
             let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
-            let Err(report) = broker.connect_within(GENEROUS_BUDGET).await else {
+            let Err(report) = broker
+                .connect_within(connect_deadline(GENEROUS_BUDGET))
+                .await
+            else {
                 panic!("a listener that does not speak AMQP cannot complete the handshake");
             };
             assert!(
@@ -458,7 +501,7 @@ fn every_runtime_connects_through_the_resolver_it_was_given() {
 
 #[test]
 fn a_zero_connection_budget_leaves_nothing_for_address_attempts() {
-    let deadline = OperationBudget::start(Duration::ZERO);
+    let deadline = OperationBudget::start(Duration::ZERO, LookupShare::Whole);
     let addresses = [
         SocketAddr::new(loopback(1), 5672),
         SocketAddr::new(loopback(2), 5672),

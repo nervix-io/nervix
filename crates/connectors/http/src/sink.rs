@@ -31,12 +31,13 @@ use std::{net::SocketAddr, time::Duration};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    HttpRequestSink, PerRecordOutcome, RustlsClientConfigSource, SinkFinish, SinkFinishResult,
-    SinkHost, SinkHttpRequest, SinkLifecycle, SinkPublishError, SinkRecordId, SinkRetryDelay,
-    SinkStartError, SinkStartResult, client_config_value, physical_time::actual_utc_now,
+    ClientConfigError, ConfiguredDeadline, HttpRequestSink, PerRecordOutcome,
+    RustlsClientConfigSource, SinkFinish, SinkFinishResult, SinkHost, SinkHttpRequest,
+    SinkLifecycle, SinkPublishError, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::ClientConfigEntry;
+use nervix_models::{ClientConfigEntry, DeadlineKey};
 use nervix_primitives::{net::TcpStream, sync::StdArc, time::Instant};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
@@ -92,23 +93,16 @@ type HttpAttemptResult<T> = Result<T, Report<HttpAttemptError>>;
 
 impl HttpSink {
     pub fn new(config: HttpSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let timeout_text = client_config_value(&config.config, "timeout_ms", HTTP_SINK)
+        let configured = ConfiguredDeadline::timeout(&config.config)
             .change_context(SinkStartError::InvalidConfiguration { sink: HTTP_SINK })?;
-        let timeout_ms = timeout_text.parse::<u64>().map_err(|_| {
-            Report::new(SinkStartError::InvalidConfiguration { sink: HTTP_SINK })
-                .attach_printable("HTTP timeout_ms must be a positive integer")
-        })?;
-        let timeout = Duration::from_millis(timeout_ms);
-        if timeout_ms == 0
-            || nervix_primitives::time::Instant::now()
-                .checked_add(timeout)
-                .is_none()
-        {
-            return Err(
-                Report::new(SinkStartError::InvalidConfiguration { sink: HTTP_SINK })
-                    .attach_printable("HTTP timeout_ms cannot be scheduled"),
-            );
-        }
+        let Some(timeout) = configured else {
+            return Err(Report::new(ClientConfigError::MissingRequired {
+                connector: HTTP_SINK,
+                key: DeadlineKey::Timeout.key().to_string(),
+            })
+            .change_context(SinkStartError::InvalidConfiguration { sink: HTTP_SINK }));
+        };
+        let timeout = timeout.bound();
         let tls = RustlsClientConfigSource::new(&config.config)
             .build_with_default_roots()
             .change_context(SinkStartError::InvalidConfiguration { sink: HTTP_SINK })?;

@@ -21,7 +21,7 @@ use thiserror::Error;
 pub enum ClientDeadlineError {
     #[error("not a positive whole number of milliseconds")]
     NotPositiveWholeMilliseconds,
-    #[error("longer than the longest timeout a request can be scheduled with")]
+    #[error("longer than the longest deadline a wait can be scheduled with")]
     Unschedulable,
 }
 

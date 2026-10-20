@@ -46,6 +46,9 @@ pub enum ClientConfigError {
     },
     #[error("invalid boolean client config key '{key}' value '{value}'")]
     InvalidBoolean { key: String, value: String },
+    /// A deadline key's value breaks the vocabulary's deadline rule, which the cause beneath names.
+    #[error("invalid client config key '{key}'")]
+    InvalidDeadline { key: &'static str },
 }
 
 #[derive(Debug, Clone)]
