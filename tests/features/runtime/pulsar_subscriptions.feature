@@ -1,4 +1,95 @@
 Feature: Pulsar subscriptions belong to their declared owner
+  @pulsar_subscription_replacement
+  @pulsar_source_retirement @deloxide_stress
+  Scenario Outline: Replacing a Pulsar input removes the owned subscription the replacement leaves behind
+    Given Pulsar is running
+    And a <cluster_size> node nervix cluster is started
+    And Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" is provisioned
+    And Pulsar subscription "<replacement_subscription>" of topic "<replacement_topic>" is provisioned
+    And a Pulsar domain graph reads through "{{pulsar_addr}}"
+    And Pulsar ingestor "events" reads subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" declared "OWNED BY INGESTOR"
+    Then within "30s" Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" has 1 consumer
+    When these Plexus statements are executed
+      """
+      ALTER PULSAR TOPIC INGESTOR events
+        SET FROM broker TOPIC '<replacement_topic>' SUBSCRIPTION '<replacement_subscription>' OWNED BY INGESTOR
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s ON QUIESCE SUSPEND;
+      """
+    Then within "30s" Pulsar subscription "<replacement_subscription>" of topic "<replacement_topic>" has 1 consumer
+    And within "60s" Pulsar topic "preceding_{{test_id}}" has no durable subscription "preceding_{{test_id}}"
+
+    Examples:
+      | cluster_size | replacement_subscription | replacement_topic       |
+      | 1            | replacement_{{test_id}}  | preceding_{{test_id}}   |
+      | 3            | replacement_{{test_id}}  | preceding_{{test_id}}   |
+      | 1            | preceding_{{test_id}}    | replacement_{{test_id}} |
+      | 3            | preceding_{{test_id}}    | replacement_{{test_id}} |
+
+  @pulsar_subscription_replacement
+  @pulsar_source_retirement @deloxide_stress
+  Scenario Outline: A Pulsar replacement reading the same subscription keeps its backlog and declared ownership
+    Given Pulsar is running
+    And a <cluster_size> node nervix cluster is started
+    And Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" is provisioned
+    And a Pulsar domain graph reads through "{{pulsar_addr}}"
+    And Pulsar ingestor "events" reads subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" declared "OWNED BY INGESTOR"
+    Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" has 1 consumer
+    When these Plexus statements are executed
+      """
+      STOP;
+      """
+    Then within "60s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" has no consumers
+    When Pulsar message is published to topic "retained_{{test_id}}"
+      """
+      {"user_id":44}
+      """
+    Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
+    When these Plexus statements are executed
+      """
+      CREATE CODEC equivalent_codec FROM WIRE JSON SCHEMA item_wire TO SCHEMA item;
+      ALTER PULSAR TOPIC INGESTOR events SET DECODE USING equivalent_codec;
+      """
+    Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
+    When these Plexus statements are executed
+      """
+      ALTER PULSAR TOPIC INGESTOR events REPLACE ROUTE TO output
+        INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      """
+    Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
+    When these Plexus statements are executed
+      """
+      CREATE CLIENT equivalent TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}', 'namespace' = 'public/default' };
+      ALTER PULSAR TOPIC INGESTOR events
+        SET FROM equivalent TOPIC 'persistent://public/default/retained_{{test_id}}' SUBSCRIPTION 'retained_{{test_id}}' <ownership> INSTANCES <instances>
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s ON QUIESCE SUSPEND;
+      """
+    Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
+    When these Plexus statements are executed
+      """
+      CREATE SUBSCRIPTION observed TO output;
+      START;
+      """
+    Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" has <instances> consumers
+    And the relay subscription receives a payload
+      """
+      "user_id":44
+      """
+    When Pulsar message is published to topic "retained_{{test_id}}"
+      """
+      {"user_id":45}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":45
+      """
+
+    Examples:
+      | cluster_size | ownership         | instances |
+      | 1            | OWNED BY INGESTOR | 2         |
+      | 3            | OWNED BY INGESTOR | 2         |
+      | 1            | PROVISIONED       | 1         |
+      | 3            | PROVISIONED       | 1         |
+
   @pulsar_subscription_ownership
   Scenario Outline: Pulsar ingestors with the same name in different domains read their own subscriptions under domain-qualified consumer names
     Given Pulsar is running

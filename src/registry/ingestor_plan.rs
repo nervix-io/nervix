@@ -292,8 +292,8 @@ pub(crate) enum SourceStartPlan {
 impl IngestorStartPlan {
     /// Whether replacing this input retires external state that outlives its execution.
     /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
-    /// A Pulsar subscription its ingestor owns is removed only once no replacement reads in its
-    /// place: dropping the ingestor or its domain removes it, and a replacement keeps it.
+    /// A changed owned Pulsar source needs a resolved subscription comparison at composition;
+    /// an absent replacement removes the owned subscription after its source tasks stop.
     pub(crate) fn requires_source_retirement(&self, replacement: Option<&Self>) -> bool {
         let IngestorInputPlan::Transport(input) = &self.input else {
             return false;
@@ -310,7 +310,16 @@ impl IngestorStartPlan {
             }
             SourceStartPlan::Pulsar(source) => {
                 let owned = source.subscription.ownership == PulsarSubscriptionOwnership::Ingestor;
-                owned && replacement.is_none()
+                if !owned {
+                    return false;
+                }
+                if let Some(replacement) = replacement
+                    && let IngestorInputPlan::Transport(input) = &replacement.input
+                    && let SourceStartPlan::Pulsar(replacement) = &input.source
+                {
+                    return source != replacement;
+                }
+                true
             }
             SourceStartPlan::Http(_)
             | SourceStartPlan::Kafka(_)
@@ -1421,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn retirement_removes_an_owned_pulsar_subscription_only_with_its_ingestor() {
+    fn retirement_checks_changed_owned_pulsar_inputs_and_keeps_unchanged_inputs() {
         let case = pulsar_case();
         let plans = planned_entrypoints(domain_models(case.source, case.source_model))
             .assured("a matching source and ingestor produce a plan");
@@ -1429,7 +1438,14 @@ mod tests {
         assert!(owned.requires_source_retirement(None));
         assert!(!owned.requires_source_retirement(Some(owned)));
 
-        // A replacement keeps the owned subscription, whatever it reads.
+        // Codec and route changes do not change the source that reads the subscription.
+        let mut replacement = owned.clone();
+        let mut input = transport_plan(owned).clone();
+        input.codec = named("alternate_json");
+        replacement.input = IngestorInputPlan::Transport(input);
+        assert!(!owned.requires_source_retirement(Some(&replacement)));
+
+        // Changed sources require the composition root to compare their resolved subscriptions.
         let mut input = transport_plan(owned).clone();
         let SourceStartPlan::Pulsar(source) = &mut input.source else {
             panic!("the Pulsar fixture produces a typed Pulsar source");
@@ -1437,10 +1453,10 @@ mod tests {
         source.subscription.name = named("replacement");
         let mut replacement = owned.clone();
         replacement.input = IngestorInputPlan::Transport(input.clone());
-        assert!(!owned.requires_source_retirement(Some(&replacement)));
+        assert!(owned.requires_source_retirement(Some(&replacement)));
         input.source = http_case().plan;
         replacement.input = IngestorInputPlan::Transport(input);
-        assert!(!owned.requires_source_retirement(Some(&replacement)));
+        assert!(owned.requires_source_retirement(Some(&replacement)));
 
         // A provisioned subscription is the operator's, so even a drop keeps it.
         let mut provisioned = owned.clone();

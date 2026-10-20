@@ -359,6 +359,12 @@ The CI jobs divide the work at the scenario boundary:
 | `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side, the two stress selections included: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
+The justfile reads `rust-toolchain.toml` through Python's standard-library `tomllib`, using the
+Python 3.12 or later runtime already required by repository recipes. CI installs `just` and each
+job's execution tools before running the recipes.
+Rust setup passes the declared `1.99` channel explicitly to the toolchain action, installing
+the name that repository recipes and coverage commands request.
+
 The Check workflow and reusable Bolero workflow fetch Git dependencies through Cargo's Git CLI
 transport, selected by `CARGO_NET_GIT_FETCH_WITH_CLI=true`. `Cargo.lock` still pins their revisions.
 A dependency download that fails before a test starts provides no test execution or coverage
@@ -1202,7 +1208,8 @@ Every port the harness binds is drawn from one pool shared by all scenarios in t
 binds port zero on the loopback interface, reads the port the operating system chose, closes it, and
 reserves it in the pool. The operating system would let a second scenario bind a closed port, so the
 reservation is the only thing that keeps two scenarios apart. It cannot see sibling worktrees
-running the same suite, which is why a node startup retries a lost bind on fresh ports.
+running the same suite, or any other socket on the runner, which is why a node startup and a server
+process startup both relaunch a lost bind on fresh ports.
 
 | Holder | Ports | Returned |
 | --- | --- | --- |
@@ -1212,7 +1219,7 @@ running the same suite, which is why a node startup retries a lost bind on fresh
 | gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
 | TCP forwarders | 1 port, shared by every forwarder a scenario stands in front of a dependency | At the end of cleanup, after the cluster has stopped |
-| Server process | 6 | When the process is dropped |
+| Server process | 6, and 1 more for each port a relaunch after a lost bind moved it off | When the process is dropped, the ports it gave up included |
 | A node moved to a new interconnect address | 1 new interconnect port | The port it gave up stays reserved for the rest of the run |
 
 A port returns only once nothing can still dial it. Every scenario names its nodes `node-1`,
@@ -1281,6 +1288,36 @@ every read that does not continue where the previous one ended by 10 ms reproduc
 without the read: the first log line came 111 seconds after the launch, and the deadline passed with
 the last probe still establishing its session. The start made 8,667 such reads before that
 deadline, and 19,151 for the whole scenario.
+
+**A port another socket took.** The harness draws a process's six ports before the launch reads the
+executable, and the process binds them only once it has started. Until then the operating system
+lets any other socket bind a drawn port: an outbound connection's ephemeral port, a fixture
+container, or a node of a sibling worktree. The retained case is a launch of the instrumented server
+on 19 October 2026 that spent 8.4 seconds reading its executable and then found its web console port
+taken. A process that cannot bind a listener exits with status 1 after writing its report on
+standard error, such as `Error: failed to bind web console listen address`. When the readiness wait
+sees the process exit, it reads the outermost context of that report, without the escape sequences
+that emphasise it, and classifies it with the same table as a [node startup](#node-startup): a gRPC,
+HTTP, HTTPS, observability or web console listener, or the interconnect transport's listener, that
+another process bound first is transient and selects that listener alone. Every other ending, and an
+exit without a report, stays terminal and fails the startup at once. A transient ending is launched
+again on freshly drawn ports for that listener, reading the executable first as every launch does,
+within the deadline its startup began with: a relaunch never starts a deadline of its own, and a
+startup launches at most three times, as a node startup does. Each relaunch prints the launch that
+ended, and a startup that became ready after one prints that too:
+
+```text
+server process '<node>' startup launch <n>/3 [transient] exited <elapsed> into its 2m deadline with exit status 1: <reported context>; the next launch moves its <listener> listener to a fresh port; <remaining> of its 2m deadline left
+server process '<node>' startup: ready on launch <n>/3 after <elapsed>; <remaining> of its 2m deadline left
+```
+
+A startup that still fails names every launch it relaunched before the one that ended it. The ports
+a relaunch gives up stay reserved until the fixture is dropped, together with the ports the process
+binds then, because a member's peers and a scenario's clients may still dial an address the process
+published before a restart. A restart is a startup of its own and relaunches the same way. A joining
+member reads the bootstrap member's interconnect address only once the bootstrap member accepts
+commands, and the convergence that follows a member's restart asks the new process on the gRPC port
+its startup ended on.
 
 **A startup that fails.** A failed startup describes itself before anything kills the process. It
 says how reading the executable went, and lists the readiness probes as runs of consecutive probes
@@ -2165,6 +2202,9 @@ The harness guarantees:
 - A server process launch reads every range its executable maps, in file order, within its startup
   deadline and before it spawns the process, and a failed startup is described before anything
   kills the process.
+- A server process launch that another socket kept from binding a drawn listener is launched again
+  on fresh ports for that listener within its startup's deadline, at most three times, and every
+  other ending of a launch fails its startup at once.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -2202,6 +2242,11 @@ Its limits:
 - A process observation reads procfs at one moment. A thread's wait channel names the kernel
   function it waits in, not the call in the process that led there, and a futex wait does not say
   whether the thread waits for a lock or for work.
+- A server process says why its startup ended only in the text of its report, so a lost bind is
+  recognised by comparing the report's outermost context with how the node's application error
+  renders. Until the process binds its gRPC port, a readiness probe dials whatever holds that port:
+  a socket that took it can hold the probe until its request deadline, and another node that took
+  it answers the probe in the process's place.
 
 ## Qualification Evidence
 
@@ -2225,12 +2270,21 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
-| A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched` |
+| A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had and on the port its new process answers on, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched`, `a_relaunched_member_is_asked_where_its_new_process_answers` |
 | A server process launch reads exactly the ranges its executable maps, refuses an image it cannot read, and reads nothing once its deadline has passed | `a_preparation_reads_each_mapped_range_once_and_nothing_else`, `the_server_executable_maps_less_than_its_whole_file`, `a_file_that_is_not_an_elf_image_is_refused`, `a_file_shorter_than_an_elf_header_is_refused`, `a_program_header_table_outside_the_file_is_refused`, `program_headers_of_another_size_are_refused`, `a_mapped_range_past_the_end_of_the_file_is_refused`, `a_preparation_whose_deadline_has_passed_reads_nothing` |
+| A server process report names the listener another socket held only when its outermost context is a lost bind, read without its emphasis | `a_report_names_its_outermost_context_without_its_emphasis`, `the_last_report_a_launch_wrote_is_the_one_read`, `a_log_without_a_report_names_no_context`, `control_sequences_are_removed_and_the_text_between_them_is_kept`, `a_report_of_a_lost_bind_names_the_listener_the_next_launch_moves`, `a_report_of_any_other_failure_names_no_listener` |
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
+
+The scenarios of `tests/features/cluster/server_process_ports.feature` have a listener of their own
+hold a drawn port: at a single process's start, for its web console and for its gRPC listener, at
+the bootstrap member of a three-process cluster, for its interconnect listener, and at a restarted
+member, for its gRPC listener. Each asserts that the startup relaunched exactly once, moved exactly
+that listener, and binds another port for it. A last scenario starts a process whose startup ends
+with another report, a web console certificate without its key, and asserts that the startup fails
+with the process's own exit after one launch.
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
 `cec5f764`, at the CI concurrency factor of two scenarios per CPU with Cucumber's two retries unless
