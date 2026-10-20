@@ -1366,3 +1366,15 @@ mod tests {
         assert!(source.needs_resume());
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_read_tests.rs"]
+mod read_tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "source_shuttle_tests.rs"]
+mod shuttle_tests;

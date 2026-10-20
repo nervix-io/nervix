@@ -605,6 +605,97 @@ Feature: MQTT ingestion
       | 1            | 0             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
       | 3            | 1             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
 
+  @mqtt_parallel_gather_at_quiesce @deloxide_stress
+  Scenario Outline: MQTT ACK PARALLEL publishes a quiesce change meets half gathered reach the relay without waiting for the batch timeout
+    Given MQTT is running
+    And entity gate deadline is configured as "30s"
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE CODEC notification_codec_v2
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_main
+        TYPE MQTT
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-gather-{{test_id}}'
+        };
+      CREATE MQTT TOPIC INGESTOR mqtt_gather
+        FROM mqtt_main TOPIC 'gather_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 10m ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_gather" on the leader node contains
+      """
+      ready: true
+      """
+    # Each batch holds up to eight publishes and waits up to ten minutes for the rest, so every read
+    # below is still gathering when the hold engages or ends.
+    When MQTT QoS 1 message is published to topic "gather_{{test_id}}"
+      """
+      {"user_id":1}
+      """
+    And MQTT QoS 1 message is published to topic "gather_{{test_id}}"
+      """
+      {"user_id":2}
+      """
+    And these NSPL commands begin executing in the background
+      """
+      ALTER MQTT TOPIC INGESTOR mqtt_gather SET DECODE USING notification_codec_v2;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    And within "5s" DESCRIBE INGESTOR "mqtt_gather" on the leader node contains
+      """
+      quiesce state: entity hold
+      """
+    When MQTT QoS 1 message is published to topic "gather_{{test_id}}"
+      """
+      {"user_id":3}
+      """
+    And MQTT QoS 1 message is published to topic "gather_{{test_id}}"
+      """
+      {"user_id":4}
+      """
+    And the entity gate pause for domain "{{domain}}" is released
+    Then within "30s" the relay subscription receives payloads
+      """
+      "user_id":1
+      "user_id":2
+      "user_id":3
+      "user_id":4
+      """
+    And the background NSPL execution succeeds
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   @decode_rejection
   Scenario Outline: MQTT NO ACK drops a payload its codec refuses with its record and delivers the next one
     Given MQTT is running
