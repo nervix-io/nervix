@@ -177,8 +177,8 @@ const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
         "message.max.bytes 1000000",
-        "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON \
-         MESSAGE ERROR.",
+        "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
+         ON MESSAGE ERROR.",
     ],
 };
 
