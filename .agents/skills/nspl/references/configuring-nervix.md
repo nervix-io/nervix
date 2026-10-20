@@ -306,7 +306,9 @@ relay. Do not use them to scan across branches.
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
   the operator must create before the ingestor reads. Consumers register as
   `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
-  failures and what `ALTER` keeps.
+  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
+  topic or subscription name retires the preceding owned subscription best-effort.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The
