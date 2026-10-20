@@ -1030,10 +1030,11 @@ the subscription, because the broker cannot say later who created one:
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
 driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
-not have creates the topic. While a check holds its cursor, the broker refuses to create a
-subscription of that name as a conflict, so an operator's request that arrives in that moment fails
-with HTTP 409 and succeeds when repeated. A subscription that disappears between the check and the
-join is created by the join.
+not have creates the topic when the broker allows automatic topic creation, which is Pulsar's
+default. While a check holds its cursor, the broker refuses to create a subscription of that name
+as a conflict, so an operator's request that arrives in that moment fails with HTTP 409 and
+succeeds when repeated. A subscription that disappears between the check and the join is created
+by the join.
 
 Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
 indices, so ingestors of the same name in different domains are told apart in the broker's
@@ -1429,7 +1430,12 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
-as a duplicate; the ingestor resumes by polling past anything the service expired.
+as a duplicate; the ingestor resumes by polling past anything the service expired. A poll still
+waiting when the ingestor quiesces or stops is never abandoned, because the service takes the
+message it answers with off the queue: the poll completes within its one-second wait, and a message
+it brings dispatches before the source suspends or closes. Only a service that has not answered
+within 10 seconds ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient error;
+a message the poll was returning then stays invisible until its visibility timeout.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on. The source resolves the host of its

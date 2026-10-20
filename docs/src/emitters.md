@@ -2434,10 +2434,10 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
 `ATTACHED` waits only for that declared point and cannot make an earlier `NO_ACK` boundary durable.
-MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a message after Nervix observes
-client-side acceptance, and RabbitMQ `NO_ACK` after the broker's channel has taken it. `DETACHED`
-cannot turn a confirming mode into fire-and-forget inside the emitter; it changes only whether the
-result participates upstream.
+Kafka and Pulsar `NO_ACK`, MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a
+message after Nervix observes client-side acceptance, and RabbitMQ `NO_ACK` after the broker's
+channel has taken it. `DETACHED` cannot turn a confirming mode into fire-and-forget inside the
+emitter; it changes only whether the result participates upstream.
 
 Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
 graph. Downstream consumers and queries can use that key to suppress retries within that admitted

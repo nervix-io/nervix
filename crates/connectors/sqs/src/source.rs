@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The SQS client a source configuration declares, the queue-URL lookup each instance
-//!   makes when it resumes, long polling, message attributes as ingest headers, and deleting a
-//!   message once it is acknowledged.
+//!   makes when it resumes, long polling and how a receive in flight completes when the host
+//!   cancels a read, message attributes as ingest headers, and deleting a message once it is
+//!   acknowledged.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
@@ -21,7 +22,7 @@
     )
 )]
 
-use std::{borrow::Cow, fmt::Debug};
+use std::{borrow::Cow, fmt::Debug, future::Future, pin::pin, time::Duration};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -42,13 +43,31 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, SqsQueueName};
+use nervix_primitives::time::timeout;
 use thiserror::Error;
 
 use crate::connection::{FailedRequest, SqsTrust};
 
 const SQS: &str = "sqs";
-/// How long one receive request waits for a message before the service answers empty.
+/// How long one receive request waits for a message before the service answers empty, in the whole
+/// seconds the request carries.
 const LONG_POLL_SECONDS: i32 = 1;
+/// The long poll as a duration.
+const LONG_POLL: Duration =
+    match Duration::from_secs(1).checked_mul(LONG_POLL_SECONDS.unsigned_abs()) {
+        Some(long_poll) => long_poll,
+        None => panic!("a long poll of a few seconds fits a duration"),
+    };
+const _: () = assert!(LONG_POLL_SECONDS > 0, "every receive long-polls");
+/// How long the service may take beyond the long poll to answer a receive: the request's and the
+/// answer's round trip on a loaded service.
+const RECEIVE_ANSWER_ALLOWANCE: Duration = Duration::from_secs(9);
+/// How long a read the host cancelled still waits for its receive in flight: the rest of the
+/// receive's long poll and its answer. A service that has not answered by then is not answering.
+const CANCELLED_RECEIVE_BUDGET: Duration = match LONG_POLL.checked_add(RECEIVE_ANSWER_ALLOWANCE) {
+    Some(budget) => budget,
+    None => panic!("a long poll and its answer allowance of a few seconds fit a duration"),
+};
 /// The JSON protocol's error type for a queue the service does not have.
 const QUEUE_DOES_NOT_EXIST: &str = "QueueDoesNotExist";
 
@@ -68,6 +87,10 @@ pub enum SqsSourceError {
     MissingQueueUrl { queue: String },
     #[error("failed to receive SQS messages")]
     Receive,
+    #[error(
+        "the SQS receive in flight did not answer within {budget:?} of its read's cancellation"
+    )]
+    CancelledReceiveUnanswered { budget: Duration },
     #[error("failed to delete an acknowledged SQS message")]
     Delete,
 }
@@ -293,6 +316,102 @@ impl SqsSource {
             })),
         }
     }
+
+    /// Long-polls `queue` until the service returns at least one message, or the host cancels the
+    /// read. The cancellation is observed between receives, so a cancelled read sends no further
+    /// receive, and a receive already in flight still completes and hands over what it brought.
+    async fn read_batch<Q: QueueReceive>(
+        queue: &Q,
+        cancellation: &SourceReadCancellation,
+    ) -> SourceResult<SourceBatch<SqsSourceMessage>> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if cancellation.is_cancelled() {
+                return Ok(SourceBatch::Interrupted {
+                    gathered: Vec::new(),
+                });
+            }
+            let received = Self::complete_receive(queue.receive(), cancellation)
+                .await
+                .change_context(SourceError::Read { connector: SQS })?;
+            if received.is_empty() {
+                continue;
+            }
+            let mut messages = Vec::with_capacity(received.len());
+            for message in received {
+                messages.push(SqsSourceMessage::new(message));
+            }
+            return Ok(SourceBatch::Messages(messages));
+        }
+    }
+
+    /// Waits for `receive`, which the host's cancellation does not abandon: the service takes the
+    /// messages it answers with off the queue, so an abandoned answer would leave them invisible
+    /// until their visibility timeout. A receive the host cancels while it waits is awaited for at
+    /// most `CANCELLED_RECEIVE_BUDGET` more, the rest of its long poll and the answer's round trip;
+    /// a service that has not answered by then has stopped answering, and the receive is abandoned
+    /// with a typed failure.
+    async fn complete_receive<F>(
+        receive: F,
+        cancellation: &SourceReadCancellation,
+    ) -> SqsSourceResult<Vec<SqsMessage>>
+    where
+        F: Future<Output = SqsSourceResult<Vec<SqsMessage>>>,
+    {
+        let mut receive = pin!(receive);
+        if let Some(received) = cancellation.unless_cancelled(&mut receive).await {
+            return received;
+        }
+        match timeout(CANCELLED_RECEIVE_BUDGET, receive).await {
+            Ok(received) => received,
+            Err(elapsed) => Err(Report::new(elapsed).change_context(
+                SqsSourceError::CancelledReceiveUnanswered {
+                    budget: CANCELLED_RECEIVE_BUDGET,
+                },
+            )),
+        }
+    }
+}
+
+/// One long-polling receive from a queue: the request a source instance sends through its SDK
+/// client, and a fake service in the checks of how a read meets the host's cancellation.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each steady poll of a source's read sends its receives through its queue"
+    )
+)]
+trait QueueReceive: Sync {
+    /// Asks the queue for one message with all of its attributes, waiting up to the long poll for
+    /// one to arrive, and returns the messages the service answered with, possibly none.
+    fn receive(&self) -> impl Future<Output = SqsSourceResult<Vec<SqsMessage>>> + Send;
+}
+
+/// The queue a source instance receives from through its SDK client.
+struct SdkQueue<'a> {
+    client: &'a SqsClient,
+    url: &'a str,
+}
+
+impl QueueReceive for SdkQueue<'_> {
+    fn receive(&self) -> impl Future<Output = SqsSourceResult<Vec<SqsMessage>>> + Send {
+        let request = self
+            .client
+            .receive_message()
+            .queue_url(self.url)
+            .max_number_of_messages(1)
+            .message_attribute_names("All")
+            .wait_time_seconds(LONG_POLL_SECONDS)
+            .send();
+        async move {
+            match request.await {
+                Ok(response) => Ok(response.messages.unwrap_or_default()),
+                Err(error) => Err(FailedRequest::new(&error)
+                    .report(SqsSourceError::Receive, "SQS ReceiveMessage failed")),
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -338,44 +457,14 @@ impl BrokerSourceConnector for SqsSource {
         _request: SourceBatchRequest,
         cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
-        let Some(queue_url) = self.queue_url.as_deref() else {
+        let Some(url) = self.queue_url.as_deref() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let receive = self
-                .client
-                .receive_message()
-                .queue_url(queue_url)
-                .max_number_of_messages(1)
-                .message_attribute_names("All")
-                .wait_time_seconds(LONG_POLL_SECONDS)
-                .send();
-            // A cancellation abandons the receive in flight, and a message the service was
-            // returning through it stays invisible until its visibility timeout.
-            let Some(received) = cancellation.unless_cancelled(receive).await else {
-                return Ok(SourceBatch::Interrupted {
-                    gathered: Vec::new(),
-                });
-            };
-            let response = match received {
-                Ok(response) => response,
-                Err(error) => {
-                    let failure = FailedRequest::new(&error)
-                        .report(SqsSourceError::Receive, "SQS ReceiveMessage failed");
-                    return Err(failure.change_context(SourceError::Read { connector: SQS }));
-                }
-            };
-            let received = response.messages.unwrap_or_default();
-            if received.is_empty() {
-                continue;
-            }
-            let mut messages = Vec::with_capacity(received.len());
-            for message in received {
-                messages.push(SqsSourceMessage::new(message));
-            }
-            return Ok(SourceBatch::Messages(messages));
-        }
+        let queue = SdkQueue {
+            client: &self.client,
+            url,
+        };
+        Self::read_batch(&queue, cancellation).await
     }
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
@@ -529,3 +618,15 @@ mod tests {
         assert_eq!(SqsMessageAttributes::attribute_value(&list), "a,b");
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_read_tests.rs"]
+mod read_tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "source_shuttle_tests.rs"]
+mod shuttle_tests;
