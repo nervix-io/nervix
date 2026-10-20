@@ -1236,7 +1236,9 @@ Delivery constraints:
 - `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
 - `NO ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
 - `ACK` modes require `SESSION PERSISTENT QOS 1`
-- `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
+- `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
+  a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
+  rather than after its batch timeout
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
 Without a `client_id` in the client configuration, one instance connects as
