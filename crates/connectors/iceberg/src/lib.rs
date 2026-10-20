@@ -1218,6 +1218,11 @@ impl IcebergSinkClient {
         builder.build().map_err(|error| commit_failure(&error))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the external Iceberg catalog owns table loading and its request \
+                                   effects")
+    )]
     async fn refresh_table(&mut self) -> SinkPublishResult<()> {
         let table_ident = self.table.identifier().clone();
         self.table = self
