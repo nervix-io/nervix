@@ -354,14 +354,16 @@ failure through a read-copy-update of the current publication, preserving the ot
 failure even when their transitions race. Healthy polls only read, and identical reports retain
 the same immutable failure observation.
 
-The selected observation gives an active task retry precedence over a connector retry. Otherwise
-an active connector retry stays visible ahead of a task error without a retry; with neither retry,
+The failure selected for retry scheduling gives an active task retry precedence over a connector
+retry. Otherwise an active connector retry stays visible ahead of a task error without a retry; with neither retry,
 the task error takes precedence. This keeps publishing work visible to drains even when the emitter
 buffer is empty. Reporting a task error without a new retry preserves that task's active retry.
-DESCRIBE loads the selected error, backoff and remaining wait from one coherent observation.
+DESCRIBE retains the whole immutable publication, renders both owners' errors when both fail, and
+loads the selected retry's backoff and remaining wait from that same publication.
 The registered TaskStatus Bolero property and production-owner Shuttle check cover independent
-clearing, concurrent reports, coherent selection and immutable retained observations. These are
-publication interleavings; the primitive boundary owns its atomic memory-ordering implementation.
+clearing, concurrent reports, coherent selection, both diagnostic owners and immutable retained
+observations. These are publication interleavings; the primitive boundary owns its atomic
+memory-ordering implementation.
 Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
 registry interest.
 

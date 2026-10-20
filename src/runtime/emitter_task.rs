@@ -2550,6 +2550,39 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn connector_and_task_failures_are_both_described() {
+        let context = sink_context();
+        let host = context.sink_host();
+        let task_reason = "mqtt client refused the record: Request channel is full";
+        let connector_reason =
+            "resolving MQTT host 'mqtt.nervix.test' failed: the name does not exist";
+        let backoff = Duration::from_secs(1);
+
+        context.record_retry(task_reason, backoff, EmitterRetryKind::Infrastructure);
+        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
+
+        let observed = transient_error(&context).assured("both failures remain published");
+        assert!(observed.contains(task_reason), "{observed}");
+        assert!(observed.contains(connector_reason), "{observed}");
+
+        let selected = context
+            .status
+            .snapshot()
+            .assured("the task retry is active");
+        let retry = selected.retry.as_ref().assured("the task selected a retry");
+        assert_eq!(retry.kind, EmitterRetryKind::Infrastructure);
+        assert_eq!(retry.reconnect.backoff, backoff);
+
+        host.clear_transient_error();
+        assert_eq!(transient_error(&context).as_deref(), Some(task_reason));
+        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
+        context.status.clear();
+        assert_eq!(transient_error(&context).as_deref(), Some(connector_reason));
+        host.clear_transient_error();
+        assert!(context.status.snapshot().is_none());
+    }
+
+    #[nervix_primitives::test]
     async fn connector_status_failure_survives_task_success() {
         let context = sink_context();
         let host = context.sink_host();

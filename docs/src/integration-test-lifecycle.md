@@ -1010,6 +1010,11 @@ Browser assertions that wait for an acknowledged subscription tab to disappear p
 seconds. This bounds the server reply and browser update together; on expiry, the step reports the
 tab text that remains visible.
 
+A continuous browser assertion begins after its readiness predicate holds. The console reconnect
+scenario first waits for the restored clock's `PACED` state, then observes the complete stability
+period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
+the bounded selector predicate establishes clock readiness before the stability observation starts.
+
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
 visible while it waits. Its entry holds:

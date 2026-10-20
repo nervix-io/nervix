@@ -709,9 +709,10 @@ retains task-owned and connector-owned failures independently in one atomic publ
 or commit outcome clears the task failure; a retained connector's progress clears the connector
 failure. MQTT packet progress therefore preserves the host's unanswered-publish diagnostic until
 the task succeeds. Repeated healthy operations only read, and reporting a task error without
-selecting a new retry preserves that task's active retry. DESCRIBE selects an active task retry,
-then an active connector retry, then a task error without a retry, rendering error, backoff and
-remaining wait from the same immutable failure. A failed record obtains
+selecting a new retry preserves that task's active retry. DESCRIBE renders both retained errors
+with their `task` and `connector` owners when both fail. It selects an active task retry, then an
+active connector retry, then a task error without a retry, rendering that retry's backoff and
+remaining wait from the same immutable publication as the errors. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
 

@@ -1610,10 +1610,11 @@ Source and sink tasks retain an immutable failure publication. An emitter's task
 connector background task report and clear their own failures independently within that atomic
 publication. SinkHost transient-status callbacks own the connector failure; publish and commit
 outcomes own the task failure. Connection progress therefore preserves a pending publish or commit
-failure, and task success preserves a connector failure awaiting recovery. DESCRIBE observes one
-coherent error/retry pair: an active task retry first, then an active connector retry, and then a
-task error without a retry. Retry state still counts toward a drain when the payload buffer is
-empty. Pooled Redis and SQL sinks retain one wait
+failure, and task success preserves a connector failure awaiting recovery. DESCRIBE renders every
+retained error from one coherent publication, labeling simultaneous failures as `task` and
+`connector`. Its retry is selected from that same publication: an active task retry first, then an
+active connector retry, and then a task error without a retry. Retry state still counts toward a
+drain when the payload buffer is empty. Pooled Redis and SQL sinks retain one wait
 slot per sink and publish it only after a connection borrow returns Pending. Its guard clears on
 completion, error or cancellation; sink teardown removes its own registration. Confirmation
 attempts retain the emitter's startup counter. Quiesced payload and client outcome metrics use

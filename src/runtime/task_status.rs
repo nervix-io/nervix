@@ -31,7 +31,7 @@ enum FailureOwner {
 
 /// Absence of this publication means both writers are healthy.
 #[derive(Debug)]
-enum TaskFailures<R> {
+pub(super) enum TaskFailures<R> {
     Task(Arc<TaskFailure<R>>),
     Connector(Arc<TaskFailure<R>>),
     Both {
@@ -75,9 +75,10 @@ impl<R> TaskFailures<R> {
         Some(StdArc::new(failures))
     }
 
+    /// Selects the failure used by retry scheduling and drain checks.
     /// A pending task retry takes precedence. Otherwise any connector retry stays visible to
     /// drains, ahead of a task error without a retry. With no retry, the task error takes precedence.
-    fn selected(&self) -> Arc<TaskFailure<R>> {
+    pub(super) fn selected(&self) -> Arc<TaskFailure<R>> {
         match self {
             Self::Task(failure) | Self::Connector(failure) => failure.clone(),
             Self::Both { task, connector } => {
@@ -105,6 +106,11 @@ impl<R> Default for TaskStatus<R> {
 }
 
 impl<R: Clone + PartialEq> TaskStatus<R> {
+    /// Retains every failure in one immutable publication for operator inspection.
+    pub(super) fn failures(&self) -> Option<StdArc<TaskFailures<R>>> {
+        self.failures.load_full()
+    }
+
     pub(super) fn snapshot(&self) -> Option<Arc<TaskFailure<R>>> {
         self.failures
             .load()
@@ -260,6 +266,21 @@ mod tests {
                 };
                 let snapshot = status.snapshot();
                 assert_eq!(snapshot.as_deref(), expected);
+                let publication = status.failures();
+                assert_eq!(
+                    publication
+                        .as_deref()
+                        .and_then(|failures| failures.owned(FailureOwner::Task))
+                        .map(|failure| failure.as_ref()),
+                    task.as_ref()
+                );
+                assert_eq!(
+                    publication
+                        .as_deref()
+                        .and_then(|failures| failures.owned(FailureOwner::Connector))
+                        .map(|failure| failure.as_ref()),
+                    connector.as_ref()
+                );
                 snapshots.push((snapshot, expected.cloned()));
             }
             status.clear();
@@ -328,6 +349,22 @@ mod tests {
                                 };
                                 assert_eq!(failure.retry, Some(retry));
                             }
+                            if let Some(publication) = reader.failures() {
+                                for owner in [FailureOwner::Task, FailureOwner::Connector] {
+                                    if let Some(failure) = publication.owned(owner) {
+                                        let retry = match (owner, failure.error.as_str()) {
+                                            (FailureOwner::Task, "task-first") => 1,
+                                            (FailureOwner::Task, "task-second") => 2,
+                                            (FailureOwner::Connector, "connector-first") => 3,
+                                            (FailureOwner::Connector, "connector-second") => 4,
+                                            (_, other) => {
+                                                panic!("unexpected owned failure: {other}")
+                                            }
+                                        };
+                                        assert_eq!(failure.retry, Some(retry));
+                                    }
+                                }
+                            }
                             nervix_primitives::task::yield_now().await;
                         }
                     });
@@ -335,6 +372,17 @@ mod tests {
                         writing.await.assured("status transitions do not panic");
                     }
                     reading.await.assured("status observations do not panic");
+                    let publication = status
+                        .failures()
+                        .assured("both owners retain their final failures");
+                    let published_task = publication
+                        .owned(FailureOwner::Task)
+                        .assured("the task published its final failure");
+                    let published_connector = publication
+                        .owned(FailureOwner::Connector)
+                        .assured("the connector published its final failure");
+                    assert_eq!(published_task.error, "task-second");
+                    assert_eq!(published_connector.error, "connector-second");
                     let task = status
                         .snapshot()
                         .assured("the task failure remains published");
@@ -350,6 +398,8 @@ mod tests {
                     assert!(status.snapshot().is_none());
                     assert_eq!(task.retry, Some(2));
                     assert_eq!(connector.retry, Some(4));
+                    assert_eq!(published_task.retry, Some(2));
+                    assert_eq!(published_connector.retry, Some(4));
                 });
             },
             1_000,

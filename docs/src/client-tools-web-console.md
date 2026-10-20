@@ -80,6 +80,10 @@ it follows the clock, `INTERRUPTED` while the connection is lost, which shows no
 once the server ends the attachment, which the console does not attach again until the selection
 or connection changes.
 
+The terminal's connected-to-leader message confirms the new session's serving node. The selected
+clock remains `ATTACHING` until its own attach reply arrives, including when a new session restores
+it after a leader change. Its `PACED` state and advancing ticks establish restored-clock readiness.
+
 ## Creating Entities From Forms
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource

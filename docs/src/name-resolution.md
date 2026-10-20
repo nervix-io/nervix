@@ -621,6 +621,12 @@ describes.
 A failed lookup is visible through the path that asked. The resolver itself logs no individual
 lookup and exports no metric of its own.
 
+An emitter's description includes both its task failure and its retained connector's failure when
+both are present. An MQTT DNS failure therefore remains visible alongside a refused queued publish;
+each owner clears its own diagnostic when it recovers. The task's pending retry continues to govern
+publishing work and drain accounting, as [Connector Crates And The Connector Contract](./connector-contract.md)
+describes.
+
 | Where | What shows the failure |
 | --- | --- |
 | RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, and the HTTP request emitter | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` shows the lookup failure on its `transient error:` line, with the host and the reason, such as `resolving 'rabbitmq.example.internal' failed: the name does not exist`. An SQS source looks its queue up when an instance resumes, and shows a lookup failure there on the same line |
