@@ -319,7 +319,11 @@ therefore remains explicit cleanup work. A participant that refuses capture, pre
 recovery preparation, confirmation, activation, or reconciliation answers with a rejection whose
 text is its complete failure chain rather than only the outermost failure, so the coordinator
 reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
-module, and saved state revision. Discard is exact and idempotent over the coordination
+module, and saved state revision. A destination whose own process incarnation has advertised that
+it is terminating refuses a planned-handoff preparation before it validates the request, with
+`destination node '<node_id>' is terminating`: the coordinator plans from its gossip view, which can
+still list a stopping peer as eligible, while the destination's own advertisement is authoritative.
+Discard is exact and idempotent over the coordination
 identity, transition ID, domain, and entity; a delayed discard for one operation cannot remove a
 replacement prepared by another operation.
 
@@ -345,7 +349,11 @@ classification.
 
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
-an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
+an operation in a partially engaged state or cancel cleanup after the receiver accepted it. Those
+tasks and each lease's deadline task belong to the receiver's runtime. A receiver that stops ends
+every lease it holds once its domains have stopped and waits for those tasks, so a lease its
+coordinator never released ends with the receiver rather than at a deadline past its stop, and an
+engagement that reaches a receiver whose runtime has stopped fails.
 
 Each receiver lease is a distinct in-memory instance even when an identical request is re-engaged
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
@@ -1781,7 +1789,8 @@ receiver restart is reported as indeterminate, and why an acknowledgement regist
 run of the node that registered it.
 
 An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
-lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an
+lease, or ending it with its node's runtime, removes the runtime fence but does not report a
+persisted preparation as cleaned up. Only an
 exact durable discard, activation, or schedule-based reconciliation resolves that preparation.
 
 ## Observability

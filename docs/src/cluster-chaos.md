@@ -2300,8 +2300,8 @@ order:
 
 1. It loads the `sch_prio`, `sch_sfq` and `sch_netem` modules, and fails when the kernel cannot
    provide one.
-2. It installs `just` and `toml`, and installs jq 1.8.1 from its release, checked against the
-   release's SHA-256, because the worker's own jq is Ubuntu's 1.7.
+2. It installs `just`, and jq 1.8.1 from its release, checked against the release's SHA-256,
+   because the worker's own jq is Ubuntu's 1.7.
 3. It removes every Rust toolchain directory from the `PATH` the suite runs with, and fails if
    `cargo`, `rustc` or `rustup` is still reachable.
 4. It pulls the image and logs out of the registry.

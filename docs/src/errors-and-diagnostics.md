@@ -650,7 +650,11 @@ and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a 
 or a certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and carries neither credentials nor a record; a
 response from the service keeps its existing description. None is a record rejection, and none
-acknowledges input.
+acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
+service that has not answered it within 10 seconds of the cancellation ends the read with
+`SqsSourceError::CancelledReceiveUnanswered`, which names that budget, beneath `SourceError::Read`.
+The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
+the receive was returning stays invisible until its visibility timeout.
 
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the
@@ -1324,6 +1328,14 @@ its partial intake and relay holds. The preparation deadline bounds engagement, 
 independently of the activation lease. A typed reply timeout, or a transport failure that broke the request's
 stream, can retry the same engagement identity and scope within that budget; rejection and other
 request failures keep their classification.
+
+A destination whose own process incarnation advertised that it is terminating refuses a
+planned-handoff preparation with `OwnershipHandoffError::DestinationTerminating`, which names the
+destination. The coordinator receives the destination's complete chain in its rejection and reports
+the unit's preparation as failed, as it reports a destination's other refusals, before it releases
+the gate. An engagement that reaches a node whose runtime stopped, or that was still waiting for
+its relays when the runtime stopped, reports `EntityGateOperationError::RuntimeStopped` naming the
+domain; a peer receives it as a failed operation, not as a rejection of its identity or scope.
 
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct

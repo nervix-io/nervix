@@ -51,6 +51,7 @@ mod domain_resume;
 mod pause;
 mod relocation_commit;
 mod restarted_voter;
+mod shutdown_handoff;
 
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
@@ -370,6 +371,8 @@ enum CommandPausePoint {
     RestoreBranchStateConversion(DomainName),
     IngestorRoutePoll(DomainNodeRef),
     OwnershipHandoffFlush(DomainName),
+    OwnershipHandoffActivation(DomainName),
+    GracefulDrain(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,

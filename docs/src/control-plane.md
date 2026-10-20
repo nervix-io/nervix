@@ -634,7 +634,9 @@ unaffected nodes and branches keep their sessions, buffers, state, and in-flight
 released after the destination owners activate the published runtime revision. A fence or drain
 timeout releases the old graph without writing the candidate schedule. If activation fails after a
 schedule commit, the gate stays closed until its lease deadline rather than opening before the
-destination is ready.
+destination is ready. That holds on every node that keeps running; a node that stops ends the leases
+it holds with its runtime, as [Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown)
+describes.
 
 Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is
 absent. They do not block the handoff; destroying the old task negatively acknowledges their
@@ -688,7 +690,11 @@ first, the deadline or a repeated signal, decides how the process exits.
 
 When graceful shutdown begins, the process advertises that its current incarnation is terminating.
 The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
-and explicit relocation exclude it as a new destination. The advertisement is transient state of
+and explicit relocation exclude it as a new destination. A leader whose gossip has not yet observed
+the advertisement can still choose the incarnation, so the incarnation itself refuses to prepare a
+new planned handoff for which it is the destination; see
+[Terminating Incarnation And Placement Eligibility](shutdown.md#terminating-incarnation-and-placement-eligibility).
+The advertisement is transient state of
 that process incarnation, so a restarted incarnation is eligible again unless the stable node name
 is cordoned in Raft. The process then stops accepting on its public gRPC, connector, observability,
 and console listeners and closes the client connections they had accepted. Closing a connection
