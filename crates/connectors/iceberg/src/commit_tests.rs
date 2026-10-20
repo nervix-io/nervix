@@ -1,8 +1,6 @@
 //! What an Iceberg commit charges the bulk memory class for, and which staged files it publishes,
 //! driven through the sink against Iceberg's in-memory catalog.
 
-use std::collections::HashMap as StdHashMap;
-
 use ::iceberg::{
     MemoryCatalog, Namespace, TableCommit, TableCreation,
     memory::{MEMORY_CATALOG_WAREHOUSE, MemoryCatalogBuilder},
@@ -74,10 +72,14 @@ impl Catalog for RefusingFirstAppend {
         self.inner.list_namespaces(parent).await
     }
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "iceberg's Catalog trait fixes namespace properties to the standard library's map"
+    )]
     async fn create_namespace(
         &self,
         namespace: &NamespaceIdent,
-        properties: StdHashMap<String, String>,
+        properties: std::collections::HashMap<String, String>,
     ) -> IcebergResult<Namespace> {
         self.inner.create_namespace(namespace, properties).await
     }
@@ -90,10 +92,14 @@ impl Catalog for RefusingFirstAppend {
         self.inner.namespace_exists(namespace).await
     }
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "iceberg's Catalog trait fixes namespace properties to the standard library's map"
+    )]
     async fn update_namespace(
         &self,
         namespace: &NamespaceIdent,
-        properties: StdHashMap<String, String>,
+        properties: std::collections::HashMap<String, String>,
     ) -> IcebergResult<()> {
         self.inner.update_namespace(namespace, properties).await
     }
@@ -157,10 +163,12 @@ async fn memory_catalog() -> MemoryCatalog {
     MemoryCatalogBuilder::default()
         .load(
             "memory",
-            StdHashMap::from([(
+            [(
                 MEMORY_CATALOG_WAREHOUSE.to_string(),
                 "memory://warehouse".to_string(),
-            )]),
+            )]
+            .into_iter()
+            .collect(),
         )
         .await
         .assured("the in-memory catalog takes a warehouse location")
@@ -177,7 +185,7 @@ fn table_ident() -> TableIdent {
 async fn create_table(catalog: &dyn Catalog) -> Table {
     let namespace = NamespaceIdent::new(NAMESPACE.to_string());
     catalog
-        .create_namespace(&namespace, StdHashMap::new())
+        .create_namespace(&namespace, Default::default())
         .await
         .assured("the in-memory catalog creates the namespace");
     let schema = Schema::builder()
