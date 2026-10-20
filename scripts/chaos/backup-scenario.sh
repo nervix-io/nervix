@@ -83,6 +83,13 @@ backup_verify_archive() {
         || backup_fail 'the archive omitted acknowledged Kafka domain offsets'
 }
 
+# A restored domain has its own name, so its archive has different section paths and encoded record
+# digests. Two archives of the same state compare by this projection of their descriptions: the
+# public checkpoint identities, revisions, branch counts and exact source positions.
+backup_state_projection='[.domains[0].runtime_state[] |
+    {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
+    sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
+
 # Restores ARCHIVE, described in DESCRIPTION, as the stopped domain TARGET, backs TARGET up again and
 # requires its public checkpoint identities, revisions, branch counts and exact source positions to
 # equal the archive's. The restore report, the re-export's archive, report and description, and
@@ -119,13 +126,8 @@ backup_verify_restore() {
         "DESCRIBE BACKUP '/chaos-backup/${restored_archive##*/}' FORMAT JSON;" \
         >"${restored_description}" \
         || backup_fail 'the restored generation could not be verified offline'
-    # The renamed domain has different section paths and encoded record digests. Compare its
-    # public checkpoint identities, revisions, branch counts and exact source positions.
-    local state_projection='[.domains[0].runtime_state[] |
-        {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
-        sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
-    jq -S "${state_projection}" "${description}" >"${expected_state}"
-    jq -S "${state_projection}" "${restored_description}" >"${restored_state}"
+    jq -S "${backup_state_projection}" "${description}" >"${expected_state}"
+    jq -S "${backup_state_projection}" "${restored_description}" >"${restored_state}"
     cmp "${expected_state}" "${restored_state}" \
         || backup_fail 'restored lifecycle or source checkpoints differ from the complete cut'
 }
