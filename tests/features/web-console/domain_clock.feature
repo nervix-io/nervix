@@ -74,6 +74,7 @@ Feature: Web console domain clock
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".domain-clock" contains "PACED"
     And selector ".domain-clock" contains "PACED" for 1500 milliseconds
     And selector ".domain-clock-tick-id" advances as a number within 10000 milliseconds
     And selector ".terminal" contains "domain clock [{{domain}}] attached" exactly 2 times

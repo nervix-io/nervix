@@ -240,6 +240,10 @@ Feature: MQTT emission
       """
       {"user_id":1}
       """
+    And within "60s" DESCRIBE EMITTER "window_out" on the leader node contains
+      """
+      transient error: -
+      """
 
     Examples:
       | cluster_size | mode  |
