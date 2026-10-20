@@ -22174,6 +22174,56 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
 }
 
 #[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} replicas \
+            without placeholder {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_replicas_without_placeholder(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    placeholder: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let replaced = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
+        .clone();
+    let placement = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} to have replicas without '{replaced}'. \
+             last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                let placed =
+                    scheduled_node_placement_from_status(&output, &world.domain, &kind, &name);
+                if let Some((_, replicas)) = placed
+                    && !replicas.is_empty()
+                    && !replicas.contains(&replaced.as_str())
+                {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        placement.pause(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
     expr = "node {string} observability path {string} eventually responds with {int} and {string}"
 )]
 async fn then_node_observability_path_eventually_responds(

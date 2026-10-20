@@ -135,6 +135,7 @@ tags = [
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
+  "@kept_ingestor_offsets",
 ]
 target = "test:scenarios"
 
@@ -663,6 +664,16 @@ id = "scenario.remote-ack-branches"
 invariant = "On one and three nodes, two interleaved branches complete all attached deliveries and commit their source offsets while remote correlation and admission owners retire their rows."
 invocation = "scenarios"
 scenario = "Interleaved branches complete attached deliveries and commit their source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A forced reassignment that moves a Kafka ingestor's domain-offset replica while the ingestor keeps running: the schedule rebinds the offsets under the tracked assignment barrier and hands the kept ingestor the new originator. Kafka and interconnect waits are outside the detector."
+examples = 1
+feature = "tests/features/cluster/narrow_schedule_activation.feature"
+id = "scenario.kept-ingestor-offsets"
+invariant = "An ingestor that keeps running while its domain offsets lose their replica commits every record delivered afterwards and leaves no diagnostic lock finding."
+invocation = "scenarios"
+scenario = "A Kafka ingestor keeps committing its domain offsets after their replica is lost"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1206,6 +1217,16 @@ id = "stress.remote-ack-branches"
 invariant = "On one and three nodes, two interleaved branches complete all attached deliveries and commit their source offsets while remote correlation and admission owners retire their rows."
 invocation = "stress-scenarios"
 scenario = "Interleaved branches complete attached deliveries and commit their source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a forced reassignment that moves a Kafka ingestor's domain-offset replica while the ingestor keeps running, the rebind of the offsets under the tracked assignment barrier and the re-issued originator."
+examples = 1
+feature = "tests/features/cluster/narrow_schedule_activation.feature"
+id = "stress.kept-ingestor-offsets"
+invariant = "An ingestor that keeps running while its domain offsets lose their replica commits every record delivered afterwards and leaves no diagnostic lock finding."
+invocation = "stress-scenarios"
+scenario = "A Kafka ingestor keeps committing its domain offsets after their replica is lost"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2550,6 +2571,8 @@ workloads = [
 path = "src/runtime/state_store.rs"
 workloads = [
   "scenario.guest-save-backup",
+  "scenario.kept-ingestor-offsets",
+  "stress.kept-ingestor-offsets",
   "stress.guest-save-backup",
   "scenario.native-metadata-restore",
   "owner.restore-storage",

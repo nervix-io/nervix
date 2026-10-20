@@ -167,6 +167,7 @@ impl EndpointIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
             connector_label: "endpoint",
+            domain_offsets: None,
         })
     }
 }

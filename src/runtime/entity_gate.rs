@@ -1782,6 +1782,7 @@ mod tests {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],
+                domain_offsets: None,
             },
         );
         runtime.inner.ingestor_quiescence.insert(
