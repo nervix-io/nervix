@@ -20,6 +20,7 @@ import tomllib
 import uuid
 from typing import Any
 
+from scripts.analysis_admission import target_kind
 from scripts.rust_source import RustFile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -54,13 +55,6 @@ class Configuration:
         if self.target:
             args.extend(["--target", self.target])
         return args
-
-
-def target_kind(kinds: list[str]) -> str:
-    """Cargo's target kinds as the analysis names them: every library form is one `lib`."""
-    if set(kinds) & {"lib", "rlib", "cdylib", "staticlib", "proc-macro"}:
-        return "lib"
-    return kinds[0]
 
 
 def digest(path: pathlib.Path) -> str:
