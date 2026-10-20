@@ -45,6 +45,13 @@ and unavailable-endpoint scenarios are registered for active, order and stressed
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
 tracked-lock detector; its lanes qualify only the tracked paths the surrounding lifecycle reaches.
 
+Pulsar input retirement uses the same cold lifecycle boundary: it snapshots typed plans, releases
+the registry guard and stops the exact source tasks before comparing resolved subscription
+identities and removing an unused owned subscription. Matching replacements retain their backlog.
+The public drop and replacement outlines cover running and passive installation in active,
+order and stressed diagnostics. No new synchronization protocol or hot-path map access is added;
+broker I/O, asynchronous waits and concurrent-map internals remain outside the detector's scope.
+
 Transaction pause release is a cold control-plane lifecycle path. Application completion uses the
 step's tracked impact recorder to recover an engaged domain pause before retaining its terminal
 outcome. The public pause-release regression controls two leadership transfers and is registered

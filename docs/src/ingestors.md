@@ -1050,7 +1050,16 @@ applies the drop once its removals have ended, so a drop whose broker cannot be 
 only after that timeout for each owned subscription it removes. The subscription then remains until
 the operator removes it or the broker expires it. `STOP`, a node restart, a relocation and a restore
 keep the subscription. Replacing the source with `ALTER PULSAR TOPIC INGESTOR ... SET FROM ...`
-keeps the preceding owned subscription in place, whatever the replacement reads. `DESCRIBE INGESTOR`
+removes the preceding owned subscription after its consumers stop and before the replacement
+starts, unless the replacement reads the same subscription of the same qualified topic at the
+same resolved broker address. Client names, route, codec, delivery-mode and instance-count changes
+do not change that identity. Short topics use their client's namespace, so a short name and its
+fully qualified spelling identify the same topic. Broker addresses compare their URL scheme,
+host and effective port; an omitted port means 6650 for `pulsar` and 6651 for `pulsar+ssl`.
+Different configured host names are distinct addresses even if DNS resolves them alike.
+Declaring the retained subscription `PROVISIONED` hands its ownership to the operator and keeps
+its backlog. Removal on replacement has the same timeout and best-effort reporting as removal
+on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR`
 shows the ownership as `pulsar subscription ownership: OWNED BY INGESTOR` or `PROVISIONED`.
 
 Client config currently supports:

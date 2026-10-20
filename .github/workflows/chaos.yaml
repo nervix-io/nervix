@@ -82,7 +82,7 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Plan the shards and their budgets
         id: shards
@@ -156,7 +156,7 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       # The suite runs with just, toml and the pinned jq on a PATH that holds no Rust toolchain,
       # which shows that the external command builds nothing.

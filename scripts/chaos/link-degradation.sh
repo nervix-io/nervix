@@ -58,12 +58,15 @@ link_ping_keep_events() {
 }
 
 # Samples RECEIVER from SENDER's network namespace in approximately four seconds, and summarizes
-# the complete packet count as JSON beside OUTPUT. Correlated burst loss needs more observations
-# in that same window; every other profile and healthy observation uses forty packets. The helper
-# starts under the launch bound and its sample ends under the probe's own 30-second bound. The
-# helper reports when its sample began and ended on the uptime clock the controller reads too, so
-# the probe's record tells Docker control time apart from the sample. A failed helper keeps its
-# raw streams and Docker's own state and events for it before it is removed.
+# the complete packet count as JSON beside OUTPUT. A loss profile's lost floor needs more
+# observations in that same window: forty packets of the combined profile's independent 20% loss
+# fall below its 5% floor once in about 700 samples, while four hundred put every lost floor below
+# one in 10^17, and correlated burst loss needs them for its received floor as well. Every other
+# profile and healthy observation uses forty packets. The helper starts under the launch bound and
+# its sample ends under the probe's own 30-second bound. The helper reports when its sample began
+# and ended on the uptime clock the controller reads too, so the probe's record tells Docker control
+# time apart from the sample. A failed helper keeps its raw streams and Docker's own state and
+# events for it before it is removed.
 link_ping() {
     [[ "$#" -eq 4 ]] || {
         link_degradation_fail observation 'link ping needs output, sender, receiver and profile'
@@ -75,8 +78,8 @@ link_ping() {
     local profile="$4"
     local probe_count=40 probe_interval=0.1 sample_seconds=30
     case "${profile}" in
-        burst-loss) probe_count=400; probe_interval=0.01 ;;
-        baseline | healed | delay | jitter | random-loss | rate-limit | combined) ;;
+        random-loss | burst-loss | combined) probe_count=400; probe_interval=0.01 ;;
+        baseline | healed | delay | jitter | rate-limit) ;;
         *)
             link_degradation_fail observation "unknown link probe profile ${profile}"
             return 1
