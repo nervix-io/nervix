@@ -60,6 +60,7 @@ checks = [
   "confirmation_window::shuttle_tests::shuttle_a_failure_settles_every_answer_its_broker_gave_before_it",
   "confirmation_window::shuttle_tests::shuttle_an_expired_oldest_settles_the_answers_given_before_it",
   "confirmation_window::shuttle_tests::shuttle_answers_racing_a_full_window_settle_each_record_exactly_once",
+  "confirmation_window::shuttle_tests::shuttle_driver_backpressure_settles_below_max_in_flight",
 ]
 name = "nervix-connector"
 

@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use meticulous::ResultExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, RecordSink, SinkAcknowledgements, SinkBoundedExecution,
     SinkEventReporter, SinkFinish, SinkFinishError, SinkGeneralErrorHandler, SinkHost,
@@ -35,7 +36,7 @@ use rdkafka::{
     types::{RDKafkaApiKey, RDKafkaRespErr},
 };
 
-use super::{KafkaAnswer, KafkaSink, KafkaSinkConfig};
+use super::{KafkaAnswer, KafkaQueueWaitError, KafkaSink, KafkaSinkConfig};
 
 const TOPIC: &str = "orders";
 
@@ -223,7 +224,200 @@ fn awaited_hand_over(sink: &KafkaSink, record: SinkRecord) -> KafkaAnswer {
 }
 
 #[nervix_primitives::test]
-async fn a_full_producer_queue_settles_the_answers_the_broker_already_gave() {
+async fn a_confirmed_window_larger_than_the_producer_queue_delivers_every_record() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(
+        &cluster,
+        &[("queue.buffering.max.messages", "2"), ("linger.ms", "200")],
+        confirmed(8, Duration::from_secs(60)),
+    );
+    let records = (0..8)
+        .map(|index| record(index, PARTITION_ZERO_KEYS[0], small_payload(index)))
+        .collect();
+
+    let parts = sink.publish(records).await.into_parts();
+
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a full producer queue waits for its outstanding answers: {:?}",
+        parts.infrastructure_error
+    );
+    assert!(parts.rejected.is_empty());
+    assert_eq!(parts.delivered.len(), 8);
+    assert_eq!(
+        parts.delivered.into_iter().collect::<BTreeSet<_>>(),
+        ids(0..8)
+    );
+    assert_eq!(sink.retained_records(), 0);
+}
+
+#[nervix_primitives::test]
+async fn a_record_larger_than_the_whole_producer_queue_is_rejected() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(
+        &cluster,
+        &[ONE_KIB_QUEUE],
+        confirmed(8, Duration::from_secs(60)),
+    );
+    let parts = sink
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
+            record(1, PARTITION_ZERO_KEYS[0], vec![0; OVERSIZED_PAYLOAD_BYTES]),
+            record(2, PARTITION_ZERO_KEYS[0], small_payload(2)),
+        ])
+        .await
+        .into_parts();
+
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a record the queue can never hold is a record rejection: {:?}",
+        parts.infrastructure_error
+    );
+    assert_eq!(
+        parts.delivered.into_iter().collect::<BTreeSet<_>>(),
+        ids([0, 2])
+    );
+    assert_eq!(parts.rejected.len(), 1);
+    assert_eq!(parts.rejected[0].id, SinkRecordId::new(1));
+    assert!(parts.rejected[0].error.message.contains("2048"));
+    assert!(parts.rejected[0].error.message.contains("1024"));
+}
+
+#[nervix_primitives::test]
+async fn a_producer_queue_still_occupied_by_a_served_callback_waits_for_its_return() {
+    let cluster = cluster(1, 1);
+    cluster
+        .broker_down(1)
+        .assured("broker 1 belongs to the single-broker mock cluster");
+    let mut sink = sink(
+        &cluster,
+        &[("queue.buffering.max.messages", "1")],
+        confirmed(8, Duration::from_secs(60)),
+    );
+    let hold = PollingThreadHold::waker();
+    let mut probe = awaited_hand_over(&sink, record(0, PARTITION_ZERO_KEYS[0], small_payload(0)));
+    assert!(
+        Pin::new(&mut probe)
+            .poll(&mut Context::from_waker(&hold.waker))
+            .is_pending()
+    );
+    cluster
+        .broker_up(1)
+        .assured("broker 1 belongs to the single-broker mock cluster");
+    assert!(
+        matches!(
+            timeout(Duration::from_secs(30), hold.held).await,
+            Ok(Ok(()))
+        ),
+        "the polling thread must hold its callback before the native queue place is freed"
+    );
+
+    let mut publishing =
+        Box::pin(sink.publish(vec![record(1, PARTITION_ZERO_KEYS[0], small_payload(1))]));
+    let polled = publishing
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    // Release before asserting so a failing assertion cannot keep the producer's thread held.
+    drop(hold.release);
+    assert!(
+        polled.is_pending(),
+        "the refused record waits for the callback to release its queue place"
+    );
+    let parts = publishing.await.into_parts();
+    assert!(parts.infrastructure_error.is_none());
+    assert!(parts.rejected.is_empty());
+    assert_eq!(parts.delivered, vec![SinkRecordId::new(1)]);
+}
+
+#[nervix_primitives::test]
+async fn a_producer_queue_held_without_an_outstanding_answer_expires_its_admission_wait() {
+    let cluster = cluster(1, 1);
+    cluster
+        .broker_down(1)
+        .assured("broker 1 belongs to the single-broker mock cluster");
+    let ack_timeout = Duration::from_millis(50);
+    let mut sink = sink(
+        &cluster,
+        &[("queue.buffering.max.messages", "1")],
+        confirmed(8, ack_timeout),
+    );
+    let hold = PollingThreadHold::waker();
+    let mut probe = awaited_hand_over(&sink, record(0, PARTITION_ZERO_KEYS[0], small_payload(0)));
+    assert!(
+        Pin::new(&mut probe)
+            .poll(&mut Context::from_waker(&hold.waker))
+            .is_pending()
+    );
+    cluster
+        .broker_up(1)
+        .assured("broker 1 belongs to the single-broker mock cluster");
+    assert!(
+        matches!(
+            timeout(Duration::from_secs(30), hold.held).await,
+            Ok(Ok(()))
+        ),
+        "the polling thread must hold its callback before the native queue place is freed"
+    );
+
+    let parts = sink
+        .publish(vec![record(1, PARTITION_ZERO_KEYS[0], small_payload(1))])
+        .await
+        .into_parts();
+    drop(hold.release);
+    let Some(failure) = parts.infrastructure_error else {
+        panic!("a callback that stays held must exhaust admission's ACK TIMEOUT");
+    };
+    assert_eq!(
+        failure.downcast_ref::<KafkaQueueWaitError>(),
+        Some(&KafkaQueueWaitError::TimedOut {
+            timeout: ack_timeout
+        })
+    );
+    assert_eq!(
+        failure.downcast_ref::<KafkaError>(),
+        Some(&KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull))
+    );
+    assert!(parts.delivered.is_empty());
+    assert!(parts.rejected.is_empty());
+}
+
+#[nervix_primitives::test]
+async fn an_unconfirmed_publish_rejects_a_payload_larger_than_its_producer_queue() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[ONE_KIB_QUEUE], BrokerPublishingMode::NoAck);
+    let parts = sink
+        .publish(vec![
+            record(0, PARTITION_ZERO_KEYS[0], vec![0; OVERSIZED_PAYLOAD_BYTES]),
+            record(1, PARTITION_ZERO_KEYS[0], small_payload(1)),
+        ])
+        .await
+        .into_parts();
+    assert!(parts.infrastructure_error.is_none());
+    assert_eq!(parts.delivered, vec![SinkRecordId::new(1)]);
+    assert_eq!(parts.rejected.len(), 1);
+    assert_eq!(parts.rejected[0].id, SinkRecordId::new(0));
+    assert!(parts.rejected[0].error.message.contains("2048"));
+    assert!(parts.rejected[0].error.message.contains("1024"));
+}
+
+#[nervix_primitives::test]
+async fn a_producer_queue_accepts_its_exact_payload_capacity_with_key_and_headers() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(
+        &cluster,
+        &[ONE_KIB_QUEUE],
+        confirmed(1, Duration::from_secs(60)),
+    );
+    let mut message = record(0, &"k".repeat(2048), vec![0; 1024]);
+    message.headers = vec![("large-header".to_string(), "v".repeat(2048))];
+    let parts = sink.publish(vec![message]).await.into_parts();
+    assert!(parts.infrastructure_error.is_none());
+    assert!(parts.rejected.is_empty());
+    assert_eq!(parts.delivered, vec![SinkRecordId::new(0)]);
+}
+
+#[nervix_primitives::test]
+async fn a_producer_queue_size_rejection_keeps_the_answers_the_broker_already_gave() {
     let cluster = cluster(2, 2);
     // Partition 0's leader answers at once and partition 1's a second later, so the window, full
     // at three records, waits for its oldest record on partition 1 while the broker answers the
@@ -243,8 +437,8 @@ async fn a_full_producer_queue_settles_the_answers_the_broker_already_gave() {
         confirmed(3, Duration::from_secs(60)),
     );
 
-    // Once the oldest record's answer arrives, the producer refuses the oversized record with a
-    // full queue while the window still holds the two answers the broker gave.
+    // The final record exceeds the whole queue's byte capacity while the window still holds
+    // answers for the preceding records.
     let outcome = sink
         .publish(vec![
             record(0, PARTITION_ONE_KEY, small_payload(0)),
@@ -260,14 +454,9 @@ async fn a_full_producer_queue_settles_the_answers_the_broker_already_gave() {
         ids([0, 1, 2]),
         "every record the broker confirmed before the queue was full is delivered"
     );
-    assert!(parts.rejected.is_empty());
-    let failure = parts
-        .infrastructure_error
-        .expect("the full producer queue ends the publish");
-    assert_eq!(
-        failure.downcast_ref::<KafkaError>(),
-        Some(&KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull))
-    );
+    assert_eq!(parts.rejected.len(), 1);
+    assert_eq!(parts.rejected[0].id, SinkRecordId::new(3));
+    assert!(parts.infrastructure_error.is_none());
 }
 
 #[nervix_primitives::test]
@@ -451,13 +640,20 @@ async fn an_unconfirmed_publish_delivers_each_record_the_producer_takes() {
 #[nervix_primitives::test]
 async fn a_full_producer_queue_ends_an_unconfirmed_publish_after_the_records_it_took() {
     let cluster = cluster(1, 1);
-    let mut sink = sink(&cluster, &[ONE_KIB_QUEUE], BrokerPublishingMode::NoAck);
+    cluster
+        .broker_down(1)
+        .assured("broker 1 belongs to the single-broker mock cluster");
+    let mut sink = sink(
+        &cluster,
+        &[("queue.buffering.max.messages", "2")],
+        BrokerPublishingMode::NoAck,
+    );
 
     let outcome = sink
         .publish(vec![
             record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
             record(1, PARTITION_ZERO_KEYS[1], small_payload(1)),
-            record(2, PARTITION_ZERO_KEYS[0], vec![0; OVERSIZED_PAYLOAD_BYTES]),
+            record(2, PARTITION_ZERO_KEYS[0], small_payload(2)),
         ])
         .await;
 
@@ -739,13 +935,17 @@ async fn a_record_a_full_producer_queue_refuses_is_never_retained() {
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    let mut sink = sink(&cluster, &[ONE_KIB_QUEUE], BrokerPublishingMode::NoAck);
+    let mut sink = sink(
+        &cluster,
+        &[("queue.buffering.max.messages", "2")],
+        BrokerPublishingMode::NoAck,
+    );
 
     let outcome = sink
         .publish(vec![
             record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
             record(1, PARTITION_ZERO_KEYS[1], small_payload(1)),
-            record(2, PARTITION_ZERO_KEYS[0], vec![0; OVERSIZED_PAYLOAD_BYTES]),
+            record(2, PARTITION_ZERO_KEYS[0], small_payload(2)),
         ])
         .await;
 
@@ -774,32 +974,17 @@ async fn finishing_counts_a_record_a_confirmed_publish_stopped_waiting_for() {
     cluster
         .broker_down(1)
         .expect("the mock cluster takes broker 1 down");
-    // A window of two takes the first record without waiting for its answer, and the full queue
-    // refuses the second, so the publish ends without the first record's answer. The producer gives
-    // that record up only after the 60s ACK TIMEOUT, so it still holds it when the sink finishes.
-    let mut sink = sink(
-        &cluster,
-        &[ONE_KIB_QUEUE],
-        confirmed(2, Duration::from_secs(60)),
+    let mut sink = sink(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+    // Cancelling the wait does not release the record librdkafka already took.
+    let mut publishing =
+        Box::pin(sink.publish(vec![record(0, PARTITION_ZERO_KEYS[0], small_payload(0))]));
+    assert!(
+        publishing
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
     );
-
-    let outcome = sink
-        .publish(vec![
-            record(0, PARTITION_ZERO_KEYS[0], small_payload(0)),
-            record(1, PARTITION_ZERO_KEYS[1], vec![0; OVERSIZED_PAYLOAD_BYTES]),
-        ])
-        .await;
-
-    let parts = outcome.into_parts();
-    assert!(parts.delivered.is_empty());
-    assert!(parts.rejected.is_empty());
-    let failure = parts
-        .infrastructure_error
-        .expect("the full producer queue ends the publish");
-    assert_eq!(
-        failure.downcast_ref::<KafkaError>(),
-        Some(&KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull))
-    );
+    drop(publishing);
     let unsent = sink
         .finish(Instant::now())
         .await

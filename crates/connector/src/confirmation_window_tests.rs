@@ -254,6 +254,8 @@ impl ScriptedRecord {
 struct WindowCase {
     /// `MAX`: one to six records await answers at once.
     max_in_flight: u8,
+    /// The driver's queue: one to six records before it asks for an answer on demand.
+    queue_capacity: u8,
     /// `ACK TIMEOUT`: one to forty milliseconds.
     timeout: u8,
     #[generator(bolero::generator::produce_with::<Vec<ScriptedRecord>>().len(0_usize..=24))]
@@ -346,6 +348,10 @@ impl WindowCase {
         usize::from(self.max_in_flight % 6) + 1
     }
 
+    fn queue_capacity(&self) -> usize {
+        usize::from(self.queue_capacity % 6) + 1
+    }
+
     fn timeout_millis(&self) -> u64 {
         u64::from(self.timeout % 40) + 1
     }
@@ -388,6 +394,16 @@ impl WindowCase {
                     verdict,
                     answer_after,
                 } => {
+                    if in_flight.len() >= self.queue_capacity()
+                        && let Some(failure) = Self::await_oldest(&mut in_flight, &mut now)
+                    {
+                        return ReferencePublish {
+                            end: now,
+                            taken,
+                            refused,
+                            failure: Some(failure),
+                        };
+                    }
                     let given_at = answer_after.map(|after| now + after);
                     let handed_over = ReferenceRecord {
                         record: id,
@@ -479,6 +495,12 @@ impl WindowCase {
                     verdict,
                     answer_after,
                 } => {
+                    if held.get() >= self.queue_capacity() {
+                        match window.settle_next().await {
+                            Ok(record) => assert!(record.is_some()),
+                            Err(failure) => return Some(failure),
+                        }
+                    }
                     let given_at =
                         answer_after.map(|after| Instant::now() + Duration::from_millis(after));
                     let answer = ScriptedAnswer::new(id, verdict, given_at, held);
@@ -492,6 +514,7 @@ impl WindowCase {
                         held.get(),
                         self.max_in_flight()
                     );
+                    assert!(held.get() <= self.queue_capacity());
                 }
             }
         }
@@ -841,6 +864,58 @@ async fn an_answer_given_at_its_deadline_is_settled() {
 
     assert_eq!(began.elapsed(), timeout);
     assert_eq!(sorted_delivered(&outcome), record_ids(&[0]));
+    assert!(outcome.infrastructure_error.is_none());
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_window() {
+    let held = Cell::new(0);
+    let began = Instant::now();
+    let mut window = ConfirmationWindow::new(SINK, settings(4, Duration::from_millis(20)), 2);
+    let records = [
+        Taken {
+            verdict: ScriptedVerdict::Confirmed,
+            answer_after: Some(Duration::from_millis(7)),
+        },
+        Taken {
+            verdict: ScriptedVerdict::Rejected,
+            answer_after: Some(Duration::from_millis(2)),
+        },
+    ];
+    hand_over_all(&mut window, &records, &held)
+        .await
+        .assured("two records fit below MAX four");
+    assert_eq!(held.get(), 2);
+    assert_eq!(
+        window
+            .settle_next()
+            .await
+            .assured("the oldest answer arrives by its deadline"),
+        Some(SinkRecordId::new(0))
+    );
+    assert_eq!(began.elapsed(), Duration::from_millis(7));
+    assert_eq!(
+        window
+            .settle_next()
+            .await
+            .assured("the younger answer has already arrived"),
+        Some(SinkRecordId::new(1))
+    );
+    assert!(
+        window
+            .settle_next()
+            .await
+            .assured("an empty window waits for nothing")
+            .is_none()
+    );
+    assert_eq!(began.elapsed(), Duration::from_millis(7));
+    assert_eq!(held.get(), 0);
+    let outcome = window.finish().await.into_parts();
+    assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+    assert_eq!(
+        rejected_records(&outcome),
+        vec![RejectedRecord::by_broker(SinkRecordId::new(1))]
+    );
     assert!(outcome.infrastructure_error.is_none());
 }
 
