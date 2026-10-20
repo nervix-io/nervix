@@ -184,6 +184,15 @@ that owner was already excluded as a destination. Its live incarnation remains a
 so a restart or loss of that owner still invalidates the captured plan. Changes to other eligible
 destinations and to the committed topology retain their own fences.
 
+The terminating incarnation also enforces its exclusion itself. A leader plans from its own gossip
+view, and gossip can still show a peer as eligible after that peer advertised terminating, as when
+peers stop in the same moment. A terminating incarnation therefore refuses to prepare a planned
+handoff for which it is the destination, before it validates the request: the preparation fails with
+`destination node '<node_id>' is terminating`, the leader releases the unit's gate and records the
+unit as failed as it does for any unit that cannot prepare, and the unit's work stays with its
+owner. A handoff the incarnation prepared before it began terminating is already in progress and
+can still complete.
+
 ### Cordon Preservation
 
 A graceful shutdown that moves work away cordons the node so its own work does not come back to it
@@ -545,10 +554,20 @@ scope.
 Gate leases are deadline-bound and release themselves if the coordinator disappears. The default
 lease is sixty seconds and a planned handoff budgets two of them, one for preparation and one for
 activation. Both are longer than the default shutdown timeout, so a gate a terminating node engaged
-can outlive that node's own process; the lease deadline, not the node, is what reopens it.
+on its peers can outlive that node's own process; the lease deadline, not the node, is what reopens
+them.
 
 When activation fails after the schedule is committed, the gate stays shut until its lease expires
 rather than opening before the destination is ready.
+
+The gate a node holds on itself ends with that node instead. Its lease is volatile state of the
+node's runtime, and runtime teardown ends every lease the node holds once the node's domain tasks
+have stopped, including a lease left held because a destination did not activate, then waits for
+the tasks that complete engagements and expire leases. A lease therefore keeps neither its relay
+gates nor the ingestors it quiesced, nor anything those retain, such as the node's metrics and the
+consensus observations they read, past the node's stop, and terminal teardown releases the node's
+storage as it does after any other drain. An engagement a peer requests after the node's runtime
+stopped fails.
 
 ### Interrupted Handoffs
 
@@ -628,7 +647,7 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first; the cluster elects a new leader after it stops. |
 | Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
-| Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
+| Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A leader that has not yet observed a peer's advertisement can still choose that peer for a move; the peer refuses the preparation as a terminating destination, and the work completes in place on its owner. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
 | Leader unreachable, or no quorum | The node waits for a leader only until its drain budget runs out, reports the drain-support phase abandoned, and still completes its local drain. Nothing is cordoned. |
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
@@ -833,6 +852,14 @@ bulk workers, so its write waits for those workers like any other job. The node 
 this wait; a write that fails is logged at `warn` as
 `failed to flush branch state snapshot during shutdown`, and a restart then finds the checkpoint
 written before it.
+
+Once those writes are done, runtime teardown ends every entity-gate lease the node holds, as
+[Ownership Handoff During Shutdown](#ownership-handoff-during-shutdown) describes, and waits for
+the tasks that finish engagements, releases and lease expiry. Each of them retains what its hold
+fences, which by then nothing dispatches through, so ending them only lifts that hold and lets the
+runtime's own storage and metrics go when the node's services are dropped. The wait has no grace
+of its own: an engagement still waiting for its relays stops waiting, and a lease stops waiting for
+its deadline.
 
 Runtime teardown ends each resolved replication route before clearing its state registry. A
 retained route cannot attach to replacement state; a request already admitted through a borrowed
