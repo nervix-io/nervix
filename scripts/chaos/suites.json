@@ -1,6 +1,41 @@
 {
   "ci_reserve_minutes": 21,
   "suites": {
+    "restore": {
+      "description": "The restore fault and volume entries of the restore qualification campaign, one entry per shard, with the runs' default bound",
+      "entries": [
+        {
+          "id": "restore-under-leader-crash",
+          "shard": 1,
+          "budget_minutes": 40,
+          "run": ["restore-fault", "--fault", "leader-crash"]
+        },
+        {
+          "id": "restore-under-owner-crash",
+          "shard": 2,
+          "budget_minutes": 40,
+          "run": ["restore-fault", "--fault", "owner-crash"]
+        },
+        {
+          "id": "restore-staging-volume",
+          "shard": 3,
+          "budget_minutes": 40,
+          "run": ["restore-volume"]
+        },
+        {
+          "id": "restore-under-leader-partition",
+          "shard": 4,
+          "budget_minutes": 40,
+          "run": ["restore-fault", "--fault", "leader-partition"]
+        },
+        {
+          "id": "restore-reclamation-under-owner-crash",
+          "shard": 5,
+          "budget_minutes": 40,
+          "run": ["restore-fault", "--fault", "reclamation-owner-crash"]
+        }
+      ]
+    },
     "smoke": {
       "description": "Three-node baseline, a leader crash with its restart, and the recovery from an isolated follower's partition",
       "entries": [

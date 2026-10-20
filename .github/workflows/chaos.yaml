@@ -51,6 +51,7 @@ on:
         options:
           - smoke
           - soak
+          - restore
         default: smoke
 
 permissions:
