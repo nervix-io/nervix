@@ -307,6 +307,20 @@ test-native-metadata-restore-repeat: tests-deps
 test-scenarios-binary binary *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
 
+# Replay a compiled ONNX inspection owner with an explicit runtime library.
+test-onnx-owner-binary binary library *args:
+    ORT_DYLIB_PATH={{ quote(library) }} {{ quote(binary) }} {{ quote(args) }}
+
+# Prepare diagnostic scenario executables for a supervised public replay.
+build-diagnostic-scenarios selection: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --no-run --package nervix-server --features {{ quote("testing," + selection) }} --lib --test scenarios
+
 # Reproduce a focused public scenario in one diagnostic selection, with the same prerequisites
 # as the complete lane. This does not replace the lane's inventory and evidence qualification.
 test-diagnostic-scenarios selection feature *args: tests-deps
@@ -355,6 +369,40 @@ test-diagnostic-harness selection *args: tests-deps
         echo "diagnostic harness selection completed no tests or ignored selected tests" >&2
         exit 1
     fi
+
+# Run focused library owners in a diagnostic selection and qualify their retained process evidence.
+test-diagnostic-lib selection test *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    library_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$library_attempts"
+    library_attempt="$(mktemp -d "$library_attempts/library.XXXXXX")"
+    export NERVIX_DEADLOCK_EVIDENCE="${NERVIX_DEADLOCK_EVIDENCE:-$library_attempt/evidence}"
+    if [[ -e "$NERVIX_DEADLOCK_EVIDENCE" ]] && { [[ ! -d "$NERVIX_DEADLOCK_EVIDENCE" ]] || [[ -n "$(ls -A -- "$NERVIX_DEADLOCK_EVIDENCE")" ]]; }; then
+        echo "diagnostic library evidence directory must be empty" >&2
+        exit 2
+    fi
+    mkdir -p "$NERVIX_DEADLOCK_EVIDENCE"
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    echo "diagnostic library attempt: $library_attempt"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --lib -- --exact {{ quote(test) }} {{ quote(args) }} 2>&1 | tee "$library_attempt/library.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$library_attempt/library.log"; then
+        echo "diagnostic library selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
+    shopt -s nullglob
+    library_evidence=("$NERVIX_DEADLOCK_EVIDENCE"/deadlock-*.rkyv)
+    if [[ ${#library_evidence[@]} -eq 0 ]]; then
+        echo "diagnostic library selection retained no process evidence" >&2
+        exit 1
+    fi
+    for evidence_file in "${library_evidence[@]}"; do
+        {{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }} qualify "$evidence_file"
+    done
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
