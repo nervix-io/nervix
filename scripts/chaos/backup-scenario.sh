@@ -145,6 +145,29 @@ backup_cut_window() {
     ((backup_released_ms >= backup_engaged_ms)) || backup_fail 'the cut release precedes engagement'
 }
 
+# True when the original domain's ingestor reports stopped on the original cluster.
+backup_original_stopped() {
+    local case_dir="$1"
+    domain_cli_command 'DESCRIBE INGESTOR chaos_ingestor;' >"${case_dir}/original-ingestor.attempt.txt" 2>&1 \
+        || return 1
+    grep -Fxq 'status: stopped' "${case_dir}/original-ingestor.attempt.txt"
+}
+
+# True once the output topic has not moved for five seconds; records the boundary it stopped at
+# in backup_output_boundary.
+backup_output_settled() {
+    local end
+    end="$(topic_end_offset chaos_output)" || return 1
+    local now
+    now="$(epoch_ms)"
+    if [[ "${end}" != "${backup_output_boundary:-}" ]]; then
+        backup_output_boundary="${end}"
+        backup_output_since_ms="${now}"
+        return 1
+    fi
+    ((now - backup_output_since_ms >= 5000))
+}
+
 # Generates the run's baseline fixture, starts the load and the listener observer, and waits until
 # the source and the sink have each passed their first ten records.
 backup_traffic_start() {
