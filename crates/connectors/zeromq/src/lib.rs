@@ -49,7 +49,13 @@ pub struct ZeroMqSink {
 
 impl ZeroMqSink {
     pub async fn new(config: ZeroMqSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let socket = Self::push_socket_from_config(&config.config).await?;
+        Self::open(&config.config).await
+    }
+
+    /// Opens the PUSH socket `config` declares. The sink reports nothing to its host, so opening it
+    /// needs only its client's entries.
+    async fn open(config: &[ClientConfigEntry]) -> SinkStartResult<Self> {
+        let socket = Self::push_socket_from_config(config).await?;
         Ok(Self { socket })
     }
 
