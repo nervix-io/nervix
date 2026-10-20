@@ -103,7 +103,7 @@ use crate::common::{
     },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
+        HttpsPublishLoopOutcome, InterconnectCredentialFault,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         client_connect_options, client_domain, observe_kafka_through, publish_kafka_record_through,
@@ -148,6 +148,7 @@ use crate::common::{
     },
     server_process_cluster::ServerProcessCluster,
     sqs_answer_hold::SqsAnswerHold,
+    stallable_tcp_proxy::StallableTcpProxy,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
