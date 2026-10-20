@@ -55,8 +55,9 @@ jobs:
           ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install tools
@@ -147,8 +148,9 @@ jobs:
           ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup pinned sanitizer nightly

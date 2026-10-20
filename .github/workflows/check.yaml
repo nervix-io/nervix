@@ -87,8 +87,10 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -237,8 +239,9 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           components: llvm-tools
 
       - name: Install cargo tools
@@ -343,8 +346,9 @@ jobs:
       SELECTION: ${{ matrix.selection }}
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -490,8 +494,9 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -682,8 +687,9 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -880,7 +886,9 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
 
       - name: Install just
         uses: taiki-e/install-action@v2
@@ -1130,8 +1138,9 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -1285,8 +1294,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -1515,8 +1525,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -1673,8 +1684,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -1809,8 +1821,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
@@ -1949,8 +1962,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
