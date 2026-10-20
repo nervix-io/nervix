@@ -375,6 +375,13 @@ impl SqsSource {
 
 /// One long-polling receive from a queue: the request a source instance sends through its SDK
 /// client, and a fake service in the checks of how a read meets the host's cancellation.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each steady poll of a source's read sends its receives through its queue"
+    )
+)]
 trait QueueReceive: Sync {
     /// Asks the queue for one message with all of its attributes, waiting up to the long poll for
     /// one to arrive, and returns the messages the service answered with, possibly none.
