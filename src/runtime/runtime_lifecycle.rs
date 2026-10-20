@@ -555,6 +555,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_relocation_commit_refusal(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_relocation_commit_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

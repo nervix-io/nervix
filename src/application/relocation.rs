@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_consensus::{DomainMutationLease, DomainPlanningInputs};
+use nervix_consensus::{ConsensusError, DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
     QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy, ScheduledNode,
@@ -242,9 +242,7 @@ impl SessionServiceImpl {
             None
         };
         if let Err(error) = self
-            .inner
-            .consensus
-            .replace_domain_schedule(plan.inputs.clone(), Some(planned_schedule), mutation)
+            .commit_relocated_schedule(plan.inputs.clone(), planned_schedule, mutation)
             .await
         {
             if let Some(handoff) = handoff.take() {
@@ -303,6 +301,32 @@ impl SessionServiceImpl {
             ));
         }
         command_ok(message)
+    }
+
+    /// Proposes the relocated schedule against the inputs the plan captured, under the domain
+    /// mutation the command holds.
+    async fn commit_relocated_schedule(
+        &self,
+        inputs: DomainPlanningInputs,
+        schedule: DomainSchedule,
+        mutation: Option<&DomainMutationLease>,
+    ) -> error_stack::Result<(), ConsensusError> {
+        // A test build can make the leader refuse the commit as a leader whose lease lapsed does:
+        // OpenRaft refuses the write before appending it and names no leader to forward it to.
+        #[cfg(feature = "testing")]
+        if self
+            .inner
+            .runtime
+            .take_relocation_commit_refusal(inputs.domain())
+        {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: None,
+            }));
+        }
+        self.inner
+            .consensus
+            .replace_domain_schedule(inputs, Some(schedule), mutation)
+            .await
     }
 
     /// Computes the plan from the currently active graph, placement plan, schedule, and cluster
