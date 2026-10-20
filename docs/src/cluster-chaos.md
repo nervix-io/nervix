@@ -1063,7 +1063,8 @@ just chaos run restore-fault --image nervix:debian --fault reclamation-owner-cra
 
 This scenario injects one fault into a restore while the restore stages runtime state, and judges
 the outcome against the restore contract of
-[Backup And Restore](./backup-and-restore.md#retries-disconnects-and-leader-changes). The domain
+[Backup And Restore Architecture](./backup-and-restore-architecture.md#failure-semantics-at-every-boundary).
+The domain
 carries the graph of [Backup Cycles](#backup-cycles) and `fixtures/restore-state.nspl`:
 
 - a Kafka ingestor with domain-owned offsets, which reads `chaos_padded_input`
@@ -2334,8 +2335,8 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 7 | `domain-time-1` 7; `domain-time-1-cluster-restart` 8; `domain-time-3` 7; `domain-time-3-cluster-restart` 10; `domain-time-3-voter-crash` 12; `domain-time-3-voter-pause` 20; `domain-time-3-voter-stop` 15 |
 | 8 | `stateful-1` 20; `stateful-1-cluster-restart` 22; `stateful-3` 20; `stateful-3-owner-crash` 20 |
 | 9 | `stateful-3-owner-pause` 20; `stateful-3-owner-partition` 25; `stateful-3-cluster-restart` 22; `domain-time-3-voter-partition` 25 |
-| 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14; `restore-under-leader-crash` 15; `restore-under-owner-crash` 15; `restore-staging-volume` 15 |
-| 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20; `restore-under-leader-partition` 20; `restore-reclamation-under-owner-crash` 22 |
+| 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14; `restore-under-leader-crash` 12; `restore-under-owner-crash` 11; `restore-staging-volume` 11 |
+| 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20; `restore-under-leader-partition` 20; `restore-reclamation-under-owner-crash` 19 |
 
 A few soak entries need explanation:
 
@@ -2442,7 +2443,7 @@ records the process of its controller and of every run it starts, and cleanup wo
   wait, plus the summary and the uploads.
 
 The smoke shard therefore runs 30 minutes of entries in a 45-minute step and a 66-minute job. The
-soak's eleven shards hold 960 minutes of entries.
+soak's eleven shards hold 946 minutes of entries.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.
@@ -2739,6 +2740,19 @@ GitHub-hosted worker. They ran against the release and diagnostic images of test
 [38933658072](https://github.com/nervix-io/nervix/actions/runs/38933658072). All 14 runs passed.
 On the diagnostic image, every process start left qualifying evidence with no active, potential or
 lost finding. The task records each entry's ledger, outcome and timings.
+
+**The restore entries.** [Backup: Qualify restores through a leader crash, a partitioned
+coordinator, an owner restart and concurrent staging
+volume](https://app.clickup.com/t/86bckvq84) ran the five restore entries, one per GitHub-hosted
+worker, against the release and diagnostic images of tested merge `4a37b26e`, in runs
+[39388139905](https://github.com/nervix-io/nervix/actions/runs/39388139905) and
+[39387247054](https://github.com/nervix-io/nervix/actions/runs/39387247054). All 10 runs passed with
+no missing record, in 4.3 to 7.9 minutes each, and the soak budgets are about two and a half times
+those durations. The owner crash ended the restore it interrupted as incomplete on one image and
+completed it on the other, so both ends the contract allows were judged. Before that campaign, the
+owner crash found the defect in which a Kafka ingestor kept through a replica move stopped
+committing its domain offsets. The task records each entry's ledger, outcome and timings, and the
+staging volume's samples.
 
 **The current suites.** The current suites run nightly against both images of `main`:
 

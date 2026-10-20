@@ -340,19 +340,19 @@
         {
           "id": "restore-under-leader-crash",
           "shard": 10,
-          "budget_minutes": 15,
+          "budget_minutes": 12,
           "run": ["restore-fault", "--fault", "leader-crash"]
         },
         {
           "id": "restore-under-owner-crash",
           "shard": 10,
-          "budget_minutes": 15,
+          "budget_minutes": 11,
           "run": ["restore-fault", "--fault", "owner-crash"]
         },
         {
           "id": "restore-staging-volume",
           "shard": 10,
-          "budget_minutes": 15,
+          "budget_minutes": 11,
           "run": ["restore-volume"]
         },
         {
@@ -382,7 +382,7 @@
         {
           "id": "restore-reclamation-under-owner-crash",
           "shard": 11,
-          "budget_minutes": 22,
+          "budget_minutes": 19,
           "run": ["restore-fault", "--fault", "reclamation-owner-crash"]
         }
       ]
