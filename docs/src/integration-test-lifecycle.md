@@ -1168,7 +1168,10 @@ a lock outlived the stop. A node still stopping keeps its task, its ports and it
 registration, and the scenario's cleanup waits for it again or leaves it stopping.
 Stopping every node requests every stop first and then waits for each node in turn. A scenario can
 also begin stopping a node without waiting, to observe how the cluster reacts while the node is on
-its way down; its cleanup waits for it later.
+its way down; its cleanup waits for it later. It can hold such a node at the start of its graceful
+drain, once the node has advertised that it is terminating and closed its intake but before it asks
+for its work to move, so that peers meet a terminating node that is still live; releasing the hold
+lets the stop go on, and scenario teardown releases it with the other command pauses.
 
 The harness prints every such stop to standard error when its wait ends, as it prints a startup:
 
