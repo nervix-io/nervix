@@ -249,11 +249,9 @@ impl SessionServiceImpl {
                 self.abort_planned_ownership_handoff(domain, handoff, None)
                     .await;
             }
-            return command_error(format!(
-                "failed to commit the relocation onto node '{}' for domain '{}': {error}",
-                plan.destination,
-                domain.as_str()
-            ));
+            return self
+                .refused_relocation_commit(&plan.destination, domain, &error)
+                .await;
         }
 
         let local_activation_error = self.apply_current_cluster_state().await.err();
@@ -327,6 +325,29 @@ impl SessionServiceImpl {
             .consensus
             .replace_domain_schedule(inputs, Some(schedule), mutation)
             .await
+    }
+
+    /// Answers a relocation whose schedule commit consensus did not accept.
+    ///
+    /// A leader that lost its leadership, or could not confirm it, answers as a node that does not
+    /// lead. An admitted relocation therefore stays applying, and repeating its execution reference
+    /// recovers it from whatever the refused write did. A leader whose lease lapsed refuses this way
+    /// before appending the write, while it still leads. Every other refusal, such as a schedule
+    /// that changed since planning, fails the relocation with the consensus owner's reason.
+    async fn refused_relocation_commit(
+        &self,
+        destination: &ClusterNodeName,
+        domain: &DomainName,
+        error: &Report<ConsensusError>,
+    ) -> CommandResult {
+        self.consensus_report_response(
+            error,
+            format!(
+                "failed to commit the relocation onto node '{destination}' for domain '{}'",
+                domain.as_str()
+            ),
+        )
+        .await
     }
 
     /// Computes the plan from the currently active graph, placement plan, schedule, and cluster
@@ -940,5 +961,87 @@ mod tests {
             .get(&member("route"))
             .expect("member must remain scheduled");
         assert_eq!(node.assigned_nodes, vec![node_name("node-2")]);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_commit_refused_by_a_leader_that_cannot_confirm_it_leads_answers_as_a_non_leader() {
+        use crate::application::{
+            command_result::{CommandDisposition, LeaderLocation, LeaderRedirect},
+            test_fixtures::{TestService, build_test_service},
+        };
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").expect("valid domain");
+        let destination = node_name("node-2");
+        let observed_leader = node_name("node-3");
+
+        let lapsed_lease = Report::new(ConsensusError::LeadershipLost { leader_id: None });
+        let answer = service
+            .refused_relocation_commit(&destination, &domain, &lapsed_lease)
+            .await;
+        assert_eq!(
+            answer.disposition,
+            CommandDisposition::NotLeader(LeaderRedirect { leader: None })
+        );
+
+        let moved_leadership = Report::new(ConsensusError::LeadershipLost {
+            leader_id: Some(observed_leader.clone()),
+        });
+        let answer = service
+            .refused_relocation_commit(&destination, &domain, &moved_leadership)
+            .await;
+        assert_eq!(
+            answer.disposition,
+            CommandDisposition::NotLeader(LeaderRedirect {
+                leader: Some(LeaderLocation {
+                    node: observed_leader,
+                    grpc_url: None,
+                    web_console_url: None,
+                }),
+            })
+        );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("remove the throwaway database");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_commit_refused_for_a_changed_schedule_fails_the_relocation() {
+        use nervix_consensus::ConsensusConflict;
+
+        use crate::application::{
+            command_result::CommandDisposition,
+            test_fixtures::{TestService, build_test_service},
+        };
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain = DomainName::parse("default").expect("valid domain");
+        let destination = node_name("node-2");
+        let stale_plan = Report::new(ConsensusError::Conflict(ConsensusConflict::Reason(
+            "schedule changed".to_string(),
+        )));
+
+        let answer = service
+            .refused_relocation_commit(&destination, &domain, &stale_plan)
+            .await;
+
+        assert_eq!(answer.disposition, CommandDisposition::Failed);
+        assert_eq!(
+            answer.message,
+            "failed to commit the relocation onto node 'node-2' for domain 'default': consensus \
+             state changed: schedule changed"
+        );
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("remove the throwaway database");
     }
 }

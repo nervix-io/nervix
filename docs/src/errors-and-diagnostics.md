@@ -1400,7 +1400,9 @@ observes, when it knows one. `RaftStorage` is a fatal storage error Raft reporte
 `Conflict` a change the replicated state machine refused, and startup, transport, linearizable-read
 and membership failures have variants of their own. The class of a failed write is decided once,
 from the type of the Raft error: an answer that forwards to a leader is `LeadershipLost`, a fatal
-storage error is `RaftStorage`, and everything else is `RaftWrite`. The Raft or I/O error stays
+storage error is `RaftStorage`, and everything else is `RaftWrite`. A leader whose lease lapsed
+refuses a write before appending it with an answer that forwards to no leader, so that refusal is
+`LeadershipLost` without a leader, although the node may still lead. The Raft or I/O error stays
 beneath the context as the report's cause.
 
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
