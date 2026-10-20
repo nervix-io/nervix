@@ -1489,29 +1489,43 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
 
-Suspension stops polling. Messages remain only for the queue's configured retention period. An
-already received message remains invisible until its visibility timeout and may then be redelivered
-as a duplicate; the ingestor resumes by polling past anything the service expired. A poll still
-waiting when the ingestor quiesces or stops is never abandoned, because the service takes the
-message it answers with off the queue: the poll completes within its one-second wait, and a message
-it brings dispatches before the source suspends or closes. Only a service that has not answered
-within 10 seconds ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient error;
-a message the poll was returning then stays invisible until its visibility timeout.
-
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
-before its first poll and keeps the queue's URL from then on. The source resolves the host of its
-client's `endpoint` through the node's asynchronous resolver each time it opens a connection, and
-tries the answers in order. Every request is still signed for the configured host, and over HTTPS
-the service certificate must name that host. Without `tls_ca_file` the client trusts the platform's
-native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment
-variables; with it, the client trusts that CA alone and connects directly. A missing name, a silent
-name server or an unreachable answer fails the queue lookup, a poll, or a deletion. The AWS SDK's
-standard retry mode makes up to three attempts at each such request. A failed lookup, poll or
-deletion is then a transient source failure that `DESCRIBE INGESTOR` shows and the source retries
-on its `RETRY POLICY`, so an ingestor started while the service is unreachable consumes once the
-service answers. A queue that does not exist fails the lookup with its name, such as
-`SQS queue 'orders' does not exist`, and is retried the same way; Nervix never creates it. A message
-is deleted only once it is acknowledged, so a lookup failure never removes one from the queue.
+before its first poll and keeps the queue's URL from then on, suspensions included. The source
+resolves the host of its client's `endpoint` through the node's asynchronous resolver each time it
+opens a connection, and dials the answers as [Dialling The
+Answers](name-resolution.md#dialling-the-answers) describes for Smithy's client. Every request is
+still signed for the configured host, and over HTTPS the service certificate must name that host.
+Without `tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
+alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
+queue lookup, a poll, or a deletion. The AWS SDK's standard retry mode makes up to three attempts at
+each such request. A failed lookup or poll is then a transient source failure that
+`DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`, so an ingestor started while
+the service is unreachable consumes once the service answers. A queue that does not exist fails the
+lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
+Nervix never creates it.
+
+Each poll is a `ReceiveMessage` for one message with all of its attributes, which the service
+answers as soon as a message arrives or after a one-second wait without one. The service hides the
+message it returns from every other receive until the queue's visibility timeout ends, and the
+source deletes it only once it is acknowledged, so a failed lookup or poll never removes a message
+from the queue. A message whose acknowledgement fails or does not arrive within the mode's
+`ACK TIMEOUT` is rejected, which leaves it in the queue. So is one whose deletion fails, which
+`DESCRIBE INGESTOR` shows as a transient error; the source does not repeat the deletion. Either way
+the message becomes visible again once its visibility timeout ends and is received again, as a
+duplicate if the graph had already processed it, and the source polls again after its
+`RETRY POLICY` delay. A queue whose visibility timeout is shorter than the mode's `ACK TIMEOUT` can
+also hand a message that still awaits its acknowledgement to another receive.
+
+Suspension stops polling. Messages wait in the queue only for its configured retention period, and
+the ingestor resumes by polling past anything the service expired. A poll still waiting when the
+ingestor quiesces or stops is never abandoned, because the service hides the message it answers
+with until its visibility timeout ends: the source sends no further poll and waits for that answer,
+which a responsive service gives within the poll's one-second wait, and a message it brings
+dispatches before the source suspends or closes. Only a service that has not answered within
+10 seconds of the quiesce change or the stop ends that poll unanswered, which `DESCRIBE INGESTOR`
+shows as a transient error; a message the poll was returning then stays invisible until its
+visibility timeout ends.
 
 ### Prometheus
 
