@@ -1821,8 +1821,11 @@ a revision older than its currently installed materialized revision.
 Once admitted, a step that fails ends the restore as `restore failed at step '<step>':` and its
 reason, with the restore's report: the consensus command that records a step refuses it with a
 `RestoreStepConflict` naming the step and the domain, user, resource, or version, and a resource
-import, domain model batch, or state installation keeps its own failure beneath the step. The steps
-before it stay applied, and the message says so. `RestoreStateInstallationError` distinguishes an
+import, domain model batch, or state installation renders its own failure's complete chain into
+the step's reason. The steps before it stay applied, and the message says so. An admitted restore
+that cannot reach its first step not recorded, because its leader no longer holds the archive or
+the restore no longer plans against the cluster, ends as `restore failed:` and its reason, and the
+steps it recorded stay applied. `RestoreStateInstallationError` distinguishes an
 incomplete installation that blocks starting a domain from authority that no longer permits
 mutation. The runtime store reports a stale or competing published generation as
 `RuntimePersistenceError::RestoreGeneration`.
@@ -1863,9 +1866,10 @@ failure.
 
 No restore diagnostic includes password hashes or resource bytes. When a state section's entity is
 absent from the restored schedule or its schema fingerprint differs, installation skips that section
-and the successful command carries an unlocated warning diagnostic. The same applies to a verified
-state record whose kind tag or version is unsupported. The CLI includes those warnings in text and
-JSON reports.
+and the successful command carries an unlocated warning diagnostic. The same applies to a state
+record whose header names another state kind than the manifest declares, or whose version is
+unsupported; an unknown record kind in the manifest refuses the archive. The CLI includes those
+warnings in text and JSON reports.
 
 The client reports an archive it cannot read as `ClientError::ReadRestoreArchive` with the path and
 the I/O error kind, above the I/O error when the client read the file itself, an empty file as
@@ -2304,10 +2308,12 @@ The shipped code falls short of the model in these places:
 - **Reasons that copy a cause as text.** The registry keeps a vocabulary rejection's report beneath
   its invalid-model refusal and also quotes the rejection in the refusal's reason, which is the
   text the session shows. A model alteration's rollback, backup drain timeout and entity gate
-  failures, and a backup's domain capture failure and timeout, carry the failure they report as a
-  reason or details string, the rendered chain or its outermost context, with no typed cause
-  beneath them. The interconnect copies a cause's outermost context into the transport failure it
-  places above that cause, so the rendered chain says it twice.
+  failures, a backup's domain capture failure and timeout, and a restore step's failure, carry the
+  failure they report as a reason or details string, the rendered chain or its outermost context,
+  with no typed cause beneath them. The interconnect copies a cause's outermost context into the
+  transport failure it places above that cause, so the rendered chain says it twice.
+- **A decision read from text.** A restore's warnings travel as diagnostics whose text begins with
+  `warning:`, and `nervix-cli restore` tells them from its other diagnostics by that prefix.
 - **Sources printed by their context.** The interconnect's I/O, TLS and HTTP/2 transport errors
   print the source `error-stack` also records beneath them.
 - **A node or a domain named twice.** An emitter's or generator's start and a processor's planning

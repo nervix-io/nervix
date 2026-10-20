@@ -48,7 +48,9 @@ names it. The contracts its scenarios verify stay with the chapters that own the
 - guest checkpoints: [WASM State And Recovery](./wasm-state.md)
 - scheduling, the voter observation grace and planned handoffs:
   [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover)
-- archives: [Backup And Restore](./backup-and-restore.md)
+- backup cuts, archives and restore installation:
+  [Backup And Restore Architecture](./backup-and-restore-architecture.md), and the statements and
+  their reports: [Backup And Restore](./backup-and-restore.md)
 - source and sink acknowledgement:
   [Connector Crates And The Connector Contract](./connector-contract.md)
 - the deadlock detector:

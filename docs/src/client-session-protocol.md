@@ -884,8 +884,8 @@ call fails as uncertain and names the execution reference. The Rust client, the 
 never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
 it comes, is discarded.
 
-`nervix-cli backup --timeout` extends its request and retry budgets by the named quiesce timeout,
-leaving the ordinary request budget for command admission, capture and the reply.
+`nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
+retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
 
 For native Rust sessions, the client loads a Hickory resolver during setup or uses one its owner
 provided. It resolves the hostname of each selected server, seed, and redirect on a new connection
@@ -1603,7 +1603,7 @@ a `BackupArchiveComplete`. Every other answer is one frame:
 | `BackupDownloadFailed` with `Expired` | The retry validity of the reference has ended. |
 | `BackupDownloadFailed` with `NotOwner` | Another user ran the backup. |
 | `LeaderRedirect` | The node does not retain the archive and does not lead. |
-| `BackupDownloadFailed` with `NotRetained` | The leader does not retain the archive: a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| `BackupDownloadFailed` with `NotRetained` | The leader does not retain the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted, or the reference names no backup. |
 | `BackupDownloadFailed` with `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
 
 An archive is retained on the node that assembled it until the first download whose completion
@@ -1652,8 +1652,9 @@ the leader before the restore can even be planned. `RESTORE` therefore never tra
 sent as a command with `RequestFailed`. [Backup And Restore](./backup-and-restore.md#restoring)
 owns what a restore recreates and the order of its steps.
 
-The client streams one `RestoreStart`, then the archive in order as non-empty `RestoreChunk` frames
-of at most 256 KiB, and half-closes the stream. The start carries the request identity of the
+The client streams one `RestoreStart`, then the archive in order as non-empty `RestoreChunk`
+frames, and half-closes the stream. The Rust client and the console send chunks of at most
+256 KiB; the leader accepts any non-empty chunk that fits one frame. The start carries the request identity of the
 reply, the restore's execution reference, the statement as canonical NSPL, and the archive's exact
 size and BLAKE3 digest. The reference is a persistent command's execution reference, and the
 request it is bound to is the statement together with the archive's size and digest: a restore is

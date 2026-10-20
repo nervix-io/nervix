@@ -950,7 +950,7 @@ retains its durable activation gate across restart. A normal `START` creates a n
 rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
-[Backup And Restore](backup-and-restore.md#publishing-the-state-generation). A deduplicator or
+[Generation Storage](backup-and-restore-architecture.md#generation-storage). A deduplicator or
 window backup likewise captures what each branch task publishes when the cut's lifecycle
 checkpoint asks it to, independently of the periodic interval, and a restore rebuilds each branch's
 native checkpoint from its archived Arrow groups and streams it through the same publisher, one
@@ -1151,8 +1151,10 @@ The same owner reclaims selected-namespace chunks made unreachable by ordinary o
 checkpoint replacement, ownership recovery or purge, including after restart. It keeps the
 selected publication and every currently referenced segmented revision.
 Reclamation preserves snapshot readers and never completes an installation or opens its `START`
-gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
-for quotas, metrics and physical storage limits.
+gate. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the sweep and [restore
+checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for quotas,
+metrics and physical storage limits.
 
 ### Domain Time
 

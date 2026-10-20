@@ -530,9 +530,10 @@ reads the configuration at the cut, and asks state owners to stage their checkpo
 the domain and explicitly releases that domain's lease before transferring its sections into the
 archive. A cluster backup repeats this process per domain, so one domain's archive transfer does
 not hold another domain paused or mutation locked. A stopped domain is confirmed under its lease
-and has no intake to pause;
-`WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` reads a live checkpoint without
-quiescing. A retry still uses the command execution's stable identity and outcome.
+and has no intake to pause; `WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` takes none
+either and reads a live checkpoint without quiescing. A retry still uses the command execution's
+stable identity and outcome, and a new leader re-executes an applying backup under it. [The
+Quiesced Cut](./backup-and-restore-architecture.md#the-quiesced-cut) describes the protocol.
 The backup drain reads admitted work on every live node and uses a separate confirming force-flush
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
 not keep the cut open, and neither do the rows a window retains, which the cut captures as window
@@ -551,11 +552,14 @@ disk. The verified description, parsed Models and reservation share one owner th
 retain until they finish, including cancellation. Parsing and the pure restore planner run on
 admitted bulk CPU workers. Native checkpoints stream into quota-owned files and use the same
 bounded installation path as guest saves. The ordinary bulk budget stays at 32 MiB, with fixed
-2 MiB conversion I/O and installation jobs. [Backup And Restore](backup-and-restore.md#restoring)
-owns the preparation estimate and its allocation limits.
+2 MiB conversion I/O and installation jobs. [Restore Intake And
+Preparation](backup-and-restore-architecture.md#restore-intake-and-preparation) owns the preparation
+estimate, and [Backup And Restore](backup-and-restore.md#limits) its allocation limits.
 
 A restore is a persistent administrative command whose progress is replicated state; the operator
-view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
+view is in [Backup And Restore](./backup-and-restore.md#restoring), and [Admission And Durable
+Progress](./backup-and-restore-architecture.md#admission-and-durable-progress) describes how each
+step is recorded. The leader admits a restore
 under its execution reference only after the archive verified and the whole restore planned, and
 admission takes the mutation lease of every domain the restore creates. The admitted execution
 records the `RESTORE` statement, the size and digest of its archive, every step the restore has
@@ -590,7 +594,8 @@ validation and the leader's content checks, and without the statement and source
 transaction. The lease keeps every other command from changing the domain while the restore holds
 it, so a leader that finds exactly the archived models already committed knows that an earlier
 attempt applied them. It stages all compatible state before any node replaces its published set,
-then publishes one durable batch per node. Only after every publication succeeds does it record
+then has every node durably select its complete set through one publication pointer. Only after
+every publication succeeds does it record
 the model step and release the start gate. For `RESUME`, this same consensus effect sets `Running`
 and installs the archived clock mapping, preserving the archived start generation and start point.
 State installation includes materialized checkpoints bound to that generation before any branch

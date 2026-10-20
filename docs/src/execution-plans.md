@@ -309,8 +309,9 @@ archived domain start generation. Native loading retains one database snapshot w
 bounded sections. A `RESUME` completion changes the domain to running at that same generation
 and mapping only after publication and passive-handle clearing on every target node. The new
 running revision therefore binds generators and branch tasks to installed materialized rows.
-[Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
-sections, and the operator-visible restore guarantees.
+[Backup And Restore Architecture](./backup-and-restore-architecture.md) owns archive cut modes,
+state selection, skipped sections and the restore guarantees, and [Backup And
+Restore](./backup-and-restore.md) the operator-visible statements, reports and limits.
 
 Resource plans carry concrete pinned version numbers from the committed Models. Node binding
 loads exactly those versions from its local resource store; it never resolves `LATEST` or reads

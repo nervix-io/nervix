@@ -318,7 +318,7 @@ Archive preparation reads the first physical tar header into the backup crate's 
 That type carries the regular manifest entry's validated identity and bounded encoded length.
 Restore uses its length to admit manifest decoding before allocating owned archive values. The
 full archive reader uses the same boundary and then verifies the manifest and every section; see
-[Backup And Restore](./backup-and-restore.md).
+[Restore Intake And Preparation](./backup-and-restore-architecture.md#restore-intake-and-preparation).
 
 ## Archived Counts
 
@@ -666,7 +666,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`. Completion of the
+authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at
@@ -681,9 +681,10 @@ Runtime storage has distinct initial and restored namespaces; restore installati
 separate from guest-state generation and checkpoint revision. A current checkpoint is either an
 inline checkpoint or a segmented checkpoint with required revision, length and digest. A read
 uses one database view for namespace selection and payload data. A queued checkpoint job retains
-its selected namespace and validates that it remains current before writing. The storage format
-marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
-requires recreation rather than inventing a namespace for the stored keys.
+its selected namespace and validates that it remains current before writing. A storage format
+marker other than the current one fails explicitly, and so does a missing marker beside nonempty
+checkpoint storage; either requires recreation rather than inventing a namespace for the stored
+keys.
 
 A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
 retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose

@@ -138,9 +138,10 @@ target node. A failure names the step, and the steps before it stay applied. An 
 retains a replicated start gate even after failure releases the execution's mutation lease.
 Retrying the reference while the restore applies on the leader returns `OutcomeUnknown` with the
 `StillApplying` cause at once, and after it finished returns the recorded outcome with the typed
-restore report. Only the leader the archive was streamed to holds it, so a new leader resumes an
-applying restore from its first step not recorded when a retry streams the archive again, and ends
-it as failed once the reference's retry validity passes without one. See
+restore report. Only the leader the archive was streamed to holds it, so a leader that holds it
+resumes an applying restore from its first step not recorded, another leader does so when a retry
+streams the archive again, and a leader without the archive ends the restore as failed once the
+reference's retry validity passes without one. See
 [Backup And Restore](./backup-and-restore.md#retries-disconnects-and-leader-changes).
 
 `RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.

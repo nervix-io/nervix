@@ -121,9 +121,13 @@ revision; segmented or inline replacement, header purge and incomplete unpublish
 permit bounded chunk deletion. Snapshot retention
 preserves preexisting readers, while the installation barrier serializes ordinary, replica and
 ownership writes with cleanup. This adds no consensus record or log
-mutation and never removes a replicated incomplete-installation gate. See
-[Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
-quota, metrics and node-local cleanup boundary.
+mutation and never removes a replicated incomplete-installation gate. Because the sweep holds that
+read guard for its whole duration, as staging and publication jobs do, the node publishes its next
+applied revision only after the job finishes. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the node-local
+cleanup boundary, and [Backup And
+Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the quota and its
+metrics.
 
 ### Coordinated WASM Reset Publications
 
