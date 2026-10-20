@@ -172,6 +172,7 @@ mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;
+mod nats_delivery;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
@@ -378,6 +379,7 @@ struct ScenarioWorld {
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
     pulsar_stop_timing: Option<pulsar_delivery::StopTiming>,
+    nats_stop_timing: Option<nats_delivery::NatsStopTiming>,
     /// When the scenario first posted an HTTP payload to a node. An input collector's window
     /// opens no earlier than the first record that reaches it, so a collection-delay assertion
     /// measures its collected output from this instant.

@@ -773,7 +773,10 @@ report when it ends are lost, and the emitter logs at `warn` how many, counting 
 not the events waiting in librdkafka's queue, and reports them as its transient error and an error
 event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
-expired deadline reports their count, without claiming the broker did not receive them. MQTT
+expired deadline reports their count, without claiming the broker did not receive them. A Core
+NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
+unresolved and with the client; its finish flushes them within that same finish deadline, and a
+deadline that ends first reports how many the client still held. MQTT
 QoS 0 discards what its client still holds, which the emitter logs at `warn`. Every other sink
 holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink

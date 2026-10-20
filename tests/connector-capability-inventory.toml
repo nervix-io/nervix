@@ -403,6 +403,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A NATS emitter whose server goes down is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "NATS SUBJECT INGESTOR"
 scenarios = [

@@ -579,6 +579,13 @@ failure's whole chain. A deadline key whose value breaks the vocabulary's rule i
 `ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
 and each connector reports it as a configuration failure.
 
+A Core NATS write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
+`SinkPublishError::Publish` and attaches its message, which `DESCRIBE EMITTER` shows; the write's
+records stay unresolved for the emitter's retry. A NATS sink whose client still holds records when
+its finish deadline passes fails its finish with `SinkFinishError::Unsent` and their count, and one
+whose client fails while it flushes them with `SinkFinishError::Flush`, the driver's flush error
+beneath.
+
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
 driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the
