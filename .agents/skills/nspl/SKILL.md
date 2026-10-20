@@ -14,6 +14,8 @@ clause order or connector options from memory.
 For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
 requirements, metadata types, headers, batching and the reasons ingest and emit differ.
+For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
+headers, response-header reads, frame metadata and the closed client CONFIG key set.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion

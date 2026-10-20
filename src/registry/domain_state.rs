@@ -17,7 +17,7 @@ use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
     CreateEndpoint, DomainName, EndpointType, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
-    PrometheusApiRoot, RelayName, SourceReference, parse_duration_text,
+    PrometheusApiRoot, RelayName, SourceReference, WebsocketsClientConfig, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -294,6 +294,16 @@ impl DomainState {
                     }
                 }
                 Model::ClientWebsockets(client) => {
+                    if let Err(report) = WebsocketsClientConfig::parse(&client.config) {
+                        let issue = report.current_context().clone();
+                        return Err(report.change_context(
+                            RegistryError::InvalidWebsocketsClientConfig {
+                                domain: domain.clone(),
+                                client: client.name.clone(),
+                                issue,
+                            },
+                        ));
+                    }
                     if let Some(signaling_protocol) = client.signaling_protocol.as_ref() {
                         let signaling_protocol = expect_kind(
                             domain,

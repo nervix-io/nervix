@@ -100,6 +100,12 @@ before its bounded closing wait, so cancellation leaves it needing a new resume.
 [connector contract](./connector-contract.md#source-boundary) owns the retry and payload lifetime
 effects.
 
+WebSockets upgrade fields cross from literal semantic Models into `WebsocketsUpgradeHeaders`,
+whose private representation enforces HTTP bounds and WebSocket protocol-name restrictions before
+an execution plan receives it. `WebsocketDataFrame` carries either text or binary payload, so a
+text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
+header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
+
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
 that result is part of the function contract. Arrow values under a null or failure validity mask

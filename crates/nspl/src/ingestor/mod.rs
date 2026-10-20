@@ -1983,6 +1983,7 @@ mod tests {
         assert_eq!(
             transport(&parsed).source,
             IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
+                headers: Vec::new(),
                 client: nervix_models::ClientName::try_from("ws_main")
                     .expect("valid client identifier"),
                 mode: WebsocketsIngestMode::NoAck,

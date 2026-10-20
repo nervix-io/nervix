@@ -113,6 +113,7 @@ pub(super) struct KafkaIntegrationBuilders {
 /// The Kafka columns live behind one allocation taken when the group opens, so the variants
 /// stay comparable in size.
 pub(super) enum IngestIntegrationBuilders {
+    Websockets { frame_type: StringBuilder },
     Kafka(Box<KafkaIntegrationBuilders>),
     Syslog { peer_addr: StringBuilder },
     Headers,
@@ -150,6 +151,9 @@ impl IngestMetadataBuilders {
         #[cfg(test)]
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
         let integration = match scope {
+            SourceMetadataScope::Websockets => IngestIntegrationBuilders::Websockets {
+                frame_type: StringBuilder::with_capacity(row_bound, 0),
+            },
             SourceMetadataScope::Kafka => {
                 IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
                     topic: StringBuilder::with_capacity(row_bound, 0),
@@ -182,45 +186,56 @@ impl IngestMetadataBuilders {
                                    appends the bounded row metadata")
     )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
-        let headers = match (&mut self.integration, row) {
-            (
-                IngestIntegrationBuilders::Kafka(kafka),
-                IngestMetadataRow::Kafka {
-                    topic,
-                    partition,
-                    offset,
-                    headers,
-                },
-            ) => {
-                kafka.topic.append_value(topic);
-                kafka.partition.append_value(*partition);
-                kafka.offset.append_value(*offset);
-                Some(*headers)
-            }
-            (
-                IngestIntegrationBuilders::Syslog { peer_addr },
-                IngestMetadataRow::Syslog {
-                    peer_addr: source_peer_addr,
-                },
-            ) => {
-                // The address renders straight into the builder's value buffer, so a peer
-                // address does not allocate a string per message.
-                use std::fmt::Write as _;
-                write!(peer_addr, "{source_peer_addr}")
-                    .assured("fmt::Write over an in-memory string builder has no failure mode");
-                peer_addr.append_value("");
-                None
-            }
-            (IngestIntegrationBuilders::Headers, IngestMetadataRow::Headers { headers }) => {
-                Some(*headers)
-            }
-            (_, row) => {
-                return Err(Report::new(IngestMetadataError::BuilderScopeMismatch {
-                    builders: self.scope,
-                    row: row.scope(),
-                }));
-            }
-        };
+        let headers: Option<&dyn nervix_connector::IngestMessageHeaders> =
+            match (&mut self.integration, row) {
+                (
+                    IngestIntegrationBuilders::Websockets { frame_type },
+                    IngestMetadataRow::Websockets {
+                        frame_type: kind,
+                        headers,
+                    },
+                ) => {
+                    frame_type.append_value(kind.as_ref());
+                    Some(headers.as_ref())
+                }
+                (
+                    IngestIntegrationBuilders::Kafka(kafka),
+                    IngestMetadataRow::Kafka {
+                        topic,
+                        partition,
+                        offset,
+                        headers,
+                    },
+                ) => {
+                    kafka.topic.append_value(topic);
+                    kafka.partition.append_value(*partition);
+                    kafka.offset.append_value(*offset);
+                    Some(*headers)
+                }
+                (
+                    IngestIntegrationBuilders::Syslog { peer_addr },
+                    IngestMetadataRow::Syslog {
+                        peer_addr: source_peer_addr,
+                    },
+                ) => {
+                    // The address renders straight into the builder's value buffer, so a peer
+                    // address does not allocate a string per message.
+                    use std::fmt::Write as _;
+                    write!(peer_addr, "{source_peer_addr}")
+                        .assured("fmt::Write over an in-memory string builder has no failure mode");
+                    peer_addr.append_value("");
+                    None
+                }
+                (IngestIntegrationBuilders::Headers, IngestMetadataRow::Headers { headers }) => {
+                    Some(*headers)
+                }
+                (_, row) => {
+                    return Err(Report::new(IngestMetadataError::BuilderScopeMismatch {
+                        builders: self.scope,
+                        row: row.scope(),
+                    }));
+                }
+            };
         if let Some(headers) = headers {
             let (names, values) = (&mut self.header_names, &mut self.header_values);
             headers.visit(&mut |name, value| {
@@ -240,6 +255,10 @@ impl IngestMetadataBuilders {
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
         let rows = self.rows;
         let integration_columns = match &mut self.integration {
+            IngestIntegrationBuilders::Websockets { frame_type } => {
+                let frame_type: ArrayRef = StdArc::new(frame_type.finish());
+                vec![frame_type]
+            }
             IngestIntegrationBuilders::Kafka(kafka) => {
                 let topic: ArrayRef = StdArc::new(kafka.topic.finish());
                 let partition: ArrayRef = StdArc::new(kafka.partition.finish());

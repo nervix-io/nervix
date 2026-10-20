@@ -799,8 +799,14 @@ is created. The refusal names the connector, the client and the domain, with the
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
-Planning failures
-likewise retain the selected entity or placement so an operator can correct the request. A
+A `TYPE WEBSOCKETS` client uses the same validation boundary with
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint or positive-duration values,
+TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
+its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
+cause if a source cannot produce its validated header collection. Rendered client values are
+validated again by the connector before opening transport.
+Planning failures likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
 a member that does not exist names the domain and the member, a server-listener ingestor names the
 ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides

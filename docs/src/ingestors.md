@@ -501,6 +501,7 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 
 - `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
 - `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
 - `PULSAR TOPIC` exposes message properties
@@ -520,7 +521,7 @@ WHERE read_header("tenant") = output.tenant
 ```
 
 `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `SYSLOG LISTENER`, `ZEROMQ PULL`,
-`WEBSOCKETS CONNECTION`, and `CLIENT PRODUCER` ingestors do not support header reads. Leader-side
+and `CLIENT PRODUCER` ingestors do not support header reads. Leader-side
 validation rejects these functions for a source without header support, with a message that names
 the source's phrase, such as `MQTT TOPIC ingestors do not support read_header or read_headers`.
 
@@ -1647,6 +1648,7 @@ The referenced resource bundle must contain:
 ```plexus,ignore
 CREATE WEBSOCKETS CONNECTION INGESTOR <name>
   FROM <client>
+  [HEADERS { 'authorization' = 'Bearer token' }]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1661,10 +1663,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | WEBSOCKETS client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | No entity-specific options. |
-| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |
+| Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |
+| Headers | `read_header`, `read_headers` |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Metadata | metadata.frame_type: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1673,10 +1675,36 @@ See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabi
 <!-- connector-matrix:ingest-websockets-connection:end -->
 
 This opens an outbound WebSocket connection through a `TYPE WEBSOCKETS` client and decodes text or
-binary frames.
+binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
+<client>` and takes literal string names and values. Names are case-insensitive; repeated names,
+protocol-owned fields (`Host`, hop-by-hop framing fields and `Sec-WebSocket-*`), malformed values,
+more than 128 fields, or more than 32 KiB of field name/value bytes are refused before activation.
+
+Each data frame exposes `metadata.frame_type` as `text` or `binary`. `read_header` and
+`read_headers` read the opening response's printable ASCII header values, including repeated values in their
+transport order. These values belong to the frame's exact connection: accepted signaling frames
+and quiesce-buffered frames retain that snapshot across suspension, reconnection and replay.
+Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
+The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
+
+The client's Nervix-owned `CONFIG` is strict and matches keys without regard to ASCII case:
+
+| Key | Contract |
+| --- | --- |
+| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. |
+| `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
+| `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
+| `tls_ca_file` | Optional CA file for `wss://`. |
+| `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together for `wss://`. |
+
+Durations obey the shared schedulable physical-duration bound. Unknown or repeated keys are
+refused. TLS file keys are refused with `ws://`. Resource mounts and
+configuration templates keep their shared client contract; rendered values are checked again when
+opening the source. A ping write has a one-second physical budget and a failure triggers recovery.
+
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
-asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
-DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
+asynchronous resolver. It tries the returned addresses in order within the configured
+`connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
 Resolution, connection and read failures are transient source failures. A peer Close records its

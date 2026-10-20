@@ -143,10 +143,13 @@ pub use connector::{
     SqsQueueName, SqsQueueSink, SqsQueueSource, SqsSink, SqsSinkEntity, SqsSource, SqsSourceEntity,
     SyslogCollectorSink, SyslogConfigEntry, SyslogIngestMode, SyslogIngestorAlteration,
     SyslogListenerSource, SyslogSink, SyslogSinkEntity, SyslogSource, SyslogSourceEntity,
+    WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey,
     WebsocketsConfigEntry, WebsocketsConnectionSource, WebsocketsEndpointSource,
-    WebsocketsIngestMode, WebsocketsIngestorAlteration, WebsocketsSource, WebsocketsSourceEntity,
-    ZeroMqConfigEntry, ZeroMqIngestMode, ZeroMqIngestorAlteration, ZeroMqPullSource,
-    ZeroMqPushSink, ZeroMqSink, ZeroMqSinkEntity, ZeroMqSource, ZeroMqSourceEntity,
+    WebsocketsFrameType, WebsocketsIngestMode, WebsocketsIngestorAlteration, WebsocketsSource,
+    WebsocketsSourceEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders,
+    WebsocketsUpgradeHeadersError, ZeroMqConfigEntry, ZeroMqIngestMode, ZeroMqIngestorAlteration,
+    ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, ZeroMqSinkEntity, ZeroMqSource,
+    ZeroMqSourceEntity,
 };
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,

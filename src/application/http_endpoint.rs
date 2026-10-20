@@ -136,9 +136,9 @@ struct EndpointSignalingDataSink<'a> {
 }
 
 impl SignalingDataSink for EndpointSignalingDataSink<'_> {
-    async fn accept(&self, payload: Vec<u8>) {
+    async fn accept(&self, frame: nervix_connector_websockets::WebsocketDataFrame) {
         self.route
-            .dispatch(self.runtime, payload.as_slice(), self.headers)
+            .dispatch(self.runtime, frame.payload(), self.headers)
             .await;
     }
 }

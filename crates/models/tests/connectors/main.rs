@@ -366,9 +366,12 @@ fn source_declaration(kind: IngestSourceKind) -> SourceDeclaration {
             every_node: true,
             reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         },
-        IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
-            headers_only(false, ConnectorKind::Websockets)
-        }
+        IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => SourceDeclaration {
+            reads_headers: true,
+            metadata: SourceMetadataScope::Websockets,
+            every_node: false,
+            reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
+        },
         IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => SourceDeclaration {
             reads_headers: true,
             metadata: SourceMetadataScope::Headers,

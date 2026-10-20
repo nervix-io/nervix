@@ -295,7 +295,7 @@ name again for every new connection it opens.
 | HTTP request emitter | The connector resolves each request's target host itself | The request's one physical `timeout_ms` | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
 | RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | Thirty seconds shared with the address attempts and TLS | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | Thirty seconds shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
-| WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | Thirty seconds shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
+| WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | `connect_timeout_ms`, default 30000, shared with the attempts, TLS and upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse sinks, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | SQS sources and sinks, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and a sink's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
@@ -328,7 +328,7 @@ before any IPv6 answer and no attempt races another:
 | RabbitMQ source or sink | Thirty seconds | TCP connection | TLS within the same budget, then Lapin's AMQP handshake, which has no deadline of its own |
 | Syslog TCP sender | Thirty seconds | TCP connection | No further step |
 | Syslog TLS sender | Thirty seconds | TCP connection and TLS | No further step |
-| WebSocket client source | Thirty seconds | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
+| WebSocket client source | `connect_timeout_ms`, default 30000 | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
 | Redis Pub/Sub source | Thirty seconds | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
 | MQTT source, sink or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
 

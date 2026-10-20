@@ -13479,6 +13479,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus commands begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -14046,6 +14047,7 @@ async fn when_background_resource_upload_connection_is_dropped(world: &mut Scena
 }
 
 #[then("the background NSPL execution succeeds")]
+#[then("the background Plexus execution succeeds")]
 async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
     let task = world
         .background_nspl

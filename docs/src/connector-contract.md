@@ -381,7 +381,7 @@ clause the grammar accepts, so documentation can show it and generated statement
 | --- | --- |
 | Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. A Prometheus client also declares every key its `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Prometheus and WebSockets clients also declare every key its `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
 
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
 `SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
@@ -1483,11 +1483,22 @@ sequenceDiagram
 - **WebSocket client source.** The WebSocket connector crate supplies the outbound
   `WEBSOCKETS CONNECTION` source through `SourceConnector` and `BrokerSourceConnector`. It has
   no emitter or listening endpoint. Its plan carries resolved client configuration, the node
-  resolver and an optional compiled signaling protocol. `open` prepares local transport and TLS
+  resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
+  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping durations and TLS
+  file keys restricted to secure endpoints with paired client identity files. Registry creation
+  and source construction after template rendering both validate it. The omitted connection
+  timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting; `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
-  handshake is queued for polling before new socket frames. Text and binary frames become raw
-  payload bytes for the host to decode; protocol control frames remain transport concerns.
+  handshake is queued for polling before new socket frames. Text and binary payload-carrying
+  variants retain their kind through signaling and become bytes for the host to decode. Each
+  connection captures its printable ASCII upgrade response headers once; queued and delivered messages
+  share that immutable snapshot, so suspension, reconnection and quiesce replay preserve the
+  correct headers. The host builds the typed `frame_type` STRING column and supplies header
+  reads from that snapshot. Request headers use the validated vocabulary collection; protocol
+  fields and repeated names cannot override the generated upgrade. Client pings begin after
+  signaling at the configured cadence, with a one-second write budget, and continue alongside
+  data reads. Protocol control frames remain transport concerns.
   Suspension drops the connection while retaining queued payloads, and close also clears that
   queue. Transport failure requires another resume of the retained source.
   The host composer currently resolves the named signaling protocol and chooses buffered intake,

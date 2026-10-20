@@ -169,7 +169,8 @@ relay. Do not use them to scan across branches.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
-- For `WEBSOCKETS CONNECTION` recovery and graceful close, read `Ingestors` →
+- For `WEBSOCKETS CONNECTION` literal upgrade headers, frame metadata, strict client CONFIG,
+  recovery and graceful close, read `Ingestors` →
   `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and

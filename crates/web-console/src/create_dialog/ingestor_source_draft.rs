@@ -372,6 +372,7 @@ impl IngestSourceDraft {
             IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
                 WebsocketsConnectionSource {
                     client: self.client()?,
+                    headers: Vec::new(),
                     mode: WebsocketsIngestMode::NoAck,
                     quiesce,
                 }

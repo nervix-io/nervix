@@ -201,6 +201,7 @@ client_plan!(SqsIngestorStartPlan {
     mode: SqsIngestMode,
 });
 client_plan!(WebsocketsIngestorStartPlan {
+    headers: nervix_models::WebsocketsUpgradeHeaders,
     mode: nervix_models::WebsocketsIngestMode,
     signaling_protocol: Option<SignalingProtocolName>,
 });
@@ -843,12 +844,18 @@ impl SourceStartPlan {
                 IngestSource::Websockets(WebsocketsSource::Connection(
                     WebsocketsConnectionSource {
                         client: expected,
+                        headers,
                         mode,
                         ..
                     },
                 )),
                 Model::ClientWebsockets(resolved),
             ) => Ok(Self::Websockets(WebsocketsIngestorStartPlan {
+                headers: nervix_models::WebsocketsUpgradeHeaders::parse(headers).change_context(
+                    EntrypointPlanError::InvalidWebsocketsUpgradeHeaders {
+                        ingestor: name.clone(),
+                    },
+                )?,
                 client: IngestorClientSpec::resolved(
                     name,
                     expected,
@@ -1283,6 +1290,7 @@ mod tests {
             source: IngestSource::Websockets(WebsocketsSource::Connection(
                 WebsocketsConnectionSource {
                     client: named("upstream"),
+                    headers: Vec::new(),
                     mode: nervix_models::WebsocketsIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -1294,11 +1302,12 @@ mod tests {
                 config: Vec::new(),
             }),
             plan: SourceStartPlan::Websockets(WebsocketsIngestorStartPlan {
+                headers: nervix_models::WebsocketsUpgradeHeaders::default(),
                 client: client(),
                 mode: nervix_models::WebsocketsIngestMode::NoAck,
                 signaling_protocol: None,
             }),
-            reads_headers: false,
+            reads_headers: true,
         }
     }
 
