@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** Reading the leader, the voters and the application-health target of every peer that
 //!   each member's public cluster status reports, the targets the running members observed an
-//!   exited member's process through before it is relaunched, deciding whether the members have
-//!   converged, and waiting for that within one budget after a start or after one member is
-//!   relaunched.
+//!   exited member's process through before it is relaunched, asking the relaunched member where
+//!   its relaunch says the new process answers, deciding whether the members have converged, and
+//!   waiting for that within one budget after a start or after one member is relaunched.
 //! - **Depends on.** Bounded status requests and the phase deadline.
 //! - **Must not know.** How a member is launched, signalled or restarted, or how a server decides
 //!   leadership and availability.
@@ -258,17 +258,31 @@ fn unreadable(member: &str, line: &str) -> Report<ConvergenceError> {
 }
 
 /// A member relaunched while the others kept running, with the target each of them observed its
-/// exited process through.
-#[derive(Debug)]
+/// exited process through and the endpoint its new process answers on.
 struct RelaunchedMember {
     member: String,
     /// The generation of the target each running member observed the exited process through. A
     /// member that had stopped observing it holds none, so any target it reports later observes
     /// the new process.
     exited_targets: BTreeMap<String, u64>,
+    /// Where the new process answers status requests, which a relaunch that moved the member's
+    /// listeners changed.
+    endpoint: StatusEndpoint,
 }
 
 impl RelaunchedMember {
+    /// The endpoint `member`, whose endpoint before the relaunch was `endpoint`, answers on now.
+    fn endpoint_of<'endpoint>(
+        &'endpoint self,
+        member: &str,
+        endpoint: &'endpoint StatusEndpoint,
+    ) -> &'endpoint StatusEndpoint {
+        if member == self.member {
+            return &self.endpoint;
+        }
+        endpoint
+    }
+
     /// Whether `observer` still observes `peer`, when it is the relaunched member, through the
     /// target it observed the exited process through, or an earlier one.
     fn observes_exited_process(&self, observer: &str, peer: &str, target: &PeerTarget) -> bool {
@@ -406,24 +420,29 @@ impl ClusterConvergence {
         Self { members, budget }
     }
 
-    /// Relaunches `member`, whose previous process has exited, through `relaunch`, then waits
-    /// until every member has converged on the new process. First every other member reports
-    /// the target it observes the exited process through, so that afterwards it converges only
-    /// through a newer one.
+    /// Relaunches `member`, whose previous process has exited, through `relaunch`, which returns
+    /// the endpoint the new process answers on, then waits until every member has converged on
+    /// the new process. First every other member reports the target it observes the exited
+    /// process through, so that afterwards it converges only through a newer one.
     pub(crate) async fn relaunch<F>(
         &self,
         member: &str,
         relaunch: F,
     ) -> Result<(), Report<ConvergenceError>>
     where
-        F: Future<Output = io::Result<()>>,
+        F: Future<Output = io::Result<StatusEndpoint>>,
     {
-        let relaunched = self.exited_targets(member).await?;
-        relaunch.await.map_err(|failure| {
+        let exited_targets = self.exited_targets(member).await?;
+        let endpoint = relaunch.await.map_err(|failure| {
             Report::new(failure).change_context(ConvergenceError::Relaunch {
                 member: member.to_string(),
             })
         })?;
+        let relaunched = RelaunchedMember {
+            member: member.to_string(),
+            exited_targets,
+            endpoint,
+        };
         self.converge(Some(&relaunched)).await
     }
 
@@ -437,7 +456,7 @@ impl ClusterConvergence {
     async fn exited_targets(
         &self,
         relaunched: &str,
-    ) -> Result<RelaunchedMember, Report<ConvergenceError>> {
+    ) -> Result<BTreeMap<String, u64>, Report<ConvergenceError>> {
         let deadline = PhaseDeadline::after(self.budget);
         let mut exited_targets = BTreeMap::new();
         let mut unread = BTreeSet::new();
@@ -472,10 +491,7 @@ impl ClusterConvergence {
                 last.answered(member, status);
             }
             if unread.is_empty() {
-                return Ok(RelaunchedMember {
-                    member: relaunched.to_string(),
-                    exited_targets,
-                });
+                return Ok(exited_targets);
             }
             if deadline.has_passed() {
                 return Err(Report::new(ConvergenceError::ExitedTargetsUnread {
@@ -507,6 +523,10 @@ impl ClusterConvergence {
             let mut unanswered = None;
             for (member, endpoint) in &self.members {
                 nervix_primitives::task::consume_budget().await;
+                let endpoint = match relaunched {
+                    Some(relaunched) => relaunched.endpoint_of(member, endpoint),
+                    None => endpoint,
+                };
                 let answered = endpoint
                     .cluster_status(deadline.nested(STATUS_REQUEST_TIMEOUT))
                     .await;
