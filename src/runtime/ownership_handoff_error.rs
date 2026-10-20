@@ -12,7 +12,7 @@
 
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
-use nervix_models::{DomainName, ModelKind, ModelName, NodeRef};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName, NodeRef};
 use thiserror::Error;
 
 pub(crate) type OwnershipHandoffResult<T> = Result<T, Report<OwnershipHandoffError>>;
@@ -23,6 +23,10 @@ pub(crate) enum OwnershipHandoffError {
     Checkpoint(String),
     #[error("ownership handoff participant validation failed: {0}")]
     Participant(String),
+    /// The destination's own process incarnation advertised that it is terminating, so it is not a
+    /// new placement destination, whatever its coordinator's view still shows.
+    #[error("destination node '{node}' is terminating")]
+    DestinationTerminating { node: ClusterNodeName },
     #[error("ownership handoff schedule validation failed: {0}")]
     Schedule(String),
     #[error("ownership handoff state validation failed: {0}")]

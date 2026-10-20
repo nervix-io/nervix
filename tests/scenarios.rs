@@ -11477,6 +11477,72 @@ async fn when_ownership_handoff_flush_pause_released(world: &mut ScenarioWorld, 
         .release_ownership_handoff_flush_pause(&domain);
 }
 
+#[given(expr = "ownership handoff for domain {string} pauses before activation")]
+async fn given_ownership_handoff_activation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .pause_ownership_handoff_activation(domain);
+}
+
+/// The handoff reaches its activation pause only once its schedule is committed, which takes a
+/// gate engagement, a drain, a capture, a preparation and a consensus write on a loaded machine.
+#[then(expr = "the ownership handoff activation pause for domain {string} is reached")]
+async fn then_ownership_handoff_activation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_activation_pause(&domain),
+    )
+    .await
+    .expect("the handoff must commit its schedule and reach its activation pause");
+}
+
+#[when(expr = "the ownership handoff activation pause for domain {string} is released")]
+async fn when_ownership_handoff_activation_pause_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_activation_pause(&domain);
+}
+
+#[given(expr = "the graceful drain of node {string} pauses before it moves its work")]
+async fn given_graceful_drain_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_graceful_drain_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its graceful drain pause")]
+async fn then_graceful_drain_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_graceful_drain_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("the stopping node must advertise that it is terminating and reach its drain pause");
+}
+
+#[when(expr = "the graceful drain pause of node {string} is released")]
+async fn when_graceful_drain_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_graceful_drain_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "ingestor {string} pauses inside dispatch")]
 async fn given_ingestor_dispatch_pause(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = world.ingestor_dispatch_ref(&ingestor);
