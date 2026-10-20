@@ -135,7 +135,16 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "records the producer queues",
+            holds: "records the producer queues under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records the producer queues under NO ACK",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Driver(
                     "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
@@ -168,6 +177,8 @@ const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
         "message.max.bytes 1000000",
+        "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON \
+         MESSAGE ERROR.",
     ],
 };
 
