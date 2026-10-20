@@ -554,10 +554,12 @@ The console then downloads the archive from the leader that assembled it, and ch
 arrives. It accepts the archive only once every byte arrived and the size and BLAKE3 digest match
 the summary, and only then hands it to the browser as a download, saved under the last component of
 the file the statement names; the browser chooses the directory. A partial or altered archive never
-reaches the browser's downloads. The first complete download releases the archive on the leader.
+reaches the browser's downloads. The first download whose last frame the leader queued releases
+the archive on the leader.
 
-A download that fails in transport, stalls, or ends early starts again from the first byte while
-the leader retains the archive, and **Download again** retries one that stopped for such a reason.
+A download that fails in transport, stalls, or ends early starts again from the first byte after a
+one-second pause, for up to eight attempts and redirects in all, while the leader retains the
+archive, and **Download again** retries one that stopped for such a reason.
 A download the leader refuses, because the archive expired, a download already collected it, or the
 node that assembled it restarted, ends with that reason; the backup itself completed, and running
 it again assembles a new archive.
