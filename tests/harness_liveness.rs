@@ -62,6 +62,10 @@ mod redis_client;
 mod runner_lag;
 #[path = "common/runner_lag_tests.rs"]
 mod runner_lag_tests;
+#[path = "common/runner_observation.rs"]
+mod runner_observation;
+#[path = "common/runner_observation_tests.rs"]
+mod runner_observation_tests;
 #[path = "common/runner_offload.rs"]
 mod runner_offload;
 #[path = "common/runner_offload_tests.rs"]

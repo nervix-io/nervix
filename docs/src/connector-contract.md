@@ -391,6 +391,11 @@ maximum and its refusal for an emitter that cannot batch are all read from the d
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
 
+Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
+endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
+declare every-node execution. Scheduling and placement-reference completion read that capability,
+so each listener stays outside placement rules.
+
 ### Generated conformance tests
 
 Tests generated from the declarations check every entity through the composed statement grammar, as

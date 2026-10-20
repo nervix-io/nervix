@@ -374,6 +374,10 @@ and report the refusal if they find the session full. A request identity that is
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
+Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
+endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their
+declared execution policy excludes them from these suggestions.
+
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
 dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
 JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference select relay
