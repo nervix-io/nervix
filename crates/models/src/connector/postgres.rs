@@ -12,10 +12,19 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
@@ -46,6 +55,28 @@ pub enum PostgresConflictAction {
     DoNothing { target: Vec<String> },
     DoUpdate { target: Vec<String> },
 }
+
+/// What the connector of a POSTGRES TABLE holds and how long it waits.
+const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "a pool acquire: name resolution, connection, TLS and authentication",
+            bound: WaitBound::Fixed(Duration::from_secs(30)),
+        },
+        DeclaredWait {
+            wait: "an insert and its metadata query",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[],
+};
 
 impl SinkEntity for PostgresTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
@@ -79,6 +110,7 @@ impl SinkEntity for PostgresTableSink {
         }],
         envelope: &[],
         properties: &[],
+        bounds: POSTGRES_BOUNDS,
     };
 }
 

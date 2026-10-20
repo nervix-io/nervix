@@ -18,7 +18,14 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
@@ -109,6 +116,30 @@ impl IcebergStorageBackend {
     }
 }
 
+/// What the connector of a ICEBERG TABLE holds and how long it waits.
+const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "records staged on disk until a commit",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("COMMIT EACH ... MAX SIZE"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "catalog requests",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "object-store operations",
+            bound: WaitBound::Driver(
+                "60 s per operation and 10 s per read or write, retried 3 times",
+            ),
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SinkEntity for IcebergTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
@@ -155,6 +186,7 @@ impl SinkEntity for IcebergTableSink {
         ],
         envelope: &[],
         properties: &[],
+        bounds: ICEBERG_BOUNDS,
     };
 }
 

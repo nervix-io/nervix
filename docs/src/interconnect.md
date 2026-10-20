@@ -179,8 +179,9 @@ A discovered peer is registered at the interconnect endpoint it advertised, and 
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
 deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
 that remains, so an address that refuses or never answers leaves time for the next one. The
-connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
-outbound connector transports; interconnect retains its socket and peer failure classification.
+operation budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
+outbound connector transports; an attempt's lookup may take the whole of its deadline, and
+interconnect retains its socket and peer failure classification.
 The first address that accepts carries the TLS handshake, HTTP/2 and the connection hello, inside
 the same deadline; a failure there fails the attempt. The advertised host stays the TLS server
 name, which the peer's certificate must name, and the authority of every request on the connection;

@@ -21,14 +21,14 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ClickHouseSink, ClickHouseSinkEntity, ClientSink, ClientSinkEntity, EnvelopeClauseKind,
-    HttpSink, HttpSinkEntity, IcebergSink, IcebergSinkEntity, KafkaSink, KafkaSinkEntity,
-    LocatorDeclaration, MongoDbSink, MongoDbSinkEntity, MqttSink, MqttSinkEntity, MySqlSink,
-    MySqlSinkEntity, NatsSink, NatsSinkEntity, OptionDeclaration, OtelSink, OtelSinkEntity,
-    PostgresSink, PostgresSinkEntity, PropertyDeclaration, PulsarSink, PulsarSinkEntity,
-    RabbitMqSink, RabbitMqSinkEntity, RedisSink, RedisSinkEntity, RuntimeCapability, SentrySink,
-    SentrySinkEntity, SqsSink, SqsSinkEntity, SyslogSink, SyslogSinkEntity, ZeroMqSink,
-    ZeroMqSinkEntity, entity_union::entity_union,
+    ClickHouseSink, ClickHouseSinkEntity, ClientSink, ClientSinkEntity, DeclaredBounds,
+    EnvelopeClauseKind, HttpSink, HttpSinkEntity, IcebergSink, IcebergSinkEntity, KafkaSink,
+    KafkaSinkEntity, LocatorDeclaration, MongoDbSink, MongoDbSinkEntity, MqttSink, MqttSinkEntity,
+    MySqlSink, MySqlSinkEntity, NatsSink, NatsSinkEntity, OptionDeclaration, OtelSink,
+    OtelSinkEntity, PostgresSink, PostgresSinkEntity, PropertyDeclaration, PulsarSink,
+    PulsarSinkEntity, RabbitMqSink, RabbitMqSinkEntity, RedisSink, RedisSinkEntity,
+    RuntimeCapability, SentrySink, SentrySinkEntity, SqsSink, SqsSinkEntity, SyslogSink,
+    SyslogSinkEntity, ZeroMqSink, ZeroMqSinkEntity, entity_union::entity_union,
 };
 use crate::{
     ClientName, ConnectorKind, EmitterBatchLegality, EmitterPublishingMode,
@@ -177,6 +177,8 @@ pub struct EmitSinkCapabilities {
     pub envelope: &'static [EnvelopeClauseKind],
     /// The closed set of keys its emitters' `PROPERTIES { … }` may set.
     pub properties: &'static [PropertyDeclaration],
+    /// What its connector holds and how long it waits.
+    pub bounds: DeclaredBounds,
 }
 
 impl EmitSinkCapabilities {
@@ -217,6 +219,7 @@ impl EmitSinkCapabilities {
                 name: property.name,
             });
         }
+        capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
         capabilities
     }
 }

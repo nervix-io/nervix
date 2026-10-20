@@ -17,6 +17,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
 };
@@ -40,6 +44,52 @@ pub struct SyslogListenerSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a SYSLOG LISTENER holds and how long it waits.
+const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "frames read from TCP and TLS connections",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Items {
+                count: 64,
+                unit: "frames",
+            },
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "the TLS handshake of an accepted connection",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "reading a connection",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[
+        "Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit.",
+    ],
+};
+
+/// What the connector of a SYSLOG COLLECTOR holds and how long it waits.
+const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts and TLS",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "a write",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SourceEntity for SyslogListenerSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: false,
@@ -56,6 +106,7 @@ impl SourceEntity for SyslogListenerSource {
         ],
         locator: None,
         options: &[],
+        bounds: SYSLOG_LISTENER_BOUNDS,
     };
 }
 
@@ -126,6 +177,7 @@ impl SinkEntity for SyslogCollectorSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: SYSLOG_COLLECTOR_BOUNDS,
     };
 }
 

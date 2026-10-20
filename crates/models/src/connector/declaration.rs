@@ -24,7 +24,10 @@ use std::fmt::{Display, Formatter};
 
 use strum::EnumIter;
 
-use crate::{ConnectorKind, EmitterPublishingModeKind, IngestDeliveryKind, ParseAsType};
+use crate::{
+    ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, IngestDeliveryKind,
+    ParseAsType,
+};
 
 /// What completion and documentation say about the external names of one kind, which a
 /// statement writes as string literals.
@@ -285,6 +288,9 @@ pub enum RuntimeCapability {
     Batch,
     /// An emitter setting one envelope clause.
     Envelope(EnvelopeClauseKind),
+    /// A peer that stops answering during a wait the deadline key bounds surfacing as the
+    /// entity's transient status within that key's bound.
+    StalledPeer(DeadlineKey),
     /// An emitter setting one property.
     Property { name: &'static str },
 }
@@ -310,6 +316,16 @@ impl RuntimeCapability {
         }
         capabilities
     }
+
+    /// The capabilities an entity's bounds give it: a stalled-peer check for each deadline key its
+    /// waits name.
+    pub(crate) fn of_bounds(bounds: DeclaredBounds) -> Vec<Self> {
+        let mut capabilities = Vec::new();
+        for key in bounds.deadline_keys() {
+            capabilities.push(Self::StalledPeer(key));
+        }
+        capabilities
+    }
 }
 
 /// A capability is named the way its statement writes it, so an inventory of the scenarios that
@@ -325,6 +341,7 @@ impl Display for RuntimeCapability {
             Self::Metadata { field } => write!(f, "metadata.{field}"),
             Self::Batch => f.write_str("BATCH"),
             Self::Envelope(kind) => f.write_str(kind.keywords()),
+            Self::StalledPeer(key) => write!(f, "STALLED PEER {}", key.key()),
             Self::Property { name } => write!(f, "PROPERTIES {name}"),
         }
     }

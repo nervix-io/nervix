@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation.
+//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation, and which
+//!   direction may set a connection's deadline key.
 //! - **Depends on.** Connector TLS primitives, Syslog client entries, and rustls.
 //! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
 //!   entries, or registry state.
@@ -26,6 +27,7 @@ use error_stack::Report;
 use nervix_connector::{
     RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
 };
+use nervix_models::DeadlineKey;
 use nervix_primitives::sync::StdArc;
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
@@ -66,6 +68,9 @@ pub enum SyslogConfigError {
     },
     #[error("unknown Syslog client config key '{key}'")]
     UnknownKey { key: String },
+    /// A key that configures an emitter's connection, which a listening ingestor never opens.
+    #[error("Syslog client config key '{key}' applies only to an emitter's connection")]
+    EmitterOnlyKey { key: &'static str },
     #[error("duplicate Syslog client config key '{key}'")]
     DuplicateKey { key: String },
     #[error(
@@ -128,6 +133,14 @@ impl SyslogClientConfig {
         direction: SyslogDirection,
     ) -> error_stack::Result<Self, SyslogConfigError> {
         Self::validate_keys(entries)?;
+        let connect_timeout = DeadlineKey::ConnectTimeout.key();
+        if direction == SyslogDirection::Ingest
+            && Self::optional_value(entries, connect_timeout).is_some()
+        {
+            return Err(Report::new(SyslogConfigError::EmitterOnlyKey {
+                key: connect_timeout,
+            }));
+        }
         let protocol = Self::required_value(entries, "protocol")?;
         let protocol = match protocol.as_str() {
             "udp" => SyslogProtocol::Udp,
@@ -256,6 +269,7 @@ impl SyslogClientConfig {
             "addr",
             "max_message_size",
             "framing",
+            DeadlineKey::ConnectTimeout.key(),
             "tls_cert_file",
             "tls_key_file",
             "tls_ca_file",
@@ -539,6 +553,25 @@ mod tests {
         )
         .expect_err("TLS non-transparent framing must fail");
         assert!(tls_framing.to_string().contains("framing"));
+    }
+
+    #[test]
+    fn only_an_emitters_client_sets_its_connection_deadline() {
+        let settings = entries(&[
+            ("protocol", "tcp"),
+            ("addr", "127.0.0.1:6514"),
+            ("connect_timeout_ms", "1000"),
+        ]);
+        SyslogClientConfig::parse(&settings, SyslogDirection::Emit)
+            .expect("an emitter's client bounds its connection");
+        let listener = SyslogClientConfig::parse(&settings, SyslogDirection::Ingest)
+            .expect_err("a listening ingestor opens no connection to bound");
+        assert!(matches!(
+            listener.current_context(),
+            SyslogConfigError::EmitterOnlyKey {
+                key: "connect_timeout_ms"
+            }
+        ));
     }
 
     #[test]

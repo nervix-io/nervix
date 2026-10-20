@@ -51,6 +51,9 @@ pub(in crate::runtime) enum OpenClientError {
         transport: &'static str,
         reason: String,
     },
+    /// One of the client's deadline keys breaks the deadline rule; the cause beneath names it.
+    #[error("invalid {transport} client deadline")]
+    InvalidDeadline { transport: &'static str },
     #[error("failed to connect to {transport}: {reason}")]
     Connect {
         transport: &'static str,
@@ -70,6 +73,7 @@ impl OpenClientError {
                 transport: "Redis",
                 reason: reason.clone(),
             },
+            RedisClientError::InvalidConnectTimeout => Self::InvalidDeadline { transport: "Redis" },
             RedisClientError::Connect { reason } => Self::Connect {
                 transport: "Redis",
                 reason: reason.clone(),

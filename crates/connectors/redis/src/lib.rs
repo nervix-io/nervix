@@ -2,9 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The Redis client a configuration declares, the node's shared pool of command
-//!   connections, the dedicated subscription connection a Pub/Sub source reads a channel
-//!   through, and publication of each record to a channel.
+//! - **Owns.** The Redis client a configuration declares, the `connect_timeout_ms` that bounds
+//!   opening a connection and checking one out, the node's shared pool of command connections,
+//!   the dedicated subscription connection a Pub/Sub source reads a channel through, and
+//!   publication of each record to a channel.
 //! - **Depends on.** The connector contract, node DNS resolver, vocabulary values, `error-stack`,
 //!   Tokio, `redis` and `bb8`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -31,14 +32,14 @@ mod source;
 )]
 mod test_fixture;
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr};
 
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, ServiceUrl, SinkFinish, SinkFinishResult, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartResult, client_tls_paths,
-    optional_client_config_value, read_tls_file,
+    ConfiguredDeadline, PerRecordOutcome, RecordSink, ServiceUrl, SinkFinish, SinkFinishResult,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartResult,
+    client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_dns::{
     DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
@@ -56,7 +57,6 @@ pub use source::{
 use thiserror::Error;
 
 const REDIS: &str = "redis";
-pub(crate) const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// Redis's DNS hook, backed by the resolver loaded for this node.
 #[derive(Clone)]
@@ -82,10 +82,12 @@ impl AsyncDNSResolver for RedisDns {
     }
 }
 
-/// bb8 opens each physical command connection with Redis's configured DNS hook.
+/// bb8 opens each physical command connection with Redis's configured DNS hook, within the
+/// client's `connect_timeout_ms`: name resolution, the connection, TLS and Redis's own setup.
 pub struct RedisCommandManager {
     client: RedisClient,
     dns: DnsResolver,
+    connect_timeout: ConfiguredDeadline,
 }
 
 impl bb8::ManageConnection for RedisCommandManager {
@@ -94,7 +96,7 @@ impl bb8::ManageConnection for RedisCommandManager {
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         let config = AsyncConnectionConfig::new()
-            .set_connection_timeout(Some(CONNECT_BUDGET))
+            .set_connection_timeout(Some(self.connect_timeout.bound()))
             .set_dns_resolver(RedisDns(self.dns.clone()));
         self.client
             .get_multiplexed_async_connection_with_config(&config)
@@ -119,7 +121,13 @@ impl bb8::ManageConnection for RedisCommandManager {
 ///
 /// Every entry is an independent connection, so the declared maximum bounds sockets rather than
 /// handles, and a checked-out connection carries one publisher's outstanding operation alone.
-pub type RedisCommandPool = bb8::Pool<RedisCommandManager>;
+/// Checking a connection out waits at most the client's `connect_timeout_ms`, which also bounds
+/// opening each new connection.
+#[derive(Clone, Debug)]
+pub struct RedisCommandPool {
+    connections: bb8::Pool<RedisCommandManager>,
+    connect_timeout: ConfiguredDeadline,
+}
 
 /// One command connection borrowed from that pool, returned when it is dropped.
 pub type RedisPooledConnection<'pool> = bb8::PooledConnection<'pool, RedisCommandManager>;
@@ -129,6 +137,9 @@ pub type RedisPooledConnection<'pool> = bb8::PooledConnection<'pool, RedisComman
 pub enum RedisClientError {
     #[error("missing Redis client config key '{key}'")]
     MissingConfig { key: &'static str },
+    /// The client's `connect_timeout_ms` breaks the deadline rule, which the cause beneath names.
+    #[error("invalid Redis client connect_timeout_ms")]
+    InvalidConnectTimeout,
     #[error("invalid Redis client configuration: {reason}")]
     InvalidConfig { reason: String },
     #[error("failed to connect to Redis: {reason}")]
@@ -153,16 +164,34 @@ pub async fn open_redis_command_pool(
         return Err(Report::new(RedisClientError::MissingConfig { key: "addr" }));
     };
     let client = redis_client(addr, config)?;
-    let manager = RedisCommandManager { client, dns };
-    bb8::Pool::builder()
+    let connect_timeout = ConfiguredDeadline::connect(config)
+        .change_context(RedisClientError::InvalidConnectTimeout)?;
+    let manager = RedisCommandManager {
+        client,
+        dns,
+        connect_timeout,
+    };
+    let opened = bb8::Pool::builder()
         .max_size(bounds.maximum().get())
         .min_idle(Some(bounds.minimum()))
+        .connection_timeout(connect_timeout.bound())
         .build(manager)
-        .await
-        .map_err(redis_pool_error)
+        .await;
+    match opened {
+        Ok(connections) => Ok(RedisCommandPool {
+            connections,
+            connect_timeout,
+        }),
+        Err(source) => Err(redis_pool_error(source, connect_timeout)),
+    }
 }
 
-fn redis_pool_error(source: redis::RedisError) -> Report<RedisClientError> {
+/// Why one command connection could not be opened: the name its address resolves, or the
+/// connection itself, which names `connect_timeout` beneath it when the driver ran out of it.
+fn redis_pool_error(
+    source: redis::RedisError,
+    connect_timeout: ConfiguredDeadline,
+) -> Report<RedisClientError> {
     if let Some(lookup) = DnsLookupError::find_in(&source) {
         return Report::new(RedisClientError::Resolve {
             host: lookup.name().to_string(),
@@ -170,9 +199,16 @@ fn redis_pool_error(source: redis::RedisError) -> Report<RedisClientError> {
         })
         .attach_printable(source);
     }
-    Report::new(RedisClientError::Connect {
+    let connect = RedisClientError::Connect {
         reason: source.to_string(),
-    })
+    };
+    if source.is_timeout() {
+        let elapsed = connect_timeout.elapsed("opening a Redis command connection");
+        return Report::new(elapsed)
+            .change_context(connect)
+            .attach_printable(elapsed.to_string());
+    }
+    Report::new(connect)
 }
 
 /// The Redis client one named client's configuration declares, with the TLS material a
@@ -309,7 +345,8 @@ impl RedisSink {
     }
 
     /// Borrow a command connection for one publish, reporting the wait until the pool hands one
-    /// over. The connection returns to the pool as soon as the publish completes.
+    /// over. The connection returns to the pool as soon as the publish completes, and a pool that
+    /// hands none over within the client's `connect_timeout_ms` fails the publish naming it.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the bb8 driver owns polling the pool future")
@@ -318,7 +355,7 @@ impl RedisSink {
         pool: &'pool RedisCommandPool,
         handle: &RedisPoolHandle,
     ) -> Result<RedisPooledConnection<'pool>, Report<SinkPublishError>> {
-        let mut borrow = std::pin::pin!(pool.get());
+        let mut borrow = std::pin::pin!(pool.connections.get());
         let mut waiting = None;
         let connection = std::future::poll_fn(|context| {
             let result = borrow.as_mut().poll(context);
@@ -328,7 +365,7 @@ impl RedisSink {
             result
         })
         .await
-        .map_err(Self::publish_pool_error);
+        .map_err(|error| Self::publish_pool_error(error, pool.connect_timeout));
         drop(waiting);
         connection
     }
@@ -356,13 +393,19 @@ impl RedisSink {
         Report::new(SinkPublishError::Publish { sink: REDIS }).attach_printable(error.to_string())
     }
 
-    fn publish_pool_error(error: bb8::RunError<redis::RedisError>) -> Report<SinkPublishError> {
+    fn publish_pool_error(
+        error: bb8::RunError<redis::RedisError>,
+        connect_timeout: ConfiguredDeadline,
+    ) -> Report<SinkPublishError> {
         match error {
-            bb8::RunError::User(source) => {
-                redis_pool_error(source).change_context(SinkPublishError::Publish { sink: REDIS })
-            }
+            bb8::RunError::User(source) => redis_pool_error(source, connect_timeout)
+                .change_context(SinkPublishError::Publish { sink: REDIS }),
             bb8::RunError::TimedOut => {
-                Self::publish_error("timed out waiting for a Redis connection")
+                // The emitter shows the message a sink attached, so the deadline leads.
+                let elapsed = connect_timeout.elapsed("checking out a Redis command connection");
+                Report::new(elapsed)
+                    .change_context(SinkPublishError::Publish { sink: REDIS })
+                    .attach_printable(elapsed.to_string())
             }
         }
     }
@@ -417,12 +460,22 @@ impl RecordSink for RedisSink {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
+    use nervix_connector::DeadlineElapsed;
+    use nervix_models::DeadlineKey;
     use nervix_test_environment::dns_authority::DnsAnswer;
 
     use super::*;
     use crate::test_fixture::Fixture;
+
+    /// The deadline a client that leaves `connect_timeout_ms` out connects within.
+    fn default_connect_timeout() -> ConfiguredDeadline {
+        ConfiguredDeadline::connect(&[]).expect("a client without the key takes the default")
+    }
 
     #[test]
     fn only_definitive_redis_command_rejections_are_record_failures() {
@@ -484,12 +537,16 @@ mod tests {
         let manager = RedisCommandManager {
             client,
             dns: fixture.dns,
+            connect_timeout: default_connect_timeout(),
         };
         let source = <RedisCommandManager as bb8::ManageConnection>::connect(&manager)
             .await
             .expect_err("an absent name cannot open a command connection");
         assert!(DnsLookupError::find_in(&source).is_some(), "{source:?}");
-        let sink_error = RedisSink::publish_pool_error(bb8::RunError::User(source.clone()));
+        let sink_error = RedisSink::publish_pool_error(
+            bb8::RunError::User(source.clone()),
+            default_connect_timeout(),
+        );
         assert!(matches!(
             sink_error
                 .frames()
@@ -499,7 +556,7 @@ mod tests {
                 failure: DnsLookupFailure::NameNotFound
             }) if host == name
         ));
-        let error = redis_pool_error(source);
+        let error = redis_pool_error(source, default_connect_timeout());
         assert!(matches!(
             error.current_context(),
             RedisClientError::Resolve {
@@ -532,6 +589,7 @@ mod tests {
             let manager = RedisCommandManager {
                 client,
                 dns: fixture.dns.clone(),
+                connect_timeout: default_connect_timeout(),
             };
             let error = <RedisCommandManager as bb8::ManageConnection>::connect(&manager)
                 .await
@@ -579,5 +637,92 @@ mod tests {
         .expect("the new answer resolves")
         .collect();
         assert_eq!(addresses, vec![SocketAddr::from(([127, 0, 0, 1], 6379))]);
+    }
+    #[test]
+    fn a_checkout_that_outlasts_connect_timeout_names_the_key_and_its_bound() {
+        let connect_timeout = ConfiguredDeadline::connect(&[ClientConfigEntry {
+            key: "connect_timeout_ms".to_string(),
+            value: "1000".to_string(),
+        }])
+        .expect("one second is a valid deadline");
+        let error = RedisSink::publish_pool_error(bb8::RunError::TimedOut, connect_timeout);
+        assert!(matches!(
+            error.current_context(),
+            SinkPublishError::Publish { sink: REDIS }
+        ));
+        let elapsed = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+            .expect("the elapsed deadline stays beneath the publish failure");
+        assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_secs(1));
+        assert!(format!("{error:#}").contains("within connect_timeout_ms 1s"));
+        let leading = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            leading.map(String::as_str),
+            Some(
+                "checking out a Redis command connection did not finish within connect_timeout_ms \
+                 1s"
+            )
+        );
+    }
+
+    #[test]
+    fn a_connection_the_driver_timed_out_names_connect_timeout_beneath_it() {
+        let timed_out = redis::RedisError::from(io::Error::from(io::ErrorKind::TimedOut));
+        let error = redis_pool_error(timed_out, default_connect_timeout());
+        assert!(matches!(
+            error.current_context(),
+            RedisClientError::Connect { .. }
+        ));
+        let elapsed = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+            .expect("the elapsed deadline stays beneath the connection failure");
+        assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_secs(30));
+
+        let refused = redis::RedisError::from(io::Error::from(io::ErrorKind::ConnectionRefused));
+        let error = redis_pool_error(refused, default_connect_timeout());
+        assert!(
+            error
+                .frames()
+                .all(|frame| frame.downcast_ref::<DeadlineElapsed>().is_none()),
+            "a refused connection did not run out of its deadline: {error:?}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_invalid_connect_timeout_refuses_to_open_the_pool() {
+        let fixture = Fixture::start().await;
+        for value in ["0", "soon", "-5"] {
+            let config = [
+                ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: "redis://127.0.0.1:1".to_string(),
+                },
+                ClientConfigEntry {
+                    key: "connect_timeout_ms".to_string(),
+                    value: value.to_string(),
+                },
+            ];
+            let error = open_redis_command_pool(
+                &config,
+                ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
+                    .expect("an empty minimum fits any maximum"),
+                fixture.dns.clone(),
+            )
+            .await
+            .expect_err("an invalid deadline cannot open a pool");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    RedisClientError::InvalidConnectTimeout
+                ),
+                "{value}: {error:?}"
+            );
+        }
     }
 }

@@ -3,8 +3,7 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The valid origin, method, target and application-header values of an outbound HTTP
-//!   request, including the bounds that are checked both for literals and evaluated records, and
-//!   the timeout a client's `timeout_ms` bounds each of its requests with.
+//!   request, including the bounds that are checked both for literals and evaluated records.
 //! - **Depends on.** The URL Standard parser and semantic error vocabulary.
 //! - **Must not know.** NSPL parsing, registry state, Arrow batches or connector I/O.
 
@@ -13,7 +12,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
@@ -112,58 +111,6 @@ impl HttpOrigin {
             return Err(Report::new(HttpRequestFieldError::Target));
         }
         Ok(target)
-    }
-}
-
-/// Why a client's `timeout_ms` cannot bound its HTTP requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum HttpRequestTimeoutError {
-    #[error("not a positive whole number of milliseconds")]
-    NotPositiveWholeMilliseconds,
-    #[error("longer than the longest timeout a request can be scheduled with")]
-    Unschedulable,
-}
-
-/// The physical bound a client's `timeout_ms` sets on each of its HTTP requests: a positive whole
-/// number of milliseconds no longer than [`HttpRequestTimeout::LONGEST`].
-///
-/// This is the HTTP transport's one timeout rule, so every client whose `timeout_ms` the registry
-/// checks is held to it here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HttpRequestTimeout(Duration);
-
-impl HttpRequestTimeout {
-    /// The longest timeout a request can be scheduled with: half the nanoseconds a `u64` holds,
-    /// about 146 years.
-    pub const LONGEST: Duration = Duration::from_nanos(u64::MAX / 2);
-
-    /// The timeout `milliseconds` states, written as ASCII digits alone: no sign, fraction, unit or
-    /// whitespace.
-    pub fn parse(milliseconds: &str) -> Result<Self, Report<HttpRequestTimeoutError>> {
-        if milliseconds.is_empty() || !milliseconds.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(Report::new(
-                HttpRequestTimeoutError::NotPositiveWholeMilliseconds,
-            ));
-        }
-        // Only ASCII digits remain, so the one way the count can fail to parse is by exceeding a
-        // `u64`, which is longer than the longest timeout too.
-        let Ok(count) = milliseconds.parse::<u64>() else {
-            return Err(Report::new(HttpRequestTimeoutError::Unschedulable));
-        };
-        if count == 0 {
-            return Err(Report::new(
-                HttpRequestTimeoutError::NotPositiveWholeMilliseconds,
-            ));
-        }
-        let timeout = Duration::from_millis(count);
-        if timeout > Self::LONGEST {
-            return Err(Report::new(HttpRequestTimeoutError::Unschedulable));
-        }
-        Ok(Self(timeout))
-    }
-
-    pub const fn duration(self) -> Duration {
-        self.0
     }
 }
 
@@ -443,55 +390,6 @@ mod tests {
                 )
                 .is_err()
         );
-    }
-
-    #[test]
-    fn a_request_timeout_is_a_positive_whole_number_of_schedulable_milliseconds() {
-        for (milliseconds, expected) in [
-            ("1", Duration::from_millis(1)),
-            ("5000", Duration::from_secs(5)),
-            ("0005000", Duration::from_secs(5)),
-        ] {
-            let timeout = HttpRequestTimeout::parse(milliseconds)
-                .assured("each table entry is a positive whole number of milliseconds");
-            assert_eq!(timeout.duration(), expected, "{milliseconds}");
-        }
-
-        let longest = HttpRequestTimeout::LONGEST.as_millis();
-        let timeout = HttpRequestTimeout::parse(&longest.to_string())
-            .assured("the longest whole number of milliseconds within the bound is admitted");
-        assert!(timeout.duration() <= HttpRequestTimeout::LONGEST);
-        let beyond = longest
-            .checked_add(1)
-            .assured("the bound in milliseconds is far below the u128 maximum");
-        let Err(report) = HttpRequestTimeout::parse(&beyond.to_string()) else {
-            panic!("one millisecond past the bound must be refused");
-        };
-        assert_eq!(
-            report.current_context(),
-            &HttpRequestTimeoutError::Unschedulable
-        );
-
-        for (milliseconds, expected) in [
-            ("", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("0", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("000", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("-5", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("+5", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("5.0", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("5s", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            (" 5", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            ("٥", HttpRequestTimeoutError::NotPositiveWholeMilliseconds),
-            (
-                "18446744073709551616",
-                HttpRequestTimeoutError::Unschedulable,
-            ),
-        ] {
-            let Err(report) = HttpRequestTimeout::parse(milliseconds) else {
-                panic!("'{milliseconds}' must not be a request timeout");
-            };
-            assert_eq!(report.current_context(), &expected, "{milliseconds}");
-        }
     }
 
     #[test]

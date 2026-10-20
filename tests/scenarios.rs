@@ -103,10 +103,10 @@ use crate::common::{
     },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
-        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
-        client_connect_options, client_domain, observe_kafka_through, publish_kafka_record_through,
+        HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
+        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
+        observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -148,6 +148,7 @@ use crate::common::{
     },
     server_process_cluster::ServerProcessCluster,
     sqs_answer_hold::SqsAnswerHold,
+    stallable_tcp_proxy::StallableTcpProxy,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
@@ -1110,6 +1111,79 @@ fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, nam
         .get(&name)
         .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
         .reset_connections();
+}
+
+/// Stand a stallable endpoint in front of the dependency whose URL placeholder `endpoint` holds,
+/// and record that URL in placeholder `name` with the endpoint's loopback address in place of the
+/// dependency's host and port.
+#[given(expr = "a stallable endpoint {string} stands in front of {string}")]
+async fn given_a_stallable_endpoint_stands_in_front_of(
+    world: &mut ScenarioWorld,
+    name: String,
+    endpoint: String,
+) {
+    let dependency = world
+        .placeholders
+        .get(&endpoint)
+        .unwrap_or_else(|| panic!("no dependency URL is published as '{endpoint}'"))
+        .clone();
+    let mut url = url::Url::parse(&dependency)
+        .unwrap_or_else(|error| panic!("'{endpoint}' is not a URL '{dependency}': {error}"));
+    let host = url
+        .host_str()
+        .unwrap_or_else(|| panic!("'{endpoint}' has no host"))
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .unwrap_or_else(|| panic!("'{endpoint}' names no port"));
+    let proxy = StallableTcpProxy::start(host, port)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the stallable endpoint '{name}' could not listen: {error}")
+        });
+    url.set_ip_host(proxy.local_addr().ip())
+        .unwrap_or_else(|()| panic!("'{endpoint}' cannot carry an address host"));
+    url.set_port(Some(proxy.local_port()))
+        .unwrap_or_else(|()| panic!("'{endpoint}' cannot carry the endpoint's port"));
+    world.placeholders.insert(
+        name.clone(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// Stand a loopback endpoint that accepts every connection and never answers on it, and record its
+/// `host:port` in placeholder `name`.
+#[given(expr = "a silent endpoint {string} is listening")]
+async fn given_a_silent_endpoint_is_listening(world: &mut ScenarioWorld, name: String) {
+    let proxy = StallableTcpProxy::silent()
+        .await
+        .unwrap_or_else(|error| panic!("the silent endpoint '{name}' could not listen: {error}"));
+    world
+        .placeholders
+        .insert(name.clone(), proxy.local_addr().to_string());
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// How long a scenario waits for a client to reach an endpoint it stood. Generous, because the wait
+/// ends as soon as the client connects.
+const STALLABLE_ENDPOINT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[then(expr = "the silent endpoint {string} eventually accepts a connection")]
+async fn then_the_silent_endpoint_eventually_accepts_a_connection(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    nervix_primitives::time::timeout(
+        STALLABLE_ENDPOINT_CONNECTION_TIMEOUT,
+        proxy.accepted_at_least(1),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("no client connected to the endpoint '{name}'"));
 }
 
 #[given("ClickHouse is running")]
