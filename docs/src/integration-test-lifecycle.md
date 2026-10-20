@@ -505,6 +505,14 @@ into one input batch. Each route sorts the rows buffered at its own flush; separ
 do not establish a single sorting window. The one-node and three-node examples retain their exact
 ordered payloads, tenant keys, and existing flush and receive deadlines.
 
+The combined message/duration window outline publishes each message-threshold group as one
+decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
+observing both outputs, it publishes one row per branch and measures each duration output from
+that publication, keeping the three-second lower bound and ten-second subscription deadlines.
+A late subscription read can lengthen the observed delay. The production-owner regression checks
+two retained rows immediately before and at the duration boundary, and three rows meeting the
+message threshold before that deadline.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
@@ -816,6 +824,12 @@ has read each output and how it stopped, the latest 200 Collector lines that nam
 test identifier, and the last command output. A collector timeout alone does not establish that the
 emitter lost a record or failed to export it; retained diagnostics and a new attempt remain separate
 evidence.
+
+The log/trace DNS recovery outline gives both emitters a 250ms initial retry delay and a one-second
+ceiling. That ceiling keeps the next automatic attempt inside the ten-second Collector observation
+after the unavailable-client and DNS phases have lasted several attempts. The outline retains its
+five-second RPC timeout, both exact signal payloads, failure and DNS-question observations, and
+one- and three-node examples. Production retry policies continue to use their declared ceiling.
 
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
