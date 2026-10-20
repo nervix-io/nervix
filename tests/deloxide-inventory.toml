@@ -2423,7 +2423,7 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The inferencer inspection admission workloads also reach the execution occupancy holders mutex while saturating and releasing the bulk workers. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
   "scenario.inferencer-inspection-admission",
@@ -2440,6 +2440,13 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
+]
+
+[[owner]]
+path = "src/fault_injection/execution.rs"
+workloads = [
+  "scenario.inferencer-inspection-admission",
+  "stress.inferencer-inspection-admission",
 ]
 
 [[owner]]
