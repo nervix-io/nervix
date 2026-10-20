@@ -609,9 +609,14 @@ resume context, which the ingestor's transient status shows by its subscription 
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
 error.
 
-A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
-refuses to take a record for a reason that is not the record's own, a full producer queue included,
-and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
+A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when a producer
+failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
+Temporary `QueueFull` applies confirmation-window backpressure in `ACK`; in `NO ACK` it is the
+producer failure that ends the attempt. A payload exceeding the entire native queue byte capacity
+is a record rejection naming the payload bytes and the capacity in either mode. An empty-window
+queue wait that expires reports `KafkaQueueWaitError::TimedOut`, retaining the producer's
+`QueueFull` beneath it; a wait whose deadline cannot be represented uses `DeadlineOutOfRange`.
+A record the producer
 drops without a delivery report keeps the report channel's cancellation the same way. Each carries
 the connector's description of the failure for the emitter's transient error, and a missed `ACK
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
