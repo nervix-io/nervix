@@ -467,8 +467,10 @@ Choose checks relevant to the configured graph:
   separate from archive-file staging and does not bound snapshot retention or filesystem
   overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
-  logical usage from SST allocation. Recover an uncertain applying restore with its exact
-  execution reference; after a terminal failed restore, restore into a fresh target name.
+  logical usage from SST allocation. Recover an uncertain applying restore by sending it again
+  under its exact execution reference, as the Rust client's `restore_with_reference` does;
+  `nervix-cli restore` starts every run under a fresh reference. After a terminal failed restore,
+  restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
   to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
   window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk
