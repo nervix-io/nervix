@@ -3010,6 +3010,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/http/src/sink/__fuzz__/sink__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
+domain_version = 1
+features = []
+id = "http-request-heads"
+invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the sink writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-http"
+random_iterations = 256
+source = "crates/connectors/http/src/sink/request_head_tests.rs"
+test = "sink::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
 domain_version = 2
 features = []

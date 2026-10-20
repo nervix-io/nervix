@@ -329,6 +329,7 @@ class InventoryTests(unittest.TestCase):
             "sqs-batch-requests",
             "iceberg-nested-datetime-staging",
             "sentry-prepared-envelopes",
+            "http-request-heads",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "websocket-signaling-protobuf-values",
@@ -380,6 +381,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-websockets",
             "nervix-connector-otel",
             "nervix-connector-sentry",
+            "nervix-connector-http",
             "nervix-web-console",
             "nervix-dns",
         })

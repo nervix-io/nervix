@@ -350,7 +350,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | a request: name resolution, connection, TLS, writing it and its final response headers: `timeout_ms`; required |  |
+| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |  |
 | Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
