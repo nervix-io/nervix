@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The MQTT client and event loop each source instance subscribes through, its
 //!   session and quality-of-service settings, the shared subscription every instance joins, the
-//!   client identity each instance connects with, manual acknowledgement of publishes, and the
-//!   local replay of publishes the host rejected, and retirement of obsolete broker sessions.
+//!   client identity each instance connects with, the batches a read gathers and how a read ends
+//!   when the host cancels it, manual acknowledgement of publishes, and the local replay of
+//!   publishes the host rejected, and retirement of obsolete broker sessions.
 //! - **Depends on.** The connector contract, the crate's broker connection through the node DNS
 //!   resolver, typed client configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -211,6 +212,11 @@ struct MqttConnection {
 
 /// The publishes a source instance reads from its broker connection: the event loop of its
 /// client, and a fake event loop in the checks of how a read meets the host's cancellation.
+///
+/// A read stops waiting for the next publish when the host cancels it or its batch timeout
+/// passes. The connection keeps every publish it already read for its next poll: the client
+/// queues each packet it reads before it writes a reply, and its next poll returns a queued
+/// publish first.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -623,6 +629,14 @@ impl SourceMessage for MqttSourceMessage {
     }
 }
 
+/// How gathering the publishes that follow a batch's first ended, when it did not fail.
+enum Gathered {
+    /// The batch holds as many publishes as the host asked for.
+    Full,
+    /// The host cancelled the read while it waited for the next publish.
+    Cancelled,
+}
+
 /// One MQTT source instance: its connection, absent while suspended or reconnecting, and the
 /// publishes the host rejected that it delivers again before polling the broker.
 pub struct MqttSource {
@@ -644,8 +658,9 @@ impl MqttSource {
     /// publishes that follow it, until the batch holds `request.max_messages` or the timeout,
     /// counted from the first publish, passes.
     ///
-    /// A read the host cancels while it waits for the batch's first publish ends at once, with
-    /// nothing gathered.
+    /// The read observes the host's cancellation whenever it waits for a publish, so a read the
+    /// host cancels ends at once with every publish it gathered, rather than once its batch is
+    /// full or its timeout passes.
     async fn read_batch<P: PublishRead>(
         publishes: &mut P,
         request: SourceBatchRequest,
@@ -671,10 +686,11 @@ impl MqttSource {
         let Some(deadline) = Instant::now().checked_add(batch_timeout) else {
             return Err(Report::new(MqttSourceError::BatchDeadline));
         };
-        let gathering = Self::gather(publishes, &mut messages, request.max_messages);
+        let gathering = Self::gather(publishes, &mut messages, request.max_messages, cancellation);
         let gathered = timeout_at(deadline, gathering).await;
         match gathered {
-            Ok(Ok(())) => Ok(SourceBatch::Messages(messages)),
+            Ok(Ok(Gathered::Full)) => Ok(SourceBatch::Messages(messages)),
+            Ok(Ok(Gathered::Cancelled)) => Ok(SourceBatch::Interrupted { gathered: messages }),
             Ok(Err(error)) => Err(error),
             // The batch timeout passed: the batch holds every publish it gathered until then.
             Err(_batch_timeout) => Ok(SourceBatch::Messages(messages)),
@@ -682,18 +698,25 @@ impl MqttSource {
     }
 
     /// Takes the publishes that follow a batch's first into `messages`, until the batch holds
-    /// `max_messages`.
+    /// `max_messages` or the host cancels the read while it waits for the next publish.
     async fn gather<P: PublishRead>(
         publishes: &mut P,
         messages: &mut Vec<MqttSourceMessage>,
         max_messages: NonZeroUsize,
-    ) -> MqttSourceResult<()> {
+        cancellation: &SourceReadCancellation,
+    ) -> MqttSourceResult<Gathered> {
         while messages.len() < max_messages.get() {
             nervix_primitives::task::consume_budget().await;
-            let publish = publishes.next_publish().await?;
+            let Some(next) = cancellation
+                .unless_cancelled(publishes.next_publish())
+                .await
+            else {
+                return Ok(Gathered::Cancelled);
+            };
+            let publish = next?;
             messages.push(MqttSourceMessage::new(publish));
         }
-        Ok(())
+        Ok(Gathered::Full)
     }
 
     fn replayed_batch(&mut self, max_messages: NonZeroUsize) -> Option<Vec<MqttSourceMessage>> {
