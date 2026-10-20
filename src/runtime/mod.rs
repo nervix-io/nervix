@@ -435,7 +435,7 @@ use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeR
 pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL;
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
-    NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
+    EntityGateTasks, NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
     OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch,
 };
 pub(crate) use entrypoint_routes::EntrypointBindingError;
