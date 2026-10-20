@@ -1333,12 +1333,14 @@ build and the existing tests, and nothing in it changes behavior.
   diagnostic image of the same revision, whose label makes every run fail unless the deadlock
   evidence of each process its nodes started qualifies; a change to the diagnostic image, its
   evidence collection or a path its scenarios exercise under tracked locks keeps both green.
-- Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
-  approximately four-second observation window and 30-second sample bound; the probe helper's
-  Docker launch has a separate bound. Other profiles and healthy observations use 40 packets at
-  100 ms intervals. Effect limits retain their received and lost fractions at every sample size;
-  an incomplete sample, ineffective fault, excessive loss or missing consecutive burst fails
-  qualification. Sampling never extends a product deadline.
+- Directed-link loss proof, for random, burst and combined loss, samples 400 packets at 10 ms
+  intervals within the same approximately four-second observation window and 30-second sample
+  bound; the probe helper's Docker launch has a separate bound. A loss floor judged over 40
+  packets fails a working fault too often: 20% independent loss misses a 5% floor about once in
+  700 samples. Other profiles and healthy observations use 40 packets at 100 ms intervals. Effect
+  limits retain their received and lost fractions at every sample size; an incomplete sample,
+  ineffective fault, excessive loss or missing consecutive burst fails qualification. Sampling
+  never extends a product deadline.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
   latest run of every required check passed on that revision. Its register lists each gap a

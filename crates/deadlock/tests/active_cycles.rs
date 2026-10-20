@@ -14,6 +14,7 @@
 
 use std::{
     env,
+    fs::File,
     io::Read,
     path::Path,
     process::{Command, ExitStatus, Stdio},
@@ -829,16 +830,28 @@ fn run_child(workload: &str, evidence: Option<&Path>) -> Child {
                 .assured("the diagnostic failure fixture exists"),
         ));
     }
+    let stalled_stderr = if workload == "blocked_report_output" {
+        // Size the empty pipe before its child can write: shrinking occupied pages can fail.
+        let (reader, writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
+            .assured("the probe can create its output pipe");
+        nix::fcntl::fcntl(&reader, nix::fcntl::FcntlArg::F_SETPIPE_SZ(4096))
+            .assured("the probe can bound its empty output pipe");
+        command.stderr(Stdio::from(writer));
+        Some(File::from(reader))
+    } else {
+        None
+    };
     let mut child = command.spawn().assured("the test binary can start itself");
+    // Close the parent's writer so the stalled reader reaches EOF after the child exits.
+    drop(command);
     let stdout = read_in_background(child.stdout.take().assured("stdout is piped"));
-    let stderr = match child.stderr.take() {
-        Some(stderr) if workload == "blocked_report_output" => {
-            nix::fcntl::fcntl(&stderr, nix::fcntl::FcntlArg::F_SETPIPE_SZ(4096))
-                .assured("the test bounds the output pipe");
-            StderrCapture::Stalled(stderr)
+    let stderr = if let Some(stderr) = stalled_stderr {
+        StderrCapture::Stalled(stderr)
+    } else {
+        match child.stderr.take() {
+            Some(stderr) => StderrCapture::Reading(read_in_background(stderr)),
+            None => StderrCapture::Uncaptured,
         }
-        Some(stderr) => StderrCapture::Reading(read_in_background(stderr)),
-        None => StderrCapture::Uncaptured,
     };
     let process = nix::unistd::Pid::from_raw(
         i32::try_from(child.id()).assured("process identifiers fit a pid_t"),
@@ -893,7 +906,7 @@ fn run_child(workload: &str, evidence: Option<&Path>) -> Child {
 
 enum StderrCapture {
     Reading(thread::JoinHandle<String>),
-    Stalled(std::process::ChildStderr),
+    Stalled(File),
     Uncaptured,
 }
 
