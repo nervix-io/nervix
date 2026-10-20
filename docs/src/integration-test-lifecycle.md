@@ -359,6 +359,17 @@ The CI jobs divide the work at the scenario boundary:
 | `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side, the two stress selections included: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
+The justfile reads `rust-toolchain.toml` through Python's standard-library `tomllib`, using the
+Python 3.12 or later runtime already required by repository recipes. CI installs `just` and each
+job's execution tools before running the recipes.
+Rust setup passes the declared `1.99` channel explicitly to the toolchain action, installing
+the name that repository recipes and coverage commands request.
+
+The Check workflow and reusable Bolero workflow fetch Git dependencies through Cargo's Git CLI
+transport, selected by `CARGO_NET_GIT_FETCH_WITH_CLI=true`. `Cargo.lock` still pins their revisions.
+A dependency download that fails before a test starts provides no test execution or coverage
+qualification evidence.
+
 The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
 their pinned Go formatters. This makes the installer and the later cache publication and report
 scripts available when a tool setup step fails. The installer retains every attempt in a

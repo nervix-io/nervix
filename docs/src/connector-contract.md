@@ -736,14 +736,19 @@ The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
 ### Pulsar subscription ownership
 
 A Pulsar source's Model declares who owns its subscription, and its plan carries the declaration.
-The plan of an input whose subscription its ingestor owns requires retirement only when no
-replacement reads in its place: the same retirement step as MQTT's removes it after `DROP
-INGESTOR` or the domain's drop withdraws the input, on the node the installed revision assigned the
-ingestor to, once that ingestor's exact source tasks stopped, a stopped domain's passive plan
-included. A replacement keeps the subscription, whatever it reads, and a provisioned subscription is
-never retired.
+The plan of an input whose subscription its ingestor owns requires retirement when that source
+changes or disappears. The same retirement step as MQTT's runs on the node the installed revision
+assigned the ingestor to, once that ingestor's exact source tasks stopped, before its replacement
+starts; a stopped domain's passive plan participates too. The composition root resolves both
+clients through their pinned mounts. The connector compares service URL scheme, host and effective
+port, the topic qualified through the client's namespace, and subscription name, without connecting
+or resolving DNS. Implicit ports mean 6650 for `pulsar` and 6651 for `pulsar+ssl`; different host
+names remain distinct endpoints. The comparison ignores consumer names, acknowledgement policy
+and subscription ownership. A replacement reading the same subscription keeps it and its backlog,
+including an ownership handoff to `PROVISIONED`. Routes and codecs alone create no retirement.
+A preceding provisioned subscription is never retired.
 
-The Pulsar composition root resolves the dropped input's client entries through its pinned mounts
+The Pulsar composition root resolves the preceding input's client entries through its pinned mounts
 and keeps their lease through the removal. The connector connects a client, joins the subscription
 with a durable shared consumer registered under `<domain>~<ingestor>-removal` and unsubscribes it,
 and the broker removes the subscription with its backlog. An absent subscription is created by the
@@ -751,7 +756,9 @@ join and removed again. The broker refuses while another consumer is connected, 
 then closes its own consumer so that it does not keep the subscription busy. The driver's
 ten-second connection timeout encloses the whole removal: connecting, joining and unsubscribing.
 Every failure, whether of resolution, connection, join, unsubscribe or the deadline, is rendered
-once into runtime error events and never fails the drop. A node removes the subscriptions a
+once into runtime error events and never fails the drop or replacement. If resolving or comparing
+the replacement fails, removal is skipped and the uncertainty is reported; normal replacement
+startup still owns validation of its client. A node removes the subscriptions a
 revision retires one at a time, within its application of that revision, so the command that
 dropped them completes once every removal has ended, and an unreachable broker delays it by up to
 the timeout for each subscription.
