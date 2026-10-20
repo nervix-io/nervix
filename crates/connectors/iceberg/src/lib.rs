@@ -191,7 +191,7 @@ impl SinkAcknowledgementServices for RetainedAcknowledgements {
 
 /// The catalog and table one emitter commits through, and the sequence its data files are named by.
 struct IcebergSinkClient {
-    catalog: StdArc<RestCatalog>,
+    catalog: StdArc<dyn Catalog>,
     table: Table,
     file_name_prefix: String,
     data_file_sequence: u64,
@@ -323,7 +323,7 @@ impl IcebergSink {
         let executor = host.executor();
         Self::validate_blob_location(backend, "table", &location)?;
         let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
-        let catalog = StdArc::new(
+        let catalog: StdArc<dyn Catalog> = StdArc::new(
             properties
                 .rest_catalog(&catalog_name, &catalog_config, &dns)
                 .await
@@ -2152,3 +2152,10 @@ mod tests {
         assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod commit_tests;

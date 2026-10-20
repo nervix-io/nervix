@@ -131,6 +131,7 @@ tags = [
   "@shutdown_kafka_refused_commit",
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
+  "@iceberg_commit_memory",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
@@ -638,6 +639,16 @@ id = "scenario.emitter-finish-at-stop"
 invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
 invocation = "scenarios"
 scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then a commit that charges exactly the file's bytes once the scenario narrows its hold to them. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "scenario.iceberg-commit-memory"
+invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once exactly those bytes are free."
+invocation = "scenarios"
+scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1751,6 +1762,16 @@ id = "stress.emitter-finish-at-stop"
 invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
 invocation = "stress-scenarios"
 scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then a commit that charges exactly the file's bytes once the scenario narrows its hold to them. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "stress.iceberg-commit-memory"
+invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once exactly those bytes are free."
+invocation = "stress-scenarios"
+scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
 selections = ["deloxide-stress"]
 
 [[workload]]

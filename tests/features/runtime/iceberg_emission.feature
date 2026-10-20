@@ -1137,3 +1137,78 @@ Feature: Iceberg emission
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  @iceberg_commit_memory @deloxide_stress
+  Scenario Outline: An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "memory_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/memory_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-memory-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT s3_main
+        TYPE S3
+        CONFIG {
+          'endpoint' = '{{rustfs_addr}}',
+          'region' = 'us-east-1',
+          'access_key_id' = 'rustfsadmin',
+          'secret_access_key' = 'rustfsadmin',
+          'path_style_access' = true
+        };
+      CREATE CLIENT iceberg_catalog
+        TYPE ICEBERG_REST
+        CONFIG {
+          'uri' = '{{iceberg_rest_addr}}',
+          'warehouse' = 's3://nervix-iceberg/warehouse'
+        };
+      CREATE EMITTER iceberg_memory FROM notifications TO ICEBERG ON S3 s3_main TABLE memory_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/memory_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    # Staging a row charges one byte, which the 64 free bytes admit, while loading the staged file
+    # for its commit charges every byte of the file.
+    And bulk memory on every node keeps only "64" bytes free
+    And http payload is posted to host "iceberg-memory-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":61,"action":"held"}
+      """
+    Then within "30s" DESCRIBE EMITTER "iceberg_memory" on the leader node reports an Iceberg commit waiting for bulk memory, whose staged bytes are saved as placeholder "commit_bytes"
+    And the Iceberg table "memory_notifications_{{test_id}}" does not contain a row within "1s"
+      """
+      {"user_id":61,"action":"held"}
+      """
+    # Exactly the bytes the refused commit asked for are now free, and nothing more.
+    When bulk memory on every node keeps only "{{commit_bytes}}" bytes free
+    Then the Iceberg table "memory_notifications_{{test_id}}" eventually contains a row
+      """
+      {"user_id":61,"action":"held"}
+      """
+    And within "10s" DESCRIBE EMITTER "iceberg_memory" on the leader node reports "bytes_total" "sent" relay "notifications" totalling "{{commit_bytes}}"
+    And within "10s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

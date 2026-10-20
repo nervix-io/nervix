@@ -16907,6 +16907,186 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
     });
 }
 
+/// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
+/// that is refused until the scenario changes the room or releases the hold. A node that already
+/// holds bulk memory for the scenario adjusts its hold without ever leaving a wider room.
+#[when(expr = "bulk memory on every node keeps only {string} bytes free")]
+async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
+    world: &mut ScenarioWorld,
+    room: String,
+) {
+    let room = expand_placeholders(world, &room);
+    let room = room
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("the free bulk memory '{room}' must be bytes: {error}"));
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .hold_bulk_memory_leaving_room_on(&crate::common::cluster::node_name(&node_id), room);
+    }
+}
+
+/// Return the bulk memory the scenario held on every node.
+#[when("bulk memory on every node is released")]
+async fn when_bulk_memory_on_every_node_is_released(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
+/// Waits until every node's bulk memory class reserves exactly what the scenario holds there, so no
+/// charge another operation took on any node outlives that operation.
+#[then(expr = "within {string} every node reserves only the bulk memory the scenario holds")]
+async fn then_every_node_reserves_only_held_bulk_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut outstanding = Vec::new();
+        for node_id in world.cluster().node_ids() {
+            let held = world
+                .fault_injection
+                .held_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
+            let reserved = world
+                .cluster()
+                .read_observability_metric(
+                    &node_id,
+                    "nervix_execution_memory_reserved_bytes",
+                    &[BULK_MEMORY_LABEL.to_string()],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("failed to read the bulk-memory reservation of '{node_id}': {error}")
+                });
+            let held: f64 = held.approx_into();
+            if reserved != held {
+                outstanding.push(format!(
+                    "'{node_id}' reserves {reserved} bytes of bulk memory while the scenario \
+                     holds {held}"
+                ));
+            }
+        }
+        if outstanding.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "within {duration}: {}",
+            outstanding.join("; ")
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// What DESCRIBE EMITTER reports while an Iceberg commit waits for room in the bulk memory class:
+/// the staged bytes the commit asked the class for.
+fn iceberg_commit_waiting_for_bulk_memory(output: &str) -> Option<u64> {
+    let error = DescribedEmitterRetry::from_describe_output(output).transient_error?;
+    let request =
+        error.strip_prefix("Iceberg commit waits for room in the bulk memory class for ")?;
+    let bytes = request.strip_suffix(" staged bytes")?;
+    let Ok(bytes) = bytes.parse::<u64>() else {
+        panic!("DESCRIBE EMITTER reports the commit's staged bytes as a count, got '{error}'");
+    };
+    Some(bytes)
+}
+
+/// Waits until DESCRIBE EMITTER reports an Iceberg commit waiting for room in the bulk memory class,
+/// and saves the staged bytes the commit asked the class for.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports an Iceberg \
+            commit waiting for bulk memory, whose staged bytes are saved as placeholder {string}"
+)]
+async fn then_within_duration_describe_emitter_reports_iceberg_commit_waiting_for_bulk_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    placeholder: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if let Some(bytes) = iceberg_commit_waiting_for_bulk_memory(&output) {
+            world.placeholders.insert(placeholder, bytes.to_string());
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report an Iceberg commit waiting \
+             for bulk memory. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports `metric` in `direction` for `relay` with the total
+/// `expected`, on whichever physical node ran the emitter.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports {string} \
+            {string} relay {string} totalling {string}"
+)]
+async fn then_within_duration_describe_emitter_reports_metric_total(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    metric: String,
+    direction: String,
+    relay: String,
+    expected: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let prefix = format!(
+        "{} {} relay={} physical_node=",
+        expand_placeholders(world, &metric),
+        expand_placeholders(world, &direction),
+        expand_placeholders(world, &relay)
+    );
+    let expected = expand_placeholders(world, &expected);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        let mut totals = Vec::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if !line.starts_with(&prefix) {
+                continue;
+            }
+            if let Some(total) = metric_line_value(line, "total") {
+                totals.push(total.to_string());
+            }
+        }
+        if totals.iter().any(|total| total == &expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report '{prefix}…' totalling \
+             {expected}; it reported {totals:?}. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
 /// password the leader is asked to verify is refused rather than queued. The leader is the node
 /// the scenario created its user through, so the user is already visible there.

@@ -291,6 +291,8 @@ struct NodeExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
     holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
+    /// The bulk memory a scenario holds on the node, absent while it holds none.
+    bulk_memory: Option<Reservation>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1267,6 +1269,85 @@ impl FaultInjection {
             None => panic!("node '{node_id}' has not registered its executor"),
         };
         node.holders.lock().clear();
+    }
+
+    /// Hold every byte of `node_id`'s bulk memory but `room`, so that a charge needing more room
+    /// than that is refused until the scenario changes the room or releases the hold. A node that
+    /// already holds bulk memory for the scenario takes more of it or returns part of it, so the
+    /// room it leaves changes without ever passing through a wider one.
+    pub fn hold_bulk_memory_leaving_room_on(&self, node_id: &ClusterNodeName, room: u64) {
+        let Some(mut node) = self.inner.executions.get_mut(node_id) else {
+            panic!("node '{node_id}' has not registered its executor");
+        };
+        let executor = node.executor.clone();
+        loop {
+            let memory = executor.memory(MemoryClass::Bulk);
+            let free = memory
+                .capacity_bytes
+                .checked_sub(memory.reserved_bytes)
+                .assured("a budget never reserves more than its capacity");
+            if free == room {
+                return;
+            }
+            if free > room {
+                let excess = free
+                    .checked_sub(room)
+                    .verified("the branch runs only while more than the room is free");
+                // Other bulk work can take memory between the read and the charge, so a charge
+                // the class refuses reads what is free again.
+                let Ok(taken) = executor.try_reserve(MemoryClass::Bulk, excess) else {
+                    continue;
+                };
+                let held = match node.bulk_memory.take() {
+                    Some(held) => held
+                        .merge(taken)
+                        .assured("both charges come from the same node's bulk class"),
+                    None => taken,
+                };
+                node.bulk_memory = Some(held);
+                continue;
+            }
+            let shortfall = room
+                .checked_sub(free)
+                .verified("the branches above leave only less free memory than the room");
+            let Some(held) = node.bulk_memory.take() else {
+                panic!(
+                    "bulk memory on '{node_id}' has {free} bytes free, fewer than the {room} the \
+                     scenario asks for, and the scenario holds none of it to return"
+                );
+            };
+            let Some(kept) = held.bytes().checked_sub(shortfall) else {
+                panic!(
+                    "bulk memory on '{node_id}' needs {shortfall} more bytes free than the {} \
+                     bytes the scenario holds can return",
+                    held.bytes()
+                );
+            };
+            let (kept, returned) = held
+                .split(kept)
+                .verified("the part kept is no larger than the hold it is split from");
+            drop(returned);
+            node.bulk_memory = Some(kept);
+        }
+    }
+
+    /// Return all the bulk memory a scenario held on `node_id`.
+    pub fn release_bulk_memory_on(&self, node_id: &ClusterNodeName) {
+        let Some(mut node) = self.inner.executions.get_mut(node_id) else {
+            panic!("node '{node_id}' has not registered its executor");
+        };
+        node.bulk_memory = None;
+    }
+
+    /// How many bytes of `node_id`'s bulk memory the scenario holds.
+    pub fn held_bulk_memory_on(&self, node_id: &ClusterNodeName) -> u64 {
+        let Some(node) = self.inner.executions.get(node_id) else {
+            panic!("node '{node_id}' has not registered its executor");
+        };
+        match &node.bulk_memory {
+            Some(held) => held.bytes(),
+            None => 0,
+        }
     }
 
     pub fn arm_health_response_pause(
@@ -2268,6 +2349,7 @@ impl FaultInjection {
             NodeExecution {
                 executor,
                 holders: Arc::default(),
+                bulk_memory: None,
             },
         );
     }
