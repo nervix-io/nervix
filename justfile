@@ -7,7 +7,7 @@ export RUSTUP_AUTO_INSTALL := "0"
 # CI builds do not need incremental compilation artifacts.
 export CARGO_INCREMENTAL := if env("CI", []) != [] { "0" } else { env("CARGO_INCREMENTAL", []) }
 
-rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
+rust_toolchain_version := shell("python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path(\"rust-toolchain.toml\").read_text())[\"toolchain\"][\"channel\"])'")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }

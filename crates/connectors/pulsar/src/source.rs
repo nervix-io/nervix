@@ -54,6 +54,7 @@ use pulsar::{
 };
 use thiserror::Error;
 use tracing::warn;
+use url::Url;
 
 const PULSAR: &str = "pulsar";
 
@@ -126,6 +127,11 @@ impl PulsarUnresolvedRequest {
 pub enum PulsarSourceError {
     #[error("invalid Pulsar client configuration")]
     ClientConfig,
+    #[error(
+        "{connector} service address must use pulsar or pulsar+ssl and name a host",
+        connector = ConnectorKind::Pulsar
+    )]
+    InvalidServiceAddress,
     #[error(
         "Pulsar TLS supports 'tls_ca_file' but does not support client certificate authentication"
     )]
@@ -273,6 +279,45 @@ pub struct PulsarSourceSettings<'a> {
     /// index.
     pub consumer_name: String,
     pub ack_receipts: PulsarAckReceipts,
+}
+
+impl PulsarSourceSettings<'_> {
+    /// Whether both inputs read the same broker subscription. Consumer policy and declared
+    /// ownership do not change that identity. Configuration is resolved by the host first;
+    /// comparison opens no connection and performs no DNS lookup.
+    pub fn reads_same_subscription(&self, replacement: &Self) -> PulsarSourceResult<bool> {
+        let previous = self.service_url()?;
+        let next = replacement.service_url()?;
+        let same_host = previous.host_str().map(str::to_ascii_lowercase)
+            == next.host_str().map(str::to_ascii_lowercase);
+        let same_broker =
+            previous.scheme() == next.scheme() && same_host && previous.port() == next.port();
+        let previous_topic = PulsarSourcePlan::topic_from_config(self.config, self.topic.as_str());
+        let next_topic =
+            PulsarSourcePlan::topic_from_config(replacement.config, replacement.topic.as_str());
+        Ok(same_broker
+            && previous_topic == next_topic
+            && self.subscription.name == replacement.subscription.name)
+    }
+
+    fn service_url(&self) -> PulsarSourceResult<Url> {
+        let addr = client_config_value(self.config, "addr", ConnectorKind::Pulsar.into())
+            .change_context(PulsarSourceError::ClientConfig)?;
+        let mut url = Url::parse(&addr).change_context(PulsarSourceError::ClientConfig)?;
+        let default_port = match url.scheme() {
+            "pulsar" => 6650,
+            "pulsar+ssl" => 6651,
+            _ => return Err(Report::new(PulsarSourceError::InvalidServiceAddress)),
+        };
+        if !url.has_host() {
+            return Err(Report::new(PulsarSourceError::InvalidServiceAddress));
+        }
+        if url.port().is_none() {
+            url.set_port(Some(default_port))
+                .map_err(|()| Report::new(PulsarSourceError::InvalidServiceAddress))?;
+        }
+        Ok(url)
+    }
 }
 
 /// One Pulsar source's client and the shared subscription every instance consumes from.
@@ -475,7 +520,7 @@ impl PulsarSourcePlan {
         reason.starts_with(DURABLE_SUBSCRIPTION_EXISTS)
     }
 
-    /// Removes the subscription a dropped ingestor owned, once every consumer of that ingestor
+    /// Removes the subscription an ingestor owned, once every consumer of that ingestor
     /// has closed.
     ///
     /// A durable consumer joins the subscription and unsubscribes it, and the broker removes the
@@ -785,6 +830,14 @@ impl BrokerSourceConnector for PulsarSource {
 )]
 #[path = "source_tests.rs"]
 mod settlement_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_subscription_tests.rs"]
+mod subscription_tests;
 
 #[cfg(test)]
 #[cfg_attr(

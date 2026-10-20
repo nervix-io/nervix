@@ -599,7 +599,11 @@ Beneath it is the step that failed: the client's connection failure, `JoinSubscr
 `Unsubscribe` above the driver's `pulsar::Error`, which keeps a refusal's server error and reason,
 or `RemovalDeadline` with the connection budget it exceeded. A client whose configuration does not
 resolve keeps `SourceStartError::ClientConfiguration` beneath the retirement context instead. Each
-report is rendered once into runtime error events and never fails the drop. A provisioned
+report is rendered once into runtime error events and never fails the drop or replacement.
+Comparing a replacement's subscription retains URL parse causes beneath `PulsarSourceError::ClientConfig`,
+or uses `InvalidServiceAddress` for an unsupported service scheme or missing host, beneath the
+retirement context. A comparison failure preserves the subscription and is reported separately
+from any failure to start the replacement. A provisioned
 subscription that does not exist is `PulsarSourceError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's

@@ -232,7 +232,11 @@ same plans, so removing an ingestor after `STOP` can still release its MQTT sess
 connector compares validated session identities and subscriptions, cleans up obsolete identities
 best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
 No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
-and ownership transfer with an unchanged input preserve external sessions.
+and ownership transfer with an unchanged input preserve external sessions. For Pulsar, a changed
+owned input reaches retirement too: the connector compares the two resolved service endpoints,
+qualified topics and subscription names before deciding whether to remove the preceding
+subscription. An unchanged subscription is retained even when the replacement declares it
+`PROVISIONED`; replacing its routes, codec, mode or instance count does not remove its backlog.
 
 The emitter plan pairs its ordered relay inputs with one typed sink and its applicable client,
 codec, expression, flush, batching, and error contracts. A native `TO CLIENT` sink has no
