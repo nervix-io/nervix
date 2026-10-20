@@ -23,6 +23,14 @@ and an absent failure means none has been observed. These are task-owned executi
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-a-sink) owns their completion semantics.
 
+The Kafka sink installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
+validates the client configuration. Its confirmation window's on-demand settlement returns
+`Some(SinkRecordId)` for an answered record and `None` for an empty window. A refused enqueue
+keeps the same record until admission succeeds or its wait fails. The optional admission deadline
+is absent while outstanding confirmation answers can provide progress, and is established only
+when a full native queue has no current-window answer left to await. These values are private,
+volatile execution state; the [connector contract](./connector-contract.md) owns their bounds.
+
 A forced-recovery destination that has not installed its execution schedule yet retains that
 absence as an installation wait, rather than inferring that its checkpoints are missing. The
 installation publication and application sequence establish the execution before its fingerprint
