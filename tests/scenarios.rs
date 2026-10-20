@@ -147,6 +147,7 @@ use crate::common::{
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
     server_process_cluster::ServerProcessCluster,
+    sqs_answer_hold::SqsAnswerHold,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
@@ -483,6 +484,9 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
+    /// chosen message.
+    sqs_answer_hold: Option<SqsAnswerHold>,
     /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
     /// that connect through it.
     nats_endpoint: Option<NatsEndpoint>,
@@ -618,6 +622,7 @@ impl fmt::Debug for ScenarioWorld {
             )
             .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
+            .field("sqs_answer_hold", &self.sqs_answer_hold)
             .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
@@ -8184,6 +8189,95 @@ async fn given_sqs_is_forwarded(world: &mut ScenarioWorld, name: String, address
         "sqs_forwarded_endpoint",
     )
     .await;
+}
+
+/// Stands a forwarder in front of the plain SQS listener that can hold the answer carrying a chosen
+/// message, and records in placeholder `sqs_held_endpoint` the SQS endpoint that reaches the service
+/// through it.
+#[given("SQS is reached through a forwarder that can hold an answer")]
+async fn given_sqs_answer_hold(world: &mut ScenarioWorld) {
+    let endpoint = started_dependency(world, SQS_ENDPOINT);
+    let mut url = url::Url::parse(&endpoint).expect("the SQS endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the SQS endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the SQS listener is named by a literal address");
+    let port = url.port().expect("the SQS endpoint names its port");
+    let hold = SqsAnswerHold::start(std::net::SocketAddr::new(host, port))
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder to {endpoint} could not listen: {error}"));
+    url.set_host(Some("127.0.0.1"))
+        .expect("a loopback address is a valid URL host");
+    url.set_port(Some(hold.local_port()))
+        .expect("the SQS URL can carry the forwarder's port");
+    world.placeholders.insert(
+        "sqs_held_endpoint".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.sqs_answer_hold = Some(hold);
+}
+
+/// From now on the forwarder holds the first answer whose bytes carry `text`: the service took the
+/// message it carries off the queue for a receive the client still waits on.
+#[when(expr = "the SQS forwarder holds the answer that carries {string}")]
+fn when_the_sqs_forwarder_holds_the_answer_that_carries(world: &mut ScenarioWorld, text: String) {
+    let text = expand_placeholders(world, &text);
+    world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder that can hold an SQS answer must be configured first")
+        .hold_the_answer_carrying(text.into_bytes());
+}
+
+/// How long a step waits for the forwarder to hold the answer it was armed for: long enough for the
+/// cluster to start its source and send a receive on a loaded machine.
+const SQS_ANSWER_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[then("the SQS forwarder holds that answer")]
+async fn then_the_sqs_forwarder_holds_that_answer(world: &mut ScenarioWorld) {
+    let holding = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder that can hold an SQS answer must be configured first")
+        .holding();
+    match nervix_primitives::time::timeout(SQS_ANSWER_HOLD_TIMEOUT, holding).await {
+        Ok(held) => held.expect("the forwarder keeps its hold state while it waits"),
+        Err(_elapsed) => panic!(
+            "the SQS forwarder held no answer carrying the armed text within \
+             {SQS_ANSWER_HOLD_TIMEOUT:?}"
+        ),
+    }
+}
+
+/// Releases the held answer as soon as the entity gate pause for `domain` is reached. The release
+/// waits on a task of its own, so the answer reaches its receive however long this step's runner
+/// takes to observe the pause.
+#[when(
+    expr = "the SQS forwarder releases that answer once the entity gate pause for domain {string} \
+            is reached"
+)]
+async fn when_the_sqs_forwarder_releases_that_answer_at_the_entity_gate_pause(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let fault_injection = world.fault_injection.clone();
+    let reached = async move {
+        fault_injection.wait_for_entity_gate_pause(&domain).await;
+    };
+    let released = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder that can hold an SQS answer must be configured first")
+        .release_once(reached);
+    match nervix_primitives::time::timeout(ENTITY_GATE_PAUSE_TIMEOUT, released).await {
+        Ok(release) => release.expect("the release task does not panic"),
+        Err(_elapsed) => panic!(
+            "the entity gate pause that releases the held SQS answer was not reached within \
+             {ENTITY_GATE_PAUSE_TIMEOUT:?}"
+        ),
+    }
 }
 
 /// The URL of the started dependency placeholder `source` names.
@@ -22712,6 +22806,22 @@ async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
         .expect("failed to declare sqs queue");
 }
 
+#[given(expr = "SQS queue {string} exists with a visibility timeout of {string}")]
+async fn given_sqs_queue_exists_with_visibility_timeout(
+    world: &mut ScenarioWorld,
+    queue: String,
+    visibility_timeout: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let visibility_timeout =
+        parse_duration_text(&visibility_timeout).expect("the visibility timeout is a duration");
+    world
+        .cluster()
+        .ensure_sqs_queue_with_visibility_timeout(&queue, visibility_timeout)
+        .await
+        .expect("failed to declare sqs queue");
+}
+
 #[given(expr = "TLS SQS queue {string} exists")]
 async fn given_tls_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -30594,6 +30704,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.sqs_answer_hold = None;
                 world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();

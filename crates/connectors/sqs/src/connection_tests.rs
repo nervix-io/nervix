@@ -39,7 +39,7 @@ const SERVICE: &str = "sqs.nervix.test";
 /// The access key every check signs with.
 const ACCESS_KEY_ID: &str = "nervix-access-key";
 /// The queue every check looks up.
-const QUEUE: &str = "orders";
+pub(crate) const QUEUE: &str = "orders";
 
 /// A resolver asking one local authority, with the files it was loaded from.
 pub(crate) struct Fixture {
@@ -92,7 +92,7 @@ impl Fixture {
 }
 
 /// The entries of a client for `endpoint` that signs with a known access key.
-fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
+pub(crate) fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
     let entry = |key: &str, value: &str| ClientConfigEntry {
         key: key.to_string(),
         value: value.to_string(),
@@ -173,6 +173,16 @@ fn stand_in(
 }
 
 async fn answer_request(mut stream: TcpStream, answer: QueueAnswer) -> String {
+    let request = read_request(&mut stream).await;
+    stream
+        .write_all(answer.response().as_bytes())
+        .await
+        .expect("the client under test waits for the response");
+    request
+}
+
+/// Reads one whole request from `stream`: its head and the body its `Content-Length` announces.
+pub(crate) async fn read_request(stream: &mut TcpStream) -> String {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4_096];
     while !holds_whole_request(&request) {
@@ -185,10 +195,6 @@ async fn answer_request(mut stream: TcpStream, answer: QueueAnswer) -> String {
         }
         request.extend_from_slice(&buffer[..read]);
     }
-    stream
-        .write_all(answer.response().as_bytes())
-        .await
-        .expect("the client under test waits for the response");
     String::from_utf8_lossy(&request).into_owned()
 }
 
@@ -419,7 +425,7 @@ fn a_service_response_keeps_its_short_description() {
 }
 
 /// A port on the loopback address nothing listens on, so every connection to it is refused.
-async fn closed_port() -> u16 {
+pub(crate) async fn closed_port() -> u16 {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("a loopback port is available");
@@ -503,7 +509,7 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
 }
 
 /// A source instance of the client `config` declares, polling the queue every check looks up.
-async fn open_source(config: &[ClientConfigEntry], dns: DnsResolver) -> SqsSource {
+pub(crate) async fn open_source(config: &[ClientConfigEntry], dns: DnsResolver) -> SqsSource {
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
     let plan = SqsSourcePlan::new(config, queue, dns)
         .await
@@ -514,7 +520,7 @@ async fn open_source(config: &[ClientConfigEntry], dns: DnsResolver) -> SqsSourc
 }
 
 /// A request for the next batch, which a source that has not looked its queue up never sends.
-fn batch_request() -> SourceBatchRequest {
+pub(crate) fn batch_request() -> SourceBatchRequest {
     SourceBatchRequest {
         max_messages: NonZeroUsize::MIN,
         batch_timeout: None,

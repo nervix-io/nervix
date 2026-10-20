@@ -2326,6 +2326,22 @@ impl Cluster {
         ensure_sqs_queue_tls(&self.dependencies, queue).await
     }
 
+    /// Creates `queue` with `visibility_timeout`: how long a message a receive took stays invisible
+    /// to every other receive unless it is deleted first.
+    pub(crate) async fn ensure_sqs_queue_with_visibility_timeout(
+        &self,
+        queue: &str,
+        visibility_timeout: Duration,
+    ) -> io::Result<()> {
+        let client = sqs_client(&self.dependencies).await?;
+        let request = client.create_queue().queue_name(queue).attributes(
+            QueueAttributeName::VisibilityTimeout,
+            visibility_timeout.as_secs().to_string(),
+        );
+        request.send().await.map_err(io::Error::other)?;
+        Ok(())
+    }
+
     pub(crate) async fn publish_sqs(&self, queue: &str, payload: &str) -> io::Result<()> {
         publish_sqs(&self.dependencies, queue, payload).await
     }
