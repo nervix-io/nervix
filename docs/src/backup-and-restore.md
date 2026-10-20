@@ -686,6 +686,11 @@ close and database compaction reclaims files. A cancelled or failed sweep update
 does not count its partial deletion; the next completed sweep reconstructs current usage, because
 a sweep forgets the kept measurement before it removes anything it counts.
 
+The [Restore Staging Volume](cluster-chaos.md#restore-staging-volume) chaos entry samples these
+series every two seconds, with the executor's storage and memory classes and resident memory,
+while three restores of an archive whose guest saves exceed the bulk budget stage on the same
+nodes; it records their peak and settled values for the image it ran.
+
 ### Order Of Steps
 
 A restore first receives the archive and plans everything it will do. Nothing changes before both
@@ -786,6 +791,20 @@ no other command changes those domains while it applies.
 
 The staged archive is released when its restore finishes, or when the retry validity of the
 execution reference ends.
+
+These rules hold for the packaged image under real process and network faults. The
+[Restore Faults](cluster-chaos.md#restore-faults) entries of the external chaos suite fault a
+restore while it stages runtime state on three nodes: they SIGKILL the coordinating leader,
+isolate it from its peers and from the client, SIGKILL a node the restore stages on, and SIGKILL
+one while a restore whose coordinator and client were both lost awaits its failure. In each, the
+restore either completes under its execution reference or fails with `START` of its target refused,
+after which a restore of the same archive under another name completes. A completed restore equals
+its archive; a domain restored with `RESUME` keeps consuming from its archived offset after its
+stale coordinator rejoins, which shows that no delayed staging or publication replaced its
+generation or cleared its runtime handles. Unpublished staging returns to zero bytes on every node
+through completed sweeps, including on a node restarted while it held a failed restore's staging.
+A fault inside publication itself needs a testing hook; the Cucumber scenarios that pause a
+restore before state publication carry that boundary.
 
 ### Restoring From The Command Line
 

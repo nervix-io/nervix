@@ -2,8 +2,8 @@
 # Sourced by the stateful, domain-time, mixed-instability and backup-fault scenarios. Owns the node
 # faults they compose with their fixtures: an abrupt kill with an explicit restart, a graceful stop
 # and restart, a finite pause, a peer-side network isolation, a kill of every node, and one netem
-# effect on a container's egress toward one address. Each fault proves its own effect through Docker
-# inspection, Pumba's own report and the run's live Docker event recording.
+# effect on a container's egress toward chosen addresses. Each fault proves its own effect through
+# Docker inspection, Pumba's own report and the run's live Docker event recording.
 # Every fault that a mixed-instability step can hold together with another one comes as an inject
 # half and a heal half; the whole faults the other scenarios hold compose those halves, run the
 # caller's BEFORE hook immediately before they inject anything and its DURING hook while they hold,
@@ -485,14 +485,15 @@ node_fault_netem_removed() {
 }
 
 # Starts the detached Pumba injector NAME that applies EFFECT... to the egress of the run's SERVICE
-# container, whose chaos role is ROLE, toward ADDRESS for at most LIFETIME seconds, after a dry run
-# selecting exactly that container, and requires the installed netem to show EXPECTED.
+# container, whose chaos role is ROLE, toward ADDRESSES, a space-separated list, for at most
+# LIFETIME seconds, after a dry run selecting exactly that container, and requires the installed
+# netem to show EXPECTED.
 node_fault_netem_start() {
     local case_dir="$1"
     local name="$2"
     local service="$3"
     local role="$4"
-    local address="$5"
+    local addresses="$5"
     local lifetime="$6"
     local expected_effect="$7"
     shift 7
@@ -503,7 +504,11 @@ node_fault_netem_start() {
     container_id="$(owned_service_container "${service}")" || return 1
     container_name="$(run_bounded 20 docker inspect --format '{{.Name}}' "${container_id}")"
     container_name="${container_name#/}"
-    local common=(--interface eth0 --tc-image "${CHAOS_NETTOOLS_IMAGE}" --pull-image=false --target "${address}")
+    local common=(--interface eth0 --tc-image "${CHAOS_NETTOOLS_IMAGE}" --pull-image=false)
+    local address
+    for address in ${addresses}; do
+        common+=(--target "${address}")
+    done
     node_fault_dry_run "${case_dir}/${name}-dry-run.txt" "${container_id}" "${role}" 'running netem on container' \
         netem --duration 1s "${common[@]}" "$@" "${container_name}"
     local arguments=(netem --duration "${lifetime}s" "${common[@]}" "$@")

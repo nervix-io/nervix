@@ -2922,6 +2922,22 @@ coverage-chaos-backup-fault:
     fi
     kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/backup-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fault-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-fault-coverage") }} scripts/chaos/tests/backup-fault-self-test.sh
 
+# Check the restore scenarios' options, the padded guest's bounds, the sampler's records, the
+# staging verdicts and every outcome the restore verdict assigns, as every verifier self-check does.
+test-chaos-restore:
+    exec bash scripts/chaos/tests/restore-self-test.sh
+
+# Measure the restore scenarios' option checks, staging verdicts and outcome verdict.
+coverage-chaos-restore:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/restore-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/restore-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/fixtures/wasm/padded-state-wat.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/restore-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-restore-coverage") }} scripts/chaos/tests/restore-self-test.sh
+
 # Check the deduplicator and window outputs the backup state verdict accepts and each lost or
 # doubled state it refuses, as every verifier self-check does.
 test-chaos-backup-state:
