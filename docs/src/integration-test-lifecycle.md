@@ -297,11 +297,9 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
-16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
-attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
-the unchanged 41-minute suite budget. The additional slots use the observed CPU and memory
-headroom; their complete-suite qualification retains runner load and the actual margin rather than
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `4`, so its
+16-CPU runner has 64 slots. The slot count uses observed CPU and memory headroom while preserving
+the 41-minute suite budget. Complete-suite qualification retains runner load and the actual margin rather than
 assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
 without charging a slot.
 Admission grants feature capacity and a run slot in one decision, after both are available. A
