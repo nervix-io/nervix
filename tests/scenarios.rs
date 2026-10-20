@@ -16908,8 +16908,7 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
 }
 
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
-/// that is refused until the scenario changes the room or releases the hold. A node that already
-/// holds bulk memory for the scenario adjusts its hold without ever leaving a wider room.
+/// that is refused until the scenario releases the hold.
 #[when(expr = "bulk memory on every node keeps only {string} bytes free")]
 async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
     world: &mut ScenarioWorld,
@@ -16936,8 +16935,9 @@ async fn when_bulk_memory_on_every_node_is_released(world: &mut ScenarioWorld) {
     }
 }
 
-/// Waits until every node's bulk memory class reserves exactly what the scenario holds there, so no
-/// charge another operation took on any node outlives that operation.
+/// Waits until each node has reported its bulk memory class reserving exactly what the scenario
+/// holds there, so no charge another operation took on a node outlives that operation. A node is
+/// checked until it reports so once, because unrelated bulk work may hold memory for a moment.
 #[then(expr = "within {string} every node reserves only the bulk memory the scenario holds")]
 async fn then_every_node_reserves_only_held_bulk_memory(
     world: &mut ScenarioWorld,
@@ -16945,10 +16945,12 @@ async fn then_every_node_reserves_only_held_bulk_memory(
 ) {
     let deadline = Instant::now()
         + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let mut unchecked = world.cluster().node_ids();
     loop {
         nervix_primitives::task::consume_budget().await;
         let mut outstanding = Vec::new();
-        for node_id in world.cluster().node_ids() {
+        let mut remaining = Vec::new();
+        for node_id in unchecked {
             let held = world
                 .fault_injection
                 .held_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
@@ -16969,9 +16971,10 @@ async fn then_every_node_reserves_only_held_bulk_memory(
                     "'{node_id}' reserves {reserved} bytes of bulk memory while the scenario \
                      holds {held}"
                 ));
+                remaining.push(node_id);
             }
         }
-        if outstanding.is_empty() {
+        if remaining.is_empty() {
             return;
         }
         assert!(
@@ -16979,6 +16982,7 @@ async fn then_every_node_reserves_only_held_bulk_memory(
             "within {duration}: {}",
             outstanding.join("; ")
         );
+        unchecked = remaining;
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }

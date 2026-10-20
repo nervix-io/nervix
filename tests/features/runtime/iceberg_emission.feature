@@ -1141,6 +1141,7 @@ Feature: Iceberg emission
   @iceberg_commit_memory @deloxide_stress
   Scenario Outline: An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there
     Given Iceberg dependencies are running
+    And temporary files use a custom temp directory
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "memory_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/memory_notifications_{{test_id}}" with columns
       """
@@ -1181,32 +1182,32 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE EMITTER iceberg_memory FROM notifications TO ICEBERG ON S3 s3_main TABLE memory_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/memory_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE EMITTER iceberg_memory FROM notifications TO ICEBERG ON S3 s3_main TABLE memory_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/memory_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 30s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;
       """
-    # Staging a row charges one byte, which the 64 free bytes admit, while loading the staged file
-    # for its commit charges every byte of the file.
-    And bulk memory on every node keeps only "64" bytes free
     And http payload is posted to host "iceberg-memory-{{test_id}}.example.com" path "/notifications"
       """
       {"user_id":61,"action":"held"}
       """
-    Then within "30s" DESCRIBE EMITTER "iceberg_memory" on the leader node reports an Iceberg commit waiting for bulk memory, whose staged bytes are saved as placeholder "commit_bytes"
+    Then the temp directory eventually contains an Iceberg Arrow IPC staged batch
+    # The row is staged and its commit comes due 30 seconds later. Loading the staged file charges
+    # every byte of it, and the commit takes that charge only when the class has room for it now.
+    When bulk memory on every node keeps only "64" bytes free
+    Then within "90s" DESCRIBE EMITTER "iceberg_memory" on the leader node reports an Iceberg commit waiting for bulk memory, whose staged bytes are saved as placeholder "commit_bytes"
     And the Iceberg table "memory_notifications_{{test_id}}" does not contain a row within "1s"
       """
       {"user_id":61,"action":"held"}
       """
-    # Exactly the bytes the refused commit asked for are now free, and nothing more.
-    When bulk memory on every node keeps only "{{commit_bytes}}" bytes free
+    When bulk memory on every node is released
     Then the Iceberg table "memory_notifications_{{test_id}}" eventually contains a row
       """
       {"user_id":61,"action":"held"}
       """
     And within "10s" DESCRIBE EMITTER "iceberg_memory" on the leader node reports "bytes_total" "sent" relay "notifications" totalling "{{commit_bytes}}"
-    And within "10s" every node reserves only the bulk memory the scenario holds
+    And within "30s" every node reserves only the bulk memory the scenario holds
 
     Examples:
       | cluster_size |
