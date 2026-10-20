@@ -1521,10 +1521,11 @@ Suspension stops polling. Messages wait in the queue only for its configured ret
 the ingestor resumes by polling past anything the service expired. A poll still waiting when the
 ingestor quiesces or stops is never abandoned, because the service hides the message it answers
 with until its visibility timeout ends: the source sends no further poll and waits for that answer,
-which the one-second wait bounds, and a message it brings dispatches before the source suspends or
-closes. Only a service that has not answered within 10 seconds of the quiesce change or the stop
-ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient error; a message the poll
-was returning then stays invisible until its visibility timeout ends.
+which a responsive service gives within the poll's one-second wait, and a message it brings
+dispatches before the source suspends or closes. Only a service that has not answered within
+10 seconds of the quiesce change or the stop ends that poll unanswered, which `DESCRIBE INGESTOR`
+shows as a transient error; a message the poll was returning then stays invisible until its
+visibility timeout ends.
 
 ### Prometheus
 
