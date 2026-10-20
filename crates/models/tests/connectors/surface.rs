@@ -534,7 +534,7 @@ fn every_client_declares_its_pooling_and_the_owner_of_its_configuration_keys() {
 }
 
 #[test]
-fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_and_batching() {
+fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_and_stalled_peers() {
     let named = |capabilities: Vec<RuntimeCapability>| {
         capabilities
             .into_iter()
@@ -571,6 +571,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_and_batchin
             "FIFO GROUP <expression>",
             "FIFO GROUP FROM BRANCH",
             "BATCH",
+            "STALLED PEER timeout_ms",
         ]
     );
     assert_eq!(
@@ -579,7 +580,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_and_batchin
                 .capabilities()
                 .runtime_capabilities()
         ),
-        ["MODE ACK", "METHOD", "PATH"]
+        ["MODE ACK", "METHOD", "PATH", "STALLED PEER timeout_ms"]
     );
 }
 

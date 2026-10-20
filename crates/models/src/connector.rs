@@ -24,9 +24,11 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod bounds;
 mod clickhouse;
 mod client;
 mod configured_client;
+mod deadline;
 mod declaration;
 mod entity_union;
 mod external_name;
@@ -55,7 +57,7 @@ mod zeromq;
 use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
-    clickhouse::*, client::*, configured_client::*, declaration::*,
+    bounds::*, clickhouse::*, client::*, configured_client::*, deadline::*, declaration::*,
     external_name::ExternalNameError, http::*, iceberg::*, kafka::*, mongodb::*, mqtt::*, mysql::*,
     nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*,
     sink::*, source::*, source_metadata::*, sqs::*, syslog::*, websockets::*, zeromq::*,

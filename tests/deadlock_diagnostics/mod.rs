@@ -146,8 +146,8 @@ fn then_every_server_process_recorded_running_detector(world: &mut ScenarioWorld
         });
     assert_eq!(
         evidence.len(),
-        cluster.node_ids().len(),
-        "every member records one evidence file"
+        cluster.launched_processes(),
+        "every process the members' startups launched records one evidence file"
     );
     let mut processes = BTreeSet::new();
     for evidence in &evidence {

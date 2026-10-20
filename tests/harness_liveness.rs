@@ -6,14 +6,16 @@
 //!   node-stop, phase-deadline, status-request, port-pool, process-cluster convergence,
 //!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
 //!   materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable and process-observation regressions with Rust's test runner, and the
-//!   stand-in nodes, clients, images and processes those regressions talk to.
+//!   server-executable, stallable-TCP-proxy, process-observation and process-report regressions
+//!   with Rust's test runner, and the stand-in nodes, clients, images and processes those
+//!   regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, process-cluster convergence, cluster-teardown, scenario-phase, suite-watchdog,
 //!   Redis-client, HTTP-receiver, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable, process-observation and materialized-state diagnostic harness modules,
-//!   the product's shutdown coordinator a stopping node is read through, and the client wire
-//!   session protocol the stand-in nodes answer status requests with.
+//!   server-executable, stallable-TCP-proxy, process-observation, process-report and
+//!   materialized-state diagnostic harness modules, the product's shutdown coordinator a stopping
+//!   node is read through, and the client wire session protocol the stand-in nodes answer status
+//!   requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -50,6 +52,10 @@ mod process_cluster_convergence;
 mod process_observation;
 #[path = "common/process_observation_tests.rs"]
 mod process_observation_tests;
+#[path = "common/process_report.rs"]
+mod process_report;
+#[path = "common/process_report_tests.rs"]
+mod process_report_tests;
 #[path = "common/readiness_history_tests.rs"]
 mod readiness_history_tests;
 #[path = "common/redis_client.rs"]
@@ -58,6 +64,10 @@ mod redis_client;
 mod runner_lag;
 #[path = "common/runner_lag_tests.rs"]
 mod runner_lag_tests;
+#[path = "common/runner_observation.rs"]
+mod runner_observation;
+#[path = "common/runner_observation_tests.rs"]
+mod runner_observation_tests;
 #[path = "common/runner_offload.rs"]
 mod runner_offload;
 #[path = "common/runner_offload_tests.rs"]
@@ -78,6 +88,10 @@ mod scenario_schedule;
 mod server_executable;
 #[path = "common/server_executable_tests.rs"]
 mod server_executable_tests;
+#[path = "common/stallable_tcp_proxy.rs"]
+mod stallable_tcp_proxy;
+#[path = "common/stallable_tcp_proxy_tests.rs"]
+mod stallable_tcp_proxy_tests;
 #[path = "common/status_request.rs"]
 mod status_request;
 #[path = "common/suite_watchdog.rs"]
@@ -2132,7 +2146,7 @@ mod tests {
                     ],
                 )));
                 leader.publish(&unaware);
-                Ok(())
+                Ok(node_2.endpoint())
             };
             let mut converging = std::pin::pin!(convergence.relaunch("node-2", relaunch));
 
@@ -2621,7 +2635,7 @@ mod tests {
                     target("node-2", 1, "connected"),
                 ],
             )));
-            Ok(())
+            Ok(node_2.endpoint())
         };
 
         timeout(
@@ -2663,7 +2677,7 @@ mod tests {
         let relaunches = AtomicUsize::new(0);
         let relaunch = async {
             relaunches.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(exited.endpoint())
         };
 
         let failure = timeout(
@@ -2751,6 +2765,83 @@ mod tests {
             cause.to_string(),
             "the relaunched process exited during startup"
         );
+    }
+
+    /// A relaunch can move the relaunched member's listeners to fresh ports, so the members
+    /// converge on the new process only where the relaunch says it answers: the exited process's
+    /// endpoint never answers again.
+    #[nervix_primitives::test]
+    async fn a_relaunched_member_is_asked_where_its_new_process_answers() {
+        // node-2's process has exited. node-1 leads and observes it through generation 4, node-3
+        // through generation 6.
+        let leader = PublishedMember::new(&PublishedAnswer::status(&member_status(
+            "node-1",
+            "node-1",
+            &[
+                target("node-2", 4, "unavailable"),
+                target("node-3", 2, "connected"),
+            ],
+        )));
+        let other = PublishedMember::new(&PublishedAnswer::status(&member_status(
+            "node-3",
+            "node-1",
+            &[
+                target("node-1", 1, "connected"),
+                target("node-2", 6, "unavailable"),
+            ],
+        )));
+        let node_1 = StandInNode::serve(leader.behavior()).await;
+        let exited = StandInNode::serve(StandInBehavior::EndSession).await;
+        let node_3 = StandInNode::serve(other.behavior()).await;
+        let convergence = ClusterConvergence::new(
+            BTreeMap::from([
+                ("node-1".to_string(), node_1.endpoint()),
+                ("node-2".to_string(), exited.endpoint()),
+                ("node-3".to_string(), node_3.endpoint()),
+            ]),
+            CONVERGENCE_TEST_BUDGET,
+        );
+        // The new process answers on another port. It follows the leader and reaches both peers,
+        // and both peers reach it through a target newer than the exited process's.
+        let moved = StandInNode::serve(StandInBehavior::Answer(command_result(
+            completed(),
+            &member_status(
+                "node-2",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-3", 2, "connected"),
+                ],
+            ),
+        )))
+        .await;
+        let relaunch = async {
+            leader.publish(&PublishedAnswer::status(&member_status(
+                "node-1",
+                "node-1",
+                &[
+                    target("node-2", 5, "connected"),
+                    target("node-3", 2, "connected"),
+                ],
+            )));
+            other.publish(&PublishedAnswer::status(&member_status(
+                "node-3",
+                "node-1",
+                &[
+                    target("node-1", 1, "connected"),
+                    target("node-2", 7, "connected"),
+                ],
+            )));
+            Ok(moved.endpoint())
+        };
+
+        timeout(
+            CONVERGENCE_TEST_BUDGET,
+            convergence.relaunch("node-2", relaunch),
+        )
+        .await
+        .assured("the relaunch ends within its own budget")
+        .assured("the members converge where the new process answers");
     }
 
     #[nervix_primitives::test]

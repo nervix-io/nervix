@@ -338,6 +338,24 @@
           "run": ["backup-fault", "--fault", "owner-crash"]
         },
         {
+          "id": "restore-under-leader-crash",
+          "shard": 10,
+          "budget_minutes": 12,
+          "run": ["restore-fault", "--fault", "leader-crash"]
+        },
+        {
+          "id": "restore-under-owner-crash",
+          "shard": 10,
+          "budget_minutes": 11,
+          "run": ["restore-fault", "--fault", "owner-crash"]
+        },
+        {
+          "id": "restore-staging-volume",
+          "shard": 10,
+          "budget_minutes": 11,
+          "run": ["restore-volume"]
+        },
+        {
           "id": "backup-under-leader-crash",
           "shard": 11,
           "budget_minutes": 14,
@@ -354,6 +372,18 @@
           "shard": 11,
           "budget_minutes": 20,
           "run": ["backup-fault", "--fault", "rolling-restart"]
+        },
+        {
+          "id": "restore-under-leader-partition",
+          "shard": 11,
+          "budget_minutes": 20,
+          "run": ["restore-fault", "--fault", "leader-partition"]
+        },
+        {
+          "id": "restore-reclamation-under-owner-crash",
+          "shard": 11,
+          "budget_minutes": 19,
+          "run": ["restore-fault", "--fault", "reclamation-owner-crash"]
         }
       ]
     }

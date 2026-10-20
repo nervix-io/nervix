@@ -539,9 +539,10 @@ reads the configuration at the cut, and asks state owners to stage their checkpo
 the domain and explicitly releases that domain's lease before transferring its sections into the
 archive. A cluster backup repeats this process per domain, so one domain's archive transfer does
 not hold another domain paused or mutation locked. A stopped domain is confirmed under its lease
-and has no intake to pause;
-`WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` reads a live checkpoint without
-quiescing. A retry still uses the command execution's stable identity and outcome.
+and has no intake to pause; `WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` takes none
+either and reads a live checkpoint without quiescing. A retry still uses the command execution's
+stable identity and outcome, and a new leader re-executes an applying backup under it. [The
+Quiesced Cut](./backup-and-restore-architecture.md#the-quiesced-cut) describes the protocol.
 The backup drain reads admitted work on every live node and uses a separate confirming force-flush
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
 not keep the cut open, and neither do the rows a window retains, which the cut captures as window
@@ -560,11 +561,14 @@ disk. The verified description, parsed Models and reservation share one owner th
 retain until they finish, including cancellation. Parsing and the pure restore planner run on
 admitted bulk CPU workers. Native checkpoints stream into quota-owned files and use the same
 bounded installation path as guest saves. The ordinary bulk budget stays at 32 MiB, with fixed
-2 MiB conversion I/O and installation jobs. [Backup And Restore](backup-and-restore.md#restoring)
-owns the preparation estimate and its allocation limits.
+2 MiB conversion I/O and installation jobs. [Restore Intake And
+Preparation](backup-and-restore-architecture.md#restore-intake-and-preparation) owns the preparation
+estimate, and [Backup And Restore](backup-and-restore.md#limits) its allocation limits.
 
 A restore is a persistent administrative command whose progress is replicated state; the operator
-view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
+view is in [Backup And Restore](./backup-and-restore.md#restoring), and [Admission And Durable
+Progress](./backup-and-restore-architecture.md#admission-and-durable-progress) describes how each
+step is recorded. The leader admits a restore
 under its execution reference only after the archive verified and the whole restore planned, and
 admission takes the mutation lease of every domain the restore creates. The admitted execution
 records the `RESTORE` statement, the size and digest of its archive, every step the restore has
@@ -599,7 +603,8 @@ validation and the leader's content checks, and without the statement and source
 transaction. The lease keeps every other command from changing the domain while the restore holds
 it, so a leader that finds exactly the archived models already committed knows that an earlier
 attempt applied them. It stages all compatible state before any node replaces its published set,
-then publishes one durable batch per node. Only after every publication succeeds does it record
+then has every node durably select its complete set through one publication pointer. Only after
+every publication succeeds does it record
 the model step and release the start gate. For `RESUME`, this same consensus effect sets `Running`
 and installs the archived clock mapping, preserving the archived start generation and start point.
 State installation includes materialized checkpoints bound to that generation before any branch
@@ -643,7 +648,9 @@ unaffected nodes and branches keep their sessions, buffers, state, and in-flight
 released after the destination owners activate the published runtime revision. A fence or drain
 timeout releases the old graph without writing the candidate schedule. If activation fails after a
 schedule commit, the gate stays closed until its lease deadline rather than opening before the
-destination is ready.
+destination is ready. That holds on every node that keeps running; a node that stops ends the leases
+it holds with its runtime, as [Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown)
+describes.
 
 Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is
 absent. They do not block the handoff; destroying the old task negatively acknowledges their
@@ -653,12 +660,21 @@ has a replica slot, the live former owner is the first replica candidate after t
 
 `RELOCATE` differs from the others in one respect: it holds and commits its whole unit at once,
 because the unit is the plan the operator inspected and approved. A hold that cannot complete
-leaves the domain on its previous schedule and moves nothing. It holds the domain's exclusive
-alteration lock from planning through release, so it and a concurrent model change, placement
-change, or `DRAIN NODE` of the same domain are mutually exclusive. `RELOCATE` is immediate,
-non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and `DROP NODE`, because its plan
-depends on live cluster state that a queued transaction cannot pin. `DESCRIBE RELOCATION` is
-read-only content served by any cluster node. See
+leaves the domain on its previous schedule and moves nothing. `RELOCATE` holds the domain's
+exclusive alteration lock from planning through release, so it and a concurrent model change,
+placement change, or `DRAIN NODE` of the same domain are mutually exclusive.
+
+The leader refuses the relocation's schedule write when it lost its leadership or cannot confirm
+it. A leader whose lease lapsed cannot confirm it, and refuses a new write before appending it. Such
+a refusal leaves the domain on its previous schedule without failing the relocation. The relocation
+releases its hold and answers `OutcomeUnknown` with cause `LeadershipLost`, and its execution stays
+applying. The leader that resumes it, or a repetition under the same execution reference, plans the
+unit again from the schedule committed by then. Any other refusal of the write, such as a schedule
+that changed since planning, fails the relocation.
+
+`RELOCATE` is immediate, non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and
+`DROP NODE`, because its plan depends on live cluster state that a queued transaction cannot pin.
+`DESCRIBE RELOCATION` is read-only content served by any cluster node. See
 [Placement Policies](placement.md#relocating-runtime-nodes) for the statements, the selection
 forms, and the plan output.
 
@@ -688,7 +704,11 @@ first, the deadline or a repeated signal, decides how the process exits.
 
 When graceful shutdown begins, the process advertises that its current incarnation is terminating.
 The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
-and explicit relocation exclude it as a new destination. The advertisement is transient state of
+and explicit relocation exclude it as a new destination. A leader whose gossip has not yet observed
+the advertisement can still choose the incarnation, so the incarnation itself refuses to prepare a
+new planned handoff for which it is the destination; see
+[Terminating Incarnation And Placement Eligibility](shutdown.md#terminating-incarnation-and-placement-eligibility).
+The advertisement is transient state of
 that process incarnation, so a restarted incarnation is eligible again unless the stable node name
 is cordoned in Raft. The process then stops accepting on its public gRPC, connector, observability,
 and console listeners and closes the client connections they had accepted. Closing a connection

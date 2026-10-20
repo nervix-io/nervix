@@ -18,6 +18,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
@@ -57,6 +61,54 @@ pub struct RedisPubSubSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a REDIS PUBSUB ingestor holds and how long it waits.
+const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages the driver reads ahead of the host",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "reading the next message",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[],
+};
+
+/// What the connector of a REDIS PUBSUB emitter holds and how long it waits.
+const REDIS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the command pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "checking out a connection, a new one's name resolution, connection, TLS and \
+                   Redis setup included",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "the answer to a PUBLISH",
+            bound: WaitBound::Driver("500 ms"),
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SourceEntity for RedisPubSubSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: false,
@@ -72,6 +124,7 @@ impl SourceEntity for RedisPubSubSource {
             name: LocatorName::External(RedisChannelName::DECLARATION),
         }),
         options: &[],
+        bounds: REDIS_SOURCE_BOUNDS,
     };
 }
 
@@ -146,6 +199,7 @@ impl SinkEntity for RedisPubSubSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: REDIS_SINK_BOUNDS,
     };
 }
 

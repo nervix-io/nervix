@@ -539,8 +539,8 @@ runtime that could not be created, or a failed AMQP handshake, each naming the b
 is involved. The source keeps it beneath its connect and resume contexts, so `DESCRIBE INGESTOR`
 shows the deepest cause, such as the resolver's own lookup error. The sink changes it into a
 configuration failure for an invalid address or CA file and an initialization failure otherwise,
-leading with the connection error's message, which `DESCRIBE EMITTER` shows. Neither attaches
-credentials from the address.
+leading with the connection error's chain, down to a `connect_timeout_ms` it ran out of, which
+`DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
 A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
 broker's own reason, which the sink reads from its connection. A refusal of a message body larger
@@ -565,6 +565,19 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 `RedisPubSubSourceError::Resolve` and `SourceError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
+
+A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
+`DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
+bound, beneath the connector's own context: `RabbitMqConnectError::Unreachable` or `TlsHandshake`
+for a broker connection, `RedisClientError::Connect` for a new pool connection,
+`SinkPublishError::Publish` for a pool checkout, `RedisPubSubSourceError::NotEstablished` or
+`Subscribe` for a subscription, `SinkStartError::Initialize` for a Syslog sender and
+`SourceError::Resume` for a WebSocket connection. `DESCRIBE INGESTOR` shows it as the deepest cause.
+An emitter shows the message its sink attached last, so a Redis or Syslog sink attaches the
+deadline's message after its other attachments, and a RabbitMQ sink attaches its connection
+failure's whole chain. A deadline key whose value breaks the vocabulary's rule is
+`ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
+and each connector reports it as a configuration failure.
 
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
@@ -609,9 +622,14 @@ resume context, which the ingestor's transient status shows by its subscription 
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
 error.
 
-A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when the producer
-refuses to take a record for a reason that is not the record's own, a full producer queue included,
-and when a delivery report leaves a confirmed publish's record unresolved. A record the producer
+A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when a producer
+failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
+Temporary `QueueFull` applies confirmation-window backpressure in `ACK`; in `NO ACK` it is the
+producer failure that ends the attempt. A payload exceeding the entire native queue byte capacity
+is a record rejection naming the payload bytes and the capacity in either mode. An empty-window
+queue wait that expires reports `KafkaQueueWaitError::TimedOut`, retaining the producer's
+`QueueFull` beneath it; a wait whose deadline cannot be represented uses `DeadlineOutOfRange`.
+A record the producer
 drops without a delivery report keeps the report channel's cancellation the same way. Each carries
 the connector's description of the failure for the emitter's transient error, and a missed `ACK
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
@@ -650,7 +668,11 @@ and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a 
 or a certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and carries neither credentials nor a record; a
 response from the service keeps its existing description. None is a record rejection, and none
-acknowledges input.
+acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
+service that has not answered it within 10 seconds of the cancellation ends the read with
+`SqsSourceError::CancelledReceiveUnanswered`, which names that budget, beneath `SourceError::Read`.
+The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
+the receive was returning stays invisible until its visibility timeout.
 
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the
@@ -1325,6 +1347,14 @@ independently of the activation lease. A typed reply timeout, or a transport fai
 stream, can retry the same engagement identity and scope within that budget; rejection and other
 request failures keep their classification.
 
+A destination whose own process incarnation advertised that it is terminating refuses a
+planned-handoff preparation with `OwnershipHandoffError::DestinationTerminating`, which names the
+destination. The coordinator receives the destination's complete chain in its rejection and reports
+the unit's preparation as failed, as it reports a destination's other refusals, before it releases
+the gate. An engagement that reaches a node whose runtime stopped, or that was still waiting for
+its relays when the runtime stopped, reports `EntityGateOperationError::RuntimeStopped` naming the
+domain; a peer receives it as a failed operation, not as a rejection of its identity or scope.
+
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
@@ -1400,7 +1430,9 @@ observes, when it knows one. `RaftStorage` is a fatal storage error Raft reporte
 `Conflict` a change the replicated state machine refused, and startup, transport, linearizable-read
 and membership failures have variants of their own. The class of a failed write is decided once,
 from the type of the Raft error: an answer that forwards to a leader is `LeadershipLost`, a fatal
-storage error is `RaftStorage`, and everything else is `RaftWrite`. The Raft or I/O error stays
+storage error is `RaftStorage`, and everything else is `RaftWrite`. A leader whose lease lapsed
+refuses a write before appending it with an answer that forwards to no leader, so that refusal is
+`LeadershipLost` without a leader, although the node may still lead. The Raft or I/O error stays
 beneath the context as the report's cause.
 
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
@@ -1830,8 +1862,11 @@ a revision older than its currently installed materialized revision.
 Once admitted, a step that fails ends the restore as `restore failed at step '<step>':` and its
 reason, with the restore's report: the consensus command that records a step refuses it with a
 `RestoreStepConflict` naming the step and the domain, user, resource, or version, and a resource
-import, domain model batch, or state installation keeps its own failure beneath the step. The steps
-before it stay applied, and the message says so. `RestoreStateInstallationError` distinguishes an
+import, domain model batch, or state installation renders its own failure's complete chain into
+the step's reason. The steps before it stay applied, and the message says so. An admitted restore
+that cannot reach its first step not recorded, because its leader no longer holds the archive or
+the restore no longer plans against the cluster, ends as `restore failed:` and its reason, and the
+steps it recorded stay applied. `RestoreStateInstallationError` distinguishes an
 incomplete installation that blocks starting a domain from authority that no longer permits
 mutation. The runtime store reports a stale or competing published generation as
 `RuntimePersistenceError::RestoreGeneration`.
@@ -1872,9 +1907,10 @@ failure.
 
 No restore diagnostic includes password hashes or resource bytes. When a state section's entity is
 absent from the restored schedule or its schema fingerprint differs, installation skips that section
-and the successful command carries an unlocated warning diagnostic. The same applies to a verified
-state record whose kind tag or version is unsupported. The CLI includes those warnings in text and
-JSON reports.
+and the successful command carries an unlocated warning diagnostic. The same applies to a state
+record whose header names another state kind than the manifest declares, or whose version is
+unsupported; an unknown record kind in the manifest refuses the archive. The CLI includes those
+warnings in text and JSON reports.
 
 The client reports an archive it cannot read as `ClientError::ReadRestoreArchive` with the path and
 the I/O error kind, above the I/O error when the client read the file itself, an empty file as
@@ -2143,9 +2179,9 @@ fails the shard without consuming a product scenario's execution window.
 Directed-link packet observations distinguish an incomplete sample from an effect outside the
 configured limits. The latter is an injection qualification failure whether too few packets were
 lost or too few replies remained; it does not assert that the fault was absent or that product
-recovery failed. Burst samples use 400 packets inside the existing observation window, and the
-effect verifier preserves the original received and lost fractions. Failed observations remain
-retained alongside subsequent qualified samples.
+recovery failed. Random, burst and combined loss samples use 400 packets inside the existing
+observation window, and the effect verifier preserves the original received and lost fractions.
+Failed observations remain retained alongside subsequent qualified samples.
 
 Kafka end-offset observations retain their exact command, raw streams, command outcome, parsed
 offset, start time, elapsed time and effective bound before the controller relies on them. Output
@@ -2313,10 +2349,12 @@ The shipped code falls short of the model in these places:
 - **Reasons that copy a cause as text.** The registry keeps a vocabulary rejection's report beneath
   its invalid-model refusal and also quotes the rejection in the refusal's reason, which is the
   text the session shows. A model alteration's rollback, backup drain timeout and entity gate
-  failures, and a backup's domain capture failure and timeout, carry the failure they report as a
-  reason or details string, the rendered chain or its outermost context, with no typed cause
-  beneath them. The interconnect copies a cause's outermost context into the transport failure it
-  places above that cause, so the rendered chain says it twice.
+  failures, a backup's domain capture failure and timeout, and a restore step's failure, carry the
+  failure they report as a reason or details string, the rendered chain or its outermost context,
+  with no typed cause beneath them. The interconnect copies a cause's outermost context into the
+  transport failure it places above that cause, so the rendered chain says it twice.
+- **A decision read from text.** A restore's warnings travel as diagnostics whose text begins with
+  `warning:`, and `nervix-cli restore` tells them from its other diagnostics by that prefix.
 - **Sources printed by their context.** The interconnect's I/O, TLS and HTTP/2 transport errors
   print the source `error-stack` also records beneath them.
 - **A node or a domain named twice.** An emitter's or generator's start and a processor's planning

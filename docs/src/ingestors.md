@@ -593,6 +593,22 @@ CREATE IF NOT EXISTS CLIENT http_tls
   };
 ```
 
+## Client Deadlines
+
+A client's `timeout_ms` and `connect_timeout_ms` mean the same thing for every connector that reads
+them. `timeout_ms` bounds the whole of one request or operation: name resolution, connection setup,
+TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name resolution, the
+address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
+milliseconds.
+
+`HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
+`connect_timeout_ms`, and allow 30 seconds when it is left out. A `RABBITMQ` client's deadline
+covers resolving the broker, the address attempts and TLS; the AMQP handshake that follows has no
+deadline. A request or connection that runs out of its deadline becomes the ingestor's transient
+status, and the ingestor retries on its policy; a connection that runs out of `connect_timeout_ms`
+is reported naming the key and its bound. [Connector Capabilities](connector-capabilities.md) lists
+each entity's network waits and what bounds each one, including the waits nothing bounds yet.
+
 ## Client Ingestors
 
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter follows a
@@ -648,6 +664,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | batches one producer submits ahead of their outcomes: at most 1024 batches, within 32 MiB, per producer grant; when full, holds back what fills it |
+| Network waits | the acknowledgement of an admitted batch: `ACK TIMEOUT` |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [CLIENT PRODUCER capability and mirror reference](connector-capabilities.md#client-producer-ingest).
 <!-- connector-matrix:ingest-client-producer:end -->
@@ -868,6 +888,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | the response body: unbounded |
+| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>A request follows at most 10 redirects. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
@@ -910,6 +934,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
+| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>offset lookups, watermarks and seeks: fixed 5s<br>subscribe, assign and unsubscribe: unbounded |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>receive.message.max.bytes 100000000 |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
 <!-- connector-matrix:ingest-kafka-topic:end -->
@@ -1008,6 +1036,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
+| Buffers | messages each partition consumer receives ahead of the host: driver default, a receiver queue of 1000 messages; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, 12 retries<br>topic lookup and subscribe: driver default, 30 s per attempt, retried without limit<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |
+| Driver limits | Inbound frames have no size limit. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
@@ -1029,10 +1061,11 @@ the subscription, because the broker cannot say later who created one:
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
 driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
-not have creates the topic. While a check holds its cursor, the broker refuses to create a
-subscription of that name as a conflict, so an operator's request that arrives in that moment fails
-with HTTP 409 and succeeds when repeated. A subscription that disappears between the check and the
-join is created by the join.
+not have creates the topic when the broker allows automatic topic creation, which is Pulsar's
+default. While a check holds its cursor, the broker refuses to create a subscription of that name
+as a conflict, so an operator's request that arrives in that moment fails with HTTP 409 and
+succeeds when repeated. A subscription that disappears between the check and the join is created
+by the join.
 
 Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
 indices, so ingestors of the same name in different domains are told apart in the broker's
@@ -1120,6 +1153,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
+| Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and consume: unbounded<br>a silent connection: driver default, twice the negotiated heartbeat |
+| Driver limits | A frame above the negotiated frame_max ends the connection. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
@@ -1179,6 +1216,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | messages the driver reads ahead of the host: unbounded |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>reading the next message: unbounded |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
@@ -1223,6 +1264,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | queued |
+| Buffers | SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Driver limits | An incoming packet above 10 KiB ends the connection. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
 <!-- connector-matrix:ingest-mqtt-topic:end -->
@@ -1235,7 +1280,9 @@ Delivery constraints:
 - `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
 - `NO ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
 - `ACK` modes require `SESSION PERSISTENT QOS 1`
-- `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
+- `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
+  a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
+  rather than after its batch timeout
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
 Without a `client_id` in the client configuration, one instance connects as
@@ -1300,6 +1347,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | messages the subscription holds ahead of the host: driver default, 65,536 messages; when full, drops what does not fit without counting it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the subscription's flush: unbounded<br>a silent connection: driver default, a ping every 60 s; the connection ends after 2 go unanswered |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-ingest).
 <!-- connector-matrix:ingest-nats-subject:end -->
@@ -1345,6 +1396,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | the frame a peer is sending: unbounded |
+| Network waits | connecting, retried without limit: unbounded<br>the ZMTP handshake: unbounded<br>receiving the next message: unbounded |
+| Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [ZEROMQ PULL capability and mirror reference](connector-capabilities.md#zeromq-pull-ingest).
 <!-- connector-matrix:ingest-zeromq-pull:end -->
@@ -1380,6 +1435,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |
+| Network waits | the TLS handshake of an accepted connection: unbounded<br>reading a connection: unbounded |
+| Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities.md#syslog-listener-ingest).
 <!-- connector-matrix:ingest-syslog-listener:end -->
@@ -1422,13 +1481,22 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive and a delete: unbounded |
+| Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
 
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
-as a duplicate; the ingestor resumes by polling past anything the service expired.
+as a duplicate; the ingestor resumes by polling past anything the service expired. A poll still
+waiting when the ingestor quiesces or stops is never abandoned, because the service takes the
+message it answers with off the queue: the poll completes within its one-second wait, and a message
+it brings dispatches before the source suspends or closes. Only a service that has not answered
+within 10 seconds ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient error;
+a message the poll was returning then stays invisible until its visibility timeout.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on. The source resolves the host of its
@@ -1474,6 +1542,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | the query response: unbounded |
+| Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
 <!-- connector-matrix:ingest-prometheus-query:end -->
@@ -1544,6 +1616,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | a request body: unbounded |
+| Network waits | a client's request head and body: unbounded |
+| Driver limits | Request heads above 100 headers are refused. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [HTTP ENDPOINT capability and mirror reference](connector-capabilities.md#http-endpoint-ingest).
 <!-- connector-matrix:ingest-http-endpoint:end -->
@@ -1575,6 +1651,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |
+| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [WEBSOCKETS ENDPOINT capability and mirror reference](connector-capabilities.md#websockets-endpoint-ingest).
 <!-- connector-matrix:ingest-websockets-endpoint:end -->
@@ -1585,6 +1665,12 @@ endpoints. An `HTTP ENDPOINT` ingestor reads an endpoint declared `TYPE HTTP`, a
 only endpoints of that type. An endpoint of the other type is refused when the statement is
 applied, with a message such as `requires a TYPE HTTP endpoint, but endpoint 'stream' is TYPE
 WEBSOCKETS`. Both heads take the same body.
+
+Both endpoint entities declare `MODE NO ACK`: a successful response confirms admission, without
+waiting for downstream acknowledgement. Their body takes no `ACK TIMEOUT`, `RETRY POLICY`, or
+`BATCH` clause. Transport headers are available through `read_header` and `read_headers`; there is
+no typed request metadata namespace. Both ingestors execute on every cluster node and are excluded
+from placement members and placement-reference completion.
 
 Quiesce is enforced independently on every serving node. With `REJECT`, HTTP requests and new
 WebSocket upgrades receive 503, while established WebSockets close with 1013. With `BUFFER`, bodies
@@ -1668,6 +1754,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
+| Buffers | frames that arrive while the signaling handshake runs: unbounded |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |
+| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
 <!-- connector-matrix:ingest-websockets-connection:end -->

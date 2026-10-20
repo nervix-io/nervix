@@ -149,8 +149,8 @@ The connector reads the client's `addr` as an AMQP URI and takes its host from t
 because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: a sink's start, its
 reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
 is its own answer. The connector tries the answers in resolution order, each within an equal share
-of what remains of a 30 second budget, and for `amqps` completes the TLS handshake within what is
-left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
+of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and for `amqps`
+completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
@@ -188,7 +188,8 @@ socket may remain open past an answer's TTL. A replacement socket resolves the h
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
 initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
-addresses in order inside a 30-second budget shared by DNS, TCP, TLS, Redis setup, and subscribe.
+addresses in order inside the client's `connect_timeout_ms`, 30 seconds by default, shared by DNS,
+TCP, TLS, Redis setup, and subscribe.
 It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
 still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
 a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
@@ -200,8 +201,10 @@ client. Without a CA file both paths use native roots; a configured `tls_ca_file
 roots in both paths. The shared TLS configuration helper exposes that replacement policy
 explicitly because other connectors add a configured CA to their default roots.
 
-The Redis hook gives a lookup at most 30 seconds, inside the 30-second connection timeout the pool
-sets on the driver for the whole connection. Pub/Sub connection attempts have one 30-second budget.
+The Redis hook gives a lookup at most 30 seconds, inside the connection timeout the pool sets on
+the driver for the whole connection, which is the client's `connect_timeout_ms`, 30 seconds by
+default. The pool waits no longer than that for a connection to check out. Pub/Sub connection
+attempts share one budget of the same key.
 Missing names, empty answers, silence and transport failures are connection outcomes. They do not
 reject a record or confirm a publish; the host resumes the source and retries failed sink work
 according to its existing policy. A Pub/Sub connection broken by the broker or network is dropped
@@ -349,6 +352,12 @@ and a refusal is the connector's own typed failure. The Iceberg sink writes and 
 Arrow IPC files on the filesystem storage workers, so a node that cannot take the job now fails the
 publish or the commit, which the host retries as it retries any other.
 
+No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
+in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
+runtime's blocking pool. The Kafka source's metadata fetches, watermark and offset-for-time lookups,
+seeks, assignment calls and consumer drop still run inline on its worker and are the remaining
+exceptions to this rule.
+
 A driver call that parks its thread while it waits on the network computes nothing, and admitting
 it would hold a worker idle for the whole wait. librdkafka's producer flush, metadata fetch and
 synchronous offset commit are such calls, so the Kafka connector runs them on the runtime's blocking
@@ -368,6 +377,65 @@ These annotations describe this chapter's existing lifecycle; they supply no run
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
 
+### Bounds and deadlines
+
+Every entity declares, beside the rest of its declaration, what its connector holds and how long
+it waits: each buffer between its transport and the host with its capacity and what happens when it
+is full, each network wait with what ends it, and the limits its driver imposes that no Nervix key
+changes. The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
+render these bounds from the declaration, so a reader sees the same facts a reviewer checks.
+
+A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, or a driver
+default declares. When it is full, a protocol with flow control is held back: the connector stops
+reading, and the transport's own window or prefetch keeps the peer from sending more, or a publish
+waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
+it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
+is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
+shows each gap until its connector closes it.
+
+A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
+sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
+deadline keys mean the same thing for every connector:
+
+| Key | What it bounds |
+| --- | --- |
+| `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
+| `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
+
+A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or a
+declared idle key, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
+number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
+the connector contract's `ConfiguredDeadline` reads both keys once, so no connector parses its own. A
+connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
+leaves the key out, and a connection that runs out of its deadline is reported naming the key and
+its bound.
+
+A connector that dials for itself spends one `OperationBudget` from `nervix-dns` on an operation. The
+caller declares how much of it the name lookup may take: whatever is left for an operation that is
+only a connection, or at most a fixed share for one that sends a request after connecting. Each
+answer is then tried in resolution order within an equal share of what is left when its attempt
+starts, and what remains bounds the handshake and the request that follow.
+
+#### Stalled peers
+
+Each deadline key an entity's waits name is a runtime capability, `STALLED PEER <key>`, and the
+capability inventory names a scenario that observes it: a peer that stops answering during a wait
+the key bounds surfaces as the entity's transient status within that bound, and the connector
+retries on its policy. A silent endpoint accepts connections and never answers, a stallable endpoint
+in front of a dependency stops carrying bytes in both directions while its connections stay open,
+and the HTTP and gRPC receivers can hold a response; scenarios stand them where the stall belongs.
+
+#### Review checklist
+
+A change that adds or alters a connector's buffers or network waits checks that:
+
+- every buffer between the transport and the host is declared with its capacity and overflow;
+- every network wait is bounded by a declared key, clause, fixed bound or driver default, or is
+  declared unbounded;
+- every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
+- no driver call parks an asynchronous worker;
+- every deadline key its declaration names has its stalled-peer scenario in the inventory.
+
 ## Entity declarations
 
 Every connector entity declares, once in the vocabulary, everything a statement can say about it
@@ -379,8 +447,8 @@ clause the grammar accepts, so documentation can show it and generated statement
 
 | Side | What the entity declares |
 | --- | --- |
-| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
+| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. A Prometheus client also declares every key its `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
 
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
@@ -390,6 +458,11 @@ a sink accepts a publishing mode, whether its body needs a codec, and the batchi
 maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
+
+Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
+endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
+declare every-node execution. Scheduling and placement-reference completion read that capability,
+so each listener stays outside placement rules.
 
 ### Generated conformance tests
 
@@ -430,7 +503,8 @@ compares every generated region and rejects drift while preserving the surroundi
 `tests/connector-capability-inventory.toml` registers, for every entity and every capability it
 declares, the scenarios that observe that capability at run time. The capabilities are each delivery
 or publishing mode, each option and each choice of an option, each typed metadata field, batching
-where it is available, and each envelope clause and property. `just validate-connector-capabilities`,
+where it is available, each envelope clause and property, and a stalled-peer check, `STALLED PEER
+<key>`, for each deadline key the entity's waits name. `just validate-connector-capabilities`,
 which `just validate` runs, fails when a declared capability names no scenario, when an entry names a
 capability its entity does not declare or names it twice, and when a named scenario does not exist
 in its feature file. A scenario is identified by its feature file and its name exactly as the
@@ -692,9 +766,16 @@ in one of these ways:
 | Entities | A cancelled read |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| `MQTT TOPIC` | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
+| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the client had already read when the read stopped waiting stays with the client, which hands it to the next read first. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| `SQS QUEUE` | Abandons the `ReceiveMessage` in flight. A message the service was returning through it stays invisible until its visibility timeout. |
+| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+
+An MQTT read stops waiting by dropping its client's poll in flight, as its batch timeout ends a
+gathering. The client queues every packet it reads before it writes a reply, and its next poll
+returns a queued publish first, so a dropped poll loses no publish it read. It can cut short only an
+acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
+persistent session then delivers that publish again when it resumes, as it does any publish whose
+acknowledgement never reached the broker.
 
 ### MQTT session retirement
 
@@ -998,7 +1079,10 @@ hand-over. While the window holds `MAX` records it waits for the oldest answer u
 deadline and no longer before the sink hands over another record, so at most `MAX` records await
 answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was handed over, the
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
-given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
+given at the instant of its deadline is an answer. A connector whose driver queue fills before
+`MAX` can call `settle_next` to wait for and settle the oldest answer on demand. It returns that
+record's identity, or no identity when the window is empty, and uses the same per-record deadline
+and failure settlement as ordinary window admission. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
 missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
 failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
@@ -1028,10 +1112,20 @@ requests, before the broker answered any record of the publish.
 The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
 hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
 invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
-unresolved, including a producer that drops the record without one. When the producer refuses to
-take a record for a reason that is not the record's own, such as a full producer queue, the publish
-ends through the window, so every record the broker already confirmed is delivered first and is not
-sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+unresolved, including a producer that drops the record without one. A temporary `QueueFull` in a
+confirmed publish waits through `settle_next` for the oldest outstanding answer and then tries the
+same refused record again. The effective window is the smaller of `MAX` and the native queue's
+record and byte capacities. librdkafka releases a queue place after its delivery callback returns,
+so a report can arrive before that place is free. When no current-window answer remains, the
+publish checks admission again at one-millisecond intervals, with an `ACK TIMEOUT` bound starting
+at that empty-window wait; it never spins or changes an admitted record's confirmation deadline.
+A missed queue-admission bound or another producer failure ends through the window, preserving
+every answer already given. The sink reads the effective `queue.buffering.max.kbytes` from
+librdkafka's validated native configuration once at startup. In both modes a payload larger than
+that entire byte capacity is a record rejection naming its size and the capacity, since no retry
+can admit it. Native queue accounting charges payload bytes alone, independently of the Kafka
+record's wire-size limit. A temporary full queue in `NO ACK` remains an infrastructure failure
+paced by the host's retry policy. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
 producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
 own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
 producer left at librdkafka's five-minute default would keep retrying a record after the publish
@@ -1473,7 +1567,7 @@ sequenceDiagram
   `ws` and `wss` sources resolve through the node's asynchronous resolver for each new connection
   attempt. The node resolver owns DNS cache and TTL policy; the connectors keep their framing,
   upgrade, TLS, signaling and retry behavior. DNS and ordered address attempts share a physical
-  connection budget. Syslog UDP binds a socket in each attempted address's IP family and sends to
+  connection budget: the client's `connect_timeout_ms`, 30 seconds by default. Syslog UDP binds a socket in each attempted address's IP family and sends to
   the first address whose socket setup succeeds. TCP and TLS senders and WebSocket clients try
   successive answers within that budget.
   TLS verifies the configured name, and a WebSocket upgrade retains its original URL authority,

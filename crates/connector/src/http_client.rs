@@ -2,9 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, request
-//!   timeout, optional CA file and optional client identity, and whether the client follows the
-//!   redirects an endpoint answers with.
+//! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, the
+//!   request deadline its `timeout_ms` sets, optional CA file and optional client identity, and
+//!   whether the client follows the redirects an endpoint answers with.
 //! - **Depends on.** The client configuration's entries, TLS paths and PEM files, `nervix-dns`,
 //!   and `reqwest`.
 //! - **Must not know.** Which connector sends requests through the client, or what it sends.
@@ -17,8 +17,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use error_stack::{Report, ResultExt as _};
 use nervix_dns::DnsResolver;
 use reqwest::{
@@ -26,8 +24,9 @@ use reqwest::{
 };
 use thiserror::Error;
 
-use crate::client_config::{
-    client_identity_pem, client_tls_paths, optional_client_config_value, read_tls_file,
+use crate::{
+    client_config::{client_identity_pem, client_tls_paths, read_tls_file},
+    client_deadline::ConfiguredDeadline,
 };
 
 #[derive(Debug, Error)]
@@ -85,12 +84,10 @@ impl<'a> HttpClientConfig<'a> {
 
     fn builder(&self) -> Result<reqwest::ClientBuilder, Report<HttpClientConfigError>> {
         let mut builder = HttpClient::builder().dns_resolver(self.dns.clone());
-        if let Some(timeout_ms) = optional_client_config_value(self.entries, "timeout_ms") {
-            let timeout_ms = timeout_ms.parse::<u64>().map_err(|source| {
-                Report::new(HttpClientConfigError::InvalidTimeout { label: self.label })
-                    .attach_printable(source.to_string())
-            })?;
-            builder = builder.timeout(Duration::from_millis(timeout_ms));
+        let timeout = ConfiguredDeadline::timeout(self.entries)
+            .change_context(HttpClientConfigError::InvalidTimeout { label: self.label })?;
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout.bound());
         }
 
         let tls = client_tls_paths(self.entries);

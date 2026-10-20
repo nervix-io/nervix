@@ -21,6 +21,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{DeadlineKey, DeclaredBounds, DeclaredWait, OmittedDeadline, WaitBound},
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
@@ -77,6 +78,47 @@ pub struct SqsQueueSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a SQS QUEUE ingestor holds and how long it waits.
+const SQS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("3.1 s"),
+        },
+        DeclaredWait {
+            wait: "the queue URL lookup, a receive and a delete",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A request that stalls below 1 byte a second for 5 s is cancelled."],
+};
+
+/// What the connector of a SQS QUEUE emitter holds and how long it waits.
+const SQS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("3.1 s"),
+        },
+        DeclaredWait {
+            wait: "the queue URL lookup at start",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a send",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+    ],
+    driver_limits: &[
+        "A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected.",
+    ],
+};
+
 impl SourceEntity for SqsQueueSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -92,6 +134,7 @@ impl SourceEntity for SqsQueueSource {
             name: LocatorName::External(SqsQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration::INSTANCES],
+        bounds: SQS_SOURCE_BOUNDS,
     };
 }
 
@@ -212,6 +255,7 @@ impl SinkEntity for SqsQueueSink {
         }],
         envelope: &[],
         properties: &[],
+        bounds: SQS_SINK_BOUNDS,
     };
 }
 
