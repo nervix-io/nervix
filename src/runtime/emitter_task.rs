@@ -442,7 +442,7 @@ impl SinkAcknowledgementServices for AckSet {
 
 impl SinkTransientErrorStatus for EmitterSinkContext {
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
-        self.status.fail(
+        self.status.fail_connector(
             reason,
             Some(EmitterRetryStatus {
                 kind: EmitterRetryKind::Infrastructure,
@@ -455,7 +455,7 @@ impl SinkTransientErrorStatus for EmitterSinkContext {
     }
 
     fn clear_transient_error(&self) {
-        self.status.clear();
+        self.status.clear_connector();
     }
 }
 
@@ -2517,6 +2517,83 @@ mod tests {
             "emitter 'output' in domain 'emitter_tests' has an invalid flush policy: invalid \
              flush_each 'not-a-duration'"
         ));
+    }
+
+    #[nervix_primitives::test]
+    async fn connector_status_progress_keeps_publish_and_commit_failures() {
+        use meticulous::OptionExt as _;
+
+        for kind in [EmitterRetryKind::Infrastructure, EmitterRetryKind::Commit] {
+            let context = sink_context();
+            let host = context.sink_host();
+            let reason = "the broker did not answer within ACK TIMEOUT 10s";
+            let backoff = Duration::from_secs(1);
+            context.record_retry(reason, backoff, kind);
+
+            host.clear_transient_error();
+
+            let failure = context
+                .status
+                .snapshot()
+                .assured("connection progress preserves the task's unresolved failure");
+            assert_eq!(failure.error, reason);
+            let retry = failure
+                .retry
+                .as_ref()
+                .assured("record_retry supplied the pending retry");
+            assert_eq!(retry.kind, kind);
+            assert_eq!(retry.reconnect.backoff, backoff);
+
+            context.status.clear();
+            assert!(context.status.snapshot().is_none());
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn connector_and_task_failures_are_both_described() {
+        let context = sink_context();
+        let host = context.sink_host();
+        let task_reason = "mqtt client refused the record: Request channel is full";
+        let connector_reason =
+            "resolving MQTT host 'mqtt.nervix.test' failed: the name does not exist";
+        let backoff = Duration::from_secs(1);
+
+        context.record_retry(task_reason, backoff, EmitterRetryKind::Infrastructure);
+        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
+
+        let observed = transient_error(&context).assured("both failures remain published");
+        assert!(observed.contains(task_reason), "{observed}");
+        assert!(observed.contains(connector_reason), "{observed}");
+
+        let selected = context
+            .status
+            .snapshot()
+            .assured("the task retry is active");
+        let retry = selected.retry.as_ref().assured("the task selected a retry");
+        assert_eq!(retry.kind, EmitterRetryKind::Infrastructure);
+        assert_eq!(retry.reconnect.backoff, backoff);
+
+        host.clear_transient_error();
+        assert_eq!(transient_error(&context).as_deref(), Some(task_reason));
+        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
+        context.status.clear();
+        assert_eq!(transient_error(&context).as_deref(), Some(connector_reason));
+        host.clear_transient_error();
+        assert!(context.status.snapshot().is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn connector_status_failure_survives_task_success() {
+        let context = sink_context();
+        let host = context.sink_host();
+        let reason = "the MQTT connection is unavailable";
+        host.record_transient_error(reason.to_string(), Duration::from_millis(25));
+
+        context.status.clear();
+
+        assert_eq!(transient_error(&context).as_deref(), Some(reason));
+        host.clear_transient_error();
+        assert!(context.status.snapshot().is_none());
     }
 
     #[nervix_primitives::test]
