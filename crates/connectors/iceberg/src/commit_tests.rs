@@ -489,7 +489,7 @@ async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_
 }
 
 #[nervix_primitives::test]
-async fn a_staged_file_larger_than_the_whole_bulk_class_is_refused_and_kept() {
+async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_class_is_free() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
     let mut sink = fixture_sink(StdArc::clone(&catalog), Executor::default()).await;
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
@@ -500,12 +500,17 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_is_refused_and_kept() {
         .assured("a staged Arrow IPC file holds at least its schema");
     let executor = executor_with_bulk_capacity(capacity);
     sink.executor = executor.clone();
+    // Other bulk work holds one byte, so the class is short of the whole of itself.
+    let all_but_one = capacity
+        .checked_sub(1)
+        .assured("the fixture's class holds more than one byte");
+    let held = hold_bulk_memory_leaving(&executor, all_but_one);
 
     let refused = sink
         .commit()
         .await
         .err()
-        .assured("a class smaller than one staged file can never admit its load");
+        .assured("a staged file larger than the class waits until the whole class is free");
 
     assert_eq!(
         refused.current_context(),
@@ -513,27 +518,59 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_is_refused_and_kept() {
     );
     assert_eq!(
         refused.downcast_ref::<AdmissionError>(),
-        Some(&AdmissionError::ExceedsBudget {
+        Some(&AdmissionError::BudgetExhausted {
             class: "bulk",
-            requested: staged,
-            capacity,
+            requested: capacity,
         })
     );
     assert_eq!(
         description(&refused),
         Some(format!(
-            "Iceberg staged file of {staged} bytes is larger than the whole bulk memory class of \
-             {capacity} bytes"
+            "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
+             staged file of {staged} bytes"
         ))
     );
     assert_eq!(sink.staged_bytes, staged);
+    for batch in &sink.staged_batches {
+        assert!(
+            batch.path.is_file(),
+            "a refused commit keeps its staged file"
+        );
+    }
     assert_eq!(acknowledgements.acknowledged(), 0);
     assert_eq!(acknowledgements.rejected(), 0);
     assert_eq!(
         committed_user_ids(catalog.as_ref()).await,
         Vec::<i64>::new()
     );
-    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        held.bytes(),
+        "a refused charge takes nothing"
+    );
+
+    // The whole class is free now, and the file is read charged with all of it.
+    drop(held);
+    let report = sink
+        .commit()
+        .await
+        .assured("a free class admits a staged file larger than itself")
+        .assured("the commit publishes the staged rows");
+
+    assert_eq!(report.messages, 8);
+    assert_eq!(report.bytes, staged);
+    assert_eq!(
+        committed_user_ids(catalog.as_ref()).await,
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(acknowledgements.acknowledged(), 1);
+    assert_eq!(acknowledgements.rejected(), 0);
+    assert!(sink.staged_batches.is_empty());
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        0,
+        "the commit returns its whole charge"
+    );
 }
 
 #[nervix_primitives::test]

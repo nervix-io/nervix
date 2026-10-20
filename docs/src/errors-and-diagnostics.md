@@ -960,9 +960,10 @@ An Iceberg commit charges the bulk memory class for the staged files it reads ba
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `SinkPublishError::Commit` and attaches the
 description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
-memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg staged file of
-<bytes> bytes is larger than the whole bulk memory class of <capacity> bytes` when one staged file
-can never fit. The emitter retries either with its policy, and neither releases a staged record's
+memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
+for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
+staged file is larger than the class, which charges the whole class and so waits until all of it
+is free. The emitter retries either with its policy, and neither releases a staged record's
 acknowledgement.
 
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`

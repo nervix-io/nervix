@@ -85,8 +85,9 @@ bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32
 and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
 once so one blocked channel cannot exhaust the capacity another needs.
 An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
-has room for them now, so a commit whose staged files exceed the budget reads them in groups and a
-commit refused for room is retried by its emitter.
+has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
+single staged file larger than the budget waits until the whole budget is free and is charged all
+of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
@@ -158,8 +159,10 @@ not pay for a window's state, and a window width does not bound a correlator.
   and moved one bounded section at a time, so neither construction nor transfer grows with the size
   of the replicated state.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
-  node. Each node publishes what its pools and budgets are actually holding; see the
-  [interconnection metrics](metrics-and-observability.md) for the series to size against.
+  node, and on a route that feeds an Iceberg emitter, whose commit reads a staged batch above the
+  bulk budget only once the whole budget is free. Each node publishes what its pools and budgets
+  are actually holding; see the [interconnection metrics](metrics-and-observability.md) for the
+  series to size against.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not

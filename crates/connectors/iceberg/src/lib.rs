@@ -331,33 +331,95 @@ impl IcebergCommitState {
     }
 }
 
-/// The staged files one load reads into memory at once, and the bytes it charges for them.
+/// The staged files one load reads into memory at once, and what it charges for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IcebergLoadGroup {
     files: usize,
-    bytes: u64,
+    charge: IcebergLoadCharge,
 }
 
 impl IcebergLoadGroup {
     /// The leading files of `unwritten` a bulk memory class of `capacity` bytes holds together, and
-    /// at least the first, whose charge the class refuses when that file alone is larger.
+    /// at least the first. A first file larger than the whole class is read alone, charged with the
+    /// whole class.
     fn leading(unwritten: &[IcebergStagedBatch], capacity: u64) -> Self {
-        let mut group = Self { files: 0, bytes: 0 };
+        let mut files = 0_usize;
+        let mut bytes = 0_u64;
         for staged in unwritten {
-            let bytes = group
-                .bytes
+            let with_file = bytes
                 .checked_add(staged.bytes)
                 .assured("the total counts bytes this sink already staged on disk");
-            if group.files > 0 && bytes > capacity {
+            if files > 0 && with_file > capacity {
                 break;
             }
-            group.files = group
-                .files
+            files = files
                 .checked_add(1)
                 .assured("a group counts files this sink already staged");
-            group.bytes = bytes;
+            bytes = with_file;
         }
-        group
+        let charge = if bytes > capacity {
+            IcebergLoadCharge::WholeClass {
+                file_bytes: bytes,
+                capacity,
+            }
+        } else {
+            IcebergLoadCharge::Staged { bytes }
+        };
+        Self { files, charge }
+    }
+}
+
+/// What one load charges the bulk memory class for the staged files it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IcebergLoadCharge {
+    /// Every byte of the files, which the class holds together.
+    Staged { bytes: u64 },
+    /// One staged file larger than the whole class, which a route on the same node can produce by
+    /// flushing batches above it. The load charges the whole class: every byte of the file the
+    /// class can account for, leaving none for other bulk work beside the read.
+    WholeClass { file_bytes: u64, capacity: u64 },
+}
+
+impl IcebergLoadCharge {
+    /// The bytes the load reserves in the bulk memory class.
+    fn reserved_bytes(self) -> u64 {
+        match self {
+            Self::Staged { bytes } => bytes,
+            Self::WholeClass { capacity, .. } => capacity,
+        }
+    }
+
+    /// The commit failure the class's refusal of this charge becomes. Its description is what the
+    /// emitter shows as its transient error while it retries the commit, which keeps its staged
+    /// files and acknowledgements.
+    fn refused(self, refusal: Report<AdmissionError>) -> Report<SinkPublishError> {
+        let description = match (refusal.current_context(), self) {
+            (AdmissionError::BudgetExhausted { .. }, Self::Staged { bytes }) => format!(
+                "Iceberg commit waits for room in the bulk memory class for {bytes} staged bytes"
+            ),
+            (
+                AdmissionError::BudgetExhausted { .. },
+                Self::WholeClass {
+                    file_bytes,
+                    capacity,
+                },
+            ) => format!(
+                "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
+                 staged file of {file_bytes} bytes"
+            ),
+            (
+                AdmissionError::ExceedsBudget { .. }
+                | AdmissionError::BudgetClosed { .. }
+                | AdmissionError::DifferentBudget { .. },
+                _,
+            ) => format!(
+                "Iceberg commit could not charge the bulk memory class: {}",
+                refusal.current_context()
+            ),
+        };
+        refusal
+            .change_context(SinkPublishError::Commit { sink: ICEBERG })
+            .attach_printable(description)
     }
 }
 
@@ -881,9 +943,9 @@ impl IcebergSink {
     }
 
     /// Read the staged files at `paths` back on the node's filesystem workers once the bulk memory
-    /// class has granted the charge for their `bytes`, checking before each file whether the commit
-    /// stopped waiting. The charge comes back with the rows it covers, so it lasts for as long as
-    /// the commit holds them.
+    /// class has granted their `charge`, checking before each file whether the commit stopped
+    /// waiting. The reservation comes back with the rows it covers, so it lasts for as long as the
+    /// commit holds them.
     ///
     /// The charge is taken only when the class has room for it now: a place in the class's queue
     /// would take every byte the class frees until it was satisfied, holding the node's other bulk
@@ -893,7 +955,7 @@ impl IcebergSink {
         executor: &Executor,
         schema: StdArc<arrow_schema::Schema>,
         paths: Vec<PathBuf>,
-        bytes: u64,
+        charge: IcebergLoadCharge,
     ) -> SinkPublishResult<IcebergLoadedGroup> {
         let staged = |error: String, path: &PathBuf| {
             Report::new(SinkPublishError::Commit { sink: ICEBERG }).attach_printable(format!(
@@ -901,15 +963,15 @@ impl IcebergSink {
                 path.display()
             ))
         };
-        let charge = executor
-            .try_reserve(MemoryClass::Bulk, bytes)
-            .map_err(Self::refused_load)?;
+        let reservation = executor
+            .try_reserve(MemoryClass::Bulk, charge.reserved_bytes())
+            .map_err(|refusal| charge.refused(refusal))?;
         executor
             .run_storage_with(
                 StorageClass::Filesystem,
                 QueueAdmission::WaitForPlace,
-                charge,
-                move |charge, cancellation| {
+                reservation,
+                move |reservation, cancellation| {
                     let mut batches = Vec::new();
                     for path in paths {
                         cancellation
@@ -927,40 +989,14 @@ impl IcebergSink {
                             .map_err(|error| staged(error.to_string(), &path))?;
                         batches.extend(path_batches);
                     }
-                    Ok(IcebergLoadedGroup { batches, charge })
+                    Ok(IcebergLoadedGroup {
+                        batches,
+                        charge: reservation,
+                    })
                 },
             )
             .await
             .change_context(SinkPublishError::Commit { sink: ICEBERG })?
-    }
-
-    /// The commit failure a bulk memory charge the class refused becomes. Its description is what
-    /// the emitter shows as its transient error while it retries the commit, which keeps its staged
-    /// files and acknowledgements.
-    fn refused_load(refusal: Report<AdmissionError>) -> Report<SinkPublishError> {
-        let description = match refusal.current_context() {
-            AdmissionError::BudgetExhausted { requested, .. } => format!(
-                "Iceberg commit waits for room in the bulk memory class for {requested} staged \
-                 bytes"
-            ),
-            AdmissionError::ExceedsBudget {
-                requested,
-                capacity,
-                ..
-            } => format!(
-                "Iceberg staged file of {requested} bytes is larger than the whole bulk memory \
-                 class of {capacity} bytes"
-            ),
-            AdmissionError::BudgetClosed { .. } | AdmissionError::DifferentBudget { .. } => {
-                format!(
-                    "Iceberg commit could not charge the bulk memory class: {}",
-                    refusal.current_context()
-                )
-            }
-        };
-        refusal
-            .change_context(SinkPublishError::Commit { sink: ICEBERG })
-            .attach_printable(description)
     }
 
     /// Every acknowledgement this sink still holds, newest staged batch last.
@@ -1119,7 +1155,7 @@ impl IcebergSink {
                 &self.executor,
                 StdArc::clone(&self.staged_schema),
                 paths,
-                group.bytes,
+                group.charge,
             )
             .await?;
             let data_files = self.client.write_data_files(batches).await?;
@@ -1808,29 +1844,42 @@ mod tests {
             IcebergLoadGroup::leading(&files, 2_100),
             IcebergLoadGroup {
                 files: 4,
-                bytes: 2_100,
+                charge: IcebergLoadCharge::Staged { bytes: 2_100 },
             }
         );
         assert_eq!(
             IcebergLoadGroup::leading(&files, 1_000),
             IcebergLoadGroup {
                 files: 2,
-                bytes: 900,
+                charge: IcebergLoadCharge::Staged { bytes: 900 },
             }
         );
         assert_eq!(
             IcebergLoadGroup::leading(&files[2..], 1_000),
             IcebergLoadGroup {
                 files: 1,
-                bytes: 300,
+                charge: IcebergLoadCharge::Staged { bytes: 300 },
             }
         );
-        // A first file larger than the whole class is a group of its own, which the class refuses.
+        // A first file larger than the whole class is a group of its own, charged the whole class.
+        let oversized = IcebergLoadGroup::leading(&files[3..], 800);
         assert_eq!(
-            IcebergLoadGroup::leading(&files[3..], 800),
+            oversized,
             IcebergLoadGroup {
                 files: 1,
-                bytes: 900,
+                charge: IcebergLoadCharge::WholeClass {
+                    file_bytes: 900,
+                    capacity: 800,
+                },
+            }
+        );
+        assert_eq!(oversized.charge.reserved_bytes(), 800);
+        // A file larger than the whole class after a smaller one is left for a group of its own.
+        assert_eq!(
+            IcebergLoadGroup::leading(&files[2..], 800),
+            IcebergLoadGroup {
+                files: 1,
+                charge: IcebergLoadCharge::Staged { bytes: 300 },
             }
         );
     }
@@ -2330,10 +2379,14 @@ mod tests {
         let written = IcebergSink::write_ipc_batch(&executor, path.clone(), batch.clone())
             .await
             .assured("the filesystem workers write the staged file");
-        let IcebergLoadedGroup { batches, charge } =
-            IcebergSink::load_group(&executor, schema, vec![path], written)
-                .await
-                .assured("the filesystem workers read the staged file back");
+        let IcebergLoadedGroup { batches, charge } = IcebergSink::load_group(
+            &executor,
+            schema,
+            vec![path],
+            IcebergLoadCharge::Staged { bytes: written },
+        )
+        .await
+        .assured("the filesystem workers read the staged file back");
 
         assert!(written > 0);
         assert_eq!(batches, vec![batch]);

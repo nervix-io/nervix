@@ -2461,10 +2461,12 @@ emitter retries the commit with its declared policy and backpressure. The bulk c
 Staged files that together exceed it are read in groups, each the run of consecutive files the
 class can hold, and each group's rows are written into data files of their own and its charge
 returned before the next group is read; the data files of every group are still appended in the
-one catalog commit. A single staged file holds the mapped rows of one input batch, which a relay
-carries within the same 32 MiB. A staged file larger than the whole class can never be read, so
-the emitter reports `Iceberg staged file of <bytes> bytes is larger than the whole bulk memory
-class of <capacity> bytes` and retries.
+one catalog commit. A single staged file holds the mapped rows of one input batch, which can be
+larger than the class when a route on the same node flushes batches above 32 MiB. Such a file is
+read alone once the whole class is free, charged with the whole class: that is every byte of it
+the class can account for, and it leaves no room for other bulk work beside the read. Until
+then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of <capacity>
+bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
 
 A commit publishes the staged files it found when it began. Rows a flush stages while a failed
 commit waits for its retry are not in that commit's data files, so the retry first appends what the
