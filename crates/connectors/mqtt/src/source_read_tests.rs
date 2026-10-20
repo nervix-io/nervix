@@ -10,7 +10,7 @@ use std::{future::Future, time::Duration};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector as _, SourceBatch, SourceBatchRequest, SourceConnector as _,
+    BrokerSourceConnector as _, SourceBatch, SourceBatchRequest, SourceConnector as _, SourceError,
     SourceMessage as _, SourceReadCancellation,
 };
 use nervix_dns::DnsResolver;
@@ -25,7 +25,10 @@ use super::{
     MqttSource, MqttSourceError, MqttSourceMessage, MqttSourcePlan, MqttSourceResult,
     MqttSourceSettings, PublishRead,
 };
-use crate::{scripted_broker::ScriptedBroker, test_fixtures::DnsFixture};
+use crate::{
+    scripted_broker::{ScriptedBroker, ScriptedConnection},
+    test_fixtures::DnsFixture,
+};
 
 /// A batch timeout that only a full batch or the host's cancellation ends a gathering before.
 const LONG_BATCH_TIMEOUT: Duration = Duration::from_secs(3_600);
@@ -330,12 +333,13 @@ fn publish_packet(packet_id: u16, payload: &[u8]) -> Vec<u8> {
     packet
 }
 
-#[nervix_primitives::test]
-async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_sent_once() {
-    let fixture = DnsFixture::start().await;
-    let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone());
-    let mut source = MqttSource::open(&plan, 0)
+/// A source of `plan` that `broker` granted its subscription, and the broker's end of the source's
+/// connection.
+async fn subscribed(
+    plan: &MqttSourcePlan,
+    broker: &ScriptedBroker,
+) -> (MqttSource, ScriptedConnection) {
+    let mut source = MqttSource::open(plan, 0)
         .await
         .assured("an MQTT source opens without connecting");
     let grant = async {
@@ -351,8 +355,17 @@ async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_s
             .await;
         connection
     };
-    let (resumed, mut connection) = tokio::join!(source.resume(), grant);
+    let (resumed, connection) = tokio::join!(source.resume(), grant);
     resumed.assured("the scripted broker granted the subscription");
+    (source, connection)
+}
+
+#[nervix_primitives::test]
+async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_sent_once() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone());
+    let (mut source, mut connection) = subscribed(&plan, &broker).await;
     connection.write(&publish_packet(1, b"1")).await;
     connection.write(&publish_packet(2, b"2")).await;
 
@@ -394,5 +407,40 @@ async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_s
         handed_over,
         [b"1".to_vec(), b"2".to_vec()],
         "the interrupted reads handed over every publish the broker sent, each once and in order"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_connection_the_broker_closes_fails_the_read_and_is_dropped() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone());
+    let (mut source, mut connection) = subscribed(&plan, &broker).await;
+    connection.write(&publish_packet(1, b"1")).await;
+    drop(connection);
+
+    let cancellation = SourceReadCancellation::new();
+    let reading = source.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+    let Ok(read) = timeout(OBSERVATION_BUDGET, reading).await else {
+        panic!(
+            "a read whose connection the broker closed was still waiting after \
+             {OBSERVATION_BUDGET:?}"
+        );
+    };
+
+    let Err(error) = read else {
+        panic!("a read whose connection the broker closed fails");
+    };
+    assert!(matches!(
+        error.current_context(),
+        SourceError::Read { connector: "mqtt" }
+    ));
+    assert!(matches!(
+        error.downcast_ref::<MqttSourceError>(),
+        Some(MqttSourceError::Receive)
+    ));
+    assert!(
+        source.needs_resume(),
+        "a read that lost its connection drops it, so the source resumes before it reads again"
     );
 }

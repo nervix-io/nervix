@@ -681,6 +681,9 @@ Feature: MQTT ingestion
       {"user_id":4}
       """
     And the entity gate pause for domain "{{domain}}" is released
+    # The alteration restarts the source under its hold. MQTT confirms an acknowledgement once its
+    # client queued it, so the broker may deliver a publish the stopping source took in again to its
+    # replacement: delivery is at least once, and every publish arrives.
     Then within "30s" the relay subscription receives payloads
       """
       "user_id":1
@@ -689,7 +692,6 @@ Feature: MQTT ingestion
       "user_id":4
       """
     And the background NSPL execution succeeds
-    And the relay subscription does not receive a payload within "1s"
 
     Examples:
       | cluster_size | replica_count |
