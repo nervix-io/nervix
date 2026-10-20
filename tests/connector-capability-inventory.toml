@@ -774,6 +774,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "An idle Redis subscription detects a silent connection and resubscribes" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [

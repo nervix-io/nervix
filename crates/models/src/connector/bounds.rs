@@ -34,10 +34,21 @@ use crate::ClientDeadline;
 /// than the operating system's connect timeout.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a subscription without an explicit `idle_timeout_ms` may remain silent before its
+/// liveness probe must have obtained a response. The interval includes both the quiet wait and
+/// the probe, so a healthy idle subscription remains connected.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 const _: () = assert!(
     !DEFAULT_CONNECT_TIMEOUT.is_zero()
         && DEFAULT_CONNECT_TIMEOUT.as_nanos() <= ClientDeadline::LONGEST.as_nanos(),
     "the default connection deadline follows the rule every configured deadline follows"
+);
+
+const _: () = assert!(
+    !DEFAULT_IDLE_TIMEOUT.is_zero()
+        && DEFAULT_IDLE_TIMEOUT.as_nanos() <= ClientDeadline::LONGEST.as_nanos(),
+    "the default idle deadline follows the rule every configured deadline follows"
 );
 
 /// How much one entity's connector holds and how long it waits, whatever its statement says.
@@ -56,7 +67,7 @@ impl DeclaredBounds {
     /// The deadline keys the entity's waits name, each once, in the order of [`DeadlineKey`].
     ///
     /// An entity declares a handful of waits in one constant, so scanning them for each of the
-    /// two keys is bounded by the declaration.
+    /// declared keys is bounded by the declaration.
     pub fn deadline_keys(&self) -> Vec<DeadlineKey> {
         let mut keys = Vec::new();
         for key in <DeadlineKey as strum::IntoEnumIterator>::iter() {
@@ -168,6 +179,10 @@ pub enum DeadlineKey {
     /// TLS and the protocol's own handshake included.
     #[strum(serialize = "connect_timeout_ms")]
     ConnectTimeout,
+    /// `idle_timeout_ms`: a connection's silence, including the probe that checks it is alive.
+    /// Time spent applying transport backpressure is outside an idle read.
+    #[strum(serialize = "idle_timeout_ms")]
+    IdleTimeout,
 }
 
 impl DeadlineKey {

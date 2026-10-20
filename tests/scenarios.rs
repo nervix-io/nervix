@@ -23893,6 +23893,24 @@ async fn when_redis_message_is_published(
         .expect("failed to publish redis message");
 }
 
+#[when(expr = "{int} Redis messages are published to channel {string}")]
+async fn when_redis_messages_are_published(
+    world: &mut ScenarioWorld,
+    count: usize,
+    channel: String,
+    #[step] step: &Step,
+) {
+    let channel = expand_placeholders(world, &channel);
+    let payload = expand_placeholders(world, docstring(step));
+    if let Err(error) = world
+        .cluster()
+        .publish_redis_burst(&channel, &payload, count)
+        .await
+    {
+        panic!("failed to publish the Redis burst: {error}");
+    }
+}
+
 #[when(expr = "Kafka message is published to topic {string}")]
 async fn when_kafka_message_is_published(
     world: &mut ScenarioWorld,

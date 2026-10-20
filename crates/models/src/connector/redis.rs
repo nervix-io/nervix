@@ -6,21 +6,23 @@
 //!   Models with their delivery mode, the channel name a source subscribes to with the rule it
 //!   follows, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
-//! - **Must not know.** The Redis driver, its configuration keys, or how a channel is subscribed
-//!   or published to.
+//! - **Must not know.** The Redis driver, how a connection is opened, or how a channel is
+//!   subscribed or published to.
 
 #![cfg_attr(
     nervix_lint,
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::num::NonZeroUsize;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
-        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT,
+        DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
@@ -39,6 +41,17 @@ configured_client!(Redis: pooled, config NervixWithAddressQuery, CreateClientRed
 
 /// The longest channel Nervix subscribes to, in bytes.
 const REDIS_CHANNEL_MAX: usize = 1024;
+
+/// The read-ahead capacity when a Redis client leaves `subscription_buffer_messages` out.
+pub const DEFAULT_REDIS_SUBSCRIPTION_MESSAGES: NonZeroUsize = nonzero_ext::nonzero!(1024usize);
+
+/// The largest explicit Redis subscription read-ahead capacity.
+pub const MAX_REDIS_SUBSCRIPTION_MESSAGES: NonZeroUsize = nonzero_ext::nonzero!(65_536usize);
+
+const _: () = assert!(
+    DEFAULT_REDIS_SUBSCRIPTION_MESSAGES.get() <= MAX_REDIS_SUBSCRIPTION_MESSAGES.get(),
+    "the default Redis subscription capacity is an admitted explicit capacity"
+);
 
 external_names! {
     /// A Redis Pub/Sub channel: 1 to 1,024 bytes. A Redis channel is binary-safe, so any text is a
@@ -64,8 +77,11 @@ pub struct RedisPubSubSource {
 /// What the connector of a REDIS PUBSUB ingestor holds and how long it waits.
 const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
-        holds: "messages the driver reads ahead of the host",
-        bound: BufferBound::Unbounded,
+        holds: "messages read ahead of intake",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("subscription_buffer_messages"),
+            overflow: BufferOverflow::Backpressure,
+        },
     }],
     waits: &[
         DeclaredWait {
@@ -76,8 +92,11 @@ const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredWait {
-            wait: "reading the next message",
-            bound: WaitBound::Unbounded,
+            wait: "idle subscription activity, including its PING probe",
+            bound: WaitBound::Key {
+                key: DeadlineKey::IdleTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_IDLE_TIMEOUT),
+            },
         },
     ],
     driver_limits: &[],

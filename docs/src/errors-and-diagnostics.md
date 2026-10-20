@@ -566,6 +566,13 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
+Redis subscription protocol and read failures retain their driver causes beneath
+`RedisPubSubSourceError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
+the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
+and `SourceError::Read`. The host displays that transient failure and reconnects on its existing
+policy. Reader task failures retain the typed join cause. A source explicitly ending its lifetime
+joins its reader; it owes no further read outcome after intake ends.
+
 A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
 `DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
 bound, beneath the connector's own context: `RabbitMqConnectError::Unreachable` or `TlsHandshake`

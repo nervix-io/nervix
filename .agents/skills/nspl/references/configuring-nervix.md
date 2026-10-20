@@ -301,6 +301,9 @@ relay. Do not use them to scan across branches.
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
+  capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
+  `BUFFER` or `DROP` policy in generated Plexus.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and

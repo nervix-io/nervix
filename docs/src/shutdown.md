@@ -683,6 +683,11 @@ reaches its completion point before the process ends.
 
 ### Sources
 
+A Redis Pub/Sub source stops its dedicated reader and joins it before close or suspend returns.
+Its bounded read-ahead queue is volatile, unadmitted input and is discarded when that subscription
+ends. Redis Pub/Sub provides no acknowledgement or replay for those messages; an idle probe does
+not change that delivery contract.
+
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
 Removing or changing the declared input retires its external state separately, after its exact
 source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
