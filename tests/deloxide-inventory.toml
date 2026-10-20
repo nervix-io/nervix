@@ -136,6 +136,7 @@ tags = [
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
+  "@sqs_receive_at_quiesce",
 ]
 target = "test:scenarios"
 
@@ -2449,6 +2450,8 @@ path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
   "scenario.mqtt-parallel-gather-at-quiesce",
   "stress.mqtt-parallel-gather-at-quiesce",
+  "scenario.sqs-receive-at-quiesce",
+  "stress.sqs-receive-at-quiesce",
   "scenario.pulsar-finish-at-stop",
   "stress.pulsar-finish-at-stop",
   "scenario.mqtt-session-drop",
@@ -2660,4 +2663,24 @@ id = "stress.mqtt-parallel-gather-at-quiesce"
 invariant = "A quiesce change that meets an MQTT ACK PARALLEL batch half gathered takes in its publishes at once, and every publish reaches the relay without waiting for the batch timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered reach the relay without waiting for the batch timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "scenario.sqs-receive-at-quiesce"
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invocation = "scenarios"
+scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "stress.sqs-receive-at-quiesce"
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide-stress"]

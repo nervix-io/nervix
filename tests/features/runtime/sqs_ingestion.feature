@@ -222,3 +222,63 @@ Feature: SQS ingestion
       | cluster_size |
       | 1            |
       | 3            |
+
+  @sqs_receive_at_quiesce @deloxide_stress
+  Scenario Outline: An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout
+    Given SQS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And entity gate deadline is configured as "120s"
+    And a <cluster_size> node nervix cluster is started
+    And SQS is reached through a forwarder that can hold an answer
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "held_{{test_id}}" exists with a visibility timeout of "600s"
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA held_event (marker STRING);
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT (marker string);
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE CODEC held_event_codec_v2 FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+        'endpoint' = '{{sqs_held_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE INGESTOR sqs_in
+        FROM sqs_main QUEUE 'held_{{test_id}}' INSTANCES 1
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING held_event_codec
+        TO held_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION held_subscription TO held_events;
+      START;
+      """
+    And the SQS forwarder holds the answer that carries "held-{{test_id}}"
+    And SQS message is published to queue "held_{{test_id}}"
+      """
+      {"marker":"held-{{test_id}}"}
+      """
+    Then the SQS forwarder holds that answer
+    When these NSPL commands begin executing in the background
+      """
+      ALTER SQS QUEUE INGESTOR sqs_in SET DECODE USING held_event_codec_v2;
+      """
+    And the SQS forwarder releases that answer once the entity gate pause for domain "{{domain}}" is reached
+    Then within "60s" the relay subscription receives a payload
+      """
+      "marker":"held-
+      """
+    When the entity gate pause for domain "{{domain}}" is released
+    Then the background NSPL execution succeeds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
