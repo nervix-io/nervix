@@ -659,11 +659,11 @@ scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "STOP on one and three nodes tears down a NO ACK NATS emitter whose core write ran out of the client's timeout_ms while its server was down, leaving three records with the client. The domain teardown hands the emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state; the finish flushes the client once the endpoint forwards again, and the subscriber receives each record exactly once. The flush, the client's reconnection and the endpoint's asynchronous gate are untracked."
+coverage = "STOP on one and three nodes tears down a NO ACK NATS emitter whose core write ran out of the client's timeout_ms while its server was down, leaving three records with the client. The domain stop hands the emitter its finish deadline, and the emitter task either drains its buffer, whose retry sends the held records again once the client has sent them, or finishes its sink, whose flush sends what the client holds, beside the domain's tracked teardown state; either way the subscriber receives every held record once the endpoint forwards again. The flush, the client's reconnection and the endpoint's asynchronous gate are untracked."
 examples = 2
 feature = "tests/features/runtime/nats_emission.feature"
 id = "scenario.nats-finish-at-stop"
-invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back, each exactly once."
+invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back."
 invocation = "scenarios"
 scenario = "STOP sends the records a core NATS write left with its client"
 selections = ["deloxide", "deloxide-order"]
@@ -1782,11 +1782,11 @@ scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: STOP on one and three nodes tears down a NO ACK NATS emitter whose core write ran out of the client's timeout_ms while its server was down, leaving three records with the client. The domain teardown hands the emitter its finish deadline before the shutdown and the emitter task finishes its sink after the loop ends, beside the domain's tracked teardown state; the finish flushes the client once the endpoint forwards again, and the subscriber receives each record exactly once. The flush, the client's reconnection and the endpoint's asynchronous gate are untracked."
+coverage = "Under scheduling stress: STOP on one and three nodes tears down a NO ACK NATS emitter whose core write ran out of the client's timeout_ms while its server was down, leaving three records with the client. The domain stop hands the emitter its finish deadline, and the emitter task either drains its buffer, whose retry sends the held records again once the client has sent them, or finishes its sink, whose flush sends what the client holds, beside the domain's tracked teardown state; either way the subscriber receives every held record once the endpoint forwards again. The flush, the client's reconnection and the endpoint's asynchronous gate are untracked."
 examples = 2
 feature = "tests/features/runtime/nats_emission.feature"
 id = "stress.nats-finish-at-stop"
-invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back, each exactly once."
+invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back."
 invocation = "stress-scenarios"
 scenario = "STOP sends the records a core NATS write left with its client"
 selections = ["deloxide-stress"]

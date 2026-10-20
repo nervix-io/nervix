@@ -436,9 +436,11 @@ Feature: NATS emission
   # publishes through an endpoint the scenario controls, which goes down, so the client holds the
   # three records one write hands it and the write runs out of the client's timeout_ms with its
   # records unresolved. Every retry first waits for the client to flush what it holds and hands it
-  # nothing more, so the client holds one copy of each record. STOP tears the domain down and
-  # finishes the emitter by flushing its client, which sends those records once the endpoint
-  # forwards again, each of them exactly once.
+  # nothing more, so the client holds one copy of each record. STOP ends the emitter either by
+  # draining it, whose retry waits for the client to send what it holds and then sends its own copy
+  # of each record, or by finishing it, which flushes what the client holds. Either way STOP returns
+  # only once the endpoint forwards again, and every held record reaches the subscriber, a retried
+  # one possibly twice.
   @nats_finish_at_stop @emitter_finish_at_stop @deloxide_stress
   Scenario Outline: STOP sends the records a core NATS write left with its client
     Given NATS is running
@@ -505,7 +507,7 @@ Feature: NATS emission
       """
     When STOP runs while the controlled NATS endpoint forwards everything after "2s"
     Then STOP completed after the controlled NATS endpoint forwarded everything
-    And within "30s" the observed broker receives exactly these payloads
+    And within "30s" the observed broker receives payloads
       """
       {"sequence":1}
       {"sequence":2}
