@@ -1146,8 +1146,9 @@ until that node has ended.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
-  observers have ended. The scenario publishes `finished` and then releases its feature permit and
-  run slot, so admission includes all teardown work.
+  observers have ended, the sockets a scenario bound to take one of them close first, and the holds
+  on the ingest addresses close with their return. The scenario publishes `finished` and then
+  releases its feature permit and run slot, so admission includes all teardown work.
 
 ### Scenario-Driven Stops
 
@@ -1208,7 +1209,7 @@ process startup both relaunch a lost bind on fresh ports.
 | Holder | Ports | Returned |
 | --- | --- | --- |
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
-| Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
+| Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit, and 1 more for each port an ingest address moved off | At the end of cleanup, when the holds on the ingest addresses close |
 | HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
@@ -1229,6 +1230,37 @@ draw that lands on reserved ports 65,536 times in a row fails with the pool exha
 many ports the process holds, and gives back the ports it had already reserved. A pool with one free
 port among seven thousand still yields it within that many draws almost every time, and a pool with
 none ends the draw in about a second.
+
+### Addresses A Node Binds
+
+A scenario draws its ZeroMQ ingest address, `{{zeromq_ingest_addr}}`, and its syslog ingest address,
+`{{syslog_ingest_addr}}`, with its identity, but a node binds them only once the ingestor that uses
+them starts after `START`, seconds later: a ZeroMQ PULL socket whose client declares
+`'bind' = 'true'`, and a syslog listener, which every node binds on its own loopback address. Until
+then the port is free at the operating system, and a socket that took it would fail every bind the
+ingestor retries, while the ingestor's reconnect delay doubles from 250 milliseconds to 30 seconds
+and soon outgrows the step that waits for it. Two measures keep these addresses bindable.
+
+- **The hold.** From the draw until cleanup, a TCP socket bound to the port on the wildcard address
+  with `SO_REUSEADDR`, which never listens, holds it. Linux picks no held port for a socket bound to
+  port zero or for an outgoing connection, and refuses an explicit bind of it without
+  `SO_REUSEADDR`, so neither the harness's own listeners on port zero nor any client socket on the
+  host can take it. A node's listener sets `SO_REUSEADDR`, as every Tokio listener does, and binds
+  beside the hold on its loopback address, after a restart as well. UDP has no hold: a syslog UDP
+  listener binds without `SO_REUSEADDR`, and any UDP socket on the port would refuse it.
+- **The check at first use.** The first time a scenario names the address, in the statement that
+  creates the client its node binds, the harness binds the port once as that node will, TCP with
+  `SO_REUSEADDR` on the wildcard address and, for a syslog address, UDP as well, and closes it
+  again. A bind refused with `AddrInUse` means another socket took the port, as Docker's proxy does
+  for a port it publishes and as any UDP socket can: the address moves to a freshly drawn and held
+  port before the statement names it, at most eight ports in all, and `cucumber.log` and the
+  standard error record each move with the refusal and what the kernel's socket tables list on the
+  taken port, each socket with its table, address, state, user and inode and whether this process
+  holds it. Any other refusal fails the scenario. Once named, the address never moves, because a
+  model carries it.
+
+A port an address moved off stays reserved with it until cleanup, since the socket that took it may
+still hold it.
 
 ## Server Processes
 
@@ -2169,6 +2201,10 @@ The harness guarantees:
 - A server process launch that another socket kept from binding a drawn listener is launched again
   on fresh ports for that listener within its startup's deadline, at most three times, and every
   other ending of a launch fails its startup at once.
+- No socket bound to port zero and no outgoing connection takes the port of a ZeroMQ or syslog
+  address a scenario's nodes bind, from its draw until cleanup, and the first statement that names
+  the address names a port no other socket listened on, or held over UDP, when the harness checked
+  it.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -2211,6 +2247,10 @@ Its limits:
   renders. Until the process binds its gRPC port, a readiness probe dials whatever holds that port:
   a socket that took it can hold the probe until its request deadline, and another node that took
   it answers the probe in the process's place.
+- A socket that binds a node-bound address's port explicitly with `SO_REUSEADDR`, or over UDP,
+  after a statement named the address still fails the node's bind, because the address can no
+  longer move. Outside Linux the move names no holder, because the kernel's socket tables cannot be
+  read.
 
 ## Qualification Evidence
 
@@ -2232,6 +2272,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
+| An address a node binds keeps its drawn port off every ephemeral pick and out of its node's way, moves off a port another socket took at its first use and only then, names what held that port, and gives back every port it drew | `a_held_port_is_no_ephemeral_pick`, `a_node_listener_binds_beside_the_hold_on_any_loopback_address_and_after_a_restart`, `naming_a_free_address_binds_its_port_once_and_keeps_it`, `naming_moves_an_address_off_a_port_another_listener_took`, `naming_moves_a_syslog_address_off_a_port_a_udp_socket_took`, `a_zeromq_address_keeps_a_port_only_a_udp_socket_holds`, `a_refusal_other_than_a_taken_port_fails_and_leaves_the_address_unnamed`, `an_address_whose_every_port_is_taken_ends_at_the_draw_limit`, `release_gives_back_every_port_the_address_drew`, `the_listing_names_a_listener_on_the_port_and_its_process`, `a_socket_table_row_reads_its_address_state_owner_and_inode` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
 | A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had and on the port its new process answers on, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched`, `a_relaunched_member_is_asked_where_its_new_process_answers` |
@@ -2249,6 +2290,13 @@ member, for its gRPC listener. Each asserts that the startup relaunched exactly 
 that listener, and binds another port for it. A last scenario starts a process whose startup ends
 with another report, a web console certificate without its key, and asserts that the startup fails
 with the process's own exit after one launch.
+
+The scenarios tagged `@node_bound_port_taken`, in `tests/features/runtime/zeromq_ingestion.feature`
+and `tests/features/runtime/syslog_support.feature`, have another socket take the port a scenario
+drew for its ingest address before any statement names it: a listener with `SO_REUSEADDR` on every
+address for the ZeroMQ address, and a UDP socket on every address for the syslog address, on one-
+and three-node clusters. Each asserts that the ingestor becomes ready within 30 seconds and that a
+message sent to the address the scenario names reaches its relay.
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
 `cec5f764`, at the CI concurrency factor of two scenarios per CPU with Cucumber's two retries unless

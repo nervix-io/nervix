@@ -204,3 +204,65 @@ Feature: ZeroMQ ingestion
       | cluster_size |
       | 1            |
       | 3            |
+
+  # The harness draws the ingest port when the scenario starts, and the node binds it only once
+  # its ingestor starts after START. A socket that took the port in between fails every bind the
+  # ingestor retries, so the address moves to a fresh port when a statement first names it.
+  @node_bound_port_taken
+  Scenario Outline: A ZeroMQ ingestor binds a fresh port when another socket took the port the scenario drew for it
+    Given a <cluster_size> node nervix cluster is started
+    And another socket listens on the port the scenario drew for its ZeroMQ ingest address
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_zeromq_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
+        CREATE CLIENT zeromq_main
+        TYPE ZEROMQ
+        CONFIG {
+          'addr' = '{{zeromq_ingest_addr}}',
+          'bind' = 'true'
+        };
+        CREATE ZEROMQ PULL INGESTOR zeromq_notifications
+        FROM zeromq_main MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_zeromq_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "zeromq_notifications" on the leader node contains
+      """
+      ready: true
+      """
+    When ZeroMQ message is published
+      """
+      {"user_id":45}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":45
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
