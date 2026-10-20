@@ -481,8 +481,8 @@ use ingestor_quiesce::{
 };
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
-    KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
-    KafkaOffsetStatePersistence, ReplicatedKafkaOffsetState,
+    KafkaOffsetOriginatorSlot, KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment,
+    KafkaOffsetStateOriginator, KafkaOffsetStatePersistence, ReplicatedKafkaOffsetState,
 };
 use local_drain::LocalIntake;
 use lookup_hash_map::{
