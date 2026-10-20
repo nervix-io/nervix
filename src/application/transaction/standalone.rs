@@ -16,6 +16,7 @@
     )
 )]
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionMutationError,
@@ -30,8 +31,8 @@ use super::{
         model_mutation::command_error,
         session_service::SessionServiceImpl,
     },
-    is_queueable_transaction_statement, transaction_commit_error_message,
-    transaction_commit_result, transaction_statement_label,
+    PreparedTransactionAdmission, TransactionCommitError, is_queueable_transaction_statement,
+    transaction_commit_error_message, transaction_commit_result, transaction_statement_label,
 };
 
 fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
@@ -66,6 +67,36 @@ fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> Command
             .collect(),
         transaction_admission: step.result.admission.clone(),
         ..CommandResult::new(disposition, step.result.message.clone())
+    }
+}
+
+/// The command one coordinator applies, which every step of its preparation and commit admission
+/// checks against the command's transaction.
+struct StandaloneCommand<'a> {
+    transaction_id: &'a str,
+    owner: &'a UserName,
+    domain: &'a DomainName,
+    request: &'a TransactionStatementRequest,
+    limits: TransactionQueueLimits,
+}
+
+/// Why one preparation step did not bring the command's statement into its transaction.
+enum StandaloneSetback {
+    /// Refused against this coordinator's observation of the transaction, so the refusal stands
+    /// only while the transaction has not moved since.
+    Refused(Box<CommandResult>),
+    /// Ended in an outcome no later observation of the transaction changes, such as lost
+    /// leadership or a transaction bound to another owner.
+    Ended(Box<CommandResult>),
+}
+
+impl StandaloneSetback {
+    fn refused(result: CommandResult) -> Self {
+        Self::Refused(Box::new(result))
+    }
+
+    fn ended(result: CommandResult) -> Self {
+        Self::Ended(Box::new(result))
     }
 }
 
@@ -130,18 +161,23 @@ impl SessionServiceImpl {
                 transaction_statement_label(&statement)
             ));
         }
-        let limits = TransactionQueueLimits {
-            max_statements: self.inner.transaction_max_statements,
-            max_source_bytes: self.inner.transaction_max_source_bytes,
-        };
-        let queued = TransactionStatementRequest {
+        let request = TransactionStatementRequest {
             request_reference,
             expected_position: 0,
             source,
             statement,
         };
-
-        let mut current = self
+        let command = StandaloneCommand {
+            transaction_id: &transaction_id,
+            owner: &owner,
+            domain: &domain,
+            request: &request,
+            limits: TransactionQueueLimits {
+                max_statements: self.inner.transaction_max_statements,
+                max_source_bytes: self.inner.transaction_max_source_bytes,
+            },
+        };
+        let observed = self
             .inner
             .consensus
             .current_transaction(&transaction_id)
@@ -155,203 +191,13 @@ impl SessionServiceImpl {
                 crate::fault_injection::StandaloneTransactionBoundary::Lookup,
             )
             .await;
-        let mut prepared = None;
-        if current.is_none() {
-            let candidate = ReplicatedTransaction::open_for_command(
-                transaction_id.clone(),
-                domain.clone(),
-                owner.clone(),
-                self.transaction_activity(),
-                queued.request_reference.clone(),
-            );
-            if let Err(error) = candidate.queue_admission(&owner, &domain, &queued, limits) {
-                return command_error(error.to_string());
-            }
-            let admission = self
-                .preflight_transaction_statement(&candidate, &queued)
-                .await;
-            #[cfg(feature = "testing")]
-            self.inner
-                .runtime
-                .pause_standalone_transaction_if_armed(
-                    self.inner.consensus.local_node_id(),
-                    &domain,
-                    crate::fault_injection::StandaloneTransactionBoundary::Preflight,
-                )
-                .await;
-            let prepared_admission = match admission {
-                Ok(admission) => admission,
-                Err(error) => return command_error(format!("{error:#}")),
-            };
-            prepared = Some(prepared_admission);
-            if let Err(error) = self
-                .inner
-                .consensus
-                .open_transaction(candidate, self.inner.transaction_max_open)
-                .await
-                && self
-                    .inner
-                    .consensus
-                    .current_transaction(&transaction_id)
-                    .await
-                    .is_none()
-            {
-                return self.transaction_consensus_error_response(error).await;
-            }
-            current = self
-                .inner
-                .consensus
-                .current_transaction(&transaction_id)
-                .await;
-            if current
-                .as_ref()
-                .is_some_and(|transaction| transaction.statements.is_empty())
-            {
-                let prepared_admission = prepared
-                    .take()
-                    .verified("the newly opened transaction prepared its first admission above");
-                let admitted =
-                    TransactionStatement::admitted(queued.clone(), prepared_admission.result);
-                match self
-                    .inner
-                    .consensus
-                    .queue_transaction_statement(TransactionQueueRequest {
-                        id: transaction_id.clone(),
-                        owner: owner.clone(),
-                        domain: domain.clone(),
-                        activity: self.transaction_activity(),
-                        statement: admitted,
-                        report: prepared_admission.report,
-                        limits,
-                    })
-                    .await
-                {
-                    Ok(queued_transaction) => current = Some(queued_transaction),
-                    Err(error) => {
-                        return self.transaction_consensus_error_response(error).await;
-                    }
-                }
-            }
-        }
-        let mut transaction =
-            current.verified("the durable command transaction was opened or observed above");
-
-        if transaction.owner != owner || transaction.domain != domain {
-            return command_error(format!(
-                "durable command transaction '{}' is bound to a different owner or domain",
-                transaction.id
-            ));
-        }
-        if let TransactionState::Open(_) = &transaction.state {
-            match transaction.queue_admission(&owner, &domain, &queued, limits) {
-                Ok(TransactionQueueAdmission::Existing(_)) => {}
-                Ok(TransactionQueueAdmission::New) => {
-                    let prepared_admission = match prepared.take() {
-                        Some(prepared_admission) => prepared_admission,
-                        None => {
-                            match self
-                                .preflight_transaction_statement(&transaction, &queued)
-                                .await
-                            {
-                                Ok(admission) => admission,
-                                Err(error) => return command_error(format!("{error:#}")),
-                            }
-                        }
-                    };
-                    let admitted =
-                        TransactionStatement::admitted(queued.clone(), prepared_admission.result);
-                    transaction = match self
-                        .inner
-                        .consensus
-                        .queue_transaction_statement(TransactionQueueRequest {
-                            id: transaction_id.clone(),
-                            owner: owner.clone(),
-                            domain: domain.clone(),
-                            activity: self.transaction_activity(),
-                            statement: admitted,
-                            report: prepared_admission.report,
-                            limits,
-                        })
-                        .await
-                    {
-                        Ok(transaction) => transaction,
-                        Err(error) => {
-                            return self.transaction_consensus_error_response(error).await;
-                        }
-                    };
-                }
-                Err(error) => return command_error(error.to_string()),
-            }
-        }
-
-        let mut current = transaction;
-        let committing = loop {
-            nervix_primitives::task::consume_budget().await;
-            match &current.state {
-                TransactionState::Open(_) => {
-                    let prepared = match self.prepare_transaction_commit(&current).await {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            let message = transaction_commit_error_message(&error);
-                            match self
-                                .fail_incomplete_transaction_commit(
-                                    &current,
-                                    &owner,
-                                    self.transaction_activity(),
-                                    &error,
-                                )
-                                .await
-                            {
-                                Ok(Some(transaction)) => {
-                                    return standalone_transaction_result(&transaction);
-                                }
-                                Ok(None) => return command_error(message),
-                                Err(error) => {
-                                    return self.transaction_consensus_error_response(error).await;
-                                }
-                            }
-                        }
-                    };
-                    let admission = self
-                        .inner
-                        .consensus
-                        .start_transaction_commit(
-                            transaction_id.clone(),
-                            owner.clone(),
-                            self.transaction_activity(),
-                            prepared.expected_preview,
-                            prepared.report,
-                            prepared.plan,
-                        )
-                        .await;
-                    match admission {
-                        Ok(transaction) => break transaction,
-                        Err(error)
-                            if matches!(
-                                error.current_context(),
-                                ConsensusTransactionError::Mutation(
-                                    TransactionMutationError::PreviewStale { .. }
-                                        | TransactionMutationError::PlanningInputsChanged { .. }
-                                )
-                            ) =>
-                        {
-                            let refreshed = self
-                                .inner
-                                .consensus
-                                .current_transaction(&transaction_id)
-                                .await;
-                            let Some(refreshed) = refreshed else {
-                                return self.transaction_consensus_error_response(error).await;
-                            };
-                            current = refreshed;
-                        }
-                        Err(error) => {
-                            return self.transaction_consensus_error_response(error).await;
-                        }
-                    }
-                }
-                TransactionState::Committing(_) | TransactionState::Finished(_) => break current,
-            }
+        let admitted = match self.admit_standalone_statement(&command, observed).await {
+            Ok(transaction) => transaction,
+            Err(result) => return *result,
+        };
+        let committing = match self.admit_standalone_commit(&command, admitted).await {
+            Ok(transaction) => transaction,
+            Err(result) => return *result,
         };
         let finished = if matches!(committing.state, TransactionState::Finished(_)) {
             Ok(committing)
@@ -374,6 +220,324 @@ impl SessionServiceImpl {
                 }
             }
         }
+    }
+
+    /// Brings the command's statement into its transaction, starting from `observed`, what this
+    /// coordinator last saw of it, and opening the transaction when it saw none.
+    ///
+    /// Answers the transaction once it holds the statement or has moved past queuing. After a
+    /// leadership change another coordinator can open and advance the same transaction while this
+    /// one still acts on an earlier observation, so a refusal is the command's outcome only while
+    /// the transaction stands where this coordinator observed it. Progress recorded since is
+    /// recovered under the same execution reference instead.
+    async fn admit_standalone_statement(
+        &self,
+        command: &StandaloneCommand<'_>,
+        mut observed: Option<ReplicatedTransaction>,
+    ) -> Result<ReplicatedTransaction, Box<CommandResult>> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let admission = match &observed {
+                None => self.open_standalone_transaction(command).await,
+                Some(transaction) => {
+                    self.queue_standalone_statement(command, transaction, None)
+                        .await
+                }
+            };
+            let refusal = match admission {
+                Ok(transaction) => return Ok(transaction),
+                Err(StandaloneSetback::Ended(result)) => return Err(result),
+                Err(StandaloneSetback::Refused(result)) => result,
+            };
+            let Some(progressed) = self
+                .standalone_transaction_progress(command, observed.as_ref())
+                .await
+            else {
+                return Err(refusal);
+            };
+            observed = Some(progressed);
+        }
+    }
+
+    /// Opens the command's transaction and queues its statement, preflighted against the empty
+    /// transaction this coordinator opens.
+    async fn open_standalone_transaction(
+        &self,
+        command: &StandaloneCommand<'_>,
+    ) -> Result<ReplicatedTransaction, StandaloneSetback> {
+        let candidate = ReplicatedTransaction::open_for_command(
+            command.transaction_id.to_owned(),
+            command.domain.clone(),
+            command.owner.clone(),
+            self.transaction_activity(),
+            command.request.request_reference.clone(),
+        );
+        if let Err(error) = candidate.queue_admission(
+            command.owner,
+            command.domain,
+            command.request,
+            command.limits,
+        ) {
+            return Err(StandaloneSetback::refused(command_error(error.to_string())));
+        }
+        let preflight = self
+            .preflight_transaction_statement(&candidate, command.request)
+            .await;
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_standalone_transaction_if_armed(
+                self.inner.consensus.local_node_id(),
+                command.domain,
+                crate::fault_injection::StandaloneTransactionBoundary::Preflight,
+            )
+            .await;
+        let prepared = match preflight {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(StandaloneSetback::refused(command_error(format!(
+                    "{error:#}"
+                ))));
+            }
+        };
+        if let Err(error) = self
+            .inner
+            .consensus
+            .open_transaction(candidate, self.inner.transaction_max_open)
+            .await
+            && self
+                .inner
+                .consensus
+                .current_transaction(command.transaction_id)
+                .await
+                .is_none()
+        {
+            return Err(StandaloneSetback::ended(
+                self.transaction_consensus_error_response(error).await,
+            ));
+        }
+        let opened = self
+            .inner
+            .consensus
+            .current_transaction(command.transaction_id)
+            .await
+            .verified("the durable command transaction was opened or observed above");
+        self.queue_standalone_statement(command, &opened, Some(prepared))
+            .await
+    }
+
+    /// Queues the command's statement into `transaction` unless the transaction already holds it
+    /// or has moved past queuing.
+    ///
+    /// `prepared` is the admission preflighted while opening the transaction; without one, the
+    /// statement is preflighted against `transaction`.
+    async fn queue_standalone_statement(
+        &self,
+        command: &StandaloneCommand<'_>,
+        transaction: &ReplicatedTransaction,
+        prepared: Option<PreparedTransactionAdmission>,
+    ) -> Result<ReplicatedTransaction, StandaloneSetback> {
+        if transaction.owner != *command.owner || transaction.domain != *command.domain {
+            return Err(StandaloneSetback::ended(command_error(format!(
+                "durable command transaction '{}' is bound to a different owner or domain",
+                transaction.id
+            ))));
+        }
+        let TransactionState::Open(_) = &transaction.state else {
+            return Ok(transaction.clone());
+        };
+        let admission = transaction.queue_admission(
+            command.owner,
+            command.domain,
+            command.request,
+            command.limits,
+        );
+        match admission {
+            Ok(TransactionQueueAdmission::Existing(_)) => return Ok(transaction.clone()),
+            Ok(TransactionQueueAdmission::New) => {}
+            Err(error) => {
+                return Err(StandaloneSetback::refused(command_error(error.to_string())));
+            }
+        }
+        let prepared = match prepared {
+            Some(prepared) => prepared,
+            None => {
+                let preflight = self
+                    .preflight_transaction_statement(transaction, command.request)
+                    .await;
+                match preflight {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return Err(StandaloneSetback::refused(command_error(format!(
+                            "{error:#}"
+                        ))));
+                    }
+                }
+            }
+        };
+        let admitted = TransactionStatement::admitted(command.request.clone(), prepared.result);
+        let queued = self
+            .inner
+            .consensus
+            .queue_transaction_statement(TransactionQueueRequest {
+                id: command.transaction_id.to_owned(),
+                owner: command.owner.clone(),
+                domain: command.domain.clone(),
+                activity: self.transaction_activity(),
+                statement: admitted,
+                report: prepared.report,
+                limits: command.limits,
+            })
+            .await;
+        let error = match queued {
+            Ok(transaction) => return Ok(transaction),
+            Err(error) => error,
+        };
+        // The ledger refuses a mutation against the transaction as it now stands, which another
+        // coordinator may have moved; any other failure ends the step whatever its progress.
+        let ConsensusTransactionError::Mutation(_) = error.current_context() else {
+            let result = self.transaction_consensus_error_response(error).await;
+            return Err(StandaloneSetback::ended(result));
+        };
+        let result = self.transaction_consensus_error_response(error).await;
+        Err(StandaloneSetback::refused(result))
+    }
+
+    /// Starts the commit of the command's transaction once the transaction holds its statement.
+    ///
+    /// Answers the transaction once it is committing or finished. The commit is planned against
+    /// this coordinator's observation of the transaction, so a planning refusal is the command's
+    /// outcome only while the transaction stands where it was planned; progress another
+    /// coordinator recorded since is recovered instead.
+    async fn admit_standalone_commit(
+        &self,
+        command: &StandaloneCommand<'_>,
+        admitted: ReplicatedTransaction,
+    ) -> Result<ReplicatedTransaction, Box<CommandResult>> {
+        let mut current = admitted;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let TransactionState::Open(_) = &current.state else {
+                return Ok(current);
+            };
+            let prepared = match self.prepare_transaction_commit(&current).await {
+                Ok(prepared) => prepared,
+                Err(refusal) => {
+                    let progressed = self
+                        .standalone_transaction_progress(command, Some(&current))
+                        .await;
+                    if let Some(progressed) = progressed {
+                        current = progressed;
+                        continue;
+                    }
+                    let result = self
+                        .refuse_standalone_commit(command, &current, &refusal)
+                        .await;
+                    return Err(Box::new(result));
+                }
+            };
+            let admission = self
+                .inner
+                .consensus
+                .start_transaction_commit(
+                    command.transaction_id.to_owned(),
+                    command.owner.clone(),
+                    self.transaction_activity(),
+                    prepared.expected_preview,
+                    prepared.report,
+                    prepared.plan,
+                )
+                .await;
+            match admission {
+                Ok(transaction) => return Ok(transaction),
+                Err(error)
+                    if matches!(
+                        error.current_context(),
+                        ConsensusTransactionError::Mutation(
+                            TransactionMutationError::PreviewStale { .. }
+                                | TransactionMutationError::PlanningInputsChanged { .. }
+                        )
+                    ) =>
+                {
+                    let refreshed = self
+                        .inner
+                        .consensus
+                        .current_transaction(command.transaction_id)
+                        .await;
+                    let Some(refreshed) = refreshed else {
+                        let result = self.transaction_consensus_error_response(error).await;
+                        return Err(Box::new(result));
+                    };
+                    current = refreshed;
+                }
+                // The ledger refused the commit against the transaction as it now stands, which
+                // another coordinator may have moved past the one this commit was planned from.
+                Err(error)
+                    if matches!(
+                        error.current_context(),
+                        ConsensusTransactionError::Mutation(_)
+                    ) =>
+                {
+                    let progressed = self
+                        .standalone_transaction_progress(command, Some(&current))
+                        .await;
+                    let Some(progressed) = progressed else {
+                        let result = self.transaction_consensus_error_response(error).await;
+                        return Err(Box::new(result));
+                    };
+                    current = progressed;
+                }
+                Err(error) => {
+                    let result = self.transaction_consensus_error_response(error).await;
+                    return Err(Box::new(result));
+                }
+            }
+        }
+    }
+
+    /// The command's outcome when its commit planning is refused against a transaction that has
+    /// not moved: the refusal fails the commit when the plan names the operation it fails at, and
+    /// is answered as it stands otherwise.
+    async fn refuse_standalone_commit(
+        &self,
+        command: &StandaloneCommand<'_>,
+        transaction: &ReplicatedTransaction,
+        refusal: &Report<TransactionCommitError>,
+    ) -> CommandResult {
+        let failed = self
+            .fail_incomplete_transaction_commit(
+                transaction,
+                command.owner,
+                self.transaction_activity(),
+                refusal,
+            )
+            .await;
+        match failed {
+            Ok(Some(transaction)) => standalone_transaction_result(&transaction),
+            Ok(None) => command_error(transaction_commit_error_message(refusal)),
+            Err(error) => self.transaction_consensus_error_response(error).await,
+        }
+    }
+
+    /// The command's transaction as it now stands, when it moved since `observed`.
+    ///
+    /// The comparison covers the whole durable transaction, so its opening, an accepted statement,
+    /// a commit admission, commit progress and a recorded outcome each count as progress that a
+    /// refusal decided against `observed` did not see.
+    async fn standalone_transaction_progress(
+        &self,
+        command: &StandaloneCommand<'_>,
+        observed: Option<&ReplicatedTransaction>,
+    ) -> Option<ReplicatedTransaction> {
+        let current = self
+            .inner
+            .consensus
+            .current_transaction(command.transaction_id)
+            .await?;
+        if observed == Some(&current) {
+            return None;
+        }
+        Some(current)
     }
 }
 

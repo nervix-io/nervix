@@ -739,7 +739,12 @@ planned before a schedule revision fails rather than overwrite that revision.
 What happens after such a refusal depends on who owns the plan. An ordinary command applies through
 a frozen internal attempt; when its captured inputs change before its effect is recorded, it keeps
 the failed attempt and starts a new attempt derived from the current revision under the same
-execution reference, so its caller sees one outcome. An explicit transaction freezes its plan when
+execution reference, so its caller sees one outcome. A refusal reached against an out-of-date view
+of the attempt is not that outcome either. After leadership changes, the leader that admitted the
+command can still hold an observation from before a successor opened, committed, or paused the
+domain for the same attempt. That coordinator reads the attempt again before accepting a preflight,
+queue, or commit-planning refusal. If the attempt moved, it recovers that progress under the same
+reference, and only a refusal against the attempt as it still stands is recorded. An explicit transaction freezes its plan when
 `COMMIT` is admitted: stale inputs at admission leave the transaction `OPEN`, and a step whose
 inputs changed after admission fails the transaction with the applied prefix preserved, rather than
 being replanned against state the client never reviewed. [Transaction Quiescence And Impact
