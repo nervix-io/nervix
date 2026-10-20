@@ -97,7 +97,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
-| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
+| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
@@ -502,6 +502,19 @@ the step that injects the holds only awaits that task. A stalled runner delays w
 of a release, never the release itself. The step still watches the controlled operation, and a
 command that ends before its gates were held fails the step with the command's own outcome.
 
+The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
+into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
+do not establish a single sorting window. The one-node and three-node examples retain their exact
+ordered payloads, tenant keys, and existing flush and receive deadlines.
+
+The combined message/duration window outline publishes each message-threshold group as one
+decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
+observing both outputs, it publishes one row per branch and measures each duration output from
+that publication, keeping the three-second lower bound and ten-second subscription deadlines.
+A late subscription read can lengthen the observed delay. The production-owner regression checks
+two retained rows immediately before and at the duration boundary, and three rows meeting the
+message threshold before that deadline.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
@@ -814,6 +827,12 @@ test identifier, and the last command output. A collector timeout alone does not
 emitter lost a record or failed to export it; retained diagnostics and a new attempt remain separate
 evidence.
 
+The log/trace DNS recovery outline gives both emitters a 250ms initial retry delay and a one-second
+ceiling. That ceiling keeps the next automatic attempt inside the ten-second Collector observation
+after the unavailable-client and DNS phases have lasted several attempts. The outline retains its
+five-second RPC timeout, both exact signal payloads, failure and DNS-question observations, and
+one- and three-node examples. Production retry policies continue to use their declared ceiling.
+
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
@@ -1012,6 +1031,11 @@ finished, and a scenario whose log ends at a phase marker is still inside that p
 Browser assertions that wait for an acknowledged subscription tab to disappear poll for up to 10
 seconds. This bounds the server reply and browser update together; on expiry, the step reports the
 tab text that remains visible.
+
+A continuous browser assertion begins after its readiness predicate holds. The console reconnect
+scenario first waits for the restored clock's `PACED` state, then observes the complete stability
+period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
+the bounded selector predicate establishes clock readiness before the stability observation starts.
 
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
@@ -2017,6 +2041,36 @@ query. They keep the placement, branch, round, value byte length and watermarks,
 the fixture's large values. Query failure or timeout stays a diagnostic observation; the original
 exact-row assertion still fails. This observation budget starts after the row deadline and grants
 no additional time for a missing row to satisfy the assertion.
+
+`just test-diagnostic-lib <selection> <test>` runs one exact library owner test in `deloxide`,
+`deloxide-order` or `deloxide-stress`. The owner starts its diagnostic process before
+creating runtime workers or acquiring tracked locks; isolated children inherit the attempt's
+evidence directory and retain their own process records. Each attempt keeps its output under
+`target/deloxide/focused/<selection>/library.*`. The command requires completed, non-ignored tests
+and a fresh evidence directory, and qualifies every retained record. Each invocation selects one
+owner, since the detector installs once per process. Ordinary library selections use `just
+test-runtime`. This focused observation does not replace the complete lane's workload inventory
+and accounting.
+
+Each registered `owner-tests` workload uses the fresh process the canonical lane launches and
+records one process observation. The ONNX queue-recovery body runs directly in that process; its
+ordinary test uses a supervised child to establish native-library isolation within the full unit
+suite.
+
+`just test-onnx-owner-binary <binary> <library> <filter>` replays a compiled inspection owner
+against an explicit runtime library. Retain the binary's source and execution mode, the library
+digest, the selected test and the process evidence with the replay.
+
+`just build-diagnostic-scenarios <selection>` prepares library, scenario and server executables for
+a supervised replay. Capture their source, mode and artifact identities before replaying the
+selected workloads.
+
+ONNX fixture preparation hands native-library loading, directory creation and model copies to
+`off_the_runner`; a replacement model copy uses the same owner. The scenario publishes its fixture
+placeholder after directory preparation completes and awaits any replacement before its next step.
+The runner continues polling other scenarios and the suite watchdog during that work. This is
+harness preparation: the node's subsequent metadata inspection retains its own thirty-second
+deadline, bulk admission and native-session ownership.
 
 `just test-diagnostic-harness <selection> <filter>` runs focused harness regressions in the chosen
 diagnostic build. `just coverage-harness-liveness <filter>` measures ordinary harness regressions

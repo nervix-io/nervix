@@ -731,10 +731,15 @@ broker source's acknowledgement that its transport fails to confirm, and a rejec
 take back, become the ingestor's transient status with the innermost context of the source's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
-Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
-operations read the retained status without writing it; a transition clears an active failure.
-Reporting a different error without selecting a new retry preserves the active retry. DESCRIBE
-renders error, backoff and remaining wait from one immutable observation. A failed record obtains
+Each source or sink publishes its safe transient error and optional retry together. An emitter
+retains task-owned and connector-owned failures independently in one atomic publication. A publish
+or commit outcome clears the task failure; a retained connector's progress clears the connector
+failure. MQTT packet progress therefore preserves the host's unanswered-publish diagnostic until
+the task succeeds. Repeated healthy operations only read, and reporting a task error without
+selecting a new retry preserves that task's active retry. DESCRIBE renders both retained errors
+with their `task` and `connector` owners when both fail. It selects an active task retry, then an
+active connector retry, then a task error without a retry, rendering that retry's backoff and
+remaining wait from the same immutable publication as the errors. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
 
@@ -863,10 +868,14 @@ failure when the pinned file is decoded. Neither failure silently selects anothe
 ONNX binding preflight preserves the distinction between invalid tensor bindings, an ONNX loading
 failure, worker refusal, worker panic and inspection timeout. Worker refusal retains the bounded
 executor's report beneath the inferencer context; it does not classify an uninspected model as
-malformed. The thirty-second inspection bound covers admission to a bulk worker through release of
-the temporary session. Debug events record submission, worker entry, builder initialization, model
-loading and session release. A timeout also records the bulk class's configured workers, running
-jobs and pending jobs, so an operator can correlate queue delay with dependency work. These are
+malformed. The thirty-second inspection bound begins before the bulk-memory reservation and ends
+after release of the temporary session. A cancelled image read preserves the executor's ordinary
+`Cancelled` outcome beneath its inspection context; the awaiting request still receives its timeout
+or ends with its caller. Advisory image-read failures leave native image selection and load errors
+to ONNX Runtime. Debug events record memory admission, submission, worker entry, native-image
+preparation, builder initialization, model loading and session release. A timeout also records bulk
+memory capacity and reserved bytes beside configured workers, running jobs and pending jobs, so an
+operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
 
