@@ -5,7 +5,7 @@
 //! so a batch timeout passes only once nothing else can happen. The last reads through the
 //! client's event loop from a scripted broker, on the real clock.
 
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -52,13 +52,11 @@ struct DeliveredPublishes {
 }
 
 impl PublishRead for DeliveredPublishes {
-    fn next_publish(&mut self) -> impl Future<Output = MqttSourceResult<Publish>> + Send {
-        async move {
-            match self.publishes.recv().await {
-                Some(publish) => Ok(publish),
-                // The check dropped its end: the connection is lost.
-                None => Err(Report::new(MqttSourceError::Receive)),
-            }
+    async fn next_publish(&mut self) -> MqttSourceResult<Publish> {
+        match self.publishes.recv().await {
+            Some(publish) => Ok(publish),
+            // The check dropped its end: the connection is lost.
+            None => Err(Report::new(MqttSourceError::Receive)),
         }
     }
 }

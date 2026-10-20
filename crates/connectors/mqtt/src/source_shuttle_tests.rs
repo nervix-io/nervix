@@ -16,7 +16,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::{future::Future, num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -52,12 +52,10 @@ struct DeliveredPublishes {
 }
 
 impl PublishRead for DeliveredPublishes {
-    fn next_publish(&mut self) -> impl Future<Output = MqttSourceResult<Publish>> + Send {
-        async move {
-            match self.publishes.recv().await {
-                Some(publish) => Ok(publish),
-                None => Err(Report::new(MqttSourceError::Receive)),
-            }
+    async fn next_publish(&mut self) -> MqttSourceResult<Publish> {
+        match self.publishes.recv().await {
+            Some(publish) => Ok(publish),
+            None => Err(Report::new(MqttSourceError::Receive)),
         }
     }
 }

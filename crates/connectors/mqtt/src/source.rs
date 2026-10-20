@@ -230,17 +230,16 @@ trait PublishRead: Send {
 }
 
 impl PublishRead for MqttConnection {
-    fn next_publish(&mut self) -> impl Future<Output = MqttSourceResult<Publish>> + Send {
-        async move {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                match self.eventloop.poll().await {
-                    Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
-                    Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
-                    Err(error) => {
-                        return Err(MqttConnectionError::report(error)
-                            .change_context(MqttSourceError::Receive));
-                    }
+    async fn next_publish(&mut self) -> MqttSourceResult<Publish> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match self.eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
+                Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
+                Err(error) => {
+                    return Err(
+                        MqttConnectionError::report(error).change_context(MqttSourceError::Receive)
+                    );
                 }
             }
         }
