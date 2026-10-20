@@ -458,7 +458,7 @@ fn every_runtime_connects_through_the_resolver_it_was_given() {
 
 #[test]
 fn a_zero_connection_budget_leaves_nothing_for_address_attempts() {
-    let deadline = ConnectionBudget::start(Duration::ZERO);
+    let deadline = OperationBudget::start(Duration::ZERO);
     let addresses = [
         SocketAddr::new(loopback(1), 5672),
         SocketAddr::new(loopback(2), 5672),

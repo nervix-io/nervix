@@ -32,7 +32,7 @@ use nervix_connector::{
     PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
     SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
-use nervix_dns::{ConnectionBudget, DnsResolver};
+use nervix_dns::{DnsResolver, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
     net::{TcpStream, UdpSocket},
@@ -111,7 +111,7 @@ impl SyslogSink {
         config: &SyslogClientConfig,
         dns: &DnsResolver,
     ) -> SinkStartResult<SyslogSender> {
-        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let budget = OperationBudget::start(CONNECT_BUDGET);
         let addresses = {
             let mapping_input = dns
                 .resolve(&config.server_name, config.port, budget.remaining())

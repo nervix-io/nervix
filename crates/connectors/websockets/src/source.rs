@@ -36,7 +36,7 @@ use nervix_connector::{
     SourceError, SourceMessage, SourceReadCancellation, SourceResult, SourceResume,
     client_config_value,
 };
-use nervix_dns::{ConnectionBudget, DnsResolver};
+use nervix_dns::{DnsResolver, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
     net::TcpStream,
@@ -268,7 +268,7 @@ impl SourceConnector for WebsocketSource {
         if self.relay.is_some() {
             return Ok(SourceResume::Ready);
         }
-        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let budget = OperationBudget::start(CONNECT_BUDGET);
         let addresses = self
             .dns
             .resolve(&self.endpoint.host, self.endpoint.port, budget.remaining())

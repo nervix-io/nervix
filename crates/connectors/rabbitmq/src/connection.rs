@@ -53,7 +53,7 @@ use lapin::{
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, read_tls_file};
-use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
+use nervix_dns::{DnsLookupFailure, DnsResolver, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{collections::ConcurrentQueue, time::timeout};
 use thiserror::Error;
@@ -205,7 +205,7 @@ impl RabbitMqBroker {
     }
 
     async fn connect_within(&self, budget: Duration) -> RabbitMqConnectResult<Connection> {
-        let deadline = ConnectionBudget::start(budget);
+        let deadline = OperationBudget::start(budget);
         let runtime = lapin::runtime::default_runtime().map_err(|error| {
             Report::new(RabbitMqConnectError::RuntimeUnavailable).attach_printable(error)
         })?;
@@ -216,7 +216,7 @@ impl RabbitMqBroker {
     }
 
     /// Every address the broker host resolves to now, within the connection budget.
-    async fn resolve(&self, deadline: &ConnectionBudget) -> RabbitMqConnectResult<Vec<SocketAddr>> {
+    async fn resolve(&self, deadline: &OperationBudget) -> RabbitMqConnectResult<Vec<SocketAddr>> {
         let host = self.host();
         let resolved = self
             .dns
@@ -240,7 +240,7 @@ impl RabbitMqBroker {
         &self,
         runtime: &TokioRuntime,
         addresses: &[SocketAddr],
-        deadline: &ConnectionBudget,
+        deadline: &OperationBudget,
     ) -> RabbitMqConnectResult<BrokerStream> {
         let mut report = Report::new(RabbitMqConnectError::Unreachable {
             host: self.host().to_string(),
@@ -268,7 +268,7 @@ impl RabbitMqBroker {
     async fn secure(
         &self,
         stream: BrokerStream,
-        deadline: &ConnectionBudget,
+        deadline: &OperationBudget,
     ) -> RabbitMqConnectResult<BrokerStream> {
         let BrokerTransport::Tls { ca_chain } = &self.transport else {
             return Ok(stream);

@@ -21,12 +21,12 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::time::Instant;
 
 /// One physical connection deadline shared by lookup and every address attempt.
-pub struct ConnectionBudget {
+pub struct OperationBudget {
     started: Instant,
     total: Duration,
 }
 
-impl ConnectionBudget {
+impl OperationBudget {
     pub fn start(total: Duration) -> Self {
         Self {
             started: Instant::now(),
@@ -59,7 +59,7 @@ pub struct AddressAttempt {
 
 /// The ordered address attempts of one connection.
 pub struct AddressAttempts<'a> {
-    budget: &'a ConnectionBudget,
+    budget: &'a OperationBudget,
     addresses: std::slice::Iter<'a, SocketAddr>,
 }
 

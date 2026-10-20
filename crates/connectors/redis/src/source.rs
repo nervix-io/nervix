@@ -30,7 +30,7 @@ use nervix_connector::{
     RustlsClientConfigSource, SourceBatch, SourceBatchRequest, SourceConnector, SourceError,
     SourceMessage, SourceReadCancellation, SourceResult, SourceResume, client_config_value,
 };
-use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
+use nervix_dns::{DnsLookupFailure, DnsResolver, OperationBudget};
 use nervix_models::{ClientConfigEntry, RedisChannelName};
 use nervix_primitives::{net::TcpStream, sync::StdArc, time::timeout};
 use redis::{
@@ -111,7 +111,7 @@ impl RedisPubSubSourcePlan {
     }
 
     async fn subscribe(&self) -> RedisPubSubSourceResult<PubSubStream> {
-        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let budget = OperationBudget::start(CONNECT_BUDGET);
         let stream = self.connect_with_budget(&budget).await?;
         let mut pubsub = timeout(
             budget.remaining(),
@@ -149,13 +149,13 @@ impl RedisPubSubSourcePlan {
     /// system resolver, so the connector opens the transport and lets Redis set up the protocol.
     #[cfg(test)]
     async fn connect(&self) -> RedisPubSubSourceResult<ConnectedStream> {
-        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let budget = OperationBudget::start(CONNECT_BUDGET);
         self.connect_with_budget(&budget).await
     }
 
     async fn connect_with_budget(
         &self,
-        budget: &ConnectionBudget,
+        budget: &OperationBudget,
     ) -> RedisPubSubSourceResult<ConnectedStream> {
         match self.client.get_connection_info().addr() {
             ConnectionAddr::Tcp(host, port) => self.connect_tcp(host, *port, None, budget).await,
@@ -200,7 +200,7 @@ impl RedisPubSubSourcePlan {
         host: &str,
         port: u16,
         tls: Option<&StdArc<rustls::ClientConfig>>,
-        budget: &ConnectionBudget,
+        budget: &OperationBudget,
     ) -> RedisPubSubSourceResult<ConnectedStream> {
         let addresses = {
             let mapping_input = self.dns.resolve(host, port, budget.remaining()).await;

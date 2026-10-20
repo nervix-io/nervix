@@ -79,7 +79,7 @@ pub use configuration::{
     DnsConfiguration, DnsConfigurationError, NameServers, SYSTEM_HOSTS_FILE,
     SYSTEM_RESOLVER_CONFIGURATION,
 };
-pub use dial::{AddressAttempt, ConnectionBudget};
+pub use dial::{AddressAttempt, OperationBudget};
 pub use lookup::{DnsLookupError, DnsLookupFailure, DnsLookupReport};
 
 use crate::{configuration::LoadedConfiguration, hosts::HostsTable};
