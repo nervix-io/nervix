@@ -1475,17 +1475,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A relocation whose commit a leader with a lapsed lease refuses completes under its execution reference
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus statements are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA lease_event ( id I64 );
       CREATE RELAY lease_input SCHEMA lease_event UNBRANCHED;
@@ -1494,13 +1494,13 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO lease_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus statements are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
     Given the leader refuses the next relocation commit in domain "{{domain}}" as a leader whose lease lapsed
-    When these NSPL commands are executed on the leader node
+    When these Plexus statements are executed on the leader node
       """
       RELOCATE JUNCTION lease_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -1509,7 +1509,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       relocated 1 of 1 runtime node(s) onto node 'node-2'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus statements are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """

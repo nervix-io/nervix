@@ -15529,6 +15529,7 @@ async fn connect_to_node_with_credentials(
 }
 
 #[when(expr = "these NSPL commands are executed through the client on node {string}")]
+#[when(expr = "these Plexus statements are executed through the client on node {string}")]
 async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     world: &mut ScenarioWorld,
     node_id: String,
