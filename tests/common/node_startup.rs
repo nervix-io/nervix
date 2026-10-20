@@ -38,6 +38,10 @@
 //! outlasts. The budget bounds what the harness waits for, not what the operating system
 //! schedules: a runner that stops running the harness's own tasks for longer than an attempt
 //! delays the check that ends it, and the measured startups include such a runner.
+//!
+//! A restart with an armed fault selects [`StartupRetryPolicy::BindBeforeRuntime`] and shares
+//! one [`ATTEMPT_READINESS_BUDGET`] across its launches, cleanup and pauses. Only a typed occupied
+//! early listener permits another launch; a running node may already have consumed the fault.
 
 use std::{fmt, io, time::Duration};
 
@@ -178,10 +182,27 @@ pub(crate) enum StartupRetry {
     /// a peer that was not listening yet, or readiness that did not arrive in time.
     #[strum(serialize = "transient")]
     Transient(StartupPorts),
-    /// The node decided this outcome from its configuration, its stored state or its own code, so
-    /// the next launch repeats it.
+    /// A fresh launch would repeat the failure or could invalidate the scenario's armed fault.
     #[strum(serialize = "terminal")]
     Terminal,
+}
+
+/// Which failures can be retried without invalidating the scenario's startup fault.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StartupRetryPolicy {
+    /// Ordinary startup may recover transient initialization and readiness failures.
+    Transient,
+    /// An armed fault survives only an occupied early listener, before runtime initialization.
+    BindBeforeRuntime,
+}
+
+impl StartupRetryPolicy {
+    fn readiness_timeout(self) -> StartupRetry {
+        match self {
+            Self::Transient => StartupRetry::Transient(StartupPorts::All),
+            Self::BindBeforeRuntime => StartupRetry::Terminal,
+        }
+    }
 }
 
 /// Why one launch attempt did not produce a ready node.
@@ -194,35 +215,44 @@ pub(crate) enum AttemptFailure {
 }
 
 impl AttemptFailure {
-    /// Whether launching the node again could plausibly produce a different outcome.
-    pub(crate) fn retry(&self, cleanup: &AttemptCleanup) -> StartupRetry {
+    /// Whether this startup may launch again after its owned cleanup, preserving any armed fault.
+    pub(crate) fn retry(
+        &self,
+        cleanup: &AttemptCleanup,
+        policy: StartupRetryPolicy,
+    ) -> StartupRetry {
         match self {
             // Launching reads the harness's own configuration: the addresses it must parse, the
             // test certificate authority, the node's database directory. None of that changes
             // because the harness tried again.
             Self::Launch(_) => StartupRetry::Terminal,
-            Self::NotReady(error) => Self::readiness_retry(error.current_context(), cleanup),
+            Self::NotReady(error) => {
+                Self::readiness_retry(error.current_context(), cleanup, policy)
+            }
         }
     }
 
-    fn readiness_retry(error: &NodeStartupError, cleanup: &AttemptCleanup) -> StartupRetry {
+    fn readiness_retry(
+        error: &NodeStartupError,
+        cleanup: &AttemptCleanup,
+        policy: StartupRetryPolicy,
+    ) -> StartupRetry {
         match error.failure {
             // Joining the task during cleanup can reveal the initialization failure a pending
             // status request could not observe. A clean exit after our stop request is the
-            // expected cleanup of a readiness timeout, so that still permits a retry.
+            // expected cleanup of a readiness timeout; the policy decides whether that running
+            // node could already have consumed an armed fault.
             NodeStartupFailure::DeadlineExpired => match cleanup {
                 AttemptCleanup::Stopped(outcome) => match outcome.as_ref() {
-                    NodeTaskTerminalOutcome::CleanApplicationExit => {
-                        StartupRetry::Transient(StartupPorts::All)
-                    }
-                    outcome => Self::terminal_retry(outcome),
+                    NodeTaskTerminalOutcome::CleanApplicationExit => policy.readiness_timeout(),
+                    outcome => Self::terminal_retry(outcome, policy),
                 },
                 AttemptCleanup::NothingLaunched | AttemptCleanup::StillStopping => {
-                    StartupRetry::Transient(StartupPorts::All)
+                    policy.readiness_timeout()
                 }
             },
             NodeStartupFailure::TaskTerminated => match &error.task_state {
-                NodeTaskState::Terminal(outcome) => Self::terminal_retry(outcome),
+                NodeTaskState::Terminal(outcome) => Self::terminal_retry(outcome, policy),
                 // A task reported as unstarted, still running or left stopping did not terminate,
                 // so the harness has no ending to classify and must not launch over it.
                 NodeTaskState::NotStarted
@@ -232,10 +262,13 @@ impl AttemptFailure {
         }
     }
 
-    fn terminal_retry(outcome: &NodeTaskTerminalOutcome) -> StartupRetry {
+    fn terminal_retry(
+        outcome: &NodeTaskTerminalOutcome,
+        policy: StartupRetryPolicy,
+    ) -> StartupRetry {
         match outcome {
             NodeTaskTerminalOutcome::ApplicationError(error) => {
-                Self::application_retry(error.current_context())
+                Self::application_retry(error, policy)
             }
             // A clean exit observed by readiness is unexpected. The requested clean stop of a
             // timed-out task is handled by readiness_retry. Panics and cancellations always
@@ -246,26 +279,39 @@ impl AttemptFailure {
         }
     }
 
-    fn application_retry(error: &AppError) -> StartupRetry {
-        match error {
+    fn application_retry(error: &Report<AppError>, policy: StartupRetryPolicy) -> StartupRetry {
+        let ports = match error.current_context() {
             // The harness allocates ports from a pool it shares with every concurrent scenario and
             // with sibling worktrees running the same suite, so an address another process took
             // first is the one application error a fresh allocation resolves.
-            AppError::BindGrpcListenAddress => StartupRetry::Transient(StartupPorts::Grpc),
-            AppError::BindHttpListenAddress => StartupRetry::Transient(StartupPorts::Http),
-            AppError::BindHttpsListenAddress => StartupRetry::Transient(StartupPorts::Https),
-            AppError::BindObservabilityListenAddress => {
-                StartupRetry::Transient(StartupPorts::Observability)
-            }
+            AppError::BindGrpcListenAddress => StartupPorts::Grpc,
+            AppError::BindHttpListenAddress => StartupPorts::Http,
+            AppError::BindHttpsListenAddress => StartupPorts::Https,
+            AppError::BindObservabilityListenAddress => StartupPorts::Observability,
             AppError::BindWebConsoleListenAddress | AppError::BindWebConsoleHttpsListenAddress => {
-                StartupRetry::Transient(StartupPorts::WebConsole)
+                StartupPorts::WebConsole
             }
             // The interconnect transport binds its own listener while it starts.
-            AppError::StartInterconnect => StartupRetry::Transient(StartupPorts::Interconnect),
+            AppError::StartInterconnect => StartupPorts::Interconnect,
             // Every other application error is the node's decision about its configuration, its
             // stored state or its peers, and it holds for the next launch too.
-            _ => StartupRetry::Terminal,
+            _ => return StartupRetry::Terminal,
+        };
+        if let StartupRetryPolicy::BindBeforeRuntime = policy {
+            // Early server listeners bind before the application opens its stores or applies
+            // runtime changes. Interconnect initialization happens later, so even a bind failure
+            // there cannot establish that a scenario's armed fault is untouched.
+            if ports == StartupPorts::Interconnect {
+                return StartupRetry::Terminal;
+            }
+            let Some(cause) = error.downcast_ref::<io::Error>() else {
+                return StartupRetry::Terminal;
+            };
+            if cause.kind() != io::ErrorKind::AddrInUse {
+                return StartupRetry::Terminal;
+            }
         }
+        StartupRetry::Transient(ports)
     }
 }
 
@@ -367,7 +413,7 @@ impl fmt::Display for StartupAttempts {
 /// What ended a node's startup before it became ready.
 #[derive(Debug, Error)]
 pub(crate) enum StartupEnd {
-    #[error("the last attempt failed for a reason a fresh launch repeats")]
+    #[error("the last failure does not permit another launch")]
     TerminalFailure,
     #[error("every launch the attempt limit allows was spent")]
     AttemptsSpent,
@@ -395,6 +441,7 @@ pub(crate) struct NodeStartupExhausted {
 pub(crate) struct NodeStartup<'node> {
     node: &'node ClusterNodeName,
     budget: PhaseDeadline,
+    retry_policy: StartupRetryPolicy,
     attempts: Vec<FailedAttempt>,
 }
 
@@ -408,10 +455,12 @@ impl<'node> NodeStartup<'node> {
         node: &'node ClusterNodeName,
         target: &mut impl StartableNode,
         budget: PhaseDeadline,
+        retry_policy: StartupRetryPolicy,
     ) -> Result<(), Report<NodeStartupExhausted>> {
         let startup = Self {
             node,
             budget,
+            retry_policy,
             attempts: Vec::new(),
         };
         startup.run(target).await
@@ -435,7 +484,7 @@ impl<'node> NodeStartup<'node> {
                 Err(failure) => failure,
             };
             let cleanup = target.clean_up(self.budget).await;
-            let retry = failure.retry(&cleanup);
+            let retry = failure.retry(&cleanup, self.retry_policy);
             let still_stopping = matches!(cleanup, AttemptCleanup::StillStopping);
             self.record(attempt, failure, retry, cleanup);
 
