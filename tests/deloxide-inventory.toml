@@ -137,6 +137,7 @@ tags = [
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
+  "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
 ]
 target = "test:scenarios"
@@ -2493,6 +2494,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.mqtt-parallel-gather-at-quiesce",
+  "stress.mqtt-parallel-gather-at-quiesce",
   "scenario.sqs-receive-at-quiesce",
   "stress.sqs-receive-at-quiesce",
   "scenario.pulsar-finish-at-stop",
@@ -2686,6 +2689,26 @@ id = "stress.websocket-source-move"
 invariant = "A planned ownership handoff closes the former WebSocket session gracefully and the new owner delivers a batch."
 invocation = "stress-scenarios"
 scenario = "Moving a WebSocket ingestor closes its former session gracefully"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An entity hold that quiesces an MQTT ACK PARALLEL ingestor, and its release, each meeting a read that gathers a partial batch, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The MQTT client, the broker and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/mqtt_ingestion.feature"
+id = "scenario.mqtt-parallel-gather-at-quiesce"
+invariant = "A quiesce change that meets an MQTT ACK PARALLEL batch half gathered takes in its publishes at once, and every publish reaches the relay without waiting for the batch timeout, on one and three nodes."
+invocation = "scenarios"
+scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered reach the relay without waiting for the batch timeout"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces an MQTT ACK PARALLEL ingestor, and its release, each meeting a read that gathers a partial batch, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The MQTT client, the broker and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/mqtt_ingestion.feature"
+id = "stress.mqtt-parallel-gather-at-quiesce"
+invariant = "A quiesce change that meets an MQTT ACK PARALLEL batch half gathered takes in its publishes at once, and every publish reaches the relay without waiting for the batch timeout, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered reach the relay without waiting for the batch timeout"
 selections = ["deloxide-stress"]
 
 [[workload]]
