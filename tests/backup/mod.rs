@@ -763,10 +763,19 @@ async fn when_session_backs_up_the_cluster(world: &mut ScenarioWorld, node: Stri
         .open_session(&node, &world.domain)
         .await
         .expect("the scenario's session opens");
-    let outcome = session
-        .run_command_result("BACKUP CLUSTER TO 'unused.nvxb';")
+    let query = "BACKUP CLUSTER TO 'unused.nvxb';";
+    let mut outcome = session
+        .run_command_result(query)
         .await
         .expect("the backup is answered");
+    if outcome_awaits_leader(&outcome) {
+        let reference = outcome.execution_reference.clone();
+        let scope = session.scope();
+        let routes = world.cluster().leader_routes();
+        let learned =
+            learn_command_outcome(&routes, &scope, query, reference.as_str(), outcome).await;
+        outcome = learned.outcome;
+    }
     let summary = outcome
         .backup
         .as_deref()

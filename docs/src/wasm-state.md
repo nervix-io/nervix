@@ -87,7 +87,8 @@ and queued checkpoint writers cannot cross an installation namespace.
 The every-node checkpoint maintenance owner also reclaims restored chunks after ordinary,
 replica, handoff or recovery checkpoints replace their selected header, or after state purge.
 It retains the exact revision a selected segmented header names, and preexisting snapshot readers
-keep complete saves across deletion. [Backup And Restore](./backup-and-restore.md) owns the sweep's
+keep complete saves across deletion. [Backup And Restore
+Architecture](./backup-and-restore-architecture.md#restore-staging-maintenance) owns the sweep's
 bounded buffers, accounting, cancellation and separate database allocation limits.
 The replicated start gate remains closed until every node completes publication, even if the
 restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease

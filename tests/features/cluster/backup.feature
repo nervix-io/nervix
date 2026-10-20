@@ -961,7 +961,7 @@ Feature: Configuration backup into a public archive
     And a node other than placeholder "leader" is saved as placeholder "follower"
     When the CLI backs up "cluster" from node "{{follower}}" into "follower.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When the session backs up the cluster on node "{{leader}}" without downloading its archive
+    When the session backs up the cluster on node "{{follower}}" without downloading its archive
     And the backup's archive is downloaded from node "{{follower}}"
     Then the download is redirected to node "{{leader}}"
 

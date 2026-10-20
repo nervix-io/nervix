@@ -255,6 +255,22 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   placements and revisions, failure before and after each durability and authority boundary,
   stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
   duplicate windows, observability, and limits.
+- [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md) is the
+  authoritative architecture reference for backup and restore. Any change to the archive crate or
+  the archive format, to how a backup cuts a domain or captures, stages, transfers, assembles,
+  retains or serves state, to how a restore receives, prepares, plans, admits, records or resumes
+  its steps, or to how restored state is converted, staged, published, gated, reclaimed or resumed
+  must keep that chapter current in the same change. Its scope includes ownership by layer, the
+  archive contract and its compatibility rules, cut kinds, the quiesced cut protocol and its capture
+  fence, owner capture, the capture and installation interconnect operations, transfer, assembly
+  and retention, restore intake, preparation and planning, admission and durable step progress, the
+  installation authority, staging, complete-generation publication and the installation gate,
+  generation storage, restore staging maintenance and its quota, lifecycle resumption, state
+  placement identities, failure semantics at every boundary, guarantees and limits, observability,
+  and qualification evidence. [Backup And Restore](docs/src/backup-and-restore.md) remains the owner
+  of the statements, the command-line and console surfaces, the archive's section and record tables,
+  the operator limits and the reported failures; consensus storage, the interconnect, data-plane
+  concurrency, WASM state and shutdown keep their own contracts.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph

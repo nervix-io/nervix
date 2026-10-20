@@ -1594,6 +1594,12 @@ only endpoints of that type. An endpoint of the other type is refused when the s
 applied, with a message such as `requires a TYPE HTTP endpoint, but endpoint 'stream' is TYPE
 WEBSOCKETS`. Both heads take the same body.
 
+Both endpoint entities declare `MODE NO ACK`: a successful response confirms admission, without
+waiting for downstream acknowledgement. Their body takes no `ACK TIMEOUT`, `RETRY POLICY`, or
+`BATCH` clause. Transport headers are available through `read_header` and `read_headers`; there is
+no typed request metadata namespace. Both ingestors execute on every cluster node and are excluded
+from placement members and placement-reference completion.
+
 Quiesce is enforced independently on every serving node. With `REJECT`, HTTP requests and new
 WebSocket upgrades receive 503, while established WebSockets close with 1013. With `BUFFER`, bodies
 that fit receive 202 and drain after resume; a full buffer rejects further intake without discarding
