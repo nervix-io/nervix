@@ -151,6 +151,9 @@ pub(super) struct SourceStart {
     pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
     /// The connector's name in the instance lifecycle log.
     pub(super) connector_label: &'static str,
+    /// The originator a domain-offset Kafka source commits through, which schedule application
+    /// replaces while the ingestor keeps running here; absent for every other source.
+    pub(super) domain_offsets: Option<StdArc<KafkaOffsetOriginatorSlot>>,
 }
 
 /// One broker source ready to open: its connector plan and the host settings it runs under.
@@ -229,6 +232,7 @@ impl<P> BrokerSourceStart<'_, P> {
             unacknowledged_admission,
             client_mounts,
             connector_label,
+            domain_offsets: None,
         })
     }
 }
@@ -320,6 +324,7 @@ impl<P> PacedSourceStart<P> {
             unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts,
             connector_label,
+            domain_offsets: None,
         })
     }
 }
@@ -367,6 +372,7 @@ impl Runtime {
             unacknowledged_admission,
             client_mounts,
             connector_label,
+            domain_offsets,
         } = source;
         let IngestorDependencies {
             handles,
@@ -448,6 +454,7 @@ impl Runtime {
                 shutdown: shutdown_tx,
                 branched: branched_runtime.runtimes,
                 tasks,
+                domain_offsets,
             },
         );
     }

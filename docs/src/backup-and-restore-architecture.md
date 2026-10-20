@@ -785,6 +785,12 @@ They hold within these limits:
   [Cluster Interconnect](./interconnect.md) defines both transfers.
 - **Dry runs.** A dry run reports no skipped-state warnings, because they are derived from the schedule
   an applied restore publishes.
+- **Faults inside publication.** The external chaos entries fault a restore while it stages, which a
+  delay on the coordinating leader's links holds open in the release image. A fault inside
+  publication itself needs a testing hook, so the Cucumber scenarios that pause a restore before
+  state publication carry that boundary, and the refusal of a delayed coordinator's request is
+  judged in a real process only by the traffic of the domain it would have replaced: the image
+  exposes no publication generation and no count of refused requests.
 
 ## Observability
 
@@ -816,7 +822,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Staging quota and maintenance | `backup_staging.feature`, the state store's storage regressions, the kept-measurement property, and the consensus Shuttle check that reclamation holds its revision through queued installation. |
 | Interconnect operations | The Turmoil scenarios for a fenced section fetch across a partition, window sections above the bulk budget, a bounded inventory under a held link, and a restart during transfer, with their committed seeds; [Deterministic Interconnect Simulation](./interconnect-simulation.md) lists them. |
 | Tracked locks | The restore storage owner tests and the `@restore_installation` and `@backup_wait` scenarios in the Deloxide selections, with their `stress.` twins in the stress selections; [Data-Plane Concurrency](./data-plane-concurrency.md) records what the detector does and does not see. |
-| Real processes | The external chaos soak entries for backup under load, backup cycles, backup under owner crash, leader crash and partition, a rolling restart during a backup stream, and restore into a fresh cluster; [External Cluster Chaos](./cluster-chaos.md) defines them. |
+| Real processes | The external chaos soak entries for backup under load, backup cycles, backup under owner crash, leader crash and partition, a rolling restart during a backup stream, and restore into a fresh cluster; and the [restore faults](./cluster-chaos.md#restore-faults) held in staging through a SIGKILL of the coordinating leader, an isolation of that leader from its peers and the client, a SIGKILL of a state owner, and a SIGKILL of a state owner while a restore whose coordinator and client were lost awaits its failure. Each restore completes under its execution reference or fails with `START` refused and a restore under another name completes; a completed restore equals its archive, a domain resumed after its coordinator's isolation consumes exactly from its archived offset, and staging returns to zero on every node through completed sweeps. The [staging volume](./cluster-chaos.md#restore-staging-volume) entry measures three concurrent restores of guest saves above the bulk budget. [External Cluster Chaos](./cluster-chaos.md) defines them. |
 
 ### Representation Checks
 
@@ -925,4 +931,9 @@ LLVM tools the toolchain declares, and patch coverage is advisory. The measured 
 archive throughput and restore times, with their commands and image identities, are recorded on
 [Backup 07](https://app.clickup.com/t/86bc8dbxv); the freeze grows with a domain's branches and
 state, from a tenth of a second for a few branches to about three seconds for a thousand branches on
-one node and seven on three.
+one node and seven on three. The restore fault campaign and the staging volume measurements, with
+their runs, commands and image identities, are recorded on [Backup: Qualify restores through a
+leader crash, a partitioned coordinator, an owner restart and concurrent staging
+volume](https://app.clickup.com/t/86bckvq84): three concurrent restores of 40 MiB guest saves staged
+at most about 0.3 GB on a state owner, finished in under 20 seconds each on a GitHub-hosted worker,
+and left no unpublished staging five seconds after they ended.

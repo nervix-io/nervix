@@ -180,7 +180,11 @@ same desired revision rather than reconstructing one from live tasks.
 The swap sequence fences delivery before stopping an owner, prepares new local placement and
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
-change keeps its task; a moved owner rebinds only its affected runtime and state placement.
+change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
+takes the originator its domain offsets' new binding issued: a change that only replaces a replica
+of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
+keeps the originator it last held, which every later binding refuses.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
