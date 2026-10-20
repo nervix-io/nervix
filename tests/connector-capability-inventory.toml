@@ -2,13 +2,14 @@
 #
 # A capability is something a statement can make an entity do once it runs: deliver or publish in
 # one declared mode, write one declared option or make one choice of it, read one typed metadata
-# field, publish in batches, or set one envelope clause or property. Each entity declares its
-# capabilities in the vocabulary, beside everything else a statement can say about it, and
-# `just validate-connector-capabilities`, which `just validate` runs, holds this file to those
-# declarations: every declared capability names at least one scenario that observes it, every
-# entry names a capability its entity declares, once, and every scenario an entry names exists in
-# its feature file. A scenario is named exactly as its `Scenario:` or `Scenario Outline:` line
-# writes it.
+# field, publish in batches, set one envelope clause or property, or, as `STALLED PEER <key>`,
+# report a peer that stops answering within the client deadline key that bounds the wait. Each
+# entity declares its capabilities in the vocabulary, beside everything else a statement can say
+# about it, and `just validate-connector-capabilities`, which `just validate` runs, holds this file
+# to those declarations: every declared capability names at least one scenario that observes it,
+# every entry names a capability its entity declares, once, and every scenario an entry names
+# exists in its feature file. A scenario is named exactly as its `Scenario:` or `Scenario Outline:`
+# line writes it.
 #
 # A change that declares a new capability registers the scenario that observes it in the same
 # change; one that renames or moves a registered scenario updates its entry. Quiesce modes and
@@ -28,6 +29,13 @@ capability = "MODE ACK"
 entity = "CLICKHOUSE TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/clickhouse_emission.feature", scenario = "ClickHouse emitter inserts mapped rows from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ClickHouse emitter whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -87,6 +95,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter_transport.feature", scenario = "A request whose attempts time out stays pending and reported, releases each timed-out connection, and is delivered once the endpoint answers" },
+]
+
+[[capability]]
 capability = "EVERY"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
@@ -98,6 +113,13 @@ capability = "MODE NO ACK"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling resolves its endpoint with the node DNS fixture" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An HTTP polling ingestor whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -437,6 +459,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "ATTRIBUTES"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
@@ -493,6 +522,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "ATTRIBUTES"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
@@ -525,6 +561,13 @@ capability = "SCOPE"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -574,6 +617,13 @@ capability = "QUERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Prometheus ingestor whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -661,6 +711,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
@@ -672,6 +729,13 @@ capability = "MODE ACK SEQUENTIAL"
 entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK SEQUENTIAL delivers again a delivery acknowledged after its connection was lost" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
 ]
 
 [[capability]]
@@ -689,10 +753,24 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Redis emitter whose server never answers is reported within connect_timeout_ms" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "REDIS PUBSUB INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "Redis ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Redis subscription whose server never answers is reported within connect_timeout_ms" },
 ]
 
 [[capability]]
@@ -707,6 +785,13 @@ capability = "MODE ACK"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/sentry_emission.feature", scenario = "Sentry emitter publishes codec JSON as authenticated event envelopes" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Sentry emitter whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -745,6 +830,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An SQS emitter whose service stops answering is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
@@ -773,6 +865,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
@@ -791,6 +890,13 @@ capability = "MODE NO ACK"
 entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_client_ingestion.feature", scenario = "Websocket client ingestor connects to a remote endpoint and delivers a JSON payload" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms" },
 ]
 
 [[capability]]

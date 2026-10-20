@@ -42,7 +42,7 @@ use std::{io, time::Duration};
 
 use error_stack::Report;
 use nervix_dns::{
-    ConnectionBudget, DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver,
+    DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, LookupShare, OperationBudget,
 };
 use nervix_primitives::{net::TcpStream, time::timeout};
 use rumqttc::{ConnectionError, MqttOptions, NetworkOptions};
@@ -109,7 +109,7 @@ impl MqttDialer {
     /// The driver names what it dials as `host:port` and leaves an IPv6 literal unbracketed, a
     /// form the URL grammar cannot read, so the port is what follows the last colon.
     async fn dial(&self, authority: &str, network: NetworkOptions) -> io::Result<TcpStream> {
-        let budget = ConnectionBudget::start(self.budget);
+        let budget = OperationBudget::start(self.budget, LookupShare::Whole);
         let Some((host, port)) = authority.rsplit_once(':') else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -122,7 +122,7 @@ impl MqttDialer {
                 format!("the MQTT driver asked to dial '{authority}', whose port is not a number"),
             ));
         };
-        let resolved = self.dns.resolve(host, port, budget.remaining()).await;
+        let resolved = self.dns.resolve(host, port, budget.lookup()).await;
         let addresses = match resolved {
             Ok(addresses) => addresses,
             Err(report) => return Err(io::Error::other(DnsLookupReport::from(report))),

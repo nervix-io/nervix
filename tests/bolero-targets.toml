@@ -3022,3 +3022,18 @@ random_iterations = 256
 source = "src/application/describe_output_properties.rs"
 test = "application::describe_output::properties::bolero_ingestor_describe_reports_round_trip"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/dns/src/__fuzz__/dial__tests__bolero_operation_budget_shares_never_outgrow_what_is_left/corpus"
+domain_version = 1
+features = []
+id = "dns-operation-budget"
+invariant = "An operation budget never grows back as time passes, what is left of it is the total less the elapsed time and never less than nothing, the lookup's share never outlives what is left or its own bound, and the equal shares each address attempt takes of what is left together never outlast the budget or waste a nanosecond per answer."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-dns"
+random_iterations = 256
+source = "crates/dns/src/dial_tests.rs"
+test = "dial::tests::bolero_operation_budget_shares_never_outgrow_what_is_left"
+test_target = "lib"

@@ -539,8 +539,8 @@ runtime that could not be created, or a failed AMQP handshake, each naming the b
 is involved. The source keeps it beneath its connect and resume contexts, so `DESCRIBE INGESTOR`
 shows the deepest cause, such as the resolver's own lookup error. The sink changes it into a
 configuration failure for an invalid address or CA file and an initialization failure otherwise,
-leading with the connection error's message, which `DESCRIBE EMITTER` shows. Neither attaches
-credentials from the address.
+leading with the connection error's chain, down to a `connect_timeout_ms` it ran out of, which
+`DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
 A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
 broker's own reason, which the sink reads from its connection. A refusal of a message body larger
@@ -565,6 +565,19 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 `RedisPubSubSourceError::Resolve` and `SourceError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
+
+A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
+`DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
+bound, beneath the connector's own context: `RabbitMqConnectError::Unreachable` or `TlsHandshake`
+for a broker connection, `RedisClientError::Connect` for a new pool connection,
+`SinkPublishError::Publish` for a pool checkout, `RedisPubSubSourceError::NotEstablished` or
+`Subscribe` for a subscription, `SinkStartError::Initialize` for a Syslog sender and
+`SourceError::Resume` for a WebSocket connection. `DESCRIBE INGESTOR` shows it as the deepest cause.
+An emitter shows the message its sink attached last, so a Redis or Syslog sink attaches the
+deadline's message after its other attachments, and a RabbitMQ sink attaches its connection
+failure's whole chain. A deadline key whose value breaks the vocabulary's rule is
+`ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
+and each connector reports it as a configuration failure.
 
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the

@@ -14,12 +14,16 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
@@ -84,6 +88,100 @@ pub struct KafkaTopicSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
+const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages librdkafka prefetches",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver(
+                "queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536",
+            ),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection setup: TCP, TLS and SASL",
+            bound: WaitBound::Driver("socket.connection.setup.timeout.ms, 30 s"),
+        },
+        DeclaredWait {
+            wait: "a fetch",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s"),
+        },
+        DeclaredWait {
+            wait: "a consumer-group commit under ACK",
+            bound: WaitBound::Fixed(Duration::from_secs(30)),
+        },
+        DeclaredWait {
+            wait: "offset lookups, watermarks and seeks",
+            bound: WaitBound::Fixed(Duration::from_secs(5)),
+        },
+        DeclaredWait {
+            wait: "subscribe, assign and unsubscribe",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[
+        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "receive.message.max.bytes 100000000",
+    ],
+};
+
+/// What the connector of a KAFKA TOPIC emitter holds and how long it waits.
+const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "records the producer queues under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records the producer queues under NO ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::FailPublish,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records awaiting confirmation under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ACK PARALLEL MAX"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "a produce request",
+            bound: WaitBound::Driver("request.timeout.ms, 30 s"),
+        },
+        DeclaredWait {
+            wait: "delivery under NO ACK",
+            bound: WaitBound::Driver("message.timeout.ms, 300 s"),
+        },
+        DeclaredWait {
+            wait: "delivery under ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+    ],
+    driver_limits: &[
+        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "message.max.bytes 1000000",
+        "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
+         ON MESSAGE ERROR.",
+    ],
+};
+
 impl SourceEntity for KafkaTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -121,6 +219,7 @@ impl SourceEntity for KafkaTopicSource {
             },
             OptionDeclaration::INSTANCES,
         ],
+        bounds: KAFKA_SOURCE_BOUNDS,
     };
 }
 
@@ -234,6 +333,7 @@ impl SinkEntity for KafkaTopicSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: KAFKA_SINK_BOUNDS,
     };
 }
 

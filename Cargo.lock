@@ -7317,6 +7317,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "aws-smithy-runtime-api",
+ "bolero",
  "bytes",
  "error-stack",
  "hickory-resolver 0.26.3",

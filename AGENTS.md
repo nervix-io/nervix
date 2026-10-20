@@ -373,6 +373,14 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   encoded-size measure has a bounded Bolero property registered for ordinary and fuzz execution;
   shared implementations keep their properties with their owner. Unit tests do not replace
   required public scenarios or concurrency evidence.
+- Every buffer a connector holds between its transport and the host is declared in its entity's
+  `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
+  unbounded ones included. `timeout_ms` and `connect_timeout_ms` keep the one meaning the
+  contract gives them and are read through `ConfiguredDeadline`; no driver call that parks its thread
+  runs on an asynchronous worker; and every deadline key an entity's waits name has its
+  `STALLED PEER` scenario in the capability inventory.
+  [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
+  its review checklist.
 - The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)
   owns the detailed requirements. Before closing a connector epic, review landed parallel work
   against it and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
