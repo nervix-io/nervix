@@ -375,10 +375,10 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   required public scenarios or concurrency evidence.
 - Every buffer a connector holds between its transport and the host is declared in its entity's
   `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
-  unbounded ones included. `timeout_ms` and `connect_timeout_ms` keep the one meaning the
-  contract gives them and are read through `ConfiguredDeadline`; no driver call that parks its thread
-  runs on an asynchronous worker; and every deadline key an entity's waits name has its
-  `STALLED PEER` scenario in the capability inventory.
+  unbounded ones included. Each client deadline key, such as `timeout_ms` or `connect_timeout_ms`,
+  keeps the one meaning the contract gives it and is read through `ConfiguredDeadline`; no driver
+  call that parks its thread runs on an asynchronous worker; and every deadline key an entity's
+  waits name has its `STALLED PEER` scenario in the capability inventory.
   [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
   its review checklist.
 - The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)

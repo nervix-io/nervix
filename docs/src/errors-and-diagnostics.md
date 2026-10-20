@@ -579,6 +579,16 @@ failure's whole chain. A deadline key whose value breaks the vocabulary's rule i
 `ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
 and each connector reports it as a configuration failure.
 
+A Syslog frame write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
+`SinkPublishError::Publish`, and the sink attaches the deadline's message last, so
+`DESCRIBE EMITTER` leads with it; the emitter rebuilds its connection and retries on its policy. A Syslog
+listener's connection whose TLS handshake runs out of `connect_timeout_ms`, or which sends nothing
+for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's connection failure.
+That failure closes only the connection and is logged at debug level; it is never the ingestor's
+transient error. A Syslog client that sets a deadline key its direction and protocol never wait on
+is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
+applies to.
+
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
 driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the

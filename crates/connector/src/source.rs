@@ -172,6 +172,12 @@ pub enum SourceBatch<M> {
     Interrupted {
         gathered: Vec<M>,
     },
+    /// The read took `payloads` payloads from its transport that exceed the size bound of the
+    /// source's client, and dropped each of them alone, leaving the transport's next payload
+    /// intact. The host counts them and reads again at once.
+    Oversized {
+        payloads: NonZeroUsize,
+    },
     ResumeRequired,
     Closed,
 }
@@ -495,6 +501,8 @@ pub trait SourceHostServices: Send + 'static {
     fn handle_ack_failure(&self, reason: String);
     /// Counts positions the host discarded after a reconnect because the broker redelivers them.
     fn record_transport_redeliveries(&self, positions: usize);
+    /// Counts payloads the source dropped because they exceed the size bound of its client.
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize);
     /// Reports that the source stopped before its transport confirmed `positions` it had read,
     /// which the transport presents again by its own redelivery contract.
     fn record_unconfirmed_stop(&self, positions: usize);
@@ -580,6 +588,10 @@ impl SourceHost {
 
     pub fn record_transport_redeliveries(&self, positions: usize) {
         self.services.record_transport_redeliveries(positions);
+    }
+
+    pub fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        self.services.record_oversized_payloads(payloads);
     }
 
     pub fn record_unconfirmed_stop(&self, positions: usize) {

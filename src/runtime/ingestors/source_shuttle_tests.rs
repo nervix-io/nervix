@@ -304,6 +304,9 @@ impl SourceHostServices for ChannelHost {
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a channel source without positions discarded {positions} after a reconnect");
     }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a channel source whose payloads all fit dropped {payloads} for their size");
+    }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("a channel source without positions left {positions} unconfirmed");
     }
@@ -807,6 +810,9 @@ impl SourceHostServices for GraphHost {
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check source discarded {positions} positions after a reconnect");
     }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check source whose payloads all fit dropped {payloads} for their size");
+    }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("the check's source closes on its own, but {positions} positions were left");
     }
@@ -1025,6 +1031,9 @@ impl SourceHostServices for RefusingGraphHost {
     }
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check source discarded {positions} positions after a reconnect");
+    }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check source whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("the check's source closes on its own, but {positions} positions were left");

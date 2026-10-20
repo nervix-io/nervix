@@ -989,10 +989,11 @@ TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name 
 address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
 milliseconds.
 
-`HTTP`, `SENTRY`, `OTEL`, `SQS` and `CLICKHOUSE` clients read `timeout_ms`; an `HTTP` request
-emitter's client requires it. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and
-allow 30 seconds when it is left out; a `REDIS` command pool also waits no longer than that to check
-out a connection. A `RABBITMQ` client's deadline covers resolving the broker, the address attempts
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE` and `SYSLOG` clients read `timeout_ms`; an `HTTP`
+request emitter's client requires it, and a `SYSLOG` emitter's client bounds writing and flushing
+each frame by it. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and allow 30
+seconds when it is left out; a `REDIS` command pool also waits no longer than that to check out a
+connection. A `RABBITMQ` client's deadline covers resolving the broker, the address attempts
 and TLS; the AMQP handshake that follows has no deadline. A request or connection that runs out of
 its deadline becomes the emitter's transient status, and the emitter retries on its policy; a
 connection that runs out of `connect_timeout_ms` is reported naming the key and its bound.
@@ -1436,9 +1437,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>writing and flushing a frame: `timeout_ms`; unbounded when omitted |
 | Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
 
 See the [SYSLOG COLLECTOR capability and mirror reference](connector-capabilities.md#syslog-collector-emit).
 <!-- connector-matrix:emit-syslog-collector:end -->

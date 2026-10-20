@@ -59,11 +59,17 @@ const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
     waits: &[
         DeclaredWait {
             wait: "the TLS handshake of an accepted connection",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
         },
         DeclaredWait {
             wait: "reading a connection",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::IdleTimeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &[
@@ -83,8 +89,11 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredWait {
-            wait: "a write",
-            bound: WaitBound::Unbounded,
+            wait: "writing and flushing a frame",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &[],

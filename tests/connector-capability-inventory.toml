@@ -872,6 +872,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Syslog collector whose server stops reading is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
@@ -883,6 +890,20 @@ capability = "metadata.peer_addr"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/syslog_support.feature", scenario = "Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "A Syslog TLS listener closes a client that stalls its handshake within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "A Syslog TCP listener closes a connection idle beyond idle_timeout_ms" },
 ]
 
 [[capability]]
