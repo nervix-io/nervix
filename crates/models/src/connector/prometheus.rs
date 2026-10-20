@@ -24,8 +24,8 @@ use url::Url;
 
 use super::{configured_client::configured_client, entity_union::connector_sources};
 use crate::{
-    AcknowledgementConfirmation, ClientConfigEntry, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, DomainClockPeriod, HttpRequestTimeout, HttpRequestTimeoutError,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientDeadline, ClientDeadlineError,
+    ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod,
     IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PositionClass, SourceBody, SourceEntity,
     SourceMetadataScope, SourceReference, SourceReferenceKind,
@@ -55,7 +55,7 @@ configured_client!(Prometheus: unpooled, config Nervix, CreateClientPrometheus =
 pub enum PrometheusClientKey {
     /// The [`PrometheusApiRoot`] every query is sent beneath. Required.
     Addr,
-    /// The [`HttpRequestTimeout`] that bounds each query. Required.
+    /// The [`ClientDeadline`] that bounds each query. Required.
     TimeoutMs,
     /// A PEM certificate authority that HTTPS trusts in addition to the client's own roots.
     TlsCaFile,
@@ -82,7 +82,7 @@ pub enum PrometheusClientConfigError {
         "'{}' is not a usable request timeout: {issue}",
         PrometheusClientKey::TimeoutMs
     )]
-    InvalidTimeout { issue: HttpRequestTimeoutError },
+    InvalidTimeout { issue: ClientDeadlineError },
     #[error(
         "'{}' and '{}' must be set together",
         PrometheusClientKey::TlsCertFile,
@@ -173,7 +173,7 @@ impl PrometheusApiRoot {
                 key: PrometheusClientKey::TimeoutMs,
             }));
         };
-        if let Err(report) = HttpRequestTimeout::parse(timeout) {
+        if let Err(report) = ClientDeadline::parse(timeout) {
             let issue = *report.current_context();
             return Err(
                 report.change_context(PrometheusClientConfigError::InvalidTimeout { issue })
@@ -463,12 +463,12 @@ mod tests {
         assert_eq!(
             timeout.current_context(),
             &PrometheusClientConfigError::InvalidTimeout {
-                issue: HttpRequestTimeoutError::NotPositiveWholeMilliseconds,
+                issue: ClientDeadlineError::NotPositiveWholeMilliseconds,
             }
         );
         assert_eq!(
-            timeout.downcast_ref::<HttpRequestTimeoutError>(),
-            Some(&HttpRequestTimeoutError::NotPositiveWholeMilliseconds)
+            timeout.downcast_ref::<ClientDeadlineError>(),
+            Some(&ClientDeadlineError::NotPositiveWholeMilliseconds)
         );
     }
 
