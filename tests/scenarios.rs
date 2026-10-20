@@ -8956,34 +8956,37 @@ fn onnx_fixture_path(fixture: &str) -> PathBuf {
 
 /// Writes every generated ONNX model into a fresh resource directory for `node_id` and registers
 /// the directory under `placeholder`.
-fn place_onnx_fixture_resource_directory(
+async fn place_onnx_fixture_resource_directory(
     world: &mut ScenarioWorld,
     node_id: &str,
     placeholder: &str,
 ) -> PathBuf {
-    ensure_onnx_runtime_loaded();
-
     let base_dir = world
         .cluster()
         .node_base_dir(node_id)
         .expect("node base dir should exist");
     let resource_dir = base_dir.join("fixtures").join(placeholder);
-    if resource_dir.exists() {
-        std::fs::remove_dir_all(&resource_dir).expect("old fixture directory should be removed");
-    }
-    std::fs::create_dir_all(resource_dir.join("models"))
-        .expect("fixture model directory should be created");
-    for fixture in ONNX_FIXTURE_MODELS {
-        let source_path = onnx_fixture_path(fixture);
-        let destination_path = resource_dir.join("models").join(fixture);
-        std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
-            panic!(
-                "failed to copy ONNX fixture '{}' to '{}': {error}",
-                source_path.display(),
-                destination_path.display()
-            )
-        });
-    }
+    let resource_dir = crate::common::runner_offload::off_the_runner(move || {
+        ensure_onnx_runtime_loaded();
+        if resource_dir.exists() {
+            std::fs::remove_dir_all(&resource_dir).expect("the fixture directory can be recreated");
+        }
+        std::fs::create_dir_all(resource_dir.join("models"))
+            .expect("fixture model directory should be created");
+        for fixture in ONNX_FIXTURE_MODELS {
+            let source_path = onnx_fixture_path(fixture);
+            let destination_path = resource_dir.join("models").join(fixture);
+            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to copy ONNX fixture '{}' to '{}': {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+        resource_dir
+    })
+    .await;
 
     world
         .placeholders
@@ -8997,7 +9000,7 @@ async fn given_node_has_onnx_fixture_resource_directory(
     node_id: String,
     placeholder: String,
 ) {
-    place_onnx_fixture_resource_directory(world, &node_id, &placeholder);
+    place_onnx_fixture_resource_directory(world, &node_id, &placeholder).await;
 }
 
 #[given(
@@ -9011,16 +9014,19 @@ async fn given_node_has_onnx_fixture_resource_directory_with_replaced_model(
     relative_path: String,
     fixture: String,
 ) {
-    let resource_dir = place_onnx_fixture_resource_directory(world, &node_id, &placeholder);
+    let resource_dir = place_onnx_fixture_resource_directory(world, &node_id, &placeholder).await;
     let source_path = onnx_fixture_path(&fixture);
     let destination_path = resource_dir.join(&relative_path);
-    std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
-        panic!(
-            "failed to copy ONNX fixture '{}' over '{}': {error}",
-            source_path.display(),
-            destination_path.display()
-        )
-    });
+    crate::common::runner_offload::off_the_runner(move || {
+        std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to copy ONNX fixture '{}' over '{}': {error}",
+                source_path.display(),
+                destination_path.display()
+            )
+        });
+    })
+    .await;
 }
 
 #[given(expr = "node {string} has WASM processor fixture resource directory {string}")]
