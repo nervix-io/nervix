@@ -6,14 +6,16 @@
 //!   node-stop, phase-deadline, status-request, port-pool, process-cluster convergence,
 //!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
 //!   materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable, process-observation and process-report regressions with Rust's test
-//!   runner, and the stand-in nodes, clients, images and processes those regressions talk to.
+//!   server-executable, stallable-TCP-proxy, process-observation and process-report regressions
+//!   with Rust's test runner, and the stand-in nodes, clients, images and processes those
+//!   regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, process-cluster convergence, cluster-teardown, scenario-phase, suite-watchdog,
 //!   Redis-client, HTTP-receiver, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable, process-observation, process-report and materialized-state diagnostic
-//!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
-//!   client wire session protocol the stand-in nodes answer status requests with.
+//!   server-executable, stallable-TCP-proxy, process-observation, process-report and
+//!   materialized-state diagnostic harness modules, the product's shutdown coordinator a stopping
+//!   node is read through, and the client wire session protocol the stand-in nodes answer status
+//!   requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -82,6 +84,10 @@ mod scenario_schedule;
 mod server_executable;
 #[path = "common/server_executable_tests.rs"]
 mod server_executable_tests;
+#[path = "common/stallable_tcp_proxy.rs"]
+mod stallable_tcp_proxy;
+#[path = "common/stallable_tcp_proxy_tests.rs"]
+mod stallable_tcp_proxy_tests;
 #[path = "common/status_request.rs"]
 mod status_request;
 #[path = "common/suite_watchdog.rs"]
