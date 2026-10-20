@@ -126,6 +126,7 @@ use crate::common::{
     kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
+    node_startup::StartupPorts,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
@@ -498,6 +499,9 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    /// The listeners whose ports another socket is to hold from the moment the next server process,
+    /// or the bootstrap member of the next real-process cluster, draws them.
+    server_process_held_ports: Option<StartupPorts>,
     deadlock_report: Option<deadlock_reports::ReportFixture>,
     node_trace_export: Option<NodeTraceExport>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
@@ -628,6 +632,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_interconnect_attempt_error,
             )
             .field("server_process", &self.server_process)
+            .field("server_process_held_ports", &self.server_process_held_ports)
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
             .field("last_server_signal_at", &self.last_server_signal_at)
@@ -2841,8 +2846,66 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
 }
 
 #[given("a nervix-server process is started")]
+#[when("a nervix-server process is started")]
 async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
     start_ready_server_process(world, &[]).await;
+}
+
+/// The listeners a step names by the name the fixture reports them under.
+fn startup_ports(listener: &str) -> StartupPorts {
+    listener
+        .parse()
+        .unwrap_or_else(|_| panic!("a server process has no '{listener}' listener"))
+}
+
+#[given(expr = "another socket holds the {string} port the next nervix-server process draws")]
+fn given_another_socket_holds_next_server_process_port(
+    world: &mut ScenarioWorld,
+    listener: String,
+) {
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "a scenario holds the ports of one server process start at a time"
+    );
+    world.server_process_held_ports = Some(startup_ports(&listener));
+}
+
+#[then(
+    expr = "the server process startup fails at once with exit status {int} without another launch"
+)]
+async fn then_server_process_startup_fails_without_another_launch(
+    world: &mut ScenarioWorld,
+    code: i32,
+) {
+    let process = world
+        .server_process
+        .as_mut()
+        .verified("the preceding step started a nervix-server process");
+    let Err(failure) = process.wait_until_ready().await else {
+        panic!("a nervix-server whose startup ends with an error must not become ready");
+    };
+    assert_eq!(
+        process.launches(),
+        1,
+        "a startup that ends for a reason other than a lost bind is not launched again: {failure}"
+    );
+    let expected = format!("nervix-server exited during startup with exit status {code}");
+    assert!(
+        failure.to_string().starts_with(&expected),
+        "the startup must fail with the process's own exit: {failure}"
+    );
+}
+
+#[then(
+    expr = "the server process was relaunched once because another socket held its {string} port"
+)]
+fn then_server_process_was_relaunched_off_held_port(world: &mut ScenarioWorld, listener: String) {
+    world
+        .server_process
+        .as_mut()
+        .verified("the preceding step started a nervix-server process")
+        .verify_one_relaunch_off_held_ports(startup_ports(&listener))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[given(
@@ -2857,6 +2920,10 @@ async fn given_server_process_cluster_is_started(
     assert!(
         world.server_process_cluster.is_none(),
         "a scenario starts at most one real-process cluster"
+    );
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "this real-process cluster start holds no ports"
     );
     initialize_scenario_identity(world);
     let options = [
@@ -3174,9 +3241,12 @@ async fn start_ready_server_process_with_launch(
         "a scenario starts at most one nervix-server process"
     );
     initialize_scenario_identity(world);
-    let mut process = ServerProcess::start(launch, options)
-        .await
-        .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
+    let started = match world.server_process_held_ports.take() {
+        Some(held) => ServerProcess::start_holding(launch, options, held).await,
+        None => ServerProcess::start(launch, options).await,
+    };
+    let mut process =
+        started.unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
         .await
@@ -3227,6 +3297,10 @@ async fn start_server_process_without_waiting(
     assert!(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
+    );
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "a server process started without waiting for readiness holds no ports"
     );
     let process = ServerProcess::start(launch, options)
         .await
