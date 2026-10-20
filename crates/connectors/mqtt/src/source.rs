@@ -24,6 +24,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
@@ -39,7 +40,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, ConnectorKind, MqttQos, MqttSession};
-use nervix_primitives::time::{Instant, sleep_until, timeout};
+use nervix_primitives::time::{Instant, timeout, timeout_at};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, DisconnectProperties, DisconnectReasonCode,
     Event, EventLoop, Incoming, MqttOptions, Outgoing, Publish, QoS, SessionMode,
@@ -206,6 +207,38 @@ pub struct MqttSourcePlan {
 struct MqttConnection {
     client: AsyncClient,
     eventloop: EventLoop,
+}
+
+/// The publishes a source instance reads from its broker connection: the event loop of its
+/// client, and a fake event loop in the checks of how a read meets the host's cancellation.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "each steady poll of a source's read takes its publishes through its connection"
+    )
+)]
+trait PublishRead: Send {
+    /// Polls the connection until it yields its next publish.
+    fn next_publish(&mut self) -> impl Future<Output = MqttSourceResult<Publish>> + Send;
+}
+
+impl PublishRead for MqttConnection {
+    fn next_publish(&mut self) -> impl Future<Output = MqttSourceResult<Publish>> + Send {
+        async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                match self.eventloop.poll().await {
+                    Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
+                    Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
+                    Err(error) => {
+                        return Err(MqttConnectionError::report(error)
+                            .change_context(MqttSourceError::Receive));
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl MqttSourcePlan {
@@ -607,19 +640,60 @@ impl MqttSource {
         self.replay.clear();
     }
 
-    async fn next_publish(connection: &mut MqttConnection) -> MqttSourceResult<Publish> {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            match connection.eventloop.poll().await {
-                Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
-                Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
-                Err(error) => {
-                    return Err(
-                        MqttConnectionError::report(error).change_context(MqttSourceError::Receive)
-                    );
-                }
-            }
+    /// Reads one batch from `publishes`: its first publish, and under a batch timeout the
+    /// publishes that follow it, until the batch holds `request.max_messages` or the timeout,
+    /// counted from the first publish, passes.
+    ///
+    /// A read the host cancels while it waits for the batch's first publish ends at once, with
+    /// nothing gathered.
+    async fn read_batch<P: PublishRead>(
+        publishes: &mut P,
+        request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
+    ) -> MqttSourceResult<SourceBatch<MqttSourceMessage>> {
+        let Some(first) = cancellation
+            .unless_cancelled(publishes.next_publish())
+            .await
+        else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let first = first?;
+        let mut messages = Vec::with_capacity(request.max_messages.get());
+        messages.push(MqttSourceMessage::new(first));
+        if request.max_messages == NonZeroUsize::MIN {
+            return Ok(SourceBatch::Messages(messages));
         }
+        let Some(batch_timeout) = request.batch_timeout else {
+            return Ok(SourceBatch::Messages(messages));
+        };
+        let Some(deadline) = Instant::now().checked_add(batch_timeout) else {
+            return Err(Report::new(MqttSourceError::BatchDeadline));
+        };
+        let gathering = Self::gather(publishes, &mut messages, request.max_messages);
+        let gathered = timeout_at(deadline, gathering).await;
+        match gathered {
+            Ok(Ok(())) => Ok(SourceBatch::Messages(messages)),
+            Ok(Err(error)) => Err(error),
+            // The batch timeout passed: the batch holds every publish it gathered until then.
+            Err(_batch_timeout) => Ok(SourceBatch::Messages(messages)),
+        }
+    }
+
+    /// Takes the publishes that follow a batch's first into `messages`, until the batch holds
+    /// `max_messages`.
+    async fn gather<P: PublishRead>(
+        publishes: &mut P,
+        messages: &mut Vec<MqttSourceMessage>,
+        max_messages: NonZeroUsize,
+    ) -> MqttSourceResult<()> {
+        while messages.len() < max_messages.get() {
+            nervix_primitives::task::consume_budget().await;
+            let publish = publishes.next_publish().await?;
+            messages.push(MqttSourceMessage::new(publish));
+        }
+        Ok(())
     }
 
     fn replayed_batch(&mut self, max_messages: NonZeroUsize) -> Option<Vec<MqttSourceMessage>> {
@@ -701,56 +775,17 @@ impl BrokerSourceConnector for MqttSource {
         let Some(connection) = self.connection.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let Some(first) = cancellation
-            .unless_cancelled(Self::next_publish(connection))
-            .await
-        else {
-            return Ok(SourceBatch::Interrupted {
-                gathered: Vec::new(),
-            });
-        };
-        let first = match first {
-            Ok(publish) => publish,
+        match Self::read_batch(connection, request, cancellation).await {
+            Ok(batch) => Ok(batch),
             Err(error) => {
-                self.disconnect();
-                return Err(error.change_context(SourceError::Read { connector: MQTT }));
-            }
-        };
-        let mut messages = Vec::with_capacity(request.max_messages.get());
-        messages.push(MqttSourceMessage::new(first));
-        if request.max_messages == NonZeroUsize::MIN {
-            return Ok(SourceBatch::Messages(messages));
-        }
-        let Some(batch_timeout) = request.batch_timeout else {
-            return Ok(SourceBatch::Messages(messages));
-        };
-        let Some(deadline) = Instant::now().checked_add(batch_timeout) else {
-            return Err(Report::new(MqttSourceError::BatchDeadline)
-                .change_context(SourceError::Read { connector: MQTT }));
-        };
-        // A cancellation that arrives while the batch gathers waits for the batch deadline, which
-        // bounds the gathering, so the publishes already taken still reach the host.
-        let mut failure = None;
-        while messages.len() < request.max_messages.get() {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::select! {
-                _ = sleep_until(deadline) => break,
-                next = Self::next_publish(connection) => {
-                    match next {
-                        Ok(publish) => messages.push(MqttSourceMessage::new(publish)),
-                        Err(error) => {
-                            failure = Some(error);
-                            break;
-                        }
-                    }
+                // A read that loses its connection drops it, and with it every publish the read
+                // took, which a persistent session delivers again once the source resumes.
+                if let MqttSourceError::Receive = error.current_context() {
+                    self.disconnect();
                 }
+                Err(error.change_context(SourceError::Read { connector: MQTT }))
             }
         }
-        if let Some(error) = failure {
-            self.disconnect();
-            return Err(error.change_context(SourceError::Read { connector: MQTT }));
-        }
-        Ok(SourceBatch::Messages(messages))
     }
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
