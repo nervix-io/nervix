@@ -651,12 +651,21 @@ has a replica slot, the live former owner is the first replica candidate after t
 
 `RELOCATE` differs from the others in one respect: it holds and commits its whole unit at once,
 because the unit is the plan the operator inspected and approved. A hold that cannot complete
-leaves the domain on its previous schedule and moves nothing. It holds the domain's exclusive
-alteration lock from planning through release, so it and a concurrent model change, placement
-change, or `DRAIN NODE` of the same domain are mutually exclusive. `RELOCATE` is immediate,
-non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and `DROP NODE`, because its plan
-depends on live cluster state that a queued transaction cannot pin. `DESCRIBE RELOCATION` is
-read-only content served by any cluster node. See
+leaves the domain on its previous schedule and moves nothing. `RELOCATE` holds the domain's
+exclusive alteration lock from planning through release, so it and a concurrent model change,
+placement change, or `DRAIN NODE` of the same domain are mutually exclusive.
+
+The leader refuses the relocation's schedule write when it lost its leadership or cannot confirm
+it. A leader whose lease lapsed cannot confirm it, and refuses a new write before appending it. Such
+a refusal leaves the domain on its previous schedule without failing the relocation. The relocation
+releases its hold and answers `OutcomeUnknown` with cause `LeadershipLost`, and its execution stays
+applying. The leader that resumes it, or a repetition under the same execution reference, plans the
+unit again from the schedule committed by then. Any other refusal of the write, such as a schedule
+that changed since planning, fails the relocation.
+
+`RELOCATE` is immediate, non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and
+`DROP NODE`, because its plan depends on live cluster state that a queued transaction cannot pin.
+`DESCRIBE RELOCATION` is read-only content served by any cluster node. See
 [Placement Policies](placement.md#relocating-runtime-nodes) for the statements, the selection
 forms, and the plan output.
 

@@ -392,6 +392,14 @@ immediately. Cordon and uncordon similarly return after the eligibility state is
 drain and node removal return after resulting ownership and schedules are usable on the remaining
 live set.
 
+The leader refuses the relocation's schedule write when it lost its leadership or cannot confirm it,
+for example because its lease lapsed. Such a relocation moves nothing and is not reported as failed.
+Its outcome stays unknown until the statement is repeated under the same execution reference,
+which a client that follows the session protocol does on its own, and the leader that serves the
+repetition plans the unit again from the schedule committed by then. A relocation whose plan went
+stale before its write, for example because the schedule changed, fails, and you retry the
+statement.
+
 The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one runtime node in a
 running domain, and `DYNAMIC` when the plan moves nothing or the domain is stopped. A stopped
 domain keeps its schedule, so its runtime nodes are relocated without a hold and execute on the

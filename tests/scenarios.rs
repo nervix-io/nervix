@@ -8662,6 +8662,30 @@ async fn then_broken_handoff_engagement_request_was_delivered(
     );
 }
 
+#[given(
+    expr = "the leader refuses the next relocation commit in domain {string} as a leader whose \
+            lease lapsed"
+)]
+async fn given_leader_refuses_next_relocation_commit(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world.fault_injection.refuse_next_relocation_commit(domain);
+}
+
+#[then(expr = "the refusal of the relocation commit in domain {string} was delivered")]
+async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .relocation_commit_refusal_delivered(&domain),
+        "no relocation commit in domain {domain} met the armed leader refusal"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -15739,6 +15763,7 @@ async fn connect_to_node_with_credentials(
 }
 
 #[when(expr = "these NSPL commands are executed through the client on node {string}")]
+#[when(expr = "these Plexus statements are executed through the client on node {string}")]
 async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     world: &mut ScenarioWorld,
     node_id: String,

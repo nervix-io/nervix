@@ -39,7 +39,10 @@ has expired, and a report that inspection no longer knows does not make its refe
 Finalization accepts a terminal command result. An `OutcomeUnknown`, leader redirect, or detached
 transaction leaves the execution applying and preserves the disposition and diagnostics for its
 current waiter. Reconciliation and repetition under the same reference resume that execution;
-an interrupted attempt never supplies a definitive failure for the execution ledger. A resumed
+an interrupted attempt never supplies a definitive failure for the execution ledger. An attempt
+whose proposal the leader refused because it lost its leadership, or could not confirm it, is
+interrupted in this sense. A leader whose lease lapsed refuses that way while it still leads. The
+attempt answers as a node that does not lead, never as a failure. A resumed
 transaction request whose transaction already finished answers each of its operations from what
 the finished transaction recorded: the same transaction for its opening, each append's recorded
 admission, and the transaction's terminal outcome for its commit or revert. The result it finalizes

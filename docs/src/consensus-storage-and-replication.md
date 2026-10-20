@@ -68,10 +68,13 @@ Consensus startup, proposal, and membership operations carry contextual error re
 Database open failures retain their I/O cause; Raft configuration, startup, and handler
 registration failures retain the failure beneath the startup context. A rejected proposal keeps
 its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
-storage, and other Raft write failures separately. A state-machine refusal remains a typed
-conflict, distinct from a storage or leadership failure. These classifications determine whether
-the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
-message to decide.
+storage, and other Raft write failures separately. A leader whose lease lapsed, because no quorum
+acknowledged a heartbeat or append it sent within the maximum election timeout, refuses a proposal
+before appending it with a redirect that names no leader. That refusal is leadership loss as well,
+although the node can still lead, and nothing of the refused proposal reached the log. A
+state-machine refusal remains a typed conflict, distinct from a storage or leadership failure.
+These classifications determine whether the control plane redirects, retries, or reports an
+uncertain failure; it does not parse the error message to decide.
 
 Transaction mutation checks also create local reports. Raft's applied response retains its
 existing serialized `TransactionMutationError` outcome, so report frames are local to the state
