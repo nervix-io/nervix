@@ -1264,9 +1264,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | queued |
-| Buffers | SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |
+| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
-| Driver limits | An incoming packet above 10 KiB ends the connection. |
+| Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
@@ -1284,6 +1284,14 @@ Delivery constraints:
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
+
+Every connection an MQTT ingestor opens advertises the incoming packet bound the table above
+declares as the Maximum Packet Size of its `CONNECT`. MQTT 5 requires the broker to discard a larger
+publish for this subscriber instead of sending it, so the publish never reaches the ingestor and a
+persistent session never presents it again; the broker's own metrics, not Nervix's, show that
+discard. A broker that sends a larger packet anyway is answered with a `DISCONNECT` whose reason is
+Packet too large, and the ingestor reports the packet's size and the bound as its transient error
+and an error event before it reconnects.
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with

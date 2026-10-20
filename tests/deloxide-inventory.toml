@@ -651,6 +651,16 @@ scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; the client's event loop, its flush notices and the proxy's asynchronous gate are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "scenario.mqtt-finish-at-stop"
+invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
+invocation = "scenarios"
+scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline are untracked."
 examples = 1
 feature = "tests/features/cluster/graceful_shutdown.feature"
@@ -1754,6 +1764,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. Source controls and domain teardown reach tracked locks; the client's event loop, its flush notices and the asynchronous fault gate remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "stress.mqtt-finish-at-stop"
+invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
+invocation = "stress-scenarios"
+scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: STOP on one and three nodes reaches the Pulsar sink's finish while one NO ACK record or a full 100-record producer queue is held behind a paused broker connection. Source controls and domain teardown reach tracked locks; the receipt futures and asynchronous fault gate remain untracked."
 examples = 4
 feature = "tests/features/runtime/pulsar_delivery.feature"
@@ -2521,6 +2541,8 @@ workloads = [
   "stress.sqs-receive-at-quiesce",
   "scenario.pulsar-finish-at-stop",
   "stress.pulsar-finish-at-stop",
+  "scenario.mqtt-finish-at-stop",
+  "stress.mqtt-finish-at-stop",
   "scenario.mqtt-session-drop",
   "scenario.mqtt-topic-replacement",
   "scenario.mqtt-endpoint-replacement",
