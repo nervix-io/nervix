@@ -72,6 +72,13 @@ name = "nervix-connector-kafka"
 
 [[package]]
 checks = [
+  "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
+  "source::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
+]
+name = "nervix-connector-sqs"
+
+[[package]]
+checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
