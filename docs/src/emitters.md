@@ -1050,11 +1050,18 @@ delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer tha
 milliseconds librdkafka holds refuses the emitter when it starts. `NO_ACK` is fire-and-forget after
 local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
 record into its producer queue and does not wait for a delivery report. A later broker error,
-producer timeout, crash, or process exit can therefore lose an accepted record. A full local queue
-is an infrastructure condition paced by the declared retry policy with backpressure. In `ACK` it
-ends the attempt without discarding an answer the broker already gave: the records the broker
-confirmed are delivered and are not sent again, and only the records still awaiting a report are
-retried. When the emitter stops, it flushes what the producer still queues, in both modes and
+producer timeout, crash, or process exit can therefore lose an accepted record. In `ACK`, a full
+local queue applies backpressure: Nervix waits for the oldest outstanding delivery report, settles
+it, and tries to enqueue the same refused record again. The effective confirmation window is
+limited by both `MAX` and the producer queue's record and byte capacities. If no outstanding report
+remains, Nervix waits for the native delivery callback to release its queue place, bounded by
+`ACK TIMEOUT`. An unanswered or failed delivery report still ends the attempt after settling every
+answer already given, and only unresolved records are retried. In `NO_ACK`, a temporarily full
+queue is an infrastructure condition paced by the declared retry policy. In either mode, a record
+whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
+`ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
+the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
+When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
 the node's graceful shutdown each give that flush their deadline. Records still awaiting their
 delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
@@ -2532,10 +2539,10 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
 `ATTACHED` waits only for that declared point and cannot make an earlier `NO_ACK` boundary durable.
-MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a message after Nervix observes
-client-side acceptance, and RabbitMQ `NO_ACK` after the broker's channel has taken it. `DETACHED`
-cannot turn a confirming mode into fire-and-forget inside the emitter; it changes only whether the
-result participates upstream.
+Kafka and Pulsar `NO_ACK`, MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a
+message after Nervix observes client-side acceptance, and RabbitMQ `NO_ACK` after the broker's
+channel has taken it. `DETACHED` cannot turn a confirming mode into fire-and-forget inside the
+emitter; it changes only whether the result participates upstream.
 
 Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
 graph. Downstream consumers and queries can use that key to suppress retries within that admitted

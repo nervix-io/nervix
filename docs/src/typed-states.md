@@ -23,6 +23,14 @@ and an absent failure means none has been observed. These are task-owned executi
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-a-sink) owns their completion semantics.
 
+The Kafka sink installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
+validates the client configuration. Its confirmation window's on-demand settlement returns
+`Some(SinkRecordId)` for an answered record and `None` for an empty window. A refused enqueue
+keeps the same record until admission succeeds or its wait fails. The optional admission deadline
+is absent while outstanding confirmation answers can provide progress, and is established only
+when a full native queue has no current-window answer left to await. These values are private,
+volatile execution state; the [connector contract](./connector-contract.md) owns their bounds.
+
 A forced-recovery destination that has not installed its execution schedule yet retains that
 absence as an installation wait, rather than inferring that its checkpoints are missing. The
 installation publication and application sequence establish the execution before its fingerprint
@@ -318,7 +326,7 @@ Archive preparation reads the first physical tar header into the backup crate's 
 That type carries the regular manifest entry's validated identity and bounded encoded length.
 Restore uses its length to admit manifest decoding before allocating owned archive values. The
 full archive reader uses the same boundary and then verifies the manifest and every section; see
-[Backup And Restore](./backup-and-restore.md).
+[Restore Intake And Preparation](./backup-and-restore-architecture.md#restore-intake-and-preparation).
 
 ## Archived Counts
 
@@ -666,7 +674,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`. Completion of the
+authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at
@@ -681,9 +689,10 @@ Runtime storage has distinct initial and restored namespaces; restore installati
 separate from guest-state generation and checkpoint revision. A current checkpoint is either an
 inline checkpoint or a segmented checkpoint with required revision, length and digest. A read
 uses one database view for namespace selection and payload data. A queued checkpoint job retains
-its selected namespace and validates that it remains current before writing. The storage format
-marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
-requires recreation rather than inventing a namespace for the stored keys.
+its selected namespace and validates that it remains current before writing. A storage format
+marker other than the current one fails explicitly, and so does a missing marker beside nonempty
+checkpoint storage; either requires recreation rather than inventing a namespace for the stored
+keys.
 
 A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
 retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose

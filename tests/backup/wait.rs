@@ -383,7 +383,8 @@ async fn then_archive_contains_delayed_cuts(world: &mut ScenarioWorld, file: Str
             .assured("the cut release follows its engagement");
         assert!(
             elapsed >= Duration::from_secs(seconds),
-            "the archive records the injected cut delay"
+            "the archive records the injected cut delay for {domain}: required at least \
+             {seconds}s, recorded {elapsed:?} between {engaged_at:?} and {released_at:?}"
         );
     }
 }

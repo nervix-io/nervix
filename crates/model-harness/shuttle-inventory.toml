@@ -60,6 +60,7 @@ checks = [
   "confirmation_window::shuttle_tests::shuttle_a_failure_settles_every_answer_its_broker_gave_before_it",
   "confirmation_window::shuttle_tests::shuttle_an_expired_oldest_settles_the_answers_given_before_it",
   "confirmation_window::shuttle_tests::shuttle_answers_racing_a_full_window_settle_each_record_exactly_once",
+  "confirmation_window::shuttle_tests::shuttle_driver_backpressure_settles_below_max_in_flight",
 ]
 name = "nervix-connector"
 
@@ -69,6 +70,13 @@ checks = [
   "delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
 ]
 name = "nervix-connector-kafka"
+
+[[package]]
+checks = [
+  "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
+  "source::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
+]
+name = "nervix-connector-mqtt"
 
 [[package]]
 checks = [

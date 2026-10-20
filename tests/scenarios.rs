@@ -8736,6 +8736,30 @@ async fn then_broken_handoff_engagement_request_was_delivered(
     );
 }
 
+#[given(
+    expr = "the leader refuses the next relocation commit in domain {string} as a leader whose \
+            lease lapsed"
+)]
+async fn given_leader_refuses_next_relocation_commit(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world.fault_injection.refuse_next_relocation_commit(domain);
+}
+
+#[then(expr = "the refusal of the relocation commit in domain {string} was delivered")]
+async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .relocation_commit_refusal_delivered(&domain),
+        "no relocation commit in domain {domain} met the armed leader refusal"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -11717,6 +11741,72 @@ async fn when_ownership_handoff_flush_pause_released(world: &mut ScenarioWorld, 
     world
         .fault_injection
         .release_ownership_handoff_flush_pause(&domain);
+}
+
+#[given(expr = "ownership handoff for domain {string} pauses before activation")]
+async fn given_ownership_handoff_activation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .pause_ownership_handoff_activation(domain);
+}
+
+/// The handoff reaches its activation pause only once its schedule is committed, which takes a
+/// gate engagement, a drain, a capture, a preparation and a consensus write on a loaded machine.
+#[then(expr = "the ownership handoff activation pause for domain {string} is reached")]
+async fn then_ownership_handoff_activation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_activation_pause(&domain),
+    )
+    .await
+    .expect("the handoff must commit its schedule and reach its activation pause");
+}
+
+#[when(expr = "the ownership handoff activation pause for domain {string} is released")]
+async fn when_ownership_handoff_activation_pause_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_activation_pause(&domain);
+}
+
+#[given(expr = "the graceful drain of node {string} pauses before it moves its work")]
+async fn given_graceful_drain_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_graceful_drain_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its graceful drain pause")]
+async fn then_graceful_drain_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_graceful_drain_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("the stopping node must advertise that it is terminating and reach its drain pause");
+}
+
+#[when(expr = "the graceful drain pause of node {string} is released")]
+async fn when_graceful_drain_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_graceful_drain_pause(&crate::common::cluster::node_name(&node_id));
 }
 
 #[given(expr = "ingestor {string} pauses inside dispatch")]
@@ -15747,6 +15837,7 @@ async fn connect_to_node_with_credentials(
 }
 
 #[when(expr = "these NSPL commands are executed through the client on node {string}")]
+#[when(expr = "these Plexus statements are executed through the client on node {string}")]
 async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     world: &mut ScenarioWorld,
     node_id: String,
@@ -17396,6 +17487,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
 }
 
 #[when("these NSPL commands fail")]
+#[when("these Plexus statements fail")]
 async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: &Step) {
     world.last_command_error = None;
     world.last_command_output = None;
@@ -22416,6 +22508,56 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
 }
 
 #[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} replicas \
+            without placeholder {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_replicas_without_placeholder(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    placeholder: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let replaced = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
+        .clone();
+    let placement = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} to have replicas without '{replaced}'. \
+             last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                let placed =
+                    scheduled_node_placement_from_status(&output, &world.domain, &kind, &name);
+                if let Some((_, replicas)) = placed
+                    && !replicas.is_empty()
+                    && !replicas.contains(&replaced.as_str())
+                {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        placement.pause(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
     expr = "node {string} observability path {string} eventually responds with {int} and {string}"
 )]
 async fn then_node_observability_path_eventually_responds(
@@ -26739,112 +26881,131 @@ async fn then_generator_occurrences_preserve_branches(
     );
     let branch_field = expand_placeholders(world, &branch_field);
     let timestamp_field = expand_placeholders(world, &timestamp_field);
-    let session = world
+    let mut session = world
         .active_session
-        .as_mut()
+        .take()
         .assured("an active session with subscription must exist");
     let deadline = Instant::now()
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
-    let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
-    let mut observed = Vec::new();
+    let mut last_payload = world.last_subscription_payload.take();
+    let (session, last_payload) =
+        crate::common::runner_observation::observe_off_the_runner(async move {
+            let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
+            let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
+            let mut observed = Vec::new();
 
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let complete_occurrences = branches_by_timestamp
-            .values()
-            .filter(|branches| *branches == &expected_branches)
-            .count();
-        if complete_occurrences >= expected_occurrences {
-            assert_eq!(
-                complete_occurrences, expected_occurrences,
-                "generator produced more complete occurrences than the assertion consumed"
-            );
-            return;
-        }
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out after observing {complete_occurrences} of {expected_occurrences} complete \
-             generator occurrences for branches {expected_branches:?}: {observed:?}"
-        );
-        let remaining = deadline
-            .checked_duration_since(now)
-            .verified("the deadline comparison above established remaining scenario time");
-        let event = match session.try_next_subscription(remaining).await {
-            Ok(Some(event)) => event,
-            Ok(None) => panic!(
-                "timed out after observing {complete_occurrences} of {expected_occurrences} \
-                 complete generator occurrences for branches {expected_branches:?}: {observed:?}"
-            ),
-            Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
-        };
-        let payload = event.payload;
-        let (key, payload_json) = if let Some((key, payload_json)) = payload.split_once(" payload=")
-        {
-            (key.strip_prefix("key="), payload_json)
-        } else {
-            (None, payload.as_str())
-        };
-        let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
-            Ok(parsed) => parsed,
-            Err(error) => panic!("subscription payload is not valid JSON: {error}"),
-        };
-        let Some(branch) = parsed.get(&branch_field) else {
-            panic!("subscription payload has no field '{branch_field}': {payload}");
-        };
-        let Some(branch) = branch.as_str() else {
-            panic!("subscription payload field '{branch_field}' is not a string: {payload}");
-        };
-        assert!(
-            expected_branches.contains(branch),
-            "generator produced unexpected branch '{branch}': {payload}"
-        );
-        if let Some(key) = key {
-            let key = match serde_json::from_str::<serde_json::Value>(key) {
-                Ok(key) => key,
-                Err(error) => panic!("subscription key is not valid JSON: {error}"),
-            };
-            assert_eq!(
-                key.get(&branch_field),
-                parsed.get(&branch_field),
-                "generator output did not preserve branch field '{branch_field}': {payload}"
-            );
-        }
-        let Some(timestamp) = parsed.get(&timestamp_field) else {
-            panic!("subscription payload has no field '{timestamp_field}': {payload}");
-        };
-        let Some(timestamp) = timestamp.as_str() else {
-            panic!("subscription payload field '{timestamp_field}' is not a string: {payload}");
-        };
-        let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-            Ok(timestamp) => timestamp,
-            Err(error) => {
-                panic!("subscription payload field '{timestamp_field}' is not RFC 3339: {error}")
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let complete_occurrences = branches_by_timestamp
+                    .values()
+                    .filter(|branches| *branches == &expected_branches)
+                    .count();
+                if complete_occurrences >= expected_occurrences {
+                    assert_eq!(
+                        complete_occurrences, expected_occurrences,
+                        "generator produced more complete occurrences than the assertion consumed"
+                    );
+                    return (session, last_payload);
+                }
+                let now = Instant::now();
+                assert!(
+                    now < deadline,
+                    "timed out after observing {complete_occurrences} of {expected_occurrences} \
+                     complete generator occurrences for branches {expected_branches:?}: \
+                     {observed:?}"
+                );
+                let remaining = deadline
+                    .checked_duration_since(now)
+                    .verified("the deadline comparison above established remaining scenario time");
+                let event = match session.try_next_subscription(remaining).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => panic!(
+                        "timed out after observing {complete_occurrences} of \
+                         {expected_occurrences} complete generator occurrences for branches \
+                         {expected_branches:?}: {observed:?}"
+                    ),
+                    Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
+                };
+                let payload = event.payload;
+                let (key, payload_json) =
+                    if let Some((key, payload_json)) = payload.split_once(" payload=") {
+                        (key.strip_prefix("key="), payload_json)
+                    } else {
+                        (None, payload.as_str())
+                    };
+                let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
+                    Ok(parsed) => parsed,
+                    Err(error) => panic!("subscription payload is not valid JSON: {error}"),
+                };
+                let Some(branch) = parsed.get(&branch_field) else {
+                    panic!("subscription payload has no field '{branch_field}': {payload}");
+                };
+                let Some(branch) = branch.as_str() else {
+                    panic!(
+                        "subscription payload field '{branch_field}' is not a string: {payload}"
+                    );
+                };
+                assert!(
+                    expected_branches.contains(branch),
+                    "generator produced unexpected branch '{branch}': {payload}"
+                );
+                if let Some(key) = key {
+                    let key = match serde_json::from_str::<serde_json::Value>(key) {
+                        Ok(key) => key,
+                        Err(error) => panic!("subscription key is not valid JSON: {error}"),
+                    };
+                    assert_eq!(
+                        key.get(&branch_field),
+                        parsed.get(&branch_field),
+                        "generator output did not preserve branch field '{branch_field}': \
+                         {payload}"
+                    );
+                }
+                let Some(timestamp) = parsed.get(&timestamp_field) else {
+                    panic!("subscription payload has no field '{timestamp_field}': {payload}");
+                };
+                let Some(timestamp) = timestamp.as_str() else {
+                    panic!(
+                        "subscription payload field '{timestamp_field}' is not a string: {payload}"
+                    );
+                };
+                let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
+                    Ok(timestamp) => timestamp,
+                    Err(error) => {
+                        panic!(
+                            "subscription payload field '{timestamp_field}' is not RFC 3339: \
+                             {error}"
+                        )
+                    }
+                };
+                let timestamp = timestamp
+                    .timestamp_nanos_opt()
+                    .assured("generator scenario timestamps fit signed Unix nanoseconds");
+                if let Some(previous) =
+                    latest_timestamp_by_branch.insert(branch.to_string(), timestamp)
+                {
+                    assert!(
+                        timestamp > previous,
+                        "generator timestamps for branch '{branch}' did not increase: \
+                         {observed:?}, {payload}"
+                    );
+                }
+                let inserted = branches_by_timestamp
+                    .entry(timestamp)
+                    .or_default()
+                    .insert(branch.to_string());
+                assert!(
+                    inserted,
+                    "generator repeated an occurrence for branch '{branch}': {payload}"
+                );
+                last_payload = Some(payload.clone());
+                observed.push(payload);
             }
-        };
-        let timestamp = timestamp
-            .timestamp_nanos_opt()
-            .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
-            assert!(
-                timestamp > previous,
-                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
-                 {payload}"
-            );
-        }
-        let inserted = branches_by_timestamp
-            .entry(timestamp)
-            .or_default()
-            .insert(branch.to_string());
-        assert!(
-            inserted,
-            "generator repeated an occurrence for branch '{branch}': {payload}"
-        );
-        world.last_subscription_payload = Some(payload.clone());
-        observed.push(payload);
-    }
+        })
+        .await;
+    world.active_session = Some(session);
+    world.last_subscription_payload = last_payload;
 }
 
 #[then(
@@ -29817,48 +29978,64 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let deadline = Instant::now() + duration;
-    let mut payload_counts = BTreeMap::new();
+    let mut observer = world
+        .broker_observer
+        .take()
+        .expect("a broker observer must exist before assertion");
+    let mut last_payload = world.last_broker_payload.take();
+    let mut last_headers = std::mem::take(&mut world.last_broker_headers);
+    struct BrokerObservation {
+        observer: BrokerObserver,
+        last_payload: Option<String>,
+        last_headers: Vec<(String, String)>,
+    }
+    let observation = crate::common::runner_observation::observe_off_the_runner(async move {
+        let mut payload_counts = BTreeMap::new();
 
-    for received in 0..count {
-        nervix_primitives::task::consume_budget().await;
-        let now = Instant::now();
+        for received in 0..count {
+            nervix_primitives::task::consume_budget().await;
+            let now = Instant::now();
+            assert!(
+                now < deadline,
+                "timed out after receiving {received} of {count} broker messages within \
+                 {duration:?}; observed payload counts: {payload_counts:?}"
+            );
+            let message = observer
+                .try_next_message(deadline.saturating_duration_since(now))
+                .await
+                .expect("failed while waiting for an exact broker message count")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "timed out after receiving {received} of {count} broker messages within \
+                         {duration:?}; observed payload counts: {payload_counts:?}"
+                    )
+                });
+            *payload_counts
+                .entry(message.payload.clone())
+                .or_insert(0usize) += 1;
+            last_payload = Some(message.payload);
+            last_headers = message.headers;
+        }
+
+        let duplicate = observer
+            .try_next_message(Duration::from_millis(500))
+            .await
+            .expect("failed while checking for a duplicate broker message");
         assert!(
-            now < deadline,
-            "timed out after receiving {received} of {count} broker messages within {duration:?}; \
+            duplicate.is_none(),
+            "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
              observed payload counts: {payload_counts:?}"
         );
-        let message = world
-            .broker_observer
-            .as_mut()
-            .expect("a broker observer must exist before assertion")
-            .try_next_message(deadline.saturating_duration_since(now))
-            .await
-            .expect("failed while waiting for an exact broker message count")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out after receiving {received} of {count} broker messages within \
-                     {duration:?}; observed payload counts: {payload_counts:?}"
-                )
-            });
-        *payload_counts
-            .entry(message.payload.clone())
-            .or_insert(0usize) += 1;
-        world.last_broker_payload = Some(message.payload);
-        world.last_broker_headers = message.headers;
-    }
-
-    let duplicate = world
-        .broker_observer
-        .as_mut()
-        .expect("a broker observer must exist before assertion")
-        .try_next_message(Duration::from_millis(500))
-        .await
-        .expect("failed while checking for a duplicate broker message");
-    assert!(
-        duplicate.is_none(),
-        "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
-         observed payload counts: {payload_counts:?}"
-    );
+        BrokerObservation {
+            observer,
+            last_payload,
+            last_headers,
+        }
+    })
+    .await;
+    world.broker_observer = Some(observation.observer);
+    world.last_broker_payload = observation.last_payload;
+    world.last_broker_headers = observation.last_headers;
 }
 
 /// Every docstring line is one exact payload. The broker must deliver exactly those payloads, in

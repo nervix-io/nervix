@@ -459,6 +459,11 @@ maximum and its refusal for an emitter that cannot batch are all read from the d
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
 
+Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
+endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
+declare every-node execution. Scheduling and placement-reference completion read that capability,
+so each listener stays outside placement rules.
+
 ### Generated conformance tests
 
 Tests generated from the declarations check every entity through the composed statement grammar, as
@@ -761,9 +766,16 @@ in one of these ways:
 | Entities | A cancelled read |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| `MQTT TOPIC` | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
+| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the client had already read when the read stopped waiting stays with the client, which hands it to the next read first. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+
+An MQTT read stops waiting by dropping its client's poll in flight, as its batch timeout ends a
+gathering. The client queues every packet it reads before it writes a reply, and its next poll
+returns a queued publish first, so a dropped poll loses no publish it read. It can cut short only an
+acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
+persistent session then delivers that publish again when it resumes, as it does any publish whose
+acknowledgement never reached the broker.
 
 ### MQTT session retirement
 
@@ -1067,7 +1079,10 @@ hand-over. While the window holds `MAX` records it waits for the oldest answer u
 deadline and no longer before the sink hands over another record, so at most `MAX` records await
 answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was handed over, the
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
-given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
+given at the instant of its deadline is an answer. A connector whose driver queue fills before
+`MAX` can call `settle_next` to wait for and settle the oldest answer on demand. It returns that
+record's identity, or no identity when the window is empty, and uses the same per-record deadline
+and failure settlement as ordinary window admission. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
 missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
 failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
@@ -1097,10 +1112,20 @@ requests, before the broker answered any record of the publish.
 The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
 hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
 invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
-unresolved, including a producer that drops the record without one. When the producer refuses to
-take a record for a reason that is not the record's own, such as a full producer queue, the publish
-ends through the window, so every record the broker already confirmed is delivered first and is not
-sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+unresolved, including a producer that drops the record without one. A temporary `QueueFull` in a
+confirmed publish waits through `settle_next` for the oldest outstanding answer and then tries the
+same refused record again. The effective window is the smaller of `MAX` and the native queue's
+record and byte capacities. librdkafka releases a queue place after its delivery callback returns,
+so a report can arrive before that place is free. When no current-window answer remains, the
+publish checks admission again at one-millisecond intervals, with an `ACK TIMEOUT` bound starting
+at that empty-window wait; it never spins or changes an admitted record's confirmation deadline.
+A missed queue-admission bound or another producer failure ends through the window, preserving
+every answer already given. The sink reads the effective `queue.buffering.max.kbytes` from
+librdkafka's validated native configuration once at startup. In both modes a payload larger than
+that entire byte capacity is a record rejection naming its size and the capacity, since no retry
+can admit it. Native queue accounting charges payload bytes alone, independently of the Kafka
+record's wire-size limit. A temporary full queue in `NO ACK` remains an infrastructure failure
+paced by the host's retry policy. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
 producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
 own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
 producer left at librdkafka's five-minute default would keep retrying a record after the publish

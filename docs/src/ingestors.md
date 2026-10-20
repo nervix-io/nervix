@@ -1061,10 +1061,11 @@ the subscription, because the broker cannot say later who created one:
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
 driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
-not have creates the topic. While a check holds its cursor, the broker refuses to create a
-subscription of that name as a conflict, so an operator's request that arrives in that moment fails
-with HTTP 409 and succeeds when repeated. A subscription that disappears between the check and the
-join is created by the join.
+not have creates the topic when the broker allows automatic topic creation, which is Pulsar's
+default. While a check holds its cursor, the broker refuses to create a subscription of that name
+as a conflict, so an operator's request that arrives in that moment fails with HTTP 409 and
+succeeds when repeated. A subscription that disappears between the check and the join is created
+by the join.
 
 Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
 indices, so ingestors of the same name in different domains are told apart in the broker's
@@ -1279,7 +1280,9 @@ Delivery constraints:
 - `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
 - `NO ACK` has no in-flight ACK window, so it never accepts `MAX <n>`
 - `ACK` modes require `SESSION PERSISTENT QOS 1`
-- `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait
+- `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
+  a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
+  rather than after its batch timeout
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
 Without a `client_id` in the client configuration, one instance connects as
@@ -1662,6 +1665,12 @@ endpoints. An `HTTP ENDPOINT` ingestor reads an endpoint declared `TYPE HTTP`, a
 only endpoints of that type. An endpoint of the other type is refused when the statement is
 applied, with a message such as `requires a TYPE HTTP endpoint, but endpoint 'stream' is TYPE
 WEBSOCKETS`. Both heads take the same body.
+
+Both endpoint entities declare `MODE NO ACK`: a successful response confirms admission, without
+waiting for downstream acknowledgement. Their body takes no `ACK TIMEOUT`, `RETRY POLICY`, or
+`BATCH` clause. Transport headers are available through `read_header` and `read_headers`; there is
+no typed request metadata namespace. Both ingestors execute on every cluster node and are excluded
+from placement members and placement-reference completion.
 
 Quiesce is enforced independently on every serving node. With `REJECT`, HTTP requests and new
 WebSocket upgrades receive 503, while established WebSockets close with 1013. With `BUFFER`, bodies

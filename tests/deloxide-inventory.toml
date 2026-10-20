@@ -123,6 +123,8 @@ tags = [
   "@shutdown_cordon_release",
   "@shutdown_kafka_handoff",
   "@shutdown_leader_change",
+  "@shutdown_terminating_destination",
+  "@shutdown_unactivated_handoff",
   "@shutdown_flush_before_freeze",
   "@shutdown_source_confirmation",
   "@shutdown_source_confirmation_handoff",
@@ -135,7 +137,9 @@ tags = [
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
+  "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@kept_ingestor_offsets",
 ]
 target = "test:scenarios"
 
@@ -657,6 +661,26 @@ scenario = "A stopping follower resumes its remaining ownership moves after the 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Tracked entity-gate state while a stopping leader engages, drains and releases the gates of moves that a terminating peer refuses to prepare, beside the tracked teardown of the peers it stops with. Gossip, the destination's terminating check, transport waits and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-terminating-destination"
+invariant = "A terminating destination refuses every planned handoff a leader with a stale view of it starts, so the leader's work stays with its owner, completes in place and resumes there after the restart."
+invocation = "scenarios"
+scenario = "A leader stopping with peers it has not seen terminate keeps its ingestor when the chosen peer refuses it"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Tracked entity-gate state of a committed relocation whose destination restarted before activating: the source leaves its gate held for the lease, and its runtime teardown ends that lease and joins the lease tasks before the node's storage is released. The activation pause, transport waits and the Kafka client are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-unactivated-handoff"
+invariant = "A node whose committed handoff never activated ends the gate lease it holds with its runtime, so it releases its node and consensus databases when it stops, and the moved ingestor keeps delivering after the restarts."
+invocation = "scenarios"
+scenario = "A node whose relocated ingestor never activated on its restarted destination releases its storage when it stops"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Bounded remote delivery and peer admission owners under interleaved branches, attached sink acknowledgement and Kafka source offset commit."
 examples = 2
 feature = "tests/features/runtime/remote_ack_owners.feature"
@@ -664,6 +688,16 @@ id = "scenario.remote-ack-branches"
 invariant = "On one and three nodes, two interleaved branches complete all attached deliveries and commit their source offsets while remote correlation and admission owners retire their rows."
 invocation = "scenarios"
 scenario = "Interleaved branches complete attached deliveries and commit their source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A forced reassignment that moves a Kafka ingestor's domain-offset replica while the ingestor keeps running: the schedule rebinds the offsets under the tracked assignment barrier and hands the kept ingestor the new originator. Kafka and interconnect waits are outside the detector."
+examples = 1
+feature = "tests/features/cluster/narrow_schedule_activation.feature"
+id = "scenario.kept-ingestor-offsets"
+invariant = "An ingestor that keeps running while its domain offsets lose their replica commits every record delivered afterwards and leaves no diagnostic lock finding."
+invocation = "scenarios"
+scenario = "A Kafka ingestor keeps committing its domain offsets after their replica is lost"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1210,6 +1244,16 @@ scenario = "Interleaved branches complete attached deliveries and commit their s
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: a forced reassignment that moves a Kafka ingestor's domain-offset replica while the ingestor keeps running, the rebind of the offsets under the tracked assignment barrier and the re-issued originator."
+examples = 1
+feature = "tests/features/cluster/narrow_schedule_activation.feature"
+id = "stress.kept-ingestor-offsets"
+invariant = "An ingestor that keeps running while its domain offsets lose their replica commits every record delivered afterwards and leaves no diagnostic lock finding."
+invocation = "stress-scenarios"
+scenario = "A Kafka ingestor keeps committing its domain offsets after their replica is lost"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: a lost remote acknowledgement, source redelivery and bounded correlation retirement."
 examples = 1
 feature = "tests/features/cluster/lost_remote_acknowledgements.feature"
@@ -1747,6 +1791,26 @@ id = "stress.shutdown-leader-change"
 invariant = "A stopping follower resumes the remaining committed-schedule ownership moves through the new leader within its original drain budget and completes its drain-support phase."
 invocation = "stress-scenarios"
 scenario = "A stopping follower resumes its remaining ownership moves after the leader changes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: tracked entity-gate state while a stopping leader engages, drains and releases the gates of moves that a terminating peer refuses to prepare. Gossip, the destination's terminating check, transport waits and the Kafka client remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-terminating-destination"
+invariant = "A terminating destination refuses every planned handoff a leader with a stale view of it starts, so the leader's work stays with its owner, completes in place and resumes there after the restart."
+invocation = "stress-scenarios"
+scenario = "A leader stopping with peers it has not seen terminate keeps its ingestor when the chosen peer refuses it"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: tracked entity-gate state of a committed relocation whose destination restarted before activating, with the source's runtime teardown ending the lease it left held. The activation pause, transport waits and the Kafka client remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-unactivated-handoff"
+invariant = "A node whose committed handoff never activated ends the gate lease it holds with its runtime, so it releases its node and consensus databases when it stops, and the moved ingestor keeps delivering after the restarts."
+invocation = "stress-scenarios"
+scenario = "A node whose relocated ingestor never activated on its restarted destination releases its storage when it stops"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2426,6 +2490,10 @@ workloads = [
   "stress.shutdown-leader-change",
   "scenario.forced-failover-delivery",
   "stress.forced-failover-delivery",
+  "scenario.shutdown-terminating-destination",
+  "stress.shutdown-terminating-destination",
+  "scenario.shutdown-unactivated-handoff",
+  "stress.shutdown-unactivated-handoff",
 ]
 
 [[owner]]
@@ -2447,6 +2515,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.mqtt-parallel-gather-at-quiesce",
+  "stress.mqtt-parallel-gather-at-quiesce",
   "scenario.sqs-receive-at-quiesce",
   "stress.sqs-receive-at-quiesce",
   "scenario.pulsar-finish-at-stop",
@@ -2553,6 +2623,8 @@ workloads = [
 path = "src/runtime/state_store.rs"
 workloads = [
   "scenario.guest-save-backup",
+  "scenario.kept-ingestor-offsets",
+  "stress.kept-ingestor-offsets",
   "stress.guest-save-backup",
   "scenario.native-metadata-restore",
   "owner.restore-storage",
@@ -2640,6 +2712,26 @@ id = "stress.websocket-source-move"
 invariant = "A planned ownership handoff closes the former WebSocket session gracefully and the new owner delivers a batch."
 invocation = "stress-scenarios"
 scenario = "Moving a WebSocket ingestor closes its former session gracefully"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An entity hold that quiesces an MQTT ACK PARALLEL ingestor, and its release, each meeting a read that gathers a partial batch, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The MQTT client, the broker and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/mqtt_ingestion.feature"
+id = "scenario.mqtt-parallel-gather-at-quiesce"
+invariant = "A quiesce change that meets an MQTT ACK PARALLEL batch half gathered takes in its publishes at once, and every publish reaches the relay without waiting for the batch timeout, on one and three nodes."
+invocation = "scenarios"
+scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered reach the relay without waiting for the batch timeout"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces an MQTT ACK PARALLEL ingestor, and its release, each meeting a read that gathers a partial batch, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The MQTT client, the broker and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/mqtt_ingestion.feature"
+id = "stress.mqtt-parallel-gather-at-quiesce"
+invariant = "A quiesce change that meets an MQTT ACK PARALLEL batch half gathered takes in its publishes at once, and every publish reaches the relay without waiting for the batch timeout, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered reach the relay without waiting for the batch timeout"
 selections = ["deloxide-stress"]
 
 [[workload]]

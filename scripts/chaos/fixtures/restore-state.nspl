@@ -1,0 +1,40 @@
+BEGIN;
+
+// Guest state for the restore-fault and restore-volume scenarios, beside the backup graph and its
+// deduplicator and window. A Kafka ingestor of its own feeds a branched WASM processor whose guest
+// emits nothing and saves a padded state of a fixed size for every branch, so the archive carries
+// large guest saves for every restore to stage on the processor's owner and its replica. The run
+// publishes one record a branch to that topic, so each branch saves once and the continuous load
+// on the baseline graph never makes the processor checkpoint again.
+
+CREATE RELAY chaos_padded_records SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE KAFKA TOPIC INGESTOR chaos_padded_ingestor
+  FROM chaos_kafka TOPIC 'chaos_padded_input' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_json
+  TO chaos_padded_records
+    INHERIT ALL
+    BRANCHED BY chaos_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_padded_out SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE DETACHED WASM PROCESSOR chaos_padded
+  FROM chaos_padded_records
+  USING RESOURCE chaos_padded_guest VERSION 1
+  FILE 'processors/padded-state.wat'
+  MAX FUEL 1000000000
+  MAX MEMORY 96MiB
+  BRANCHED BY chaos_branch
+  TO chaos_padded_out
+    SET event_id = event_id,
+        branch_name = branch_name,
+        sequence = sequence,
+        content = content
+    ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
+  ON GLOBAL ERROR LOG;
+
+COMMIT;

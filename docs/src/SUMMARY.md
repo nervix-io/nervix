@@ -83,6 +83,7 @@
   - [VM Functions](./vm-functions.md)
   - [Relay](./relay.md)
   - [WASM State And Recovery](./wasm-state.md)
+  - [Backup And Restore Architecture](./backup-and-restore-architecture.md)
   - [Shutdown And Recovery](./shutdown.md)
   - [Integration Test Lifecycle](./integration-test-lifecycle.md)
   - [Deterministic Interconnect Simulation](./interconnect-simulation.md)
