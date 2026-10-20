@@ -31,6 +31,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   NO_COLOR: "1"
@@ -54,14 +55,15 @@ jobs:
           ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -146,8 +148,9 @@ jobs:
           ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup pinned sanitizer nightly
@@ -159,7 +162,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -314,11 +317,11 @@ jobs:
         with:
           ref: ${{ inputs.tested-sha || github.sha }}
 
-      # The justfile reads the repository toolchain with toml-cli whenever it loads.
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Download every shard's completion evidence
         uses: actions/download-artifact@v4

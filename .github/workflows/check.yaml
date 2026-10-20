@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   TINYGO_VERSION: "0.41.1"
@@ -86,8 +87,10 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -98,7 +101,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,toml-cli,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -236,14 +239,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           components: llvm-tools
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,wild-linker
+          tool: just@latest,cargo-llvm-cov,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -342,14 +346,15 @@ jobs:
       SELECTION: ${{ matrix.selection }}
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -489,14 +494,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -681,14 +687,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -879,12 +886,14 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
 
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -1016,11 +1025,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The justfile reads the repository toolchain with toml-cli whenever it loads.
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just
 
       - name: Download ordinary coverage
         uses: actions/download-artifact@v4
@@ -1129,14 +1138,15 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1284,8 +1294,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -1296,7 +1307,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-mutants,just@latest,toml-cli,trunk,wild-linker
+          tool: cargo-llvm-cov,cargo-mutants,just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1514,14 +1525,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1672,14 +1684,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1808,14 +1821,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1948,14 +1962,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker,cargo-llvm-cov
+          tool: just@latest,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
