@@ -94,7 +94,8 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
-| Command outcome recovery | On the task of the step, or of its background execution, whose raw wire command left its outcome to the current leader: one session at a time, opened to each node in turn and dropped once that node answers | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
+| Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -1168,7 +1169,10 @@ a lock outlived the stop. A node still stopping keeps its task, its ports and it
 registration, and the scenario's cleanup waits for it again or leaves it stopping.
 Stopping every node requests every stop first and then waits for each node in turn. A scenario can
 also begin stopping a node without waiting, to observe how the cluster reacts while the node is on
-its way down; its cleanup waits for it later.
+its way down; its cleanup waits for it later. It can hold such a node at the start of its graceful
+drain, once the node has advertised that it is terminating and closed its intake but before it asks
+for its work to move, so that peers meet a terminating node that is still live; releasing the hold
+lets the stop go on, and scenario teardown releases it with the other command pauses.
 
 The harness prints every such stop to standard error when its wait ends, as it prints a startup:
 

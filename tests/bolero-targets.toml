@@ -2756,10 +2756,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connector/src/__fuzz__/confirmation_window__tests__bolero_a_publish_settles_every_answer_given_before_it_ends/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "connector-confirmation-window"
-invariant = "Under any MAX and ACK TIMEOUT, records refused at hand-over, answers confirmed, refused or failed within, at, past or never by each record's deadline, pauses between hand-overs and a driver failure, the window ends the publish exactly when the documented rule does, holds fewer than MAX answers after each hand-over, delivers exactly the records the broker confirmed before the end and rejects exactly those refused at hand-over or before the end, so no confirmed record is ever returned as unresolved, and reports the driver's failure, the oldest's failed answer or its missed deadline as the rule names."
+invariant = "Under any MAX, driver queue capacity and ACK TIMEOUT, records refused at hand-over, answers confirmed, refused or failed within, at, past or never by each record's deadline, pauses between hand-overs and a driver failure, the window ends the publish exactly when the documented rule does, holds fewer than MAX answers after each hand-over and no more than the driver queue capacity by settling the oldest answer on demand, delivers exactly the records the broker confirmed before the end and rejects exactly those refused at hand-over or before the end, so no confirmed record is ever returned as unresolved, and reports the driver's failure, the oldest's failed answer or its missed deadline as the rule names."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector"
@@ -3021,4 +3021,19 @@ package = "nervix-server"
 random_iterations = 256
 source = "src/application/describe_output_properties.rs"
 test = "application::describe_output::properties::bolero_ingestor_describe_reports_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/dns/src/__fuzz__/dial__tests__bolero_operation_budget_shares_never_outgrow_what_is_left/corpus"
+domain_version = 1
+features = []
+id = "dns-operation-budget"
+invariant = "An operation budget never grows back as time passes, what is left of it is the total less the elapsed time and never less than nothing, the lookup's share never outlives what is left or its own bound, and the equal shares each address attempt takes of what is left together never outlast the budget or waste a nanosecond per answer."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-dns"
+random_iterations = 256
+source = "crates/dns/src/dial_tests.rs"
+test = "dial::tests::bolero_operation_budget_shares_never_outgrow_what_is_left"
 test_target = "lib"

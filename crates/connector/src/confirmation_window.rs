@@ -91,7 +91,8 @@ pub enum ConfirmationWindowError {
 /// record with that future, oldest first. A record's deadline is `ACK TIMEOUT` after its own
 /// hand-over. While the window holds `MAX` records it waits for the oldest answer, until the
 /// oldest's deadline and no longer, before the sink hands over another record, so at most `MAX`
-/// records await their answers at once. `ACK SEQUENTIAL` is a window of one.
+/// records await their answers at once. `ACK SEQUENTIAL` is a window of one. A driver whose queue
+/// fills below `MAX` can request the oldest answer through [`ConfirmationWindow::settle_next`].
 ///
 /// A publish ends in one of two ways. Both consume the window, which holds the publish's outcome,
 /// so the outcome cannot be reported without them:
@@ -221,6 +222,20 @@ where
             return Ok(());
         }
         self.settle_oldest().await
+    }
+
+    /// Waits for and settles the oldest answer when the driver's queue fills below `MAX`.
+    ///
+    /// Returns the settled record's identity, or `None` when no answer is awaited. The wait keeps
+    /// the record's original confirmation deadline. An error ends the publish through
+    /// [`ConfirmationWindow::fail`], just as an admission or finish error does.
+    pub async fn settle_next(&mut self) -> SinkPublishResult<Option<SinkRecordId>> {
+        let Some(oldest) = self.in_flight.front() else {
+            return Ok(None);
+        };
+        let record = oldest.record;
+        self.settle_oldest().await?;
+        Ok(Some(record))
     }
 
     /// Ends a publish that handed every record over: waits for each answer still awaited, oldest

@@ -665,7 +665,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-sqs", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-sqs", "nervix-consensus", "nervix-server", "nervix-deadlock"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -2921,6 +2921,22 @@ coverage-chaos-backup-fault:
         ulimit -n 65536
     fi
     kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/backup-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fault-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-fault-coverage") }} scripts/chaos/tests/backup-fault-self-test.sh
+
+# Check the restore scenarios' options, the padded guest's bounds, the sampler's records, the
+# staging verdicts and every outcome the restore verdict assigns, as every verifier self-check does.
+test-chaos-restore:
+    exec bash scripts/chaos/tests/restore-self-test.sh
+
+# Measure the restore scenarios' option checks, staging verdicts and outcome verdict.
+coverage-chaos-restore:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/restore-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/restore-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/fixtures/wasm/padded-state-wat.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/restore-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-restore-coverage") }} scripts/chaos/tests/restore-self-test.sh
 
 # Check the deduplicator and window outputs the backup state verdict accepts and each lost or
 # doubled state it refuses, as every verifier self-check does.

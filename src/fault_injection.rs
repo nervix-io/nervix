@@ -49,11 +49,14 @@ mod consensus;
 mod domain_clock;
 mod domain_resume;
 mod pause;
+mod relocation_commit;
 mod restarted_voter;
+mod shutdown_handoff;
 
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use pause::TestPause;
+use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::StartupVoterGossip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +121,9 @@ struct FaultInjectionState {
     /// scenario proves the failure happened instead of assuming it.
     handoff_engagement_transport_failures:
         DashMap<DomainName, HandoffEngagementTransportFailure, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
+    /// it was delivered.
+    refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -365,6 +371,8 @@ enum CommandPausePoint {
     RestoreBranchStateConversion(DomainName),
     IngestorRoutePoll(DomainNodeRef),
     OwnershipHandoffFlush(DomainName),
+    OwnershipHandoffActivation(DomainName),
+    GracefulDrain(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -417,6 +425,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
+                refused_relocation_commits: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),

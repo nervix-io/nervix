@@ -18,11 +18,11 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, ClientIngestMode, CodecBatchContainer, CreateClientHttp,
-    CreateCodec, CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName,
-    EmitSink, EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
-    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestSink, HttpRequestTimeout,
-    HttpSink, IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName,
+    Assignment, AssignmentTarget, ClientDeadline, ClientIngestMode, CodecBatchContainer,
+    CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
+    CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression, FieldName,
+    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
+    HttpRequestSink, HttpSink, IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName,
     OtelAggregationTemporality, OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink,
     ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName,
     SignalingWireFormat, SqsFifoGroup, SqsQueueSink, SqsSink, VhostName, parse_duration_text,
@@ -819,7 +819,7 @@ pub(in crate::registry) fn validate_http_emitter_client(
 
     let timeout =
         entry("timeout_ms").ok_or_else(|| invalid("HTTP emitter client requires timeout_ms"))?;
-    HttpRequestTimeout::parse(timeout).change_context(RegistryError::InvalidModel {
+    ClientDeadline::parse(timeout).change_context(RegistryError::InvalidModel {
         domain: domain.as_str().to_string(),
         identifier: identifier.as_str().to_string(),
         reason: "HTTP emitter client timeout_ms must be a positive schedulable integer".to_string(),

@@ -164,6 +164,7 @@ impl Runtime {
                 node_quiesce_counters: DashMap::default(),
                 entity_gate_holds: Arc::new(DashMap::default()),
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
+                entity_gate_tasks: EntityGateTasks::default(),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
                 state_replication_routing: Default::default(),
@@ -555,6 +556,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_relocation_commit_refusal(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_relocation_commit_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection
@@ -581,6 +589,22 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_ownership_handoff_prepare_response_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_ownership_handoff_activation_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_activation_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_graceful_drain_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_graceful_drain_if_armed(node_id)
             .await;
     }
 
@@ -789,6 +813,13 @@ impl Runtime {
         // the replication routes their checkpoints are offered through are still installed.
         self.inner.branch_snapshot_tasks.close();
         self.inner.branch_snapshot_tasks.wait().await;
+        // Nothing dispatches through a gate, admits through a quiesced ingestor or publishes past
+        // a freeze any more, so every entity gate this node holds ends here with its runtime. A
+        // lease that a handoff left held until a deadline past this node's stop would otherwise
+        // keep its hold, and the ingestor controls and metrics that hold retains, after the node
+        // stopped.
+        self.inner.entity_gate_tasks.close();
+        self.inner.entity_gate_tasks.wait().await;
         self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();

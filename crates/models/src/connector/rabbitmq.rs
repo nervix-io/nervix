@@ -20,6 +20,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
@@ -59,6 +63,81 @@ pub struct RabbitMqQueueSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a RABBITMQ QUEUE ingestor holds and how long it waits.
+const RABBITMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "deliveries the broker sends ahead of their acknowledgement",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Items {
+                count: 1,
+                unit: "delivery",
+            },
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts and TLS",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "the AMQP handshake, channel open and consume",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: WaitBound::Driver("twice the negotiated heartbeat"),
+        },
+    ],
+    driver_limits: &["A frame above the negotiated frame_max ends the connection."],
+};
+
+/// What the connector of a RABBITMQ QUEUE emitter holds and how long it waits.
+const RABBITMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "publishes awaiting confirmation",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "unroutable messages the broker returns under NO ACK",
+            bound: BufferBound::Unbounded,
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts and TLS",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "the AMQP handshake, channel open and confirm select",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a publish",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a confirmation under ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "the round trip that ends a publish under NO ACK",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A frame above the negotiated frame_max ends the connection."],
+};
+
 impl SourceEntity for RabbitMqQueueSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -74,6 +153,7 @@ impl SourceEntity for RabbitMqQueueSource {
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration::INSTANCES],
+        bounds: RABBITMQ_SOURCE_BOUNDS,
     };
 }
 
@@ -160,6 +240,7 @@ impl SinkEntity for RabbitMqQueueSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: RABBITMQ_SINK_BOUNDS,
     };
 }
 

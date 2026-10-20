@@ -230,12 +230,12 @@ cache included, which is enough for every peer of a full 64-peer topology to rec
 further lookup waits for a slot inside its own budget. Literal addresses and hosts-file names never
 take a slot.
 
-A caller that dials for itself shares one physical connection budget between the lookup and the
-address attempts after it: the lookup receives the budget, and each answer, dialled in resolution
-order, receives an equal share of whatever time remains when its attempt starts. An address that
-refuses at once leaves its unused share to the attempts after it, and one that never answers cannot
-consume their time. Handshakes that the caller performs after an address accepts use what is left
-of the same budget.
+A caller that dials for itself spends one physical `OperationBudget` on the lookup and the address
+attempts after it: the lookup receives what the caller declares it may take, the whole budget for an
+operation that is only a connection, and each answer, dialled in resolution order, receives an equal
+share of whatever time remains when its attempt starts. An address that refuses at once leaves its
+unused share to the attempts after it, and one that never answers cannot consume their time.
+Handshakes that the caller performs after an address accepts use what is left of the same budget.
 
 A client library that resolves through one of the resolver's hooks cannot pass the deadline of the
 request it resolves for, so every hook lookup has a budget of thirty seconds, and the library's own
@@ -293,15 +293,15 @@ name again for every new connection it opens.
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer` | The thirty-second hook budget, inside OpenDAL's own operation timeouts | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | HTTP request emitter | The connector resolves each request's target host itself | The request's one physical `timeout_ms` | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
-| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | Thirty seconds shared with the address attempts and TLS | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
-| Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | Thirty seconds shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
-| WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | Thirty seconds shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
+| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts and TLS | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
+| Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
+| WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse sinks, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | SQS sources and sinks, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and a sink's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
 | OTEL gRPC sinks | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
-| Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the thirty-second connection timeout the pool sets on the driver | [DNS for Redis](./connector-contract.md#dns-for-redis) |
-| Redis Pub/Sub sources | The connector resolves and dials a dedicated stream, then hands it to Redis's `PubSub::new` | Thirty seconds shared with the attempts, TLS, Redis setup and `SUBSCRIBE` | [DNS for Redis](./connector-contract.md#dns-for-redis) |
+| Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the connection timeout the pool sets on the driver and its checkout from the client's `connect_timeout_ms`, 30 seconds by default | [DNS for Redis](./connector-contract.md#dns-for-redis) |
+| Redis Pub/Sub sources | The connector resolves and dials a dedicated stream, then hands it to Redis's `PubSub::new` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS, Redis setup and `SUBSCRIBE` | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | MQTT sources, sinks and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
 
@@ -325,11 +325,11 @@ before any IPv6 answer and no attempt races another:
 | Caller | Budget | One address attempt | After an address succeeds |
 | --- | --- | --- | --- |
 | Interconnect pool connection | The connection setup timeout, five seconds | TCP connection | TLS, HTTP/2 and the connection hello within the same timeout; a failure there fails the attempt |
-| RabbitMQ source or sink | Thirty seconds | TCP connection | TLS within the same budget, then Lapin's AMQP handshake, which has no deadline of its own |
-| Syslog TCP sender | Thirty seconds | TCP connection | No further step |
-| Syslog TLS sender | Thirty seconds | TCP connection and TLS | No further step |
-| WebSocket client source | Thirty seconds | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
-| Redis Pub/Sub source | Thirty seconds | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
+| RabbitMQ source or sink | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS within the same budget, then Lapin's AMQP handshake, which has no deadline of its own |
+| Syslog TCP sender | `connect_timeout_ms`, 30 seconds by default | TCP connection | No further step |
+| Syslog TLS sender | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | No further step |
+| WebSocket client source | `connect_timeout_ms`, 30 seconds by default | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
+| Redis Pub/Sub source | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
 | MQTT source, sink or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
 
 Syslog UDP has no connection to confirm, so a sender binds a socket in the family of each answer in

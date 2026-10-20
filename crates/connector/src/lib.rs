@@ -5,8 +5,9 @@
 //! - **Owns.** The source and sink contracts, including the rule a row or row request sink divides
 //!   mapped rows into requests by, the host handles a connector may call, and the value types that
 //!   cross the boundary: a client's resolved configuration entries and the resource
-//!   mounts they read files from, the TLS material and HTTP client settings built from those
-//!   entries, service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
+//!   mounts they read files from, the deadline keys read from them with the one meaning every
+//!   connector gives them, the TLS material and HTTP client settings built from those entries,
+//!   service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
 //!   read a source stamps arrival with, the transport-header trait a source message implements,
 //!   the typed ingest metadata row with its Kafka, syslog and header scopes, and the confirmation
 //!   window a brokered sink awaits its broker's answers through.
@@ -42,6 +43,7 @@
 )]
 
 mod client_config;
+mod client_deadline;
 mod confirmation_window;
 mod http_client;
 mod ingest_metadata;
@@ -60,6 +62,7 @@ pub use client_config::{
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
     render_client_config_template,
 };
+pub use client_deadline::{ConfiguredDeadline, DeadlineElapsed};
 pub use confirmation_window::{
     BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError,
 };

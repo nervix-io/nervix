@@ -340,6 +340,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "ingestor-describe-envelope",
+            "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-core",
@@ -380,6 +381,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-otel",
             "nervix-connector-sentry",
             "nervix-web-console",
+            "nervix-dns",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

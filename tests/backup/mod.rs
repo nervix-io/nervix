@@ -504,14 +504,31 @@ async fn then_archive_holds_a_contiguous_run(
 
 #[when(expr = "the CLI describes backup archive {string} as {word}")]
 async fn when_cli_describes_backup(world: &mut ScenarioWorld, file: String, format: String) {
-    let path = archive_path(world, &file);
+    let leader = current_leader_node(world).await;
+    describe_backup_through(world, &file, &format, &leader).await;
+}
+
+/// Describes the archive through `node`, for a scenario in which another node is down and the
+/// cluster's leader cannot be read from every node.
+#[when(expr = "the CLI describes backup archive {string} as {word} through node {string}")]
+async fn when_cli_describes_backup_through_node(
+    world: &mut ScenarioWorld,
+    file: String,
+    format: String,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    describe_backup_through(world, &file, &format, &node).await;
+}
+
+async fn describe_backup_through(world: &mut ScenarioWorld, file: &str, format: &str, node: &str) {
+    let path = archive_path(world, file);
     let statement = format!(
         "DESCRIBE BACKUP '{}' FORMAT {};",
         path.display(),
         format.to_uppercase()
     );
-    let leader = current_leader_node(world).await;
-    run_cli(world, &leader, vec!["--command".to_string(), statement]).await;
+    run_cli(world, node, vec!["--command".to_string(), statement]).await;
 }
 
 fn described_backup(world: &ScenarioWorld) -> serde_json::Value {
@@ -545,6 +562,43 @@ fn then_described_backup_has_state_sections(
         .filter(|section| kind == "any" || section["kind"].as_str() == Some(kind.as_str()))
         .count();
     assert_eq!(actual, expected, "the described backup: {description}");
+}
+
+#[then(expr = "the described backup records Kafka domain offset {int} for ingestor {string}")]
+fn then_described_backup_records_kafka_domain_offset(
+    world: &mut ScenarioWorld,
+    expected: i64,
+    ingestor: String,
+) {
+    let description = described_backup(world);
+    let sections = description["domains"]
+        .as_array()
+        .expect("the archive lists its domains")
+        .iter()
+        .flat_map(|domain| {
+            domain["runtime_state"]
+                .as_array()
+                .expect("the domain lists its state")
+        })
+        .filter(|section| {
+            section["kind"].as_str() == Some("kafka_offsets")
+                && section["entity"].as_str() == Some(ingestor.as_str())
+        })
+        .collect::<Vec<_>>();
+    let [section] = sections.as_slice() else {
+        panic!("the archive holds one Kafka offset section of '{ingestor}': {description}");
+    };
+    let offsets = section["positions"]
+        .as_array()
+        .expect("a Kafka offset section lists its positions")
+        .iter()
+        .map(|position| position["next_offset"].as_i64())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        offsets,
+        vec![Some(expected)],
+        "the archived domain offsets of '{ingestor}': {description}"
+    );
 }
 
 #[then(expr = "the described backup lists the scenario user")]
@@ -709,10 +763,19 @@ async fn when_session_backs_up_the_cluster(world: &mut ScenarioWorld, node: Stri
         .open_session(&node, &world.domain)
         .await
         .expect("the scenario's session opens");
-    let outcome = session
-        .run_command_result("BACKUP CLUSTER TO 'unused.nvxb';")
+    let query = "BACKUP CLUSTER TO 'unused.nvxb';";
+    let mut outcome = session
+        .run_command_result(query)
         .await
         .expect("the backup is answered");
+    if outcome_awaits_leader(&outcome) {
+        let reference = outcome.execution_reference.clone();
+        let scope = session.scope();
+        let routes = world.cluster().leader_routes();
+        let learned =
+            learn_command_outcome(&routes, &scope, query, reference.as_str(), outcome).await;
+        outcome = learned.outcome;
+    }
     let summary = outcome
         .backup
         .as_deref()

@@ -223,6 +223,21 @@ async fn then_completion_search_used_pages_without_duplicates(
     assert_eq!(unique.len(), values.len(), "completion pages: {values:?}");
 }
 
+#[then("the collected completion candidates are")]
+fn then_collected_completion_candidates_are(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let expected = docstring(step)
+        .trim()
+        .lines()
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = world
+        .last_completion_values
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual.len(), world.last_completion_values.len());
+    assert_eq!(actual, expected);
+}
+
 #[when(expr = "the active session cancels request {string}")]
 async fn when_active_session_cancels_request(world: &mut ScenarioWorld, name: String) {
     let target = named_request(world, &name);

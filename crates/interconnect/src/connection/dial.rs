@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use nervix_dns::ConnectionBudget;
+use nervix_dns::OperationBudget;
 use nervix_models::NodeEndpoint;
 use nervix_primitives::{net::TcpStream, time::timeout};
 use tracing::debug;
@@ -52,7 +52,7 @@ impl TransportState {
     pub(super) async fn dial(
         &self,
         key: &ConnectionSlotKey,
-        budget: &ConnectionBudget,
+        budget: &OperationBudget,
     ) -> Result<DialedStream, Report<TransportError>> {
         let dial = self.current_dial(key)?;
         let addresses = match dial {
@@ -60,7 +60,7 @@ impl TransportState {
             OutboundDial::Advertised => {
                 let resolved = self
                     .resolver
-                    .resolve(key.endpoint.host(), key.endpoint.port(), budget.remaining())
+                    .resolve(key.endpoint.host(), key.endpoint.port(), budget.lookup())
                     .await;
                 match resolved {
                     Ok(addresses) => addresses,

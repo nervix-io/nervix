@@ -353,8 +353,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
-  listeners. Every other ingestor, a `WEBSOCKETS CONNECTION` included, is single-owner and keeps its
-  live assignment across ordinary schedule recomputation; use drain, `RELOCATE`, or a hard
+  listeners and exclude them from placement members. Every other ingestor, a `WEBSOCKETS CONNECTION`
+  included, is single-owner and keeps its live assignment across ordinary schedule recomputation;
+  use drain, `RELOCATE`, or a hard
   colocation requirement when it must move.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
@@ -392,6 +393,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
   outage follows the emitter's declared retry policy.
+- Client deadline keys mean the same thing everywhere: `timeout_ms` bounds a whole request,
+  name resolution, connection and TLS included, and `connect_timeout_ms` bounds establishing a
+  connection, the protocol handshake included. RabbitMQ, Redis, Syslog emitter and WebSocket
+  clients take `connect_timeout_ms` and allow 30 seconds without it; a RabbitMQ client's deadline
+  ends before the AMQP handshake, which has none. Read `Ingestors` or
+  `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
+  bounds them.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
@@ -470,9 +478,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
   `NO_ACK` have no in-flight ACK window and never accept `MAX`.
 - Do not promise that an emitter's `NO_ACK` survives a stop on every sink. A `STOP`, a replacement
-  or a node shutdown sends what a Kafka producer still queues within its deadline, but Pulsar
-  `NO_ACK` and MQTT QoS 0 discard what their clients still hold. Choose an `ACK` mode where a stop
-  must not lose emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
+  or a node shutdown sends what a Kafka producer still queues and awaits the receipts of what a
+  Pulsar producer accepted within its deadline, reporting what is outstanding when it passes, and
+  MQTT QoS 0 discards what its client still holds. Choose an `ACK` mode where a stop must not lose
+  emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair

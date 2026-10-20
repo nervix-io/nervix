@@ -1290,10 +1290,28 @@ impl SessionServiceImpl {
         response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
     }
 
+    /// Refuses to become a new placement destination once this process incarnation advertised that
+    /// it is terminating.
+    ///
+    /// A coordinator plans from its own gossip view, which can still show this incarnation as
+    /// eligible after it advertised, as when peers stop in the same moment. This incarnation's own
+    /// advertisement is authoritative, so a destination checks it before it validates the request.
+    async fn refuse_handoff_destination_while_terminating(&self) -> OwnershipHandoffResult<()> {
+        if !self.inner.cluster.local_incarnation_is_terminating().await {
+            return Ok(());
+        }
+        Err(Report::new(OwnershipHandoffError::DestinationTerminating {
+            node: self.inner.consensus.local_node_id().clone(),
+        }))
+    }
+
     async fn prepare_ownership_handoff_state(
         &self,
         request: RemotePrepareOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
+        if request.destination == *self.inner.consensus.local_node_id() {
+            self.refuse_handoff_destination_while_terminating().await?;
+        }
         self.verify_ownership_handoff_coordinator(&request.coordination)
             .await?;
         let current_incarnations = self.live_node_incarnations().await;
@@ -1742,6 +1760,9 @@ impl SessionServiceImpl {
                                 service.inner.consensus.local_node_id()
                             )));
                         }
+                        service
+                            .refuse_handoff_destination_while_terminating()
+                            .await?;
                         let current_incarnations = service.live_node_incarnations().await;
                         Self::verify_ownership_handoff_node_incarnation(
                             &current_incarnations,
@@ -2144,6 +2165,11 @@ impl SessionServiceImpl {
         mut handoff: PlannedOwnershipHandoff,
         impact: Option<&TransactionStepImpactRecorder>,
     ) -> OwnershipHandoffResult<()> {
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_ownership_handoff_activation_if_armed(domain)
+            .await;
         let activation = self
             .activate_planned_ownership_handoff(domain, &handoff)
             .await;
@@ -2246,3 +2272,7 @@ impl SessionServiceImpl {
         handoff.gate.defer_release_to_lease_deadline();
     }
 }
+
+#[cfg(test)]
+#[path = "ownership_handoff_tests.rs"]
+mod tests;

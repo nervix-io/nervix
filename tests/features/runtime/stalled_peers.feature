@@ -1,0 +1,526 @@
+Feature: Stalled peers
+
+  A connector entity whose waits a client deadline key bounds reports a peer that stops answering
+  as its transient status within that bound, and keeps retrying on its policy. A silent endpoint
+  accepts every connection and never answers on it, so a client completes its TCP handshake and then
+  waits on its own deadline.
+
+  Scenario Outline: A Redis subscription whose server never answers is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "redis_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
+        'addr' = 'redis://{{redis_peer}}',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE REDIS PUBSUB INGESTOR redis_in
+        FROM redis_main CHANNEL 'stalled_{{test_id}}' MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "redis_peer" eventually accepts a connection
+    And within "20s" DESCRIBE INGESTOR "redis_in" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A Redis emitter whose server never answers is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "redis_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge stalled-redis-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 0 MAX 1 CONFIG {
+        'addr' = 'redis://{{redis_peer}}',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE EMITTER redis_out FROM notifications
+        TO REDIS PUBSUB redis_main CHANNEL stalled_{{test_id}}
+        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-redis-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":42}
+      """
+    Then the silent endpoint "redis_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "redis_out" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "rabbitmq_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+        'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_in
+        FROM rabbit_main QUEUE 'stalled_{{test_id}}' INSTANCES 1
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "rabbitmq_peer" eventually accepts a connection
+    And within "20s" DESCRIBE INGESTOR "rabbit_in" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "rabbitmq_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+        'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE EMITTER rabbit_out FROM notifications
+        TO RABBITMQ rabbit_main QUEUE stalled_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "rabbitmq_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "rabbit_out" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "syslog_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
+      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+        'protocol' = 'tls',
+        'addr' = '{{syslog_peer}}',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE EMITTER syslog_forward FROM events
+        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "syslog_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "syslog_forward" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "websocket_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG {
+        'endpoint' = 'ws://{{websocket_peer}}/stalled',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_in
+        FROM ws_main MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "websocket_peer" eventually accepts a connection
+    And within "20s" DESCRIBE INGESTOR "ws_in" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: An HTTP polling ingestor whose server never answers is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "http_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT poll_source TYPE HTTP CONFIG {
+        'endpoint' = 'http://{{http_peer}}/notifications',
+        'method' = 'GET',
+        'timeout_ms' = 1000
+      };
+      CREATE HTTP REQUEST INGESTOR poll_reader
+        FROM poll_source EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "http_peer" eventually accepts a connection
+    And within "20s" DESCRIBE INGESTOR "poll_reader" on the leader node contains
+      """
+      transient error: failed to read from http source: failed to send HTTP source request
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A Prometheus ingestor whose server never answers is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "prometheus_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA sample (value F64);
+      CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
+      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE RELAY samples SCHEMA sample UNBRANCHED;
+      CREATE CLIENT prom_main TYPE PROMETHEUS CONFIG {
+        'addr' = 'http://{{prometheus_peer}}',
+        'timeout_ms' = 1000
+      };
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'vector(1)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "prometheus_peer" eventually accepts a connection
+    And within "20s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
+      """
+      transient error: failed to read from prometheus source: failed to send Prometheus query
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A Sentry emitter whose server never answers is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "sentry_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA error_event (message STRING, level STRING);
+      CREATE WIRE JSON SCHEMA error_event_wire MODE STRICT (message string, level string);
+      CREATE CODEC error_event_codec FROM WIRE JSON SCHEMA error_event_wire TO SCHEMA error_event;
+      CREATE RELAY errors SCHEMA error_event UNBRANCHED;
+      CREATE VHOST edge stalled-sentry-{{test_id}}.example.com;
+      CREATE ENDPOINT error_ingress ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR error_source
+        FROM error_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
+        TO errors INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+        'dsn' = 'http://public@{{sentry_peer}}/1',
+        'timeout_ms' = 1000
+      };
+      CREATE EMITTER sentry_errors FROM errors
+        TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-sentry-{{test_id}}.example.com" path "/errors"
+      """
+      {"message":"database unavailable","level":"error"}
+      """
+    Then the silent endpoint "sentry_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "sentry_errors" on the leader node contains
+      """
+      transient error: Sentry envelope request failed
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "otel_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA event (seq I64, body STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer, body string);
+      CREATE CODEC ingest_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge stalled-otel-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+        'endpoint' = 'http://{{otel_peer}}',
+        'protocol' = '<protocol>',
+        'timeout_ms' = 1000
+      };
+      CREATE EMITTER stalled_export FROM events
+        TO OTEL otel_main <signal_body>
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-otel-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1,"body":"stalled-{{test_id}}"}
+      """
+    Then the silent endpoint "otel_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "stalled_export" on the leader node contains
+      """
+      transient error: <reported>
+      """
+
+    Examples:
+      | cluster_size | signal  | protocol      | signal_body                                                                                                                                                                                                                                                                               | reported                                                   |
+      | 1            | LOGS    | grpc          | LOGS VALUES { 'time' = now(), 'body' = input.body } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                                         | OTEL gRPC export ended without an answer from the receiver |
+      | 3            | LOGS    | http/protobuf | LOGS VALUES { 'time' = now(), 'body' = input.body } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                                         | OTEL HTTP export request failed                            |
+      | 1            | TRACES  | http/protobuf | TRACES VALUES { 'trace_id' = '00112233445566778899aabbccddeeff', 'span_id' = '0011223344556677', 'name' = input.body, 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0' | OTEL HTTP export request failed                            |
+      | 3            | TRACES  | grpc          | TRACES VALUES { 'trace_id' = '00112233445566778899aabbccddeeff', 'span_id' = '0011223344556677', 'name' = input.body, 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0' | OTEL gRPC export ended without an answer from the receiver |
+      | 1            | METRICS | grpc          | METRIC 'nervix.test.stalled' UNIT '1' DESCRIPTION 'Stalled export' SUM MONOTONIC DELTA VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                 | OTEL gRPC export ended without an answer from the receiver |
+      | 3            | METRICS | http/protobuf | METRIC 'nervix.test.stalled' UNIT '1' DESCRIPTION 'Stalled export' SUM MONOTONIC DELTA VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                 | OTEL HTTP export request failed                            |
+
+  Scenario Outline: A ClickHouse emitter whose server never answers is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "clickhouse_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge stalled-clickhouse-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT clickhouse_main TYPE CLICKHOUSE CONFIG {
+        'addr' = 'http://{{clickhouse_peer}}',
+        'timeout_ms' = 1000
+      };
+      CREATE EMITTER to_clickhouse FROM notifications
+        TO CLICKHOUSE clickhouse_main INSERT TO TABLE stalled_{{test_id}}
+        VALUES { "user_id" = input.user_id }
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 1 MAX SIZE 1MiB
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-clickhouse-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":42}
+      """
+    Then the silent endpoint "clickhouse_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "to_clickhouse" on the leader node contains
+      """
+      transient error: ClickHouse insert request failed
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: An SQS emitter whose service stops answering is reported within timeout_ms
+    Given SQS is running
+    And a <cluster_size> node nervix cluster is started
+    And a stallable endpoint "sqs_peer" stands in front of "sqs_endpoint"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "stalled_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge stalled-sqs-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+        'endpoint' = '{{sqs_peer}}',
+        'region' = 'us-east-1',
+        'timeout_ms' = 1000
+      };
+      CREATE EMITTER sqs_out FROM notifications
+        TO SQS sqs_main QUEUE stalled_{{test_id}}
+        MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-sqs-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":1}
+      """
+    Then the observed broker receives a payload
+      """
+      {"user_id":1}
+      """
+    When the stallable endpoint "sqs_peer" is paused
+    And http payload is posted to host "stalled-sqs-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":2}
+      """
+    Then within "20s" DESCRIBE EMITTER "sqs_out" on the leader node contains
+      """
+      occurred after 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

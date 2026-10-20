@@ -2,10 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Reading a client's `addr` and CA file into the broker it connects to, resolving the
-//!   broker host through the node resolver for every connection, the budget and order of the
-//!   address attempts, the TLS handshake against the configured host, and handing the established
-//!   transport to Lapin for the AMQP handshake.
+//! - **Owns.** Reading a client's `addr`, CA file and `connect_timeout_ms` into the broker it
+//!   connects to, resolving the broker host through the node resolver for every connection, the
+//!   budget and order of the address attempts, the TLS handshake against the configured host, and
+//!   handing the established transport to Lapin for the AMQP handshake.
 //! - **Depends on.** The connector contract's client configuration helpers, `nervix-dns`,
 //!   `error-stack`, Tokio, the URL grammar, and Lapin's transport hook and its async runtime.
 //! - **Must not know.** Queues, consumers, publisher confirms, the host's retry policy, or Models.
@@ -14,8 +14,9 @@
 //!
 //! Every connection resolves the broker host again through the node resolver, so an expired answer
 //! is replaced before anything is dialled. The addresses are tried in resolution order, each within
-//! an equal share of what remains of [`CONNECT_BUDGET`], so an address that cannot connect leaves
-//! time for the next. An `amqps` connection then completes its TLS handshake within what is left,
+//! an equal share of what remains of the client's `connect_timeout_ms`, so an address that cannot
+//! connect leaves time for the next. A connection that runs out of that deadline is reported naming
+//! the key and its bound. An `amqps` connection then completes its TLS handshake within what is left,
 //! verifying the broker certificate against the host the address names, whichever of its addresses
 //! was dialled. Only then does Lapin start, and it runs the AMQP handshake over that transport.
 //!
@@ -42,7 +43,7 @@
     )
 )]
 
-use std::{io, net::SocketAddr, str::FromStr as _, time::Duration};
+use std::{io, net::SocketAddr, str::FromStr as _};
 
 use async_rs::{Tokio, TokioRuntime, traits::Reactor};
 use error_stack::{Report, ResultExt as _};
@@ -52,18 +53,12 @@ use lapin::{
     uri::{AMQPScheme, AMQPUri},
 };
 use meticulous::OptionExt as _;
-use nervix_connector::{client_config_value, client_tls_paths, read_tls_file};
-use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
+use nervix_connector::{ConfiguredDeadline, client_config_value, client_tls_paths, read_tls_file};
+use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{collections::ConcurrentQueue, time::timeout};
 use thiserror::Error;
 use url::{Host, Url};
-
-/// How long one connection may spend resolving the broker host, reaching one of its addresses and,
-/// for `amqps`, completing the TLS handshake. A policy input: generous for a broker across a wide
-/// area network, and short enough that a silent name server or an address that drops every packet
-/// costs one attempt of the host's retry policy rather than the operating system's connect timeout.
-const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// The transport Lapin runs the AMQP protocol over, on the Tokio reactor.
 type BrokerStream = AsyncTcpStream<<Tokio as Reactor>::TcpStream>;
@@ -74,6 +69,9 @@ pub enum RabbitMqConnectError {
     /// The client's `addr` is missing or is not an AMQP URI.
     #[error("invalid RabbitMQ client address")]
     InvalidAddress,
+    /// The client's `connect_timeout_ms` breaks the deadline rule.
+    #[error("invalid RabbitMQ client connect_timeout_ms")]
+    InvalidConnectTimeout,
     /// The CA file an `amqps` client names could not be read or is not PEM text.
     #[error("invalid RabbitMQ CA certificate")]
     InvalidCaCertificate,
@@ -103,7 +101,7 @@ impl RabbitMqConnectError {
     /// it.
     pub fn is_configuration(&self) -> bool {
         match self {
-            Self::InvalidAddress | Self::InvalidCaCertificate => true,
+            Self::InvalidAddress | Self::InvalidConnectTimeout | Self::InvalidCaCertificate => true,
             Self::Resolve { .. }
             | Self::Unreachable { .. }
             | Self::TlsHandshake { .. }
@@ -121,6 +119,8 @@ pub(crate) struct RabbitMqBroker {
     uri: AMQPUri,
     transport: BrokerTransport,
     dns: DnsResolver,
+    /// How long one connection may take, from resolving the host through the TLS handshake.
+    connect_timeout: ConfiguredDeadline,
 }
 
 /// How a connection to the broker is carried, as the scheme of its address says.
@@ -142,6 +142,8 @@ impl RabbitMqBroker {
         let addr = client_config_value(entries, "addr", "RabbitMQ")
             .change_context(RabbitMqConnectError::InvalidAddress)?;
         let uri = Self::uri(&addr)?;
+        let connect_timeout = ConfiguredDeadline::connect(entries)
+            .change_context(RabbitMqConnectError::InvalidConnectTimeout)?;
         let transport = match uri.scheme {
             AMQPScheme::AMQP => BrokerTransport::Plain,
             AMQPScheme::AMQPS => BrokerTransport::Tls {
@@ -152,6 +154,7 @@ impl RabbitMqBroker {
             uri,
             transport,
             dns,
+            connect_timeout,
         })
     }
 
@@ -198,29 +201,34 @@ impl RabbitMqBroker {
         &self.uri.authority.host
     }
 
-    /// Open a connection to the broker within [`CONNECT_BUDGET`]; the module documentation
-    /// describes each step.
+    /// Open a connection to the broker within the client's `connect_timeout_ms`; the module
+    /// documentation describes each step.
     pub(crate) async fn connect(&self) -> RabbitMqConnectResult<Connection> {
-        self.connect_within(CONNECT_BUDGET).await
+        self.connect_within(self.connect_timeout).await
     }
 
-    async fn connect_within(&self, budget: Duration) -> RabbitMqConnectResult<Connection> {
-        let deadline = ConnectionBudget::start(budget);
+    async fn connect_within(
+        &self,
+        connect_timeout: ConfiguredDeadline,
+    ) -> RabbitMqConnectResult<Connection> {
+        let deadline = OperationBudget::start(connect_timeout.bound(), LookupShare::Whole);
         let runtime = lapin::runtime::default_runtime().map_err(|error| {
             Report::new(RabbitMqConnectError::RuntimeUnavailable).attach_printable(error)
         })?;
         let addresses = self.resolve(&deadline).await?;
-        let stream = self.dial(&runtime, &addresses, &deadline).await?;
-        let stream = self.secure(stream, &deadline).await?;
+        let stream = self
+            .dial(&runtime, &addresses, &deadline, connect_timeout)
+            .await?;
+        let stream = self.secure(stream, &deadline, connect_timeout).await?;
         self.handshake(runtime, stream).await
     }
 
     /// Every address the broker host resolves to now, within the connection budget.
-    async fn resolve(&self, deadline: &ConnectionBudget) -> RabbitMqConnectResult<Vec<SocketAddr>> {
+    async fn resolve(&self, deadline: &OperationBudget) -> RabbitMqConnectResult<Vec<SocketAddr>> {
         let host = self.host();
         let resolved = self
             .dns
-            .resolve(host, self.uri.authority.port, deadline.remaining())
+            .resolve(host, self.uri.authority.port, deadline.lookup())
             .await;
         match resolved {
             Ok(addresses) => Ok(addresses),
@@ -235,30 +243,37 @@ impl RabbitMqBroker {
     }
 
     /// A TCP stream to the first of `addresses` that accepts one, trying them in order, each within
-    /// an equal share of what remains of the connection budget.
+    /// an equal share of what remains of the connection budget. When no address accepted and the
+    /// budget ran out, the failure names `connect_timeout` beneath the unreachable host.
     async fn dial(
         &self,
         runtime: &TokioRuntime,
         addresses: &[SocketAddr],
-        deadline: &ConnectionBudget,
+        deadline: &OperationBudget,
+        connect_timeout: ConfiguredDeadline,
     ) -> RabbitMqConnectResult<BrokerStream> {
-        let mut report = Report::new(RabbitMqConnectError::Unreachable {
-            host: self.host().to_string(),
-        });
+        let mut failures = Vec::new();
         for attempt in deadline.attempts(addresses) {
             nervix_primitives::task::consume_budget().await;
             let address = attempt.address;
             let share = attempt.budget;
             match timeout(share, AsyncTcpStream::connect(runtime, address)).await {
                 Ok(Ok(stream)) => return Ok(stream),
-                Ok(Err(error)) => {
-                    report = report.attach_printable(format!("{address}: {error}"));
-                }
-                Err(_) => {
-                    report = report
-                        .attach_printable(format!("{address}: no connection within {share:?}"));
-                }
+                Ok(Err(error)) => failures.push(format!("{address}: {error}")),
+                Err(_) => failures.push(format!("{address}: no connection within {share:?}")),
             }
+        }
+        let unreachable = RabbitMqConnectError::Unreachable {
+            host: self.host().to_string(),
+        };
+        let mut report = if deadline.remaining().is_zero() {
+            Report::new(connect_timeout.elapsed("connecting to the RabbitMQ broker"))
+                .change_context(unreachable)
+        } else {
+            Report::new(unreachable)
+        };
+        for failure in failures {
+            report = report.attach_printable(failure);
         }
         Err(report)
     }
@@ -268,7 +283,8 @@ impl RabbitMqBroker {
     async fn secure(
         &self,
         stream: BrokerStream,
-        deadline: &ConnectionBudget,
+        deadline: &OperationBudget,
+        connect_timeout: ConfiguredDeadline,
     ) -> RabbitMqConnectResult<BrokerStream> {
         let BrokerTransport::Tls { ca_chain } = &self.transport else {
             return Ok(stream);
@@ -286,7 +302,12 @@ impl RabbitMqBroker {
         match timeout(remaining, stream.into_tls(self.host(), config)).await {
             Ok(Ok(secured)) => Ok(secured),
             Ok(Err(error)) => Err(failed().attach_printable(error)),
-            Err(_) => Err(failed().attach_printable(format!("no handshake within {remaining:?}"))),
+            Err(_) => Err(Report::new(
+                connect_timeout.elapsed("the TLS handshake with the RabbitMQ broker"),
+            )
+            .change_context(RabbitMqConnectError::TlsHandshake {
+                host: self.host().to_string(),
+            })),
         }
     }
 
