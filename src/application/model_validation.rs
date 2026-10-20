@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
-use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::{Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerName,
     InferencerTensorDimension, InferencerTensorSchema, IngestorName, LookupName, Model, ModelKind,
@@ -39,9 +39,9 @@ use super::{
 /// How long opening one ONNX model to read its tensor metadata may take before validation gives up.
 const MODEL_INSPECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// What inspecting one model is charged. ONNX Runtime allocates what it reads itself, so the charge
-/// only admits the inspection onto the bulk workers.
-const MODEL_INSPECTION_RESERVATION_BYTES: u64 = 1;
+/// The bounded buffer used to read the configured native image sequentially. ONNX Runtime owns
+/// its other allocations; this charge covers the image buffer and admits the bulk job.
+const MODEL_INSPECTION_RESERVATION_BYTES: u64 = 16 * 1024;
 
 struct OnnxModelMetadata {
     inputs: HashMap<String, OnnxTensorMetadata>,
@@ -128,6 +128,8 @@ enum InferencerBindingValidationError {
     InvalidExtension { node: InferencerName, file: String },
     #[error("timed out inspecting ONNX model '{file}' for inferencer '{node}'")]
     InspectionTimeout { node: InferencerName, file: String },
+    #[error("ONNX model inspection was cancelled for inferencer '{node}'")]
+    InspectionCancelled { node: InferencerName },
     #[error(
         "failed to inspect ONNX model '{file}' for inferencer '{node}': the node's bounded \
          execution did not take the inspection"
@@ -543,50 +545,23 @@ impl SessionServiceImpl {
         processor: &CreateInferencer,
         path: &std::path::Path,
     ) -> error_stack::Result<(), InferencerBindingValidationError> {
-        let path = path.to_path_buf();
-        let processor_name = processor.name.clone();
-        let processor_file = processor.file.clone();
-        let executor = self.inner.runtime.executor();
-        // Opening a model reads and optimizes the whole file, so it runs on the bulk workers. ONNX
-        // Runtime allocates what it reads itself, so the charge only admits the inspection.
-        let reservation = executor
-            .reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
-            .await
-            .change_context_lazy(|| InferencerBindingValidationError::InspectionTask {
-                node: processor.name.clone(),
-                file: processor.file.clone(),
-            })?;
-        tracing::debug!(
-            node = %processor.name,
-            model_file = %processor.file,
-            "ONNX metadata inspection submitted to bulk execution"
-        );
-        let inspected = match nervix_primitives::time::timeout(
+        let model_metadata = match nervix_primitives::time::timeout(
             MODEL_INSPECTION_TIMEOUT,
-            executor.run_cpu(
-                CpuClass::Bulk,
-                reservation,
-                move |_charge, _cancellation| {
-                    tracing::debug!(
-                        node = %processor_name,
-                        model_file = %processor_file,
-                        "ONNX metadata inspection worker started"
-                    );
-                    Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
-                },
-            ),
+            self.inspect_inferencer_model_metadata(processor, path),
         )
         .await
         {
-            Ok(inspected) => inspected,
+            Ok(metadata) => metadata?,
             Err(_) => {
-                let bulk = executor.snapshot().bulk_cpu;
+                let snapshot = self.inner.runtime.executor().snapshot();
                 tracing::debug!(
                     node = %processor.name,
                     model_file = %processor.file,
-                    workers = bulk.workers,
-                    running = bulk.running,
-                    pending = bulk.pending,
+                    workers = snapshot.bulk_cpu.workers,
+                    running = snapshot.bulk_cpu.running,
+                    pending = snapshot.bulk_cpu.pending,
+                    reserved_bytes = snapshot.bulk_memory.reserved_bytes,
+                    capacity_bytes = snapshot.bulk_memory.capacity_bytes,
                     "ONNX metadata inspection deadline expired"
                 );
                 return Err(Report::new(
@@ -595,26 +570,6 @@ impl SessionServiceImpl {
                         file: processor.file.clone(),
                     },
                 ));
-            }
-        };
-        let model_metadata = match inspected {
-            Ok(model_metadata) => model_metadata?,
-            Err(error) => {
-                let failure = match error.current_context() {
-                    ExecutionError::JobPanicked { .. } => {
-                        InferencerBindingValidationError::InspectionPanic {
-                            node: processor.name.clone(),
-                            file: processor.file.clone(),
-                        }
-                    }
-                    ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
-                        InferencerBindingValidationError::InspectionTask {
-                            node: processor.name.clone(),
-                            file: processor.file.clone(),
-                        }
-                    }
-                };
-                return Err(error.change_context(failure));
             }
         };
 
@@ -645,6 +600,145 @@ impl SessionServiceImpl {
         }
 
         Ok(())
+    }
+
+    async fn inspect_inferencer_model_metadata(
+        &self,
+        processor: &CreateInferencer,
+        path: &std::path::Path,
+    ) -> error_stack::Result<OnnxModelMetadata, InferencerBindingValidationError> {
+        let path = path.to_path_buf();
+        let processor_name = processor.name.clone();
+        let processor_file = processor.file.clone();
+        let executor = self.inner.runtime.executor();
+        tracing::debug!(
+            node = %processor.name,
+            model_file = %processor.file,
+            "ONNX metadata inspection waiting for bulk memory"
+        );
+        // Native initialization and the model's load, optimization and release stay on this
+        // admitted worker. The reservation covers the bounded image buffer; ORT owns its heap.
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+            .await
+            .change_context_lazy(|| InferencerBindingValidationError::InspectionTask {
+                node: processor.name.clone(),
+                file: processor.file.clone(),
+            })?;
+        tracing::debug!(
+            node = %processor.name,
+            model_file = %processor.file,
+            "ONNX metadata inspection submitted to bulk execution"
+        );
+        match executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                tracing::debug!(
+                    node = %processor_name,
+                    model_file = %processor_file,
+                    "ONNX metadata inspection worker started"
+                );
+                let configured_image = std::env::var_os("ORT_DYLIB_PATH");
+                tracing::debug!(
+                    node = %processor_name,
+                    model_file = %processor_file,
+                    "ONNX metadata native image preparing"
+                );
+                Self::prepare_onnx_metadata_image(configured_image.as_deref(), cancellation)
+                    .change_context_lazy(|| {
+                        InferencerBindingValidationError::InspectionCancelled {
+                            node: processor_name.clone(),
+                        }
+                    })?;
+                tracing::debug!(
+                    node = %processor_name,
+                    model_file = %processor_file,
+                    "ONNX metadata native image preparation ended"
+                );
+                Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
+            })
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let failure = match error.current_context() {
+                    ExecutionError::JobPanicked { .. } => {
+                        InferencerBindingValidationError::InspectionPanic {
+                            node: processor.name.clone(),
+                            file: processor.file.clone(),
+                        }
+                    }
+                    ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
+                        InferencerBindingValidationError::InspectionTask {
+                            node: processor.name.clone(),
+                            file: processor.file.clone(),
+                        }
+                    }
+                };
+                Err(error.change_context(failure))
+            }
+        }
+    }
+
+    /// Reading a shared library on demand follows native call order, which can fault unrelated
+    /// code pages one at a time during global and kernel-registry initialization. Read an explicit
+    /// image sequentially on the same admitted worker before entering that initialization.
+    ///
+    /// This is advisory I/O. The external loader still selects the image and owns load errors,
+    /// including relative names and an image already loaded by another caller. No process-global
+    /// initializer or cache is added here, and preparation stays inside the inspection's deadline.
+    fn prepare_onnx_metadata_image(
+        configured: Option<&std::ffi::OsStr>,
+        cancellation: &Cancellation,
+    ) -> Result<(), Cancelled> {
+        cancellation.check()?;
+        let Some(configured) = configured else {
+            return cancellation.check();
+        };
+        let path = std::path::Path::new(configured);
+        if !path.is_absolute() {
+            return cancellation.check();
+        }
+        let mut image = match std::fs::File::open(path) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "ONNX native image read hint could not open its file"
+                );
+                return cancellation.check();
+            }
+        };
+        if !matches!(image.metadata(), Ok(metadata) if metadata.is_file()) {
+            return cancellation.check();
+        }
+        Self::read_onnx_metadata_image(&mut image, cancellation)?;
+        Ok(())
+    }
+
+    fn read_onnx_metadata_image(
+        image: &mut impl std::io::Read,
+        cancellation: &Cancellation,
+    ) -> Result<(), Cancelled> {
+        cancellation.check()?;
+        let mut buffer = vec![
+            0;
+            usize::try_from(MODEL_INSPECTION_RESERVATION_BYTES).assured(
+                "the fixed inspection buffer fits every supported target"
+            )
+        ];
+        loop {
+            cancellation.check()?;
+            match image.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    tracing::debug!(?error, "ONNX native image read hint ended before EOF");
+                    break;
+                }
+            }
+        }
+        cancellation.check()
     }
 
     fn inspect_onnx_model_metadata(
@@ -747,7 +841,6 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, BranchSelection, InferencerTensorElementType, InferencerTensorRepresentation,
         ProcessorInputs, ProcessorOutputs,
@@ -755,6 +848,521 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::{super::test_fixtures::named, *};
+
+    #[cfg(all(
+        feature = "testing",
+        feature = "deloxide",
+        not(any(feature = "shuttle", feature = "loom"))
+    ))]
+    #[test]
+    fn deloxide_onnx_metadata_inspection() {
+        run_metadata_inspection(released_bulk_queue_model_preflights());
+        metadata_image_reads_use_a_bounded_buffer_and_leave_load_errors_to_the_loader();
+        cancelling_image_preparation_stops_before_the_next_read_and_releases_its_charge();
+        image_preparation_preserves_the_external_loaders_path_and_error_ownership();
+        a_model_inspection_bounds_its_wait_for_bulk_memory();
+    }
+
+    #[cfg(not(any(feature = "shuttle", feature = "loom")))]
+    #[nervix_primitives::test]
+    async fn metadata_image_reads_use_a_bounded_buffer_and_leave_load_errors_to_the_loader() {
+        struct Image {
+            bytes: std::io::Cursor<Vec<u8>>,
+            requests: Vec<usize>,
+            interrupted: bool,
+            fail: bool,
+        }
+        impl std::io::Read for Image {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.requests.push(buffer.len());
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.fail {
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
+                std::io::Read::read(&mut self.bytes, buffer)
+            }
+        }
+        let size = usize::try_from(MODEL_INSPECTION_RESERVATION_BYTES)
+            .assured("the inspection buffer fits this target");
+        for fail in [false, true] {
+            let executor = nervix_execution::Executor::default();
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+                .assured("one image buffer fits the bulk budget");
+            let image = executor
+                .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                    let mut image = Image {
+                        bytes: std::io::Cursor::new(vec![9; size * 2 + 1]),
+                        requests: Vec::new(),
+                        interrupted: false,
+                        fail,
+                    };
+                    SessionServiceImpl::read_onnx_metadata_image(&mut image, cancellation)
+                        .assured("a read hint does not replace native loader error ownership");
+                    image
+                })
+                .await
+                .assured("the image read fits the bulk worker");
+            assert!(!image.requests.is_empty());
+            assert!(
+                image
+                    .requests
+                    .iter()
+                    .all(|request| *request > 0 && *request <= size)
+            );
+            assert_eq!(
+                image.bytes.position(),
+                if fail {
+                    0
+                } else {
+                    (size * 2 + 1)
+                        .try_into()
+                        .assured("bounded fixture length fits u64")
+                }
+            );
+            assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+        }
+    }
+
+    #[cfg(not(any(feature = "shuttle", feature = "loom")))]
+    #[nervix_primitives::test]
+    async fn cancelling_image_preparation_stops_before_the_next_read_and_releases_its_charge() {
+        use nervix_primitives::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+            blocking::mpsc,
+            oneshot,
+        };
+        enum ReadState {
+            Held {
+                entered: oneshot::Sender<()>,
+                release: mpsc::Receiver<()>,
+            },
+            Released,
+        }
+        struct Image {
+            state: ReadState,
+            reads: Arc<AtomicUsize>,
+        }
+        impl std::io::Read for Image {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                match std::mem::replace(&mut self.state, ReadState::Released) {
+                    ReadState::Held { entered, release } => {
+                        entered
+                            .send(())
+                            .assured("the cancelling caller awaits worker entry");
+                        release
+                            .recv()
+                            .assured("the cancelling caller releases this read");
+                    }
+                    ReadState::Released => panic!("a cancelled preparation attempted another read"),
+                }
+                Ok(buffer.len())
+            }
+        }
+        let executor = nervix_execution::Executor::default();
+        let charge = executor
+            .try_reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+            .assured("one image buffer fits the bulk budget");
+        let reads = Arc::new(AtomicUsize::new(0));
+        let image_reads = reads.clone();
+        let (entered, reading) = oneshot::channel();
+        let (release, released) = mpsc::channel();
+        let (finished, cancellation) = oneshot::channel();
+        let worker = executor.clone();
+        let awaiting = nervix_primitives::task::spawn(async move {
+            worker
+                .run_cpu(CpuClass::Bulk, charge, move |_charge, signal| {
+                    let mut image = Image {
+                        state: ReadState::Held {
+                            entered,
+                            release: released,
+                        },
+                        reads: image_reads,
+                    };
+                    let outcome = SessionServiceImpl::read_onnx_metadata_image(&mut image, signal);
+                    finished
+                        .send(outcome)
+                        .assured("the cancelling caller observes the worker's outcome");
+                })
+                .await
+        });
+        reading
+            .await
+            .assured("the preparation entered its first bounded read");
+        assert_eq!(
+            executor.snapshot().bulk_memory.reserved_bytes,
+            MODEL_INSPECTION_RESERVATION_BYTES
+        );
+        awaiting.abort();
+        assert!(
+            awaiting
+                .await
+                .expect_err("the awaiting job was aborted")
+                .is_cancelled()
+        );
+        assert_eq!(
+            executor.snapshot().bulk_memory.reserved_bytes,
+            MODEL_INSPECTION_RESERVATION_BYTES
+        );
+        release
+            .send(())
+            .assured("the admitted worker still owns its read");
+        assert_eq!(
+            cancellation
+                .await
+                .assured("the worker reported its cancellation"),
+            Err(Cancelled)
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        nervix_primitives::time::timeout(Duration::from_secs(30), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let snapshot = executor.snapshot();
+                if snapshot.bulk_cpu.completed == 1
+                    && snapshot.bulk_cpu.running == 0
+                    && snapshot.bulk_memory.reserved_bytes == 0
+                {
+                    break;
+                }
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled read returns its worker and charge");
+        assert_eq!(executor.snapshot().bulk_cpu.running, 0);
+        assert_eq!(executor.snapshot().bulk_cpu.pending, 0);
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    #[nervix_primitives::test]
+    async fn a_model_inspection_bounds_its_wait_for_bulk_memory() {
+        let executor = crate::runtime::single_worker_executor();
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service_with_executor(
+            false,
+            executor.clone(),
+        )
+        .await;
+        let before = executor.snapshot();
+        let capacity = before.bulk_memory.capacity_bytes;
+        let held = executor
+            .try_reserve(MemoryClass::Bulk, capacity)
+            .assured("the test occupies the untouched bulk budget");
+        let processor = inferencer();
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+        let result = nervix_primitives::time::timeout(
+            MODEL_INSPECTION_TIMEOUT + Duration::from_secs(2),
+            service.validate_inferencer_model_metadata(&processor, &model),
+        )
+        .await
+        .expect("the inspection's own deadline must bound memory admission");
+        let failure = result.expect_err("the full memory budget cannot admit an inspection");
+        assert!(
+            matches!(failure.current_context(), InferencerBindingValidationError::InspectionTimeout { node, .. } if node == &processor.name),
+            "{failure:?}"
+        );
+        assert_eq!(
+            executor.snapshot().bulk_cpu.admitted,
+            before.bulk_cpu.admitted
+        );
+        assert_eq!(executor.snapshot().bulk_cpu.pending, 0);
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, capacity);
+        drop(held);
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[cfg(not(any(feature = "shuttle", feature = "loom")))]
+    #[nervix_primitives::test]
+    async fn image_preparation_preserves_the_external_loaders_path_and_error_ownership() {
+        let directory = tempfile::tempdir().assured("the image hint fixture has a directory");
+        let image = directory.path().join("native-image");
+        std::fs::write(&image, vec![1; 20_000]).assured("the fixture writes its private image");
+        for configured in [
+            None,
+            Some(std::path::PathBuf::from("native-image")),
+            Some(directory.path().join("unavailable-image")),
+            Some(directory.path().to_path_buf()),
+            Some(image.clone()),
+        ] {
+            let executor = nervix_execution::Executor::default();
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+                .assured("one preparation buffer fits the bulk budget");
+            executor
+                .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                    SessionServiceImpl::prepare_onnx_metadata_image(
+                        configured.as_deref().map(std::path::Path::as_os_str),
+                        cancellation,
+                    )
+                    .assured("the loader owns path selection and image load failures");
+                })
+                .await
+                .assured("the preparation job completes");
+            assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+        }
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    fn run_metadata_inspection(inspection: impl Future<Output = ()>) {
+        #[cfg(feature = "deloxide")]
+        {
+            let directory = std::env::var_os("NERVIX_DEADLOCK_EVIDENCE")
+                .map(nervix_deadlock::EvidenceDirectory::new);
+            nervix_deadlock::DiagnosticRun::start_selected(
+                directory,
+                nervix_primitives::deadlock::DiagnosticSelection::for_build(cfg!(
+                    feature = "deloxide-order"
+                )),
+            )
+            .assured("the isolated diagnostic process starts before its runtime and tracked locks");
+        }
+        let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .assured("the isolated inspection test can start its runtime");
+        runtime.block_on(inspection);
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    fn isolated_metadata_inspection(scenario: &str, inspection: impl Future<Output = ()>) {
+        run_metadata_inspection(async {
+            const CHILD: &str = "NERVIX_ONNX_INSPECTION_SCENARIO";
+            const DIRECTORY: &str = "NERVIX_ONNX_INSPECTION_DIRECTORY";
+            if std::env::var(CHILD).as_deref() != Ok(scenario) {
+                let executable = std::env::current_exe().assured("the test has an executable");
+                let directory = tempfile::Builder::new()
+                    .prefix("onnx-inspection-")
+                    .tempdir_in(executable.parent().assured("the executable has a parent"))
+                    .assured("the parent can retain the inspection's private evidence")
+                    .keep();
+                let stdout = directory.join("stdout.log");
+                let mut command = tokio::process::Command::new(executable);
+                command
+                    .args(["--exact", scenario, "--test-threads=1", "--nocapture"])
+                    .env(CHILD, scenario)
+                    .env(DIRECTORY, &directory)
+                    .env(
+                        "RUST_LOG",
+                        "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
+                         openraft::replication=error,\
+                         openraft::engine::handler::replication_handler=error,\
+                         nervix_interconnect=debug,\
+                         nervix_server::application::model_validation=debug",
+                    )
+                    .stdout(std::fs::File::create(&stdout).assured("the parent can retain stdout"))
+                    .stderr(std::process::Stdio::inherit())
+                    .kill_on_drop(true);
+                eprintln!("inspection evidence: {}", directory.display());
+                let mut child = command.spawn().assured("the isolated inspection can start");
+                let status =
+                    match nervix_primitives::time::timeout(Duration::from_secs(90), child.wait())
+                        .await
+                    {
+                        Ok(status) => status.assured("the parent can observe its inspection child"),
+                        Err(_) => {
+                            child
+                                .kill()
+                                .await
+                                .assured("the parent kills and reaps its owned child");
+                            panic!(
+                                "inspection supervision expired; evidence: {}",
+                                directory.display()
+                            );
+                        }
+                    };
+                let trace = directory.join("inspection.log");
+                match std::fs::read_to_string(&trace) {
+                    Ok(trace) => eprint!("{trace}"),
+                    Err(error) => {
+                        eprintln!("inspection trace {} unavailable: {error}", trace.display())
+                    }
+                }
+                assert!(
+                    status.success(),
+                    "inspection child {status}; evidence: {}",
+                    directory.display()
+                );
+                let output =
+                    std::fs::read_to_string(&stdout).assured("the parent retained child stdout");
+                assert!(
+                    output.contains("test result: ok. 1 passed; 0 failed"),
+                    "the isolated inspection must execute: {output}"
+                );
+                return;
+            }
+            let directory = std::env::var_os(DIRECTORY)
+                .assured("the parent supplies its child's evidence directory");
+            let trace = std::path::PathBuf::from(directory).join("inspection.log");
+            crate::application::tracing_setup::init_tracing_to_file(&trace)
+                .assured("the child installs the production file subscriber");
+            inspection.await;
+        });
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    #[test]
+    fn a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights() {
+        isolated_metadata_inspection(
+            "application::model_validation::tests::a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights",
+            released_bulk_queue_model_preflights(),
+        );
+    }
+
+    #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
+    async fn released_bulk_queue_model_preflights() {
+        let executor = nervix_execution::Executor::default();
+        let crate::application::test_fixtures::TestService {
+            service,
+            registry: _registry,
+            path,
+        } = crate::application::test_fixtures::build_test_service_with_executor(
+            false,
+            executor.clone(),
+        )
+        .await;
+        let matrix = InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions: vec![
+                InferencerTensorDimension::Fixed(nonzero!(2u32)),
+                InferencerTensorDimension::Fixed(nonzero!(3u32)),
+            ],
+        };
+        let processor = CreateInferencer {
+            file: "matrix_identity.onnx".to_string(),
+            inputs: vec![nervix_models::InferencerTensorMapping {
+                tensor: "matrix".to_string(),
+                schema: matrix.clone(),
+                expression: nervix_models::Expression::Literal(nervix_models::Literal::Null),
+            }],
+            output_schema: vec![nervix_models::InferencerTensorDeclaration {
+                tensor: "transformed".to_string(),
+                schema: matrix,
+            }],
+            ..inferencer()
+        };
+        let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/onnx/matrix_identity.onnx");
+        let before = executor.snapshot().bulk_cpu;
+        let mut releases = Vec::new();
+        let mut holders = nervix_primitives::task::JoinSet::new();
+        for _ in 0..before.workers {
+            nervix_primitives::task::consume_budget().await;
+            let worker = executor.clone();
+            let reservation = worker
+                .try_reserve(MemoryClass::Bulk, 0)
+                .assured("occupancy requires no memory charge");
+            let (entered, entry) = nervix_primitives::sync::oneshot::channel();
+            let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+            holders.spawn(async move {
+                worker
+                    .run_cpu(CpuClass::Bulk, reservation, move |_, _| {
+                        entered
+                            .send(())
+                            .assured("the test observes each occupied worker");
+                        held.recv()
+                            .expect_err("releasing occupancy disconnects its gate");
+                    })
+                    .await
+                    .assured("each holder has one admitted bulk worker");
+            });
+            entry.await.assured("the holder reached its actual worker");
+            releases.push(release);
+        }
+        let mut empty_jobs = nervix_primitives::task::JoinSet::new();
+        for _ in 0..before.queue_capacity {
+            nervix_primitives::task::consume_budget().await;
+            let worker = executor.clone();
+            let reservation = worker
+                .try_reserve(MemoryClass::Bulk, 0)
+                .assured("an empty queued job requires no memory charge");
+            empty_jobs.spawn(async move {
+                worker
+                    .run_cpu(CpuClass::Bulk, reservation, |_, _| ())
+                    .await
+                    .assured("each empty job has one bounded queue place");
+            });
+        }
+        while executor.snapshot().bulk_cpu.pending != before.queue_capacity {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+        let refusal = service
+            .validate_inferencer_model_metadata(&processor, &model)
+            .await
+            .expect_err("the full queue refuses an uninspected model");
+        assert!(matches!(
+            refusal.current_context(),
+            InferencerBindingValidationError::InspectionTask { .. }
+        ));
+        assert!(matches!(
+            refusal.downcast_ref::<ExecutionError>(),
+            Some(ExecutionError::QueueFull { .. })
+        ));
+        drop(releases);
+        let pending_limit = before
+            .queue_capacity
+            .checked_sub(4)
+            .assured("the default queue holds four preflights");
+        while executor.snapshot().bulk_cpu.pending > pending_limit {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+        let mut preflights = nervix_primitives::task::JoinSet::new();
+        for job in 0..4 {
+            let service = service.clone();
+            let processor = CreateInferencer {
+                name: named(&format!("queued_matrix_{job}")),
+                ..processor.clone()
+            };
+            let model = model.clone();
+            preflights.spawn(async move {
+                service
+                    .validate_inferencer_model_metadata(&processor, &model)
+                    .await
+                    .assured("the released queue admits a matching model within its product bound");
+            });
+        }
+        while let Some(preflight) = preflights.join_next().await {
+            nervix_primitives::task::consume_budget().await;
+            preflight.assured("the admitted production preflight did not panic");
+        }
+        while let Some(empty) = empty_jobs.join_next().await {
+            nervix_primitives::task::consume_budget().await;
+            empty.assured("the queued empty job completed");
+        }
+        while let Some(holder) = holders.join_next().await {
+            nervix_primitives::task::consume_budget().await;
+            holder.assured("the released holder completed");
+        }
+        let completed = before
+            .workers
+            .checked_add(before.queue_capacity)
+            .and_then(|jobs| jobs.checked_add(4))
+            .assured("the bounded default workers, queue and preflights fit usize");
+        let completed =
+            u64::try_from(completed).assured("the bounded job count fits the execution counters");
+        let after = executor.snapshot();
+        assert_eq!(after.bulk_cpu.admitted - before.admitted, completed);
+        assert_eq!(after.bulk_cpu.completed - before.completed, completed);
+        assert_eq!(after.bulk_cpu.refused - before.refused, 1);
+        assert_eq!(after.bulk_cpu.running, 0);
+        assert_eq!(after.bulk_cpu.pending, 0);
+        assert_eq!(after.bulk_memory.reserved_bytes, 0);
+        std::fs::remove_dir_all(path).assured("the completed service fixture can be removed");
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
