@@ -1429,7 +1429,12 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
-as a duplicate; the ingestor resumes by polling past anything the service expired.
+as a duplicate; the ingestor resumes by polling past anything the service expired. A poll still
+waiting when the ingestor quiesces or stops is never abandoned, because the service takes the
+message it answers with off the queue: the poll completes within its one-second wait, and a message
+it brings dispatches before the source suspends or closes. Only a service that has not answered
+within 10 seconds ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient error;
+a message the poll was returning then stays invisible until its visibility timeout.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on. The source resolves the host of its
