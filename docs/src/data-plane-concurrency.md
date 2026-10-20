@@ -354,12 +354,25 @@ programs and compiled WASM modules.
 
 ## Retained Task Dependencies
 
-A source or sink retains one failure publication containing both its safe error and optional retry.
-Success reads that slot and clears it only when it holds a failure. Identical failure reports keep
-the same immutable observation. Reporting an error without a new retry keeps the active retry,
-which remains visible as publishing work to drains even when the emitter buffer is empty. DESCRIBE
-loads error, backoff and remaining wait from one observation. Emitter confirmation guards retain
-one counter resolved at startup, and task teardown removes its registry interest.
+A source or sink retains one atomic failure publication. An emitter's task and its retained
+connector background task own independent failures within that publication: task only, connector
+only, or both. Each failure contains its safe error and optional retry. A writer clears its own
+failure through a read-copy-update of the current publication, preserving the other writer's
+failure even when their transitions race. Healthy polls only read, and identical reports retain
+the same immutable failure observation.
+
+The failure selected for retry scheduling gives an active task retry precedence over a connector
+retry. Otherwise an active connector retry stays visible ahead of a task error without a retry; with neither retry,
+the task error takes precedence. This keeps publishing work visible to drains even when the emitter
+buffer is empty. Reporting a task error without a new retry preserves that task's active retry.
+DESCRIBE retains the whole immutable publication, renders both owners' errors when both fail, and
+loads the selected retry's backoff and remaining wait from that same publication.
+The registered TaskStatus Bolero property and production-owner Shuttle check cover independent
+clearing, concurrent reports, coherent selection, both diagnostic owners and immutable retained
+observations. These are publication interleavings; the primitive boundary owns its atomic
+memory-ordering implementation.
+Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
+registry interest.
 
 Every pooled Redis or SQL sink registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
@@ -1990,10 +2003,17 @@ replica task takes them under the same lock.
 The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
 the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
 and three nodes. Its paired stress registration reaches the occupancy holders mutex under bounded
-scheduling disturbance. Metadata inspection keeps ONNX's operator concurrency at one, so loading
-and optimization run on the bulk worker the executor admitted. Debug phase events distinguish
-worker queue delay, session initialization and release while the thirty-second product bound stays
-in place. The dependency's own locks and threads remain outside Deloxide; the isolated native owner
+scheduling disturbance. It also observes the inspection's bulk-memory charge returning to zero.
+The `owner.onnx-metadata-inspection` workload runs production-wrapper queue recovery in the fresh
+process the lane launches for that exact owner, then the bounded-read and cancellation regressions,
+including retaining the buffer charge while a
+cancelled read is still in progress. Metadata inspection keeps ONNX's operator concurrency at one;
+sequential preparation of an explicit native image, loading, optimization and release run on the
+admitted bulk worker. The thirty-second bound includes memory admission. Phase events and budget
+snapshots distinguish memory waiting, worker queueing, image reads, session initialization and
+release. No shared cache, global lock or atomic protocol is added. Filesystem waits and native
+synchronization remain outside the detector; the existing executor cancellation Loom models own
+the flag's memory-ordering contract. The dependency's own locks and threads remain outside Deloxide; the isolated native owner
 regression measures the live temporary session's process thread count, and the public branch-batch
 scenario retains its exact interleaved-branch output oracle.
 

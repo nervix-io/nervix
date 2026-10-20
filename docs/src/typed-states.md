@@ -760,8 +760,15 @@ The paced simulation applications represent endpoint-open intent as `CurrentGene
 later paced generation; initial and contract-change opens retain the stopped-domain refusal.
 The opened producer's generation and its paced clock still own permission to plan readings.
 
-Healthy connector status is absence of a failure; a failure contains its safe error and an optional
-retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
+Healthy connector status is absence of a failure publication. TaskStatus represents task-only,
+connector-only and simultaneous failures as distinct states, each retaining its error and optional
+retry. The writer's identity is independent of the retry kind and diagnostic text. Each writer
+clears its own state in the current atomic publication. Selection retains an active task retry
+first, an active connector retry next, and a task error without a retry after that, so a pending
+retry remains visible to drains. Operator inspection reads both owners' errors and the selected
+retry from one immutable publication. Retained observations are immutable.
+
+Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
 a present assignment contains its state identity, optional primary, executors and replicas
 together. An absent primary represents an assignment without one primary owner. Replication routes
