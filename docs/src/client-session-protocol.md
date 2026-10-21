@@ -633,6 +633,13 @@ stays applying. The finalization boundary returns that disposition unchanged and
 under the original reference to determine the terminal outcome. Reconciliation follows the same
 rule when an attempt is interrupted after admission.
 
+A transaction's configured tombstone age cannot shorten an applying execution's recovery lifetime.
+An applying transaction request retains its finished target; an applying ordinary command retains
+its internal transaction and every planning refresh attempt through their recorded mutation owner.
+Their plans and reports remain available as well. Cleanup rechecks these relationships against the
+replicated execution records when it applies. This remains true after a leaderless interval longer
+than the configured retention.
+
 The same rule covers every transaction control:
 
 - **`BEGIN`.** The new transaction's identity is fixed when the request is admitted. Repeating a
@@ -815,8 +822,11 @@ timeout, 15 minutes by default, whether or not a session is bound to it. Attachi
 it, and a commit's admission or failure renew that deadline; an open connection, a bound session,
 and reads of the transaction do not. The deadline is a durable UTC instant, so time the cluster
 spends stopped counts toward it, and an overdue transaction expires once the cluster runs again. A
-`COMMITTING` transaction never expires. A finished transaction remains as a tombstone, 15 minutes by
-default, during which attach and inspection report its outcome; afterwards its identity is unknown.
+`COMMITTING` transaction never expires. A finished transaction remains as a tombstone for at least
+the configured retention, 15 minutes by default, during which attach and inspection report its
+outcome. An applying command that still needs it extends that lifetime as described in
+[Exact Recovery](#exact-recovery). Once the age has passed and no applying execution needs it,
+cleanup removes it and its identity is unknown; command finalization starts no additional window.
 
 **Ending a session.** A session that ends uncleanly, through a transport failure, a node stop, or
 the server ending it, only releases its binding; the transaction stays open for attach until it

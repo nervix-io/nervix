@@ -107,6 +107,8 @@ selections = ["deloxide", "deloxide-order"]
 tags = [
   "@client_wire_pause_leadership",
   "@client_wire_standalone_preparation",
+  "@client_wire_tombstone_retention",
+  "@client_wire_tombstone_recovery",
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
@@ -2239,6 +2241,10 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
+  "scenario.command-transaction-retention",
+  "stress.command-transaction-retention",
+  "scenario.command-transaction-retention-recovery",
+  "stress.command-transaction-retention-recovery",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",
@@ -2445,6 +2451,10 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.command-transaction-retention",
+  "stress.command-transaction-retention",
+  "scenario.command-transaction-retention-recovery",
+  "stress.command-transaction-retention-recovery",
   "scenario.standalone-preflight",
   "stress.standalone-preflight",
   "scenario.transaction-pause-release",
@@ -2931,4 +2941,44 @@ id = "stress.endpoint-ack-fanout"
 invariant = "Every binding receives a shared request before its response waits for all graph acknowledgements, and each window returns its own slot."
 invocation = "stress-endpoint-acknowledgement"
 scenario = "Shared endpoint intake reaches both consumers before either acknowledgement"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Tracked consensus state and transaction report lifetime during age-based cleanup, with an execution held before finalization on one- and three-node clusters. Async barriers, proposal waits and network scheduling remain untracked."
+examples = 4
+feature = "tests/features/runtime/client_wire_tombstone_retention.feature"
+id = "scenario.command-transaction-retention"
+invariant = "An applying ordinary command or transaction batch keeps its finished transaction through a later tombstone sweep; finalization permits cleanup."
+invocation = "scenarios"
+scenario = "An applying command keeps its transaction through a retention sweep"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: tracked consensus state and report retention through command finalization on one- and three-node clusters. Async barriers and network waits remain untracked."
+examples = 4
+feature = "tests/features/runtime/client_wire_tombstone_retention.feature"
+id = "stress.command-transaction-retention"
+invariant = "An applying ordinary command or transaction batch keeps its finished transaction through a later tombstone sweep; finalization permits cleanup."
+invocation = "stress-scenarios"
+scenario = "An applying command keeps its transaction through a retention sweep"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Tracked consensus state and report lifetime when leadership moves after the transaction age retention, before the command records its result. Async leadership, proposal and fault-barrier waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_tombstone_retention.feature"
+id = "scenario.command-transaction-retention-recovery"
+invariant = "Recovery of an ordinary command or transaction batch beyond tombstone age returns its recorded outcome without applying the effect again."
+invocation = "scenarios"
+scenario = "Leadership recovery uses a finished transaction beyond its age retention"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: tracked consensus transaction and report state through tombstone cleanup and leadership recovery. Async leadership and network waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_tombstone_retention.feature"
+id = "stress.command-transaction-retention-recovery"
+invariant = "Recovery of an ordinary command or transaction batch beyond tombstone age returns its recorded outcome without applying the effect again."
+invocation = "stress-scenarios"
+scenario = "Leadership recovery uses a finished transaction beyond its age retention"
 selections = ["deloxide-stress"]

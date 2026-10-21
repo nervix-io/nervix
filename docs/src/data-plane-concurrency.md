@@ -1960,6 +1960,14 @@ the lane's coverage report is evidence about it, not a proof of ownership. Forma
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 
+The command transaction retention workloads reach tracked consensus state and report ownership
+while cleanup runs with an execution held before finalization. Ordinary and stressed cases cover
+one- and three-node retention, followed by cleanup after finalization, and three-node leadership
+recovery after the transaction's configured age. Their asynchronous barriers, proposals, leader
+observations and transport waits remain outside Deloxide; the public outcomes and direct
+state-machine regressions cover the retention decision. No synchronization protocol or memory
+ordering changes at this boundary.
+
 The WebSocket source lifecycle workloads drop an ingestor, move its owner and recover from repeated
 peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
 locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's
