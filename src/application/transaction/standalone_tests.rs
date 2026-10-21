@@ -225,6 +225,100 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed_after_
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
 }
 
+/// The leader refuses a standalone command's step publication as one whose retained log is
+/// saturated, after the command's transaction started committing. The command must stay applying
+/// and keep its domain mutation lease rather than record a terminal failure, so that repeating it
+/// under the same reference finishes its transaction once.
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn a_command_whose_transaction_is_still_committing_stays_applying_until_it_finishes() {
+    use crate::{
+        application::command_result::OutcomeUnknownCause,
+        fault_injection::ModelPublicationRefusalKind,
+    };
+
+    let fault_injection = crate::FaultInjection::default();
+    let TestService {
+        service,
+        registry,
+        path,
+    } = crate::application::test_fixtures::build_test_service_with_fault_injection(
+        true,
+        fault_injection.clone(),
+    )
+    .await;
+    let domain =
+        DomainName::parse("default").assured("the fixture domain name is an accepted literal");
+    fault_injection
+        .refuse_next_model_publication(domain.clone(), ModelPublicationRefusalKind::SaturatedLog);
+    let request = CommandRequest {
+        execution_reference: test_execution_reference(),
+        ..test_command_request("CREATE SCHEMA retained ( key I64 );", "default")
+    };
+    let reference = request.execution_reference.clone();
+    let transaction_id = command_transaction_id(&request);
+    let mut subscriptions = SessionSubscriptions::new();
+
+    let first = service.test_command(request.clone(), &mut subscriptions).await;
+
+    assert!(
+        matches!(
+            first.disposition,
+            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying)
+        ),
+        "a command whose transaction is still committing answers that it still applies: {first:?}"
+    );
+    let execution = service
+        .inner
+        .consensus
+        .current_command_execution(&reference)
+        .await
+        .verified("the command was admitted before its publication was refused");
+    assert!(
+        execution.is_applying(),
+        "the command records no outcome while its transaction commits: {execution:?}"
+    );
+    assert!(
+        execution.domain_mutation(&domain).is_some(),
+        "the command keeps the domain mutation lease its transaction commits under: {execution:?}"
+    );
+    let transaction = service
+        .inner
+        .consensus
+        .current_transaction(&transaction_id)
+        .await
+        .verified("the refused publication left the command's transaction in place");
+    assert!(
+        matches!(transaction.state, TransactionState::Committing(_)),
+        "the refused publication leaves the transaction committing: {transaction:?}"
+    );
+
+    let repeated = service.test_command(request, &mut subscriptions).await;
+    subscriptions.stop_all().await;
+
+    assert!(
+        repeated.succeeded(),
+        "repeating the command under its reference finishes it: {repeated:?}"
+    );
+    let transaction = service
+        .inner
+        .consensus
+        .current_transaction(&transaction_id)
+        .await
+        .verified("the committed command transaction keeps its tombstone");
+    assert!(
+        matches!(
+            transaction.finished_outcome(),
+            Some(TransactionOutcome::Committed)
+        ),
+        "the command transaction commits once: {transaction:?}"
+    );
+
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+}
+
 /// One standalone command request in the fixture's `default` domain, applied through the command
 /// transaction its reference names.
 struct FixtureCommand {

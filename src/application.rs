@@ -943,8 +943,7 @@ impl Application {
                                 Ok(()) => {
                                     info!(
                                         domain = domain.as_str(),
-                                        "resumed orphaned ALTER pause after leadership \
-                                         acquisition"
+                                        "resumed orphaned ALTER pause"
                                     );
                                 }
                                 Err(error) => {
