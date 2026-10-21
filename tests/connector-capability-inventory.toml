@@ -162,6 +162,7 @@ capability = "MODE ACK"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them" },
 ]
 
 [[capability]]

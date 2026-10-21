@@ -72,6 +72,16 @@ released and its session disconnected; the scenario's cleanup releases remaining
 cluster shutdown, including when an assertion fails. These are external database locks, outside
 Deloxide's tracked thread-blocking locks.
 
+The Iceberg refused-append scenario stands a gate in front of the REST catalog the run shares and
+points only its own emitter's catalog client at it. The gate recognizes a commit to the scenario's
+table by its method and path, holds it until a step refuses it with the `409 Conflict` a catalog
+answers a commit whose requirements no longer hold, or passes it to the catalog, and forwards every
+other request unchanged. It records when it refused a commit and when the next one arrived, so the
+scenario requires the retried commit to follow its refusal by at least the emitter's backoff
+instead of observing a silent window. While the gate holds a commit, that commit cannot complete, so
+the scenario reads the staging directory, the table and the producer's batch outcomes as states
+that cannot move.
+
 Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
 path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
 validation and title checks remain enabled. This exclusion records a source decision rather than
@@ -102,7 +112,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
-| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, and the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes |
+| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,

@@ -123,6 +123,7 @@ use crate::common::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
@@ -171,6 +172,7 @@ mod domain_clock_attachment;
 mod domain_resume;
 mod endpoint_intake;
 mod generated_http_payloads;
+mod iceberg_delivery;
 mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
@@ -498,6 +500,9 @@ struct ScenarioWorld {
     /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
     /// chosen message.
     sqs_answer_hold: Option<SqsAnswerHold>,
+    /// The gate a scenario stood in front of the Iceberg REST catalog to hold, refuse or pass the
+    /// commits to one table.
+    iceberg_catalog_gate: Option<IcebergCatalogGate>,
     /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
     /// that connect through it.
     nats_endpoint: Option<NatsEndpoint>,
@@ -636,6 +641,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("sqs_answer_hold", &self.sqs_answer_hold)
+            .field("iceberg_catalog_gate", &self.iceberg_catalog_gate)
             .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("unaccepted_addresses", &self.unaccepted_addresses)
@@ -29746,7 +29752,13 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
 }
 
 fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
-    path_contains_staged_iceberg_batch(root, |path, name| {
+    staged_iceberg_arrow_ipc_batches(root) > 0
+}
+
+/// How many complete Arrow IPC batches Iceberg emitters staged under `root`: files a staging
+/// write finished, which hold at least one record batch.
+fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
+    staged_iceberg_batches(root, |path, name| {
         if !name.starts_with("batch-") || !name.ends_with(".arrow") {
             return false;
         }
@@ -29764,33 +29776,34 @@ fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
 }
 
 fn path_contains_staged_iceberg_parquet_batch(root: &Path) -> bool {
-    path_contains_staged_iceberg_batch(root, |_path, name| {
+    let staged = staged_iceberg_batches(root, |_path, name| {
         name.starts_with("batch-") && name.ends_with(".parquet")
-    })
+    });
+    staged > 0
 }
 
-fn path_contains_staged_iceberg_batch(
-    root: &Path,
-    predicate: impl Copy + Fn(&Path, &str) -> bool,
-) -> bool {
+/// How many files under `root`, at any depth, `predicate` accepts by their path and name.
+fn staged_iceberg_batches(root: &Path, predicate: impl Copy + Fn(&Path, &str) -> bool) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
+        return 0;
     };
+    let mut staged = 0_usize;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if path_contains_staged_iceberg_batch(&path, predicate) {
-                return true;
-            }
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| predicate(&path, name))
-        {
-            return true;
-        }
+        let found = if path.is_dir() {
+            staged_iceberg_batches(&path, predicate)
+        } else {
+            let accepted = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| predicate(&path, name));
+            usize::from(accepted)
+        };
+        staged = staged
+            .checked_add(found)
+            .assured("a scenario's temp directory holds far fewer than usize::MAX files");
     }
-    false
+    staged
 }
 
 async fn iceberg_table_rows(
@@ -31335,6 +31348,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
                 world.sqs_answer_hold = None;
+                world.iceberg_catalog_gate = None;
                 world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();

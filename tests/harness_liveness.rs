@@ -5,17 +5,17 @@
 //! - **Owns.** Registration of the focused node-liveness, readiness-history, node-startup,
 //!   node-stop, phase-deadline, status-request, port-pool, node-bound address, process-cluster
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable, stallable-TCP-proxy, unaccepted-address, process-observation and
-//!   process-report regressions with Rust's test runner, and the stand-in nodes, clients, images
-//!   and processes those regressions talk to.
+//!   Iceberg-catalog-gate, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
+//!   runner-offload, server-executable, stallable-TCP-proxy, unaccepted-address,
+//!   process-observation and process-report regressions with Rust's test runner, and the stand-in
+//!   nodes, clients, images and processes those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
-//!   suite-watchdog, Redis-client, HTTP-receiver, gRPC-receiver, NATS-observer, runner-lag,
-//!   runner-offload, server-executable, stallable-TCP-proxy, unaccepted-address,
-//!   process-observation, process-report and materialized-state diagnostic harness modules, the
-//!   product's shutdown coordinator a stopping node is read through, and the client wire session
-//!   protocol the stand-in nodes answer status requests with.
+//!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, gRPC-receiver,
+//!   NATS-observer, runner-lag, runner-offload, server-executable, stallable-TCP-proxy,
+//!   unaccepted-address, process-observation, process-report and materialized-state diagnostic
+//!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
+//!   client wire session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -24,6 +24,10 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/iceberg_catalog_gate.rs"]
+mod iceberg_catalog_gate;
+#[path = "common/iceberg_catalog_gate_tests.rs"]
+mod iceberg_catalog_gate_tests;
 #[path = "common/injected_hold.rs"]
 mod injected_hold;
 #[path = "common/injected_hold_tests.rs"]
