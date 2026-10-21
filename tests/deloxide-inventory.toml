@@ -105,6 +105,7 @@ package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@client_wire_pause_leadership",
+  "@client_wire_standalone_preparation",
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
@@ -2082,6 +2083,26 @@ invocation = "stress-scenarios"
 scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Standalone command preparation, tracked transaction impact recording and domain pause recovery across two controlled leadership transfers. Async preparation barriers remain untracked."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.standalone-preflight"
+invariant = "A stale preflight observes the same command's durable transaction progress before deciding its outcome; exact recovery and a dependent mutation succeed after pause release."
+invocation = "scenarios"
+scenario = "A stale standalone preflight recovers the applying command across repeated leadership changes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: standalone command preparation, tracked transaction impact recording and domain pause recovery across two controlled leadership transfers."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.standalone-preflight"
+invariant = "A stale preflight observes the same command's durable transaction progress before deciding its outcome; exact recovery and a dependent mutation succeed after pause release."
+invocation = "stress-scenarios"
+scenario = "A stale standalone preflight recovers the applying command across repeated leadership changes"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2298,6 +2319,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.standalone-preflight",
+  "stress.standalone-preflight",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
@@ -2384,6 +2407,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.standalone-preflight",
+  "stress.standalone-preflight",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
@@ -2395,6 +2420,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.standalone-preflight",
+  "stress.standalone-preflight",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.client-alter-drain",

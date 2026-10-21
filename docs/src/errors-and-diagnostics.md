@@ -503,6 +503,11 @@ error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
 the paragraphs below record what each integration keeps beneath it.
 
+An Iceberg object-store failure retains its OpenDAL cause beneath the external Iceberg error.
+When the storage client sets `timeout_ms`, that error also names the configured millisecond bound
+as configuration context. The host reports the failed commit and its declared reconnect backoff; one
+storage failure consumes one host attempt. Catalog requests keep their separate failure path.
+
 The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MySQL and ClickHouse
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
 host ownership transition; it does not recreate the top-level error from its formatted text.
@@ -1554,6 +1559,15 @@ report above the domain lifecycle and consensus or runtime cause, and leaves the
 A refused resume updates the coordinator's current quiescence diagnostics; it does not become a
 definitive application failure merely because the coordinator temporarily lost its authority. An existing
 definitive effect failure is retained when cleanup succeeds in that same completion attempt.
+
+An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
+its coordinator's observation of the command's internal transaction. Before the session maps such a
+report to the command's `Failed` disposition, the coordinator reads that transaction again. A
+refusal reached against a transaction that another coordinator has since opened or advanced, such
+as `TransactionPlanningError::DomainPaused` caused by the same command's own pause, is not that
+command's failure:
+the coordinator recovers the recorded progress under the same execution reference instead. A
+refusal against an unchanged transaction keeps its report, message, and disposition.
 
 ### Domain Clock Attachment
 

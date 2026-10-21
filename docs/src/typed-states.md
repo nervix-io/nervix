@@ -533,6 +533,12 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+The Iceberg sink validates its configured location into a URL before creating its storage factory.
+The initialized operator belongs to that storage root: a later object path must match its scheme,
+host, port and container identity before its relative key reaches the operator. Table metadata
+refreshes retain the first table's initialized `FileIO`; they do not install a different storage
+owner alongside refreshed metadata. Invalid object references fail at this boundary.
+
 Generated compiler findings carry a required execution-context field. An explicit null means that
 analysis has not established a source contract; it is an unknown effect, not a cold classification.
 The report decoder requires that field even though its value is optional. Complete compiler,
