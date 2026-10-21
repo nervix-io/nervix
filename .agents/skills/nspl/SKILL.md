@@ -386,11 +386,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
-  ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
-  bound; the emitter's declared retry policy owns pacing after that request fails. A ZeroMQ
-  client's `timeout_ms` bounds each send, which otherwise waits for as long as the peer reads
-  nothing. OTEL clients
+- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL,
+  ClickHouse, or an Iceberg object-store client, put `timeout_ms` in the referenced client CONFIG
+  when the request needs an explicit bound; the emitter's declared retry policy owns pacing after
+  that request fails. A ZeroMQ client's `timeout_ms` bounds each send, which otherwise waits for as
+  long as the peer reads nothing. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
