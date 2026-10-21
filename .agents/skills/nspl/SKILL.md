@@ -393,7 +393,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   ClickHouse, or an Iceberg object-store client, put `timeout_ms` in the referenced client CONFIG
   when the request needs an explicit bound; the emitter's declared retry policy owns pacing after
   that request fails. A ZeroMQ client's `timeout_ms` bounds each send, which otherwise waits for as
-  long as the peer reads nothing. OTEL clients
+  long as the peer reads nothing. Prefer a bound ZeroMQ PULL ingestor and a connecting ZeroMQ
+  emitter: the driver never reconnects a connecting PULL socket after its peer goes away, and a
+  bound emitter can keep failing after one failed publish; read `Ingestors` → `ZeroMQ` and
+  `Emitters` → `ZeroMQ`. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
@@ -401,7 +404,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Client deadline keys mean the same thing everywhere: `timeout_ms` bounds a whole request,
   name resolution, connection and TLS included, and `connect_timeout_ms` bounds establishing a
   connection, the protocol handshake included. RabbitMQ, Redis, Syslog emitter, ZeroMQ emitter and
-  WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it; a RabbitMQ client's
+  WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a ZeroMQ PULL
+  ingestor reads neither key; a RabbitMQ client's
   deadline also covers the AMQP handshake and opening the entity's channel, and its `timeout_ms`
   bounds the round trip that ends a `NO_ACK` write. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
