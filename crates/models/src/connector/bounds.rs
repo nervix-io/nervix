@@ -116,6 +116,8 @@ pub enum BufferOverflow {
     DropUncounted,
     /// A hand-over that does not fit fails the publish, and the host retries it on its policy.
     FailPublish,
+    /// The request is refused immediately; its sender owns retry.
+    RefuseRequest,
 }
 
 /// One network wait a connector performs.

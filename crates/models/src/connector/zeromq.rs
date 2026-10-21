@@ -17,7 +17,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    bounds::{BufferBound, DeclaredBounds, DeclaredBuffer, DeclaredWait, WaitBound},
+    bounds::{
+        BufferBound, DEFAULT_CONNECT_TIMEOUT, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
 };
@@ -73,11 +76,17 @@ const ZEROMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     waits: &[
         DeclaredWait {
             wait: "connecting and the ZMTP handshake",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
         },
         DeclaredWait {
             wait: "a send",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &["The driver has no high-water mark, maximum message size or heartbeat."],

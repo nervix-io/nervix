@@ -57,7 +57,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
-| Modes (complete bodies after MODE) | NO ACK |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers` |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
@@ -65,8 +65,8 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | a request body: unbounded |  |
-| Network waits | a client's request head and body: unbounded |  |
+| Buffers | a request body: unbounded<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | a client's request head and body: unbounded<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
 | Driver limits | Request heads above 100 headers are refused. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -166,7 +166,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
 | Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and consume: unbounded<br>a silent connection: driver default, twice the negotiated heartbeat |  |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
@@ -277,7 +277,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | WEBSOCKETS ENDPOINT | No emit entity is declared. An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. |
 | Reference | Websockets endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
-| Modes (complete bodies after MODE) | NO ACK |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers` |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
@@ -285,8 +285,8 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |  |
+| Buffers | unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending`<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |  |
 | Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -350,7 +350,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | a request: name resolution, connection, TLS, writing it and its final response headers: `timeout_ms`; required |  |
+| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |  |
 | Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
@@ -413,9 +413,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |  |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and confirm select: unbounded<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: unbounded |  |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |  |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### REDIS PUBSUB emit
 
@@ -497,9 +497,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | bytes queued for a peer: unbounded |  |
-| Network waits | connecting and the ZMTP handshake: unbounded<br>a send: unbounded |  |
+| Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |  |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### SQS QUEUE emit
 
@@ -728,9 +728,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |  |
-| Network waits | catalog requests: unbounded<br>object-store operations: driver default, 60 s per operation and 10 s per read or write, retried 3 times |  |
+| Network waits | catalog requests: unbounded<br>object-store metadata and delete operations: `timeout_ms`; 1m when omitted<br>object-store reads and writes: `timeout_ms`; 10s when omitted |  |
 | Driver limits | None declared. |  |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ## Clients
 

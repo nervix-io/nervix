@@ -151,6 +151,12 @@ inspection but publishes none for request routing. HTTP resolves one route per r
 WebSocket retains the route and signaling protocol selected at upgrade. The detailed admission and
 publication contract remains in [Data-Plane Concurrency](./data-plane-concurrency.md).
 
+The endpoint ingestor plan also lowers request policy once: `NoAck`, or an acknowledged policy
+with positive response capacity, physical timeout and retry delay. The decision rejects an
+unusable duration, incompatible quiesce policy or missing WebSocket signaling reference. Source
+composition creates the intake's window and checks its prepared signaling encoder. Runtime
+requests consume that prepared policy and never read configuration Models or parse durations.
+
 [Data-Plane Concurrency](./data-plane-concurrency.md) owns the publication and branch refresh
 protocols. [Domain Clock](./domain-clock.md) owns the execution-time capability bound during
 installation. [Client Session Protocol](./client-session-protocol.md) owns how a client observes

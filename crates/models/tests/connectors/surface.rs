@@ -85,9 +85,14 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             unlocated(NO_ACK, POLLING, &[("EVERY", true)])
         }
         IngestSourceKind::Http(HttpSourceEntity::Endpoint)
-        | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
-            unlocated(NO_ACK, ENDPOINT, &[])
-        }
+        | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => unlocated(
+            &[
+                (IngestDeliveryKind::NoAck, false),
+                (IngestDeliveryKind::AckRequest, false),
+            ],
+            ENDPOINT,
+            &[],
+        ),
         IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => SourceSurface {
             delivery: EVERY_DELIVERY,
             quiesce: SUSPEND,

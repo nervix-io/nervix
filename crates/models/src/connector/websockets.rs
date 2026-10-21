@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, DEFAULT_CONNECT_TIMEOUT, DeadlineKey, DeclaredBounds, DeclaredBuffer,
-        DeclaredWait, OmittedDeadline, WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
     },
     entity_union::connector_sources,
 };
@@ -108,8 +108,18 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 /// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.
 const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[],
+    buffers: &[DeclaredBuffer {
+        holds: "unresolved data frames under MODE ACK, per node and ingestor",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("MODE ACK MAX"),
+            overflow: BufferOverflow::RefuseRequest,
+        },
+    }],
     waits: &[
+        DeclaredWait {
+            wait: "graph acknowledgement under MODE ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+        },
         DeclaredWait {
             wait: "the signaling handshake",
             bound: WaitBound::Clause("the signaling protocol's TIMEOUT"),
@@ -190,7 +200,7 @@ impl SourceEntity for WebsocketsEndpointSource {
         reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
-        delivery: &[DeclaredDelivery::NO_ACK],
+        delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
         locator: None,
         options: &[],

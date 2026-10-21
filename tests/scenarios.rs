@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     fs::{OpenOptions, create_dir_all},
@@ -119,13 +120,15 @@ use crate::common::{
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
-        CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
+        CapturedRequest, ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
+    node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
     node_startup::StartupPorts,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -154,6 +157,7 @@ use crate::common::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
     },
     tcp_forwarder::TcpForwarders,
+    unaccepted_address::UnacceptedAddress,
 };
 
 mod backup;
@@ -168,6 +172,7 @@ mod domain_clock_attachment;
 mod domain_resume;
 mod endpoint_intake;
 mod generated_http_payloads;
+mod iceberg_delivery;
 mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
@@ -181,6 +186,7 @@ mod pulsar_delivery;
 mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
+mod standalone_transaction;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -322,6 +328,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    endpoint_requests: endpoint_intake::requests::EndpointRequests,
     websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
@@ -432,13 +439,21 @@ struct ScenarioWorld {
     mongodb_tls: bool,
     domain: String,
     test_id: String,
-    zeromq_ingest_addr: String,
+    /// The address this scenario's nodes bind a ZeroMQ PULL socket to.
+    zeromq_ingest: NodeBoundSlot,
     zeromq_emit_addr: String,
-    syslog_ingest_addr: String,
+    /// The socket holding the ZeroMQ emission port without listening, so connections there are
+    /// refused until a peer starts listening on it.
+    zeromq_emit_refusal: Option<nervix_primitives::net::TcpSocket>,
+    /// The address this scenario's nodes bind a syslog listener to.
+    syslog_ingest: NodeBoundSlot,
     syslog_emit_addr: String,
-    /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
-    /// nodes and its observers bind. Given back once cleanup has stopped both.
+    /// Every other port this scenario drew for fixtures of its own: the ZeroMQ and syslog
+    /// addresses its observers bind. Given back once cleanup has stopped them.
     scenario_ports: Vec<u16>,
+    /// Sockets a scenario bound to a port it drew for its own nodes, standing in for whatever else
+    /// on the host takes such a port. Closed at cleanup.
+    port_takers: Vec<PortTaker>,
     syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
     /// A Syslog stream connection holding back the end of a frame it began, until a step writes
     /// the rest.
@@ -490,11 +505,16 @@ struct ScenarioWorld {
     /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
     /// chosen message.
     sqs_answer_hold: Option<SqsAnswerHold>,
+    /// The gate a scenario stood in front of the Iceberg REST catalog to hold, refuse or pass the
+    /// commits to one table.
+    iceberg_catalog_gate: Option<IcebergCatalogGate>,
     /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
     /// that connect through it.
     nats_endpoint: Option<NatsEndpoint>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
+    /// The addresses a scenario holds where no connection completes, for as long as it runs.
+    unaccepted_addresses: Vec<UnacceptedAddress>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
     /// The gRPC receivers a scenario started, by the name its steps give them.
@@ -626,8 +646,10 @@ impl fmt::Debug for ScenarioWorld {
             .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
             .field("sqs_answer_hold", &self.sqs_answer_hold)
+            .field("iceberg_catalog_gate", &self.iceberg_catalog_gate)
             .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
+            .field("unaccepted_addresses", &self.unaccepted_addresses)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
             .field("otlp_receivers", &self.otlp_receivers)
@@ -823,15 +845,12 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     }
     world.domain = format!("d{}", Uuid::now_v7().as_simple());
     world.test_id = format!("t{}", Uuid::now_v7().as_simple());
-    world.zeromq_ingest_addr = format!(
-        "tcp://127.0.0.1:{}",
-        draw_scenario_port(world, "ZeroMQ ingest")
-    );
+    world.zeromq_ingest.draw(NodeBoundListener::ZeroMqPull);
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
         draw_scenario_port(world, "ZeroMQ emit")
     );
-    world.syslog_ingest_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog ingest"));
+    world.syslog_ingest.draw(NodeBoundListener::Syslog);
     world.syslog_emit_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog emit"));
 }
 
@@ -844,6 +863,90 @@ fn draw_scenario_port(world: &mut ScenarioWorld, purpose: &str) -> u16 {
     };
     world.scenario_ports.push(port);
     port
+}
+
+/// An address a scenario's own nodes bind, held from the scenario's identity until its cleanup.
+///
+/// Expansion reads the world through a shared reference, and naming the address the first time
+/// may move it to a fresh port, so the address sits behind a cell. The slot is empty before the
+/// scenario's identity draws the address and after cleanup gives its ports back.
+#[derive(Default)]
+struct NodeBoundSlot {
+    address: RefCell<Option<NodeBoundAddress>>,
+}
+
+impl NodeBoundSlot {
+    fn draw(&mut self, listener: NodeBoundListener) {
+        let address = match NodeBoundAddress::draw(listener) {
+            Ok(address) => address,
+            Err(error) => panic!("failed to allocate the scenario's {listener} port: {error:#}"),
+        };
+        if let Some(replaced) = self.address.get_mut().replace(address) {
+            replaced.release();
+        }
+    }
+
+    /// The port the scenario drew for the address, read without naming the address.
+    fn drawn_port(&self, listener: NodeBoundListener) -> u16 {
+        let address = self.address.borrow();
+        let Some(address) = address.as_ref() else {
+            panic!("the scenario reads its {listener} port before its identity drew it");
+        };
+        address.port()
+    }
+
+    /// Lets the address's hold go and gives every port it drew back to the pool.
+    fn release(&mut self) {
+        if let Some(address) = self.address.get_mut().take() {
+            address.release();
+        }
+    }
+}
+
+/// A socket a scenario binds to a port it drew for its own nodes. Its only work is to hold the port
+/// until cleanup closes it.
+enum PortTaker {
+    Listener {
+        _socket: nervix_primitives::net::TcpListener,
+    },
+    Datagram {
+        _socket: nervix_primitives::net::UdpSocket,
+    },
+}
+
+impl ScenarioWorld {
+    /// The ZeroMQ ingest address as a statement or a sender names it.
+    fn zeromq_ingest_addr(&self) -> String {
+        self.name_node_bound_address(&self.zeromq_ingest, NodeBoundListener::ZeroMqPull)
+    }
+
+    /// The syslog ingest address as a statement or a sender names it.
+    fn syslog_ingest_addr(&self) -> String {
+        self.name_node_bound_address(&self.syslog_ingest, NodeBoundListener::Syslog)
+    }
+
+    /// Names an address the scenario's nodes bind. The first time, its port is bound once as its
+    /// node will bind it, and an address whose port another socket took moves to a fresh port
+    /// before anything names it, which the scenario's log records with what held the port.
+    fn name_node_bound_address(&self, slot: &NodeBoundSlot, listener: NodeBoundListener) -> String {
+        let mut address = slot.address.borrow_mut();
+        let Some(address) = address.as_mut() else {
+            panic!("the scenario names its {listener} address before its identity drew it");
+        };
+        let named = match address.name(bind_as_its_node) {
+            Ok(named) => named,
+            Err(error) => panic!("the scenario's {listener} address cannot be bound: {error:#}"),
+        };
+        for moved in &named.moves {
+            let line = format!(
+                "scenario domain={} test_id={}: the {listener} address {moved}",
+                self.domain, self.test_id
+            );
+            eprintln!("{line}");
+            append_cucumber_log_line(&line);
+        }
+        named.address
+    }
 }
 
 fn refresh_dependency_configuration(world: &mut ScenarioWorld) {
@@ -1306,6 +1409,7 @@ async fn start_http_receiver(
     world: &mut ScenarioWorld,
     name: String,
     transport: ReceiverTransport,
+    length: LengthPolicy,
 ) {
     initialize_scenario_identity(world);
     let name = expand_placeholders(world, &name);
@@ -1315,7 +1419,7 @@ async fn start_http_receiver(
     );
     let port = draw_scenario_port(world, "HTTP receiver");
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let receiver = match HttpReceiver::start(address, transport).await {
+    let receiver = match HttpReceiver::start(address, transport, length).await {
         Ok(receiver) => receiver,
         Err(error) => panic!("HTTP receiver '{name}' failed to start: {error:?}"),
     };
@@ -1353,7 +1457,23 @@ fn certificate_hosts(world: &ScenarioWorld, hosts: &str) -> Vec<String> {
 
 #[given(expr = "HTTP receiver {string} is running")]
 async fn given_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
-    start_http_receiver(world, name, ReceiverTransport::Plain).await;
+    start_http_receiver(world, name, ReceiverTransport::Plain, LengthPolicy::Lenient).await;
+}
+
+/// A receiver as strict about framing as some origin servers are: a `POST`, `PUT` or `PATCH` that
+/// declares no length is answered `411 Length Required` and is not captured.
+#[given(
+    expr = "HTTP receiver {string} is running and requires a declared length on POST, PUT and \
+            PATCH requests"
+)]
+async fn given_strict_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Plain,
+        LengthPolicy::RequiredForContent,
+    )
+    .await;
 }
 
 #[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
@@ -1362,7 +1482,13 @@ async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
     };
-    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
 }
 
 #[given(
@@ -1378,7 +1504,32 @@ async fn given_https_receiver_requiring_client_certificates_is_running(
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
     };
-    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
+}
+
+/// Holds `address`, at the port of HTTP receiver `name`, behind a listener that never completes a
+/// connection, so a client whose DNS answer for the receiver's name lists `address` waits on that
+/// answer's handshake until it gives up on it.
+#[given(expr = "connections to {string} at the port of HTTP receiver {string} never complete")]
+async fn given_connections_to_address_at_http_receiver_port_never_complete(
+    world: &mut ScenarioWorld,
+    address: String,
+    name: String,
+) {
+    let ip = address
+        .parse::<std::net::IpAddr>()
+        .unwrap_or_else(|error| panic!("'{address}' is not an IP address: {error}"));
+    let port = http_receiver(world, &name).port();
+    let unaccepted = UnacceptedAddress::listen(SocketAddr::new(ip, port))
+        .await
+        .unwrap_or_else(|error| panic!("no listener could hold {address}:{port}: {error}"));
+    world.unaccepted_addresses.push(unaccepted);
 }
 
 /// Places the receiver's CA certificate and the client identity it issued where the node can mount
@@ -2059,7 +2210,13 @@ async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String,
 
     let reachable = match transport {
         OtlpTransport::HttpProtobuf => {
-            start_http_receiver(world, name.clone(), ReceiverTransport::Plain).await;
+            start_http_receiver(
+                world,
+                name.clone(),
+                ReceiverTransport::Plain,
+                LengthPolicy::Lenient,
+            )
+            .await;
             let receiver = http_receiver(world, &name);
             Reachable {
                 origin: receiver.origin(),
@@ -5387,7 +5544,7 @@ impl IngestorLogicTransportFixture {
             Self::ZeroMq => {
                 world
                     .cluster()
-                    .publish_zeromq(&world.zeromq_ingest_addr, payload)
+                    .publish_zeromq(&world.zeromq_ingest_addr(), payload)
                     .await
                     .expect("failed to publish ingestor logic zeromq payload");
             }
@@ -13176,10 +13333,17 @@ fn docstring(step: &Step) -> &str {
 fn expand_placeholders(world: &ScenarioWorld, input: &str) -> String {
     let mut output = input
         .replace("{{test_id}}", &world.test_id)
-        .replace("{{domain}}", &world.domain)
-        .replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr)
-        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr)
-        .replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr)
+        .replace("{{domain}}", &world.domain);
+    // The scenario's nodes bind these two addresses themselves, so the first text that names one
+    // checks its port and may move it. Text that names neither leaves them unchecked.
+    if output.contains("{{zeromq_ingest_addr}}") {
+        output = output.replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr());
+    }
+    output = output.replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr);
+    if output.contains("{{syslog_ingest_addr}}") {
+        output = output.replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr());
+    }
+    output = output
         .replace("{{syslog_emit_addr}}", &world.syslog_emit_addr)
         .replace("{{syslog_pri}}", "<34>");
     for (key, value) in &world.placeholders {
@@ -16915,6 +17079,190 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
     });
 }
 
+/// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
+/// that is refused until the scenario releases the hold.
+#[when(expr = "bulk memory on every node keeps only {string} bytes free")]
+async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
+    world: &mut ScenarioWorld,
+    room: String,
+) {
+    let room = expand_placeholders(world, &room);
+    let room = room
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("the free bulk memory '{room}' must be bytes: {error}"));
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .hold_bulk_memory_leaving_room_on(&crate::common::cluster::node_name(&node_id), room);
+    }
+}
+
+/// Return the bulk memory the scenario held on every node.
+#[when("bulk memory on every node is released")]
+async fn when_bulk_memory_on_every_node_is_released(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
+/// Waits until each node has reported its bulk memory class reserving exactly what the scenario
+/// holds there, so no charge another operation took on a node outlives that operation. A node is
+/// checked until it reports so once, because unrelated bulk work may hold memory for a moment.
+#[then(expr = "within {string} every node reserves only the bulk memory the scenario holds")]
+async fn then_every_node_reserves_only_held_bulk_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let mut unchecked = world.cluster().node_ids();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut outstanding = Vec::new();
+        let mut remaining = Vec::new();
+        for node_id in unchecked {
+            let held = world
+                .fault_injection
+                .held_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
+            let reserved = world
+                .cluster()
+                .read_observability_metric(
+                    &node_id,
+                    "nervix_execution_memory_reserved_bytes",
+                    &[BULK_MEMORY_LABEL.to_string()],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("failed to read the bulk-memory reservation of '{node_id}': {error}")
+                });
+            let held: f64 = held.approx_into();
+            if reserved != held {
+                outstanding.push(format!(
+                    "'{node_id}' reserves {reserved} bytes of bulk memory while the scenario \
+                     holds {held}"
+                ));
+                remaining.push(node_id);
+            }
+        }
+        if remaining.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "within {duration}: {}",
+            outstanding.join("; ")
+        );
+        unchecked = remaining;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// What DESCRIBE EMITTER reports while an Iceberg commit waits for room in the bulk memory class:
+/// the staged bytes the commit asked the class for.
+fn iceberg_commit_waiting_for_bulk_memory(output: &str) -> Option<u64> {
+    let error = DescribedEmitterRetry::from_describe_output(output).transient_error?;
+    let request =
+        error.strip_prefix("Iceberg commit waits for room in the bulk memory class for ")?;
+    let bytes = request.strip_suffix(" staged bytes")?;
+    let Ok(bytes) = bytes.parse::<u64>() else {
+        panic!("DESCRIBE EMITTER reports the commit's staged bytes as a count, got '{error}'");
+    };
+    Some(bytes)
+}
+
+/// Waits until DESCRIBE EMITTER reports an Iceberg commit waiting for room in the bulk memory class,
+/// and saves the staged bytes the commit asked the class for.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports an Iceberg \
+            commit waiting for bulk memory, whose staged bytes are saved as placeholder {string}"
+)]
+async fn then_within_duration_describe_emitter_reports_iceberg_commit_waiting_for_bulk_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    placeholder: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if let Some(bytes) = iceberg_commit_waiting_for_bulk_memory(&output) {
+            world.placeholders.insert(placeholder, bytes.to_string());
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report an Iceberg commit waiting \
+             for bulk memory. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports `metric` in `direction` for `relay` with the total
+/// `expected`, on whichever physical node ran the emitter.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports {string} \
+            {string} relay {string} totalling {string}"
+)]
+async fn then_within_duration_describe_emitter_reports_metric_total(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    metric: String,
+    direction: String,
+    relay: String,
+    expected: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let prefix = format!(
+        "{} {} relay={} physical_node=",
+        expand_placeholders(world, &metric),
+        expand_placeholders(world, &direction),
+        expand_placeholders(world, &relay)
+    );
+    let expected = expand_placeholders(world, &expected);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        let mut totals = Vec::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if !line.starts_with(&prefix) {
+                continue;
+            }
+            if let Some(total) = metric_line_value(line, "total") {
+                totals.push(total.to_string());
+            }
+        }
+        if totals.iter().any(|total| total == &expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report '{prefix}…' totalling \
+             {expected}; it reported {totals:?}. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
 /// password the leader is asked to verify is refused rather than queued. The leader is the node
 /// the scenario created its user through, so the user is already visible there.
@@ -17252,7 +17600,7 @@ impl UnacknowledgedSourceFixture {
                     .await
                     .expect("failed to bind the unacknowledged Syslog sender");
                 socket
-                    .send_to(payload.as_bytes(), &world.syslog_ingest_addr)
+                    .send_to(payload.as_bytes(), world.syslog_ingest_addr())
                     .await
                     .expect("failed to send the unacknowledged Syslog datagram");
             }
@@ -17261,7 +17609,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::ZeroMq => world
                 .cluster()
-                .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+                .publish_zeromq(&world.zeromq_ingest_addr(), &payload)
                 .await
                 .expect("failed to publish the unacknowledged ZeroMQ payload"),
         }
@@ -23166,6 +23514,40 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
     );
 }
 
+/// Another socket listens on the port the scenario drew for its ZeroMQ ingest address before any
+/// statement names it, as a port Docker publishes for a container, or a server bound to that port
+/// explicitly, would: a listener with `SO_REUSEADDR` on every address, which the port's hold does
+/// not keep out.
+#[given("another socket listens on the port the scenario drew for its ZeroMQ ingest address")]
+async fn given_another_socket_listens_on_the_zeromq_ingest_port(world: &mut ScenarioWorld) {
+    let port = world
+        .zeromq_ingest
+        .drawn_port(NodeBoundListener::ZeroMqPull);
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let socket = match nervix_primitives::net::TcpListener::bind(address).await {
+        Ok(socket) => socket,
+        Err(error) => panic!("another listener could not take {address}: {error}"),
+    };
+    world
+        .port_takers
+        .push(PortTaker::Listener { _socket: socket });
+}
+
+/// Another UDP socket binds the port the scenario drew for its syslog ingest address on every
+/// address before any statement names it. No hold keeps a UDP socket out.
+#[given("another socket binds UDP on the port the scenario drew for its syslog ingest address")]
+async fn given_another_socket_binds_udp_on_the_syslog_ingest_port(world: &mut ScenarioWorld) {
+    let port = world.syslog_ingest.drawn_port(NodeBoundListener::Syslog);
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let socket = match nervix_primitives::net::UdpSocket::bind(address).await {
+        Ok(socket) => socket,
+        Err(error) => panic!("another UDP socket could not take {address}: {error}"),
+    };
+    world
+        .port_takers
+        .push(PortTaker::Datagram { _socket: socket });
+}
+
 #[given(expr = "ZeroMQ emission endpoint {string} is observed")]
 async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     let addr = expand_placeholders(world, &addr);
@@ -23204,6 +23586,86 @@ async fn observe_zeromq_emission_endpoint(world: &mut ScenarioWorld, addr: Strin
         "failed to observe a generated ZeroMQ endpoint after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
          fresh port allocations"
     );
+}
+
+/// Holds the scenario's ZeroMQ emission port with a socket that is bound to it and never listens,
+/// so the kernel refuses every connection there and no other process takes the port before a peer
+/// starts listening on it. The address can be taken between its allocation and this bind, so a
+/// fresh port then replaces it, as it does for the observing socket.
+#[given("the ZeroMQ emission endpoint refuses connections")]
+async fn given_zeromq_emission_endpoint_refuses_connections(world: &mut ScenarioWorld) {
+    for _ in 0..ZEROMQ_OBSERVER_BIND_ATTEMPTS {
+        nervix_primitives::task::consume_budget().await;
+        let address = zeromq_tcp_address(&world.zeromq_emit_addr);
+        let socket = nervix_primitives::net::TcpSocket::new_v4()
+            .unwrap_or_else(|error| panic!("failed to create a TCP socket: {error}"));
+        if socket.bind(address).is_ok() {
+            world.zeromq_emit_refusal = Some(socket);
+            return;
+        }
+        world.zeromq_emit_addr = format!(
+            "tcp://127.0.0.1:{}",
+            draw_scenario_port(world, "replacement ZeroMQ emit")
+        );
+    }
+
+    panic!(
+        "failed to hold a generated ZeroMQ emission port after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
+         fresh port allocations"
+    );
+}
+
+/// A peer starts listening where the scenario's ZeroMQ emission endpoint refused connections: the
+/// socket holding the port lets it go and the observing pull socket binds the same address.
+#[when("a ZeroMQ peer starts listening on the emission endpoint")]
+async fn when_zeromq_peer_starts_listening_on_emission_endpoint(world: &mut ScenarioWorld) {
+    let refusal = world
+        .zeromq_emit_refusal
+        .take()
+        .expect("the ZeroMQ emission endpoint must refuse connections before a peer listens there");
+    drop(refusal);
+    let addr = world.zeromq_emit_addr.clone();
+    let observer = world
+        .cluster()
+        .observe_zeromq(&addr)
+        .await
+        .unwrap_or_else(|error| panic!("failed to observe zeromq endpoint '{addr}': {error}"));
+    world.broker_observer = Some(observer);
+}
+
+/// Stand a stallable endpoint in front of the scenario's observed ZeroMQ emission endpoint, and
+/// record in placeholder `name` the ZeroMQ address a client connects to through it.
+#[given(expr = "a stallable endpoint {string} stands in front of the ZeroMQ emission endpoint")]
+async fn given_stallable_endpoint_in_front_of_zeromq_emission_endpoint(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let target = zeromq_tcp_address(&world.zeromq_emit_addr);
+    let proxy = StallableTcpProxy::start(target.ip().to_string(), target.port())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the stallable endpoint '{name}' could not listen: {error}")
+        });
+    world
+        .placeholders
+        .insert(name.clone(), format!("tcp://{}", proxy.local_addr()));
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// The socket address of the ZeroMQ TCP endpoint `addr`, such as `tcp://127.0.0.1:5555`.
+fn zeromq_tcp_address(addr: &str) -> SocketAddr {
+    let endpoint = url::Url::parse(addr)
+        .unwrap_or_else(|error| panic!("'{addr}' is not a ZeroMQ endpoint: {error}"));
+    let host = endpoint
+        .host_str()
+        .unwrap_or_else(|| panic!("ZeroMQ endpoint '{addr}' has no host"));
+    let ip: IpAddr = host
+        .parse()
+        .unwrap_or_else(|error| panic!("ZeroMQ endpoint '{addr}' has no IP host: {error}"));
+    let port = endpoint
+        .port()
+        .unwrap_or_else(|| panic!("ZeroMQ endpoint '{addr}' names no port"));
+    SocketAddr::new(ip, port)
 }
 
 /// A broker or message destination that one scenario outline publishes to for every transport.
@@ -24400,7 +24862,7 @@ async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] ste
     let payload = expand_placeholders(world, docstring(step));
     world
         .cluster()
-        .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+        .publish_zeromq(&world.zeromq_ingest_addr(), &payload)
         .await
         .expect("failed to publish zeromq message");
 }
@@ -29375,7 +29837,13 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
 }
 
 fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
-    path_contains_staged_iceberg_batch(root, |path, name| {
+    staged_iceberg_arrow_ipc_batches(root) > 0
+}
+
+/// How many complete Arrow IPC batches Iceberg emitters staged under `root`: files a staging
+/// write finished, which hold at least one record batch.
+fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
+    staged_iceberg_batches(root, |path, name| {
         if !name.starts_with("batch-") || !name.ends_with(".arrow") {
             return false;
         }
@@ -29393,33 +29861,34 @@ fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
 }
 
 fn path_contains_staged_iceberg_parquet_batch(root: &Path) -> bool {
-    path_contains_staged_iceberg_batch(root, |_path, name| {
+    let staged = staged_iceberg_batches(root, |_path, name| {
         name.starts_with("batch-") && name.ends_with(".parquet")
-    })
+    });
+    staged > 0
 }
 
-fn path_contains_staged_iceberg_batch(
-    root: &Path,
-    predicate: impl Copy + Fn(&Path, &str) -> bool,
-) -> bool {
+/// How many files under `root`, at any depth, `predicate` accepts by their path and name.
+fn staged_iceberg_batches(root: &Path, predicate: impl Copy + Fn(&Path, &str) -> bool) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
+        return 0;
     };
+    let mut staged = 0_usize;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if path_contains_staged_iceberg_batch(&path, predicate) {
-                return true;
-            }
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| predicate(&path, name))
-        {
-            return true;
-        }
+        let found = if path.is_dir() {
+            staged_iceberg_batches(&path, predicate)
+        } else {
+            let accepted = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| predicate(&path, name));
+            usize::from(accepted)
+        };
+        staged = staged
+            .checked_add(found)
+            .assured("a scenario's temp directory holds far fewer than usize::MAX files");
     }
-    false
+    staged
 }
 
 async fn iceberg_table_rows(
@@ -30964,12 +31433,20 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
                 world.sqs_answer_hold = None;
+                world.iceberg_catalog_gate = None;
                 world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
+                world.port_takers.clear();
+                // A scenario that ended before a peer listened still holds its refused ZeroMQ
+                // emission port.
+                world.zeromq_emit_refusal = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
-                // and its observers, and both are gone by now, so the ports go back to the pool
-                // the next scenario draws from.
+                // and its observers, and both are gone by now, so the holds on the addresses its
+                // nodes bound let go, and the ports go back to the pool the next scenario draws
+                // from.
+                world.zeromq_ingest.release();
+                world.syslog_ingest.release();
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 

@@ -374,6 +374,12 @@ memory-ordering implementation.
 Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
 registry interest.
 
+An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
+factory initializes one operator for the configured object-store root; data, manifest and metadata
+files use that same initialized storage after refreshes, successful commits and ambiguous-result
+reconciliation. This reuses the library's existing storage lifetime and adds no synchronization
+protocol or shared map. The emitter task remains the sole owner of commit retry pacing.
+
 Every pooled Redis or SQL sink registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
@@ -461,6 +467,29 @@ that already loaded a present intake keeps its lease until dispatch finishes. Un
 exact source allocation, so a late close cannot remove a replacement with the same typed identity.
 Configuration withdrawal removes the route; source withdrawal alone leaves configured metadata
 available to report unavailable intake. These publications remain volatile data-plane state.
+
+A request dispatches all bindings of its resolved endpoint concurrently before waiting for their
+combined result. One binding's downstream ACK cannot gate delivery to another binding. The
+production fanout and request windows have a Shuttle check that withholds both consumer ACKs
+until both bindings start, completes them in reverse order, and checks independent permit release.
+
+An acknowledged endpoint intake owns one semaphore window, created from its typed positive count.
+It tries admission once and holds the borrowed permit through graph ACK/NACK, its absolute
+physical timeout, or intake ending. Exact lifetime ending cancels the lifetime token before
+publishing absent intake. A separate wait observes shutdown or handoff through the quiesce owner's
+existing register-before-read publication wait, so the HTTP response does not wait for source
+close after drain. Resumable pauses preserve the admitted root. Completion ready in the same poll
+as an ending wins; otherwise ending or deadline returns its unavailable outcome and releases the
+slot. Listener admission shutdown also ends the wait before graph drain. No response slot, payload, ACK root or outcome is persisted. Dropping a request drops its
+permit; admitted graph work can still complete and sender retries can duplicate effects.
+
+Registered Shuttle checks drive this production window with scheduler-visible ACK and deadline
+events, assert exact capacity and independent completion order, race ACK against expiry, and
+resolve a retained lifetime while preserving its replacement. Semaphore, cancellation-token and
+network waits are asynchronous and untracked by Deloxide. The tagged one-/three-node endpoint
+scenarios join the active, order and stressed lifecycle selections and reach the existing quiesce,
+entity-gate and root-lifecycle blocking owners; the restore selection retains its existing scope.
+The bounded outcome-body property checks the public projection separately.
 
 Unit regressions and the registered Bolero operation sequence exercise the production owner and
 retained lifetimes. Shuttle races whole-domain publication with resolution, unbind with admitted
@@ -1742,10 +1771,17 @@ runs every probe, conformance check and owner test of the active-only selection,
 drain of buffered branches before an alteration, interleaved branches with remote acknowledgement
 owners, a lost acknowledgement and a producer restart, session restarts that resume a producer and
 consumer, a domain restart that replaces its consumer, a memory-pressure pause of scheduled
-ingestors, a Roto function's column builder, TLS rebinding of every HTTPS listener, batched
-inference over interleaved branches, a restarted voter's ownership, and graceful shutdown with a
-slow cordon release and diagnostic server processes that stop gracefully, and its
+ingestors, an Iceberg commit that waits for room in the bulk memory class, a Roto function's
+column builder, TLS rebinding of every HTTPS listener, batched inference over interleaved branches,
+a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
+server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
+`stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
+the existing 360-second teardown reserve. The baseline lifecycle process retains its 1,800-second
+bound, and every invocation shares the selection's unchanged 4,800-second workload budget. The
+inventory checks require the baseline and endpoint groups to be disjoint and account for every
+registered example; this partition changes no product deadline or ordinary scenario concurrency.
 The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
 scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
 offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore
@@ -1787,6 +1823,14 @@ state and the one-shot atomic claim; fault selection remains in the harness's ow
 These async observations introduce no tracked blocking-lock owner. Deloxide continues to measure
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
+
+The `@client_wire_standalone_preparation` scenario holds a coordinator after its standalone
+transaction lookup and after preflight, while two leadership transfers let another coordinator
+apply the same command and engage its domain pause. Its active, order-analysis and stressed
+registrations reach the transaction impact recorder's tracked locks. The lookup, preflight and
+resume barriers use the existing async pause owner, whose ordering remains outside Deloxide's
+observation; the public outcome and dependent mutation assert recovery under the original
+execution reference.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 

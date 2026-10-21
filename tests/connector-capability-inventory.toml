@@ -130,6 +130,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_storage_deadlines.feature", scenario = "A paused Iceberg object store reports timeout_ms and recovers on the emitter retry policy" },
+]
+
+[[capability]]
 capability = "CATALOG"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
@@ -155,6 +162,7 @@ capability = "MODE ACK"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them" },
 ]
 
 [[capability]]
@@ -722,6 +730,14 @@ capability = "STALLED PEER connect_timeout_ms"
 entity = "RABBITMQ QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -743,6 +759,7 @@ capability = "STALLED PEER connect_timeout_ms"
 entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
 ]
 
 [[capability]]
@@ -932,4 +949,33 @@ capability = "MODE NO_ACK"
 entity = "ZEROMQ PUSH EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer never answers its handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer stops reading is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "An HTTP response follows the attached consumer's <decision> decision" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
 ]

@@ -33,6 +33,7 @@ use nervix_primitives::time::interval;
 use thiserror::Error;
 
 use super::{
+    backup::cut_reach::CutReach,
     command_result::CommandResult,
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
@@ -343,12 +344,13 @@ impl SessionServiceImpl {
                     details: error.to_string(),
                 })
             })?;
-        let mut nodes = self.inner.cluster.live_node_ids().await;
-        if !nodes.contains(self.inner.consensus.local_node_id()) {
-            nodes.push(self.inner.consensus.local_node_id().clone());
-        }
-        nodes.sort();
-        nodes.dedup();
+        // Beside the live nodes, the drain observes every node the schedule assigns the domain's
+        // work to, so a scheduled node that stops answering holds the round open instead of
+        // leaving its admitted work unobserved.
+        let schedule = self.inner.consensus.current_schedule().await;
+        let reach = CutReach::of(schedule.domain(domain));
+        let mut nodes = self.cut_live_nodes().await;
+        nodes.extend(reach.executors().cloned());
         let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);

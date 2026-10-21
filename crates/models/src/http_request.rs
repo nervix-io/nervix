@@ -138,6 +138,16 @@ impl HttpMethod {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether the method defines a meaning for content a request encloses: `POST`, `PUT` and
+    /// `PATCH`, in any ASCII case, as their case variants count for the body rules too. A request
+    /// with such a method declares its length even when it encloses nothing, as RFC 9110
+    /// section 8.6 asks of a client.
+    pub fn defines_content(&self) -> bool {
+        self.0.eq_ignore_ascii_case("POST")
+            || self.0.eq_ignore_ascii_case("PUT")
+            || self.0.eq_ignore_ascii_case("PATCH")
+    }
 }
 
 /// A request target normalized on the origin it was parsed against, which it cannot leave.
@@ -340,6 +350,23 @@ mod tests {
                 .target(&format!("/{}", "a".repeat(8 * 1024)))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn methods_that_define_request_content_are_recognized_in_every_ascii_case() {
+        for method in ["POST", "PUT", "PATCH", "post", "pUt", "Patch"] {
+            let parsed = HttpMethod::parse(method, HttpBodyMode::WithoutBody)
+                .assured("the method is a valid HTTP token");
+            assert!(parsed.defines_content(), "{method} defines request content");
+        }
+        for method in ["DELETE", "GET", "HEAD", "OPTIONS", "purge", "POSTS", "PUTS"] {
+            let parsed = HttpMethod::parse(method, HttpBodyMode::WithoutBody)
+                .assured("the method is a valid HTTP token");
+            assert!(
+                !parsed.defines_content(),
+                "{method} defines no request content"
+            );
+        }
     }
 
     #[test]

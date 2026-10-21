@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
@@ -70,14 +70,29 @@ const HTTP_REQUEST_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 /// What the connector of a HTTP ENDPOINT holds and how long it waits.
 const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "a request body",
-        bound: BufferBound::Unbounded,
-    }],
-    waits: &[DeclaredWait {
-        wait: "a client's request head and body",
-        bound: WaitBound::Unbounded,
-    }],
+    buffers: &[
+        DeclaredBuffer {
+            holds: "a request body",
+            bound: BufferBound::Unbounded,
+        },
+        DeclaredBuffer {
+            holds: "unresolved requests under MODE ACK, per node and ingestor",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("MODE ACK MAX"),
+                overflow: BufferOverflow::RefuseRequest,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "a client's request head and body",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "graph acknowledgement under MODE ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+        },
+    ],
     driver_limits: &["Request heads above 100 headers are refused."],
 };
 
@@ -85,8 +100,8 @@ const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[DeclaredWait {
-        wait: "a request: name resolution, connection, TLS, writing it and its final response \
-               headers",
+        wait: "a request: name resolution within half of it, each address's connection within an \
+               equal share of what is left, TLS, writing it and its final response headers",
         bound: WaitBound::Key {
             key: DeadlineKey::Timeout,
             omitted: OmittedDeadline::Required,
@@ -165,7 +180,7 @@ impl SourceEntity for HttpEndpointSource {
         reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
-        delivery: &[DeclaredDelivery::NO_ACK],
+        delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
         locator: None,
         options: &[],
