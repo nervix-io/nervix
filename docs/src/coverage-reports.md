@@ -438,8 +438,34 @@ fuzz campaigns a pull request carrying `fuzz` requests. It reads the ordinary re
 [CRAP report](#advisory-crap-report) and patch line coverage keep reading the ordinary report
 alone, so modeled execution never changes either of them.
 
+The completion check's GitHub Actions identity is `coverage-full` in the `Check` workflow. Its
+verdict is mandatory: a missing, failed, cancelled or timed-out selected producer cannot qualify a
+release. `just release-evidence <pull-request>` requires the successful union on the revision,
+alongside the ordinary report's integrity checks and each method's independent verdict. Its
+percentages remain advisory. A verified prose-only change selects no suites and skips the union;
+that skip supplies no coverage or release-qualification evidence.
+
+Repository administrators enforce the same completion boundary for merges by requiring the
+`coverage-full` status check from the GitHub Actions app on the default branch's ruleset. The
+workflow and release inventory do not install that external setting. A qualification records the
+live ruleset identity, enforcement, branch scope and required check on its ClickUp task, along with
+the checked revision and check result; changing source alone is not evidence that the setting is
+active. The check name stays stable across runner, producer and artifact changes.
+
+Producer jobs retain sampled CPU utilization, steal time, used memory and swap with their build
+and execution evidence. Tests, scenarios and fuzz shards record their load directly; native
+extras, Shuttle, Loom, Turmoil, diagnostic evidence and workload lanes, client conformance and the
+independent Loom weakening shards use `.github/actions/runner-load` around their workloads. Its finish phase runs
+after failure too, waits at most ten seconds for the recorder, and requires its summary before
+uploading `runner-load-<job>`; diagnostic selections and weakening shards append their matrix
+identity so their artifacts cannot overwrite one another. These are measurements of the runner,
+including build and service memory, rather than individual-process peak RSS. Workflow step times
+and collection records delimit producer work. Instrumented timings measure collection cost;
+runtime performance claims still require ordinary builds on the same host. Recording the load of
+a weakening or replay does not make that altered-source execution coverage evidence.
+
 The `coverage-full` job waits for every producer job, including one that failed or was skipped. It
-downloads their artifacts, rebuilds nothing, and records the run's selection before it combines:
+records the run's selection before downloading artifacts, then rebuilds nothing and combines:
 
 ```bash
 just coverage-full-select --event "$EVENT" --labels "$LABELS" \
@@ -468,6 +494,11 @@ Bolero selection record must show that the randomized properties passed and that
 campaigns ran exactly when `fuzz` requested them. Without `fuzz`, the recorded deliberate skip is
 valid and supplies no report. A job that a later attempt of the run did not rerun keeps its earlier
 attempt's verdict and artifacts, so a collection of any attempt up to the current one is the run's.
+
+A failed suite-selection job runs and fails the completion check rather than turning it into a
+skip. Missing downloads reach the union as missing inputs, with the selection retained, so its
+failure record and summary identify the producer, job and artifact to repair. A download failure
+also leaves its failing job verdict intact; attempting the union afterwards cannot erase it.
 
 Each input is validated before its lines join the union:
 

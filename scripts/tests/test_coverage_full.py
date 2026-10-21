@@ -409,6 +409,21 @@ class UnionTests(unittest.TestCase):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_non_pr_events_keep_the_deliberate_fuzz_skip_even_with_a_fuzz_label(self) -> None:
+        for event in ("push", "schedule", "workflow_dispatch"):
+            with self.subTest(event=event):
+                run = Run(self)
+                run.complete()
+                run.selection(("fuzz",), event=event)
+                path = run.inputs / "bolero-selection/selection.json"
+                content = json.loads(path.read_text())
+                content.update(event=event, labels=["fuzz"])
+                path.write_text(json.dumps(content))
+                status, record, _, _ = run.union()
+                self.assertEqual(status, 0, problems(record))
+                self.assertFalse(record["selection"]["fuzz_requested"])
+                self.assertNotIn("bolero-fuzz", [item["producer"] for item in record["contributions"]])
+
     def test_missing_label_enabled_producers_fail_naming_their_job_and_artifact(self) -> None:
         run = Run(self)
         run.complete(("shuttle",))
@@ -684,6 +699,30 @@ class ValidationTests(unittest.TestCase):
 
 
 class CampaignTests(unittest.TestCase):
+    def test_a_newly_registered_target_joins_the_required_campaign_automatically(self) -> None:
+        run = Run(self)
+        inventory = INVENTORY + '\n[[target]]\nid = "gamma-values"\n'
+        run.write("tests/bolero-targets.toml", inventory)
+        run.git("add", "tests/bolero-targets.toml")
+        run.git("commit", "--quiet", "-m", "test: register another property")
+        run.revision = run.git("rev-parse", "HEAD").strip()
+        run.complete(("fuzz",))
+        path = run.inputs / "coverage-bolero-fuzz/completion.json"
+        content = json.loads(path.read_text())
+        content["inventory"]["sha256"] = hashlib.sha256(inventory.encode()).hexdigest()
+        path.write_text(json.dumps(content))
+        status, record, _, _ = run.union()
+        self.assertEqual(status, 1)
+        self.assertIn("not the 3 targets of the tested inventory", problems(record))
+        self.assertFalse((run.directory / coverage_full.REPORT).exists())
+
+        content["selection"] = [*TARGETS, "gamma-values"]
+        content["counts"] = {key: 3 for key in ("discovered", "selected", "executed", "completed")}
+        path.write_text(json.dumps(content))
+        status, record, _, _ = run.union()
+        self.assertEqual(status, 0, problems(record))
+        self.assertEqual(record["fuzz"]["targets"], 3)
+
     def failing(self, expected: str, **changes: object) -> None:
         run = Run(self)
         run.complete(("fuzz",))
@@ -1058,9 +1097,23 @@ class WorkflowTests(unittest.TestCase):
         job = job_section(self.workflow, "coverage-full")
         needs = re.search(r"needs: \[(.*)\]", job)[1].split(", ")
         self.assertEqual(sorted(needs), sorted(["test-selection", *JOBS]))
-        self.assertIn("if: ${{ !cancelled() && needs.test-selection.outputs.tests-required == 'true' }}", job)
+        self.assertIn(
+            "if: ${{ !cancelled() && (needs.test-selection.result != 'success' || "
+            "needs.test-selection.outputs.tests-required == 'true') }}", job,
+        )
         self.assertNotIn("cargo", job)
         self.assertNotIn("pull-requests: write", job)
+
+    def test_missing_artifacts_reach_the_union_with_the_run_selection_preserved(self) -> None:
+        job = job_section(self.workflow, "coverage-full")
+        selection = job.index("      - name: Record the event, labels and producer results")
+        download = job.index("uses: actions/download-artifact")
+        self.assertLess(selection, download)
+        for step in job.split("\n      - name: "):
+            if "uses: actions/download-artifact" in step:
+                self.assertRegex(step, r"\n          pattern: \S+")
+        combine = step_section(job, "Combine coverage")
+        self.assertIn("if: ${{ !cancelled() }}", combine)
 
     def test_the_union_job_downloads_every_artifact_the_requirements_name(self) -> None:
         job = job_section(self.workflow, "coverage-full")
