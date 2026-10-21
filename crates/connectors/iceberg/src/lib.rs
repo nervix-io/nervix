@@ -73,10 +73,11 @@ use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkCommitReport, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError,
-    SinkStartResult, physical_time::actual_utc_now,
+    ConfiguredDeadline, MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink,
+    SinkAcknowledgementServices, SinkAcknowledgements, SinkCommitReport, SinkFinish,
+    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
+    SinkRecordPosition, SinkStagedCommit, SinkStartError, SinkStartResult,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{
@@ -469,11 +470,19 @@ impl IcebergSink {
         let staged_schema = Self::staged_arrow_schema(&mapped_schema)?;
         let staging_dir = Self::create_staging_dir(&host)?;
         let executor = host.executor();
-        Self::validate_blob_location(backend, "table", &location)?;
+        let storage_root = Self::validate_blob_location(backend, "table", &location)?;
+        let storage_deadline = ConfiguredDeadline::timeout(&storage_config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: ICEBERG })?;
         let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
         let catalog: StdArc<dyn Catalog> = StdArc::new(
             properties
-                .rest_catalog(&catalog_name, &catalog_config, &dns)
+                .rest_catalog(
+                    &catalog_name,
+                    &catalog_config,
+                    &dns,
+                    &storage_root,
+                    storage_deadline,
+                )
                 .await
                 .map_err(|error| {
                     Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(
@@ -684,7 +693,7 @@ impl IcebergSink {
         backend: IcebergStorageBackend,
         label: &str,
         location: &str,
-    ) -> SinkStartResult<()> {
+    ) -> SinkStartResult<Url> {
         let invalid = |reason: String| {
             Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
                 .attach_printable(reason)
@@ -720,7 +729,7 @@ impl IcebergSink {
                 )));
             }
         }
-        Ok(())
+        Ok(url)
     }
 
     /// The staged columns of one carrier: the rows the host selected, in this sink's exact staged
@@ -1220,6 +1229,27 @@ impl IcebergSink {
 }
 
 impl IcebergSinkClient {
+    /// Installs catalog metadata while retaining the emitter's initialized storage. Catalog loads
+    /// supply a fresh lazy FileIO; replacing ours would initialize another operator on each commit.
+    fn install_table(&mut self, table: Table) -> SinkPublishResult<()> {
+        let mut builder = Table::builder()
+            .file_io(self.table.file_io().clone())
+            .metadata(table.metadata_ref())
+            .identifier(table.identifier().clone())
+            .readonly(table.readonly())
+            .runtime(
+                ::iceberg::Runtime::try_current()
+                    .change_context(SinkPublishError::Commit { sink: ICEBERG })?,
+            );
+        if let Some(location) = table.metadata_location() {
+            builder = builder.metadata_location(location);
+        }
+        self.table = builder
+            .build()
+            .change_context(SinkPublishError::Commit { sink: ICEBERG })?;
+        Ok(())
+    }
+
     /// The table this commit attempts against, with the catalog library's own retry disabled so
     /// the emitter's declared retry policy is the only one that runs.
     fn single_attempt_table(table: &Table) -> SinkPublishResult<Table> {
@@ -1262,7 +1292,7 @@ impl IcebergSinkClient {
     )]
     async fn refresh_table(&mut self) -> SinkPublishResult<()> {
         let table_ident = self.table.identifier().clone();
-        self.table = self
+        let table = self
             .catalog
             .load_table(&table_ident)
             .await
@@ -1271,7 +1301,7 @@ impl IcebergSinkClient {
                     "failed to load Iceberg table {table_ident} for commit: {error}"
                 ))
             })?;
-        Ok(())
+        self.install_table(table)
     }
 
     /// Writes `batches` into new Parquet data files of the table, without committing them.
@@ -1346,7 +1376,7 @@ impl IcebergSinkClient {
         let tx = action.apply(tx).map_err(|error| commit_failure(&error))?;
         match tx.commit(self.catalog.as_ref()).await {
             Ok(table) => {
-                self.table = table;
+                self.install_table(table)?;
                 Ok(())
             }
             Err(error) => {
@@ -1354,7 +1384,7 @@ impl IcebergSinkClient {
                 let table_ident = self.table.identifier().clone();
                 if let Ok(refreshed) = self.catalog.load_table(&table_ident).await {
                     let committed = prepared.is_committed_to(&refreshed);
-                    self.table = refreshed;
+                    self.install_table(refreshed)?;
                     if committed {
                         return Ok(());
                     }
@@ -1466,6 +1496,8 @@ impl IcebergObjectStoreProperties {
         name: &str,
         catalog_config: &[ClientConfigEntry],
         dns: &DnsResolver,
+        storage_root: &Url,
+        storage_deadline: Option<ConfiguredDeadline>,
     ) -> IcebergResult<RestCatalog> {
         let props = self
             .props
@@ -1501,7 +1533,8 @@ impl IcebergObjectStoreProperties {
                     format!("failed to build the Iceberg REST client: {error}"),
                 )
             })?;
-        let storage_factory = DnsStorageFactory::new(self.backend, dns)?;
+        let storage_factory =
+            DnsStorageFactory::new(self.backend, dns, storage_root, storage_deadline)?;
         RestCatalogBuilder::default()
             .with_client(client)
             .with_storage_factory(StdArc::new(storage_factory))
@@ -1663,7 +1696,13 @@ mod tests {
             },
         ];
         let catalog = properties
-            .rest_catalog("fixture", &catalog_config, &dns)
+            .rest_catalog(
+                "fixture",
+                &catalog_config,
+                &dns,
+                &Url::parse("s3://bucket/table").assured("the fixture storage root is a URL"),
+                None,
+            )
             .await
             .assured("the REST catalog can be configured");
         nervix_primitives::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
@@ -1762,6 +1801,95 @@ mod tests {
             7,
             "the catalog table metadata must not be mutated"
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn installing_catalog_metadata_retains_the_initialized_storage() {
+        const PATH: &str = "memory://warehouse/table/data.parquet";
+        #[expect(
+            clippy::disallowed_types,
+            reason = "Iceberg TableMetadataBuilder requires a standard-library property map at \
+                      its external API boundary"
+        )]
+        let metadata = TableMetadataBuilder::new(
+            Schema::builder()
+                .build()
+                .assured("an empty table schema is valid"),
+            PartitionSpec::unpartition_spec(),
+            SortOrder::unsorted_order(),
+            "memory://warehouse/table".to_string(),
+            FormatVersion::V2,
+            std::collections::HashMap::default(),
+        )
+        .assured("the table metadata has every required field")
+        .build()
+        .assured("the table metadata is valid")
+        .metadata;
+        let table = Table::builder()
+            .metadata(metadata)
+            .identifier(
+                TableIdent::from_strs(["test", "table"])
+                    .assured("the table has a namespace and name"),
+            )
+            .metadata_location("memory://warehouse/table/metadata/initial.json")
+            .file_io(FileIO::new_with_memory())
+            .runtime(::iceberg::Runtime::try_current().assured("the async test runs inside Tokio"))
+            .build()
+            .assured("the in-memory table has every required field");
+        table
+            .file_io()
+            .new_output(PATH)
+            .assured("the object URL uses memory storage")
+            .write(bytes::Bytes::from_static(b"retained object"))
+            .await
+            .assured("the fixture can write its object");
+        let refreshed = Table::builder()
+            .metadata(table.metadata_ref())
+            .identifier(table.identifier().clone())
+            .metadata_location("memory://warehouse/table/metadata/refreshed.json")
+            .readonly(true)
+            .file_io(FileIO::new_with_memory())
+            .runtime(::iceberg::Runtime::try_current().assured("the async test runs inside Tokio"))
+            .build()
+            .assured("the refreshed table has every required field");
+        #[expect(
+            clippy::disallowed_types,
+            reason = "Iceberg CatalogBuilder requires a standard-library property map at its \
+                      external API boundary"
+        )]
+        let catalog = ::iceberg::memory::MemoryCatalogBuilder::default()
+            .load(
+                "fixture",
+                std::collections::HashMap::from_iter([(
+                    "warehouse".to_string(),
+                    "memory://warehouse".to_string(),
+                )]),
+            )
+            .await
+            .assured("the fixture catalog has a warehouse");
+        let mut client = IcebergSinkClient {
+            catalog: StdArc::new(catalog),
+            table,
+            file_name_prefix: "fixture".to_string(),
+            data_file_sequence: 0,
+        };
+        client
+            .install_table(refreshed)
+            .assured("catalog metadata can be installed");
+        let content = client
+            .table
+            .file_io()
+            .new_input(PATH)
+            .assured("the retained object URL uses memory storage")
+            .read()
+            .await
+            .assured("the installed table retains its initialized object storage");
+        assert_eq!(content.as_ref(), b"retained object");
+        assert_eq!(
+            client.table.metadata_location(),
+            Some("memory://warehouse/table/metadata/refreshed.json")
+        );
+        assert!(client.table.readonly());
     }
 
     #[test]

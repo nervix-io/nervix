@@ -123,12 +123,20 @@ sink resolves each request's target host itself, as its [request transport](#sin
 describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
 resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
-OpenDAL's credential providers through its accessor info. That client takes no `timeout_ms`, CA file
-or client identity from the client's configuration; OpenDAL's own timeout layer bounds each storage
-operation. The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
+OpenDAL's credential providers through its accessor info. The object-store client's optional
+`timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
+OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
+the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
+That HTTP client takes no CA file or client identity from the client's configuration. The
+Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
 trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
-S3, GCS, and Azure property mappings, URL-derived bucket or container, timeout and retry layers, and
-commit boundary. The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
+S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
+emitter's location and the initial table's effective storage properties. Table metadata refreshes
+retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
+an object URL for a different storage root is refused. OpenDAL's credential providers keep their
+own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
+neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
 
@@ -139,7 +147,7 @@ startup, while a lookup failure reaches the existing source or sink failure path
 authority, proxy behavior, TLS verification, custom trust and identity, and connection pools remain
 with the HTTP client. A client's `timeout_ms` includes DNS resolution, connection setup, TLS and
 response handling; the resolver's own 30 second ceiling only bounds clients without a shorter
-request timeout, which includes both Iceberg clients. DNS failures use the host's existing retry
+request timeout, which includes the Iceberg REST client. DNS failures use the host's existing retry
 policy and do not create application-level probes or acknowledgements.
 
 ### DNS for RabbitMQ
@@ -154,8 +162,11 @@ completes the TLS handshake within what is left. The handshake verifies the brok
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
-handshake over it. The AMQP handshake still has no deadline of its own, and the URI's
-`connection_timeout` query parameter has no effect.
+handshake over it, within what remains of the same budget. The source then opens its channel, sets
+its prefetch window and starts its consumer, and the sink opens its channel, selects publisher
+confirms under `ACK` and checks its queue, within the rest. `connect_timeout_ms` therefore bounds
+every step before the entity is ready, and a step that runs out of it is reported naming the key
+and its bound. The URI's `connection_timeout` query parameter has no effect.
 
 Lapin's `hickory-dns` feature is deliberately not selected. It resolves through one process-wide
 async-rs resolver built on first use from the host's `/etc/resolv.conf`, which ignores the node's
@@ -166,15 +177,25 @@ the feature off in the isolated RabbitMQ connector and in the server, and checks
 stays on AWS-LC.
 
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
-unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their own
-variants, as is a Lapin runtime that could not be created. A source reports the failure as a resume
-failure and retries on its declared `RETRY POLICY`. A sink reports an invalid address or CA file as
-a configuration failure and every other connection failure as an initialization failure, and the
-emitter host reopens it on its backoff. Neither path acknowledges undelivered data: a source that
-cannot connect holds no delivery, and a sink that cannot connect confirms nothing, so the input
-stays unacknowledged until a later connection delivers it. A connection that fails before its AMQP
-handshake has started no Lapin thread, and a failed handshake ends that thread and closes the
-socket. An established connection is not closed because its host's answer changed or expired; the
+unreachable addresses, a failed or overdue TLS handshake, and a failed or overdue AMQP handshake are
+their own variants, as are a Lapin runtime that could not be created and a socket the node could not
+hold a second handle on. A channel step that fails or runs out of the budget is reported beneath the
+source's or sink's own context for that step, with the elapsed deadline as its typed cause. A source
+reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A sink reports
+an invalid address, CA file or deadline key as a configuration failure and every other connection
+failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
+acknowledges undelivered data: a source that cannot connect holds no delivery, and a sink that
+cannot connect confirms nothing, so the input stays unacknowledged until a later connection
+delivers it.
+
+Lapin runs a connection's IO on a thread of its own from the start of the AMQP handshake, and that
+thread ends only once its socket fails or the broker closes the connection. Before it hands the
+transport over, the connector therefore takes a second handle on the connection's TCP socket. Until
+the entity's channel is open, dropping that handle shuts the socket down, whether the budget ran
+out, a step failed or the caller stopped waiting, as a stopped resume or sink start does; Lapin's
+loop then fails every read and write, ends with its thread, and closes the socket. A connection that
+opened lets the handle go. A connection that fails before its AMQP handshake has started no Lapin
+thread. An established connection is not closed because its host's answer changed or expired; the
 next connection uses the new answer.
 
 ### DNS for Redis
@@ -1548,12 +1569,15 @@ sequenceDiagram
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
-  not one per message. A broker that closes the channel names its reason, and Lapin hands it only
-  to what was waiting on the channel at that moment, so the sink reads the reason from its
-  connection's events, once for every channel it loses. The size refusal leaves the connection
-  open, and the sink opens its next channel on it; a message the broker had not confirmed ahead of
-  the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
-  loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
+  not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer
+  within it fails the write with that bound as its typed cause, the write's messages stay
+  unresolved for the host's retry, and the host reopens the sink; without the key the round trip
+  waits as long as the connection lives. A broker that closes the channel names its reason, and
+  Lapin hands it only to what was waiting on the channel at that moment, so the sink reads the
+  reason from its connection's events, once for every channel it loses. The size refusal leaves the
+  connection open, and the sink opens its next channel on it; a message the broker had not
+  confirmed ahead of the refused one may be in its queue, so the attempt then fails for the host's
+  retry. Any other loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
   emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Client source.** Each client ingestor a node executes has one endpoint task that outlives
   a single execution of the ingestor. It owns the attached producers, the batches each queued,

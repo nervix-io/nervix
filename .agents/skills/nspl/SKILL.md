@@ -389,9 +389,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
-  ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
-  bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
+- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL,
+  ClickHouse, or an Iceberg object-store client, put `timeout_ms` in the referenced client CONFIG
+  when the request needs an explicit bound; the emitter's declared retry policy owns pacing after
+  that request fails. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
@@ -400,7 +401,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   name resolution, connection and TLS included, and `connect_timeout_ms` bounds establishing a
   connection, the protocol handshake included. RabbitMQ, Redis, Syslog emitter and WebSocket
   clients take `connect_timeout_ms` and allow 30 seconds without it; a RabbitMQ client's deadline
-  ends before the AMQP handshake, which has none. Read `Ingestors` or
+  also covers the AMQP handshake and opening the entity's channel, and its `timeout_ms` bounds the
+  round trip that ends a `NO_ACK` write. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH

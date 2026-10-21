@@ -603,11 +603,12 @@ milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
 `connect_timeout_ms`, and allow 30 seconds when it is left out. A `RABBITMQ` client's deadline
-covers resolving the broker, the address attempts and TLS; the AMQP handshake that follows has no
-deadline. A request or connection that runs out of its deadline becomes the ingestor's transient
-status, and the ingestor retries on its policy; a connection that runs out of `connect_timeout_ms`
-is reported naming the key and its bound. [Connector Capabilities](connector-capabilities.md) lists
-each entity's network waits and what bounds each one, including the waits nothing bounds yet.
+covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the ingestor's
+channel, setting its prefetch window and starting its consumer. A request or connection that runs
+out of its deadline becomes the ingestor's transient status, and the ingestor retries on its
+policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
+bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and
+what bounds each one, including the waits nothing bounds yet.
 
 ## Client Ingestors
 
@@ -1154,7 +1155,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and consume: unbounded<br>a silent connection: driver default, twice the negotiated heartbeat |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
@@ -1183,11 +1184,12 @@ reconnect is at least once.
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
-connected to as written. Resolution, the TCP connection and, for `amqps`, the TLS handshake have 30
-seconds together; the broker certificate must name the host `addr` names. A connection that fails,
-including a name that does not resolve, is a source error that `DESCRIBE INGESTOR` shows as the
-transient error, and the instance tries again on its `RETRY POLICY` cadence without acknowledging
-anything.
+connected to as written. Resolution, the TCP connection, for `amqps` the TLS handshake, the AMQP
+handshake, opening the channel, setting the prefetch window and starting the consumer share the
+client's `connect_timeout_ms`, 30 seconds when it is left out; the broker certificate must name the
+host `addr` names. A connection that fails or runs out of that deadline, including a name that does
+not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
+instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
 
 ### Redis Pub/Sub
 

@@ -180,6 +180,7 @@ mod pulsar_delivery;
 mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
+mod standalone_transaction;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";

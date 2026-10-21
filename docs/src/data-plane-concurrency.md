@@ -374,6 +374,12 @@ memory-ordering implementation.
 Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
 registry interest.
 
+An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
+factory initializes one operator for the configured object-store root; data, manifest and metadata
+files use that same initialized storage after refreshes, successful commits and ambiguous-result
+reconciliation. This reuses the library's existing storage lifetime and adds no synchronization
+protocol or shared map. The emitter task remains the sole owner of commit retry pacing.
+
 Every pooled Redis or SQL sink registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
@@ -1817,6 +1823,14 @@ state and the one-shot atomic claim; fault selection remains in the harness's ow
 These async observations introduce no tracked blocking-lock owner. Deloxide continues to measure
 the registered product locks, while the public scenarios and model checks exercise pause ordering
 at their applicable boundaries.
+
+The `@client_wire_standalone_preparation` scenario holds a coordinator after its standalone
+transaction lookup and after preflight, while two leadership transfers let another coordinator
+apply the same command and engage its domain pause. Its active, order-analysis and stressed
+registrations reach the transaction impact recorder's tracked locks. The lookup, preflight and
+resume barriers use the existing async pause owner, whose ordering remains outside Deloxide's
+observation; the public outcome and dependent mutation assert recovery under the original
+execution reference.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 

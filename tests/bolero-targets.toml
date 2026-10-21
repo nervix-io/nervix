@@ -1735,7 +1735,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_archive__tests__bolero_window_archive_groups_rebuild_the_published_window/corpus"
-domain_version = 3
+domain_version = 4
 features = ["testing"]
 id = "backup-window-groups"
 invariant = "Resident and bounded readers of the same current native window produce byte-identical complete input and argument groups with identical revision, incarnation, sequences, watermarks, boundaries and delayed removals; restoring the bounded reader's archive preserves every live row, bit-exact branch key and argument and answers every aggregate as before."

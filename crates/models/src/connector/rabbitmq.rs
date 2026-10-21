@@ -77,15 +77,12 @@ const RABBITMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
     }],
     waits: &[
         DeclaredWait {
-            wait: "connection: name resolution, address attempts and TLS",
+            wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
+                   channel open and consume",
             bound: WaitBound::Key {
                 key: DeadlineKey::ConnectTimeout,
                 omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
             },
-        },
-        DeclaredWait {
-            wait: "the AMQP handshake, channel open and consume",
-            bound: WaitBound::Unbounded,
         },
         DeclaredWait {
             wait: "a silent connection",
@@ -112,15 +109,12 @@ const RABBITMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
     waits: &[
         DeclaredWait {
-            wait: "connection: name resolution, address attempts and TLS",
+            wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
+                   channel open, confirm select and the queue check",
             bound: WaitBound::Key {
                 key: DeadlineKey::ConnectTimeout,
                 omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
             },
-        },
-        DeclaredWait {
-            wait: "the AMQP handshake, channel open and confirm select",
-            bound: WaitBound::Unbounded,
         },
         DeclaredWait {
             wait: "a publish",
@@ -132,7 +126,10 @@ const RABBITMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "the round trip that ends a publish under NO ACK",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &["A frame above the negotiated frame_max ends the connection."],

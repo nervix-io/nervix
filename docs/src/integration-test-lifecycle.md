@@ -570,6 +570,12 @@ The boundary between them is kept in four places.
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second
   client policy.
+- **Controlled command recovery.** Standalone preparation barriers retain a coordinator's
+  transaction observation and its preflight result while the scenario transfers leadership.
+  Node- and domain-scoped resume barriers then hold the applying command's pause until the
+  scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
+  released observations. The scenario asserts the original execution reference's outcome and a
+  dependent command through the public session protocol; it adds no setup delay or request retry.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product
