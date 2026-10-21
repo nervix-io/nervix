@@ -1014,6 +1014,9 @@ scenario = "An alteration drains buffered branches on a shared relay before repl
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+# source.rs owns async channels, watch notifications and connection tasks, with no tracked
+# blocking acquisition. Its suspension workloads reach the tracked host owners listed below;
+# the production-reader Shuttle check covers the async handoff itself.
 coverage = "Syslog listener source suspension while its bounded frame intake and downstream dispatch are occupied. The source's async channel and watch are outside Deloxide; the scenario reaches the runtime's tracked alteration and quiesce owners."
 examples = 4
 feature = "tests/features/runtime/syslog_support.feature"
@@ -2399,6 +2402,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.syslog-suspend-handoff",
+  "stress.syslog-suspend-handoff",
   "scenario.standalone-preflight",
   "stress.standalone-preflight",
   "scenario.transaction-pause-release",
@@ -2623,6 +2628,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.syslog-suspend-handoff",
+  "stress.syslog-suspend-handoff",
   "scenario.endpoint-ack-decision",
   "stress.endpoint-ack-decision",
   "scenario.endpoint-ack-ending",
@@ -2670,6 +2677,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.syslog-suspend-handoff",
+  "stress.syslog-suspend-handoff",
   "scenario.endpoint-ack-decision",
   "stress.endpoint-ack-decision",
   "scenario.endpoint-ack-ending",
