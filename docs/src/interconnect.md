@@ -716,6 +716,11 @@ own attached share in sequence order, so a domain drain excludes a parked chain 
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.
 
+Progress and terminal acknowledgements share the bounded application receive queue. The application
+keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
+capacity test explicitly queues progress, consumes it while sending the terminal acknowledgement,
+and verifies that the next relay grant fits only after that terminal send completes.
+
 ### Acknowledgement Registrations
 
 The sender correlates the runtime admission of a delivery and every attached record acknowledgement

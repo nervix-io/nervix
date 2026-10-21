@@ -290,6 +290,10 @@ relay. Do not use them to scan across branches.
   Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
+- For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
+  And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
+  shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
+  declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.

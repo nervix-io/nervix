@@ -462,6 +462,29 @@ exact source allocation, so a late close cannot remove a replacement with the sa
 Configuration withdrawal removes the route; source withdrawal alone leaves configured metadata
 available to report unavailable intake. These publications remain volatile data-plane state.
 
+A request dispatches all bindings of its resolved endpoint concurrently before waiting for their
+combined result. One binding's downstream ACK cannot gate delivery to another binding. The
+production fanout and request windows have a Shuttle check that withholds both consumer ACKs
+until both bindings start, completes them in reverse order, and checks independent permit release.
+
+An acknowledged endpoint intake owns one semaphore window, created from its typed positive count.
+It tries admission once and holds the borrowed permit through graph ACK/NACK, its absolute
+physical timeout, or intake ending. Exact lifetime ending cancels the lifetime token before
+publishing absent intake. A separate wait observes shutdown or handoff through the quiesce owner's
+existing register-before-read publication wait, so the HTTP response does not wait for source
+close after drain. Resumable pauses preserve the admitted root. Completion ready in the same poll
+as an ending wins; otherwise ending or deadline returns its unavailable outcome and releases the
+slot. Listener admission shutdown also ends the wait before graph drain. No response slot, payload, ACK root or outcome is persisted. Dropping a request drops its
+permit; admitted graph work can still complete and sender retries can duplicate effects.
+
+Registered Shuttle checks drive this production window with scheduler-visible ACK and deadline
+events, assert exact capacity and independent completion order, race ACK against expiry, and
+resolve a retained lifetime while preserving its replacement. Semaphore, cancellation-token and
+network waits are asynchronous and untracked by Deloxide. The tagged one-/three-node endpoint
+scenarios join the active, order and stressed lifecycle selections and reach the existing quiesce,
+entity-gate and root-lifecycle blocking owners; the restore selection retains its existing scope.
+The bounded outcome-body property checks the public projection separately.
+
 Unit regressions and the registered Bolero operation sequence exercise the production owner and
 retained lifetimes. Shuttle races whole-domain publication with resolution, unbind with admitted
 requests and replacement, and domain teardown with retained routes. These checks treat publication
@@ -1746,6 +1769,12 @@ ingestors, a Roto function's column builder, TLS rebinding of every HTTPS listen
 inference over interleaved branches, a restarted voter's ownership, and graceful shutdown with a
 slow cordon release and diagnostic server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
+`stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
+the existing 360-second teardown reserve. The baseline lifecycle process retains its 1,800-second
+bound, and every invocation shares the selection's unchanged 4,800-second workload budget. The
+inventory checks require the baseline and endpoint groups to be disjoint and account for every
+registered example; this partition changes no product deadline or ordinary scenario concurrency.
 The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
 scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
 offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore

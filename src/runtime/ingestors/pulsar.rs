@@ -19,7 +19,7 @@ use error_stack::ResultExt as _;
 use nervix_connector_pulsar::{
     PulsarAckReceipts, PulsarSource, PulsarSourcePlan, PulsarSourceSettings,
 };
-use nervix_models::{ClientConfigEntry, IngestAcknowledgement};
+use nervix_models::ClientConfigEntry;
 
 use super::{
     super::*,
@@ -115,11 +115,10 @@ impl PulsarIngestorStartPlan {
     ) -> PulsarSourceSettings<'a> {
         // A mode without an acknowledgement tree reads one message at a time, so only an
         // acknowledged mode waits for the broker to answer what it acknowledges.
-        let ack_receipts = match self.mode.acknowledgement() {
-            IngestAcknowledgement::Unacknowledged => PulsarAckReceipts::Unawaited,
-            IngestAcknowledgement::Sequential { .. } | IngestAcknowledgement::Parallel { .. } => {
-                PulsarAckReceipts::Awaited
-            }
+        let ack_receipts = match &self.mode {
+            nervix_models::PulsarIngestMode::NoAck => PulsarAckReceipts::Unawaited,
+            nervix_models::PulsarIngestMode::AckSequential { .. }
+            | nervix_models::PulsarIngestMode::AckParallel { .. } => PulsarAckReceipts::Awaited,
         };
         PulsarSourceSettings {
             config,

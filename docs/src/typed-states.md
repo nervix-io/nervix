@@ -612,6 +612,15 @@ teardown end the domain's lifetimes and replace all of its route definitions tog
 other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
 its replacement.
 
+Endpoint request policy is either unacknowledged or a typed acknowledged plan carrying positive
+capacity, physical timeout and retry delay. The decision boundary validates these durations and
+the reject-only quiesce contract once. A WebSocket ACK declaration requires a signaling reference;
+composition verifies its prepared outbound encoder before binding intake. Request outcomes retain
+the distinction between local input refusal, temporary non-admission, downstream failure and an
+interrupted lifetime. Only the public response boundary projects those states onto the shared
+client outcome vocabulary. Exact lifetime ending is a cancellation event distinct from absent
+intake; held replies observe the event while later requests observe absence.
+
 A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
 route's records get their branch key as one of three states: unbranched, keeping the incoming key,

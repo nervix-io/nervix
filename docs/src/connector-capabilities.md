@@ -57,7 +57,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
-| Modes (complete bodies after MODE) | NO ACK |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers` |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
@@ -65,8 +65,8 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | a request body: unbounded |  |
-| Network waits | a client's request head and body: unbounded |  |
+| Buffers | a request body: unbounded<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | a client's request head and body: unbounded<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
 | Driver limits | Request heads above 100 headers are refused. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -277,7 +277,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | WEBSOCKETS ENDPOINT | No emit entity is declared. An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. |
 | Reference | Websockets endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
-| Modes (complete bodies after MODE) | NO ACK |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers` |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
@@ -285,8 +285,8 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |  |
+| Buffers | unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending`<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |  |
 | Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 

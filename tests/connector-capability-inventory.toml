@@ -926,3 +926,17 @@ entity = "ZEROMQ PUSH EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
 ]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "An HTTP response follows the attached consumer's <decision> decision" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
+]

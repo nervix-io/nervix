@@ -851,6 +851,11 @@ subscription missing; while the cursor is open, the broker refuses to create a s
 that name as a conflict. Each instance's consumer registers under `<domain>~<ingestor>-<instance>`.
 The [ingestor manual](./ingestors.md#pulsar) owns the public behavior.
 
+When an endpoint has multiple ingestor bindings, its host dispatches them concurrently and waits
+for all acknowledged bindings before completing the response. Each binding keeps its own declared
+window and deadline. A partial admission reports a processing failure rather than claiming that
+no input was admitted.
+
 ### Confirmed acknowledgements
 
 `acknowledge` returns only once the source's transport has confirmed the positions, as far as the
@@ -1631,6 +1636,21 @@ sequenceDiagram
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
   other domains publishing the same host and path. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
+  `MODE ACK MAX <n> ACK TIMEOUT <duration>` gives each node's intake an explicit 1–65,535-response
+  window. Immediate permit admission holds one response through the payload's existing ACK root;
+  codec or local route refusal yields HTTP 400, successful graph completion 200, and downstream
+  NACK, timeout, full capacity or intake ending 503 with the declared `RETRY AFTER`. ACK requires
+  reject-only quiesce. Intake stop observes the quiesce owner's publication; exact source ending
+  cancels the lifetime before publishing absence. A resumable quiesce preserves admitted work.
+  The host projects only the existing client outcome class and cause into the public object;
+  diagnostics retain their ordinary error owner. WebSocket ACK requires an explicit signaling
+  protocol whose outbound encoder can represent every fixed outcome. Its optional data-sink reply
+  also sends the frame during `ACCEPT DATA`. The request policy is a typed decision plan; it is
+  separate from broker positions, broker commits and the source loop's acknowledgement cadence.
+  Shared YAML encoding uses JSON-compatible flow syntax with quoted strings, preserving their
+  complete contents through signaling and codec round trips.
+  The source remains request-scoped. HTTP body reads and the driver's frame limits retain their
+  separate bounds. `MODE NO ACK` still confirms admission with 202.
 
 ## Failure and observation
 
