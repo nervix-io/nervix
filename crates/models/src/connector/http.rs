@@ -100,8 +100,8 @@ const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[DeclaredWait {
-        wait: "a request: name resolution, connection, TLS, writing it and its final response \
-               headers",
+        wait: "a request: name resolution within half of it, each address's connection within an \
+               equal share of what is left, TLS, writing it and its final response headers",
         bound: WaitBound::Key {
             key: DeadlineKey::Timeout,
             omitted: OmittedDeadline::Required,

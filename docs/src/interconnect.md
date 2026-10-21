@@ -1111,10 +1111,15 @@ the active decoded section are resident at once.
 node fetches a resource archive and how it verifies and records the fetched version.
 
 Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
-each node's admitted work through a management-class drain request and requests a separate
-confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
-request with its coordination identity and applied cut revision to each live node, then reads each
-node's management-class inventory of staged sections. A capture request's deadline is the remaining
+the admitted work of every live node and every node the domain's schedule assigns its work to
+through a management-class drain request, and requests a separate confirming force-flush round after
+all nodes appear quiet. The leader sends a management-class capture request with its coordination
+identity and applied cut revision to the scheduled primary of every placement whose state the
+archive captures, and for a `WITHOUT PAUSE` capture, whose schedule may move, to every other live
+node too, then reads each node's management-class inventory of staged sections. A cut refuses
+before it sends a request when the cluster does not report one of those nodes live, or when the
+schedule places an entity whose state the archive captures on no node, so a scheduled owner is
+never silently left out of an archive. A capture request's deadline is the remaining
 budget of the domain's cut rather than a fixed request deadline, because an owner stages its share of
 the domain's state before it answers; a `WITHOUT PAUSE` capture takes the default cut budget. A receiver waits up to five seconds for its
 state machine to apply that revision, installs its current runtime plan, and rechecks the sending

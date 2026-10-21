@@ -120,7 +120,7 @@ use crate::common::{
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
-        CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
+        CapturedRequest, ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     kafka_group_member::ExternalKafkaGroupMember,
@@ -156,6 +156,7 @@ use crate::common::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
     },
     tcp_forwarder::TcpForwarders,
+    unaccepted_address::UnacceptedAddress,
 };
 
 mod backup;
@@ -505,6 +506,8 @@ struct ScenarioWorld {
     nats_endpoint: Option<NatsEndpoint>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
+    /// The addresses a scenario holds where no connection completes, for as long as it runs.
+    unaccepted_addresses: Vec<UnacceptedAddress>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
     /// The gRPC receivers a scenario started, by the name its steps give them.
@@ -638,6 +641,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("sqs_answer_hold", &self.sqs_answer_hold)
             .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
+            .field("unaccepted_addresses", &self.unaccepted_addresses)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
             .field("otlp_receivers", &self.otlp_receivers)
@@ -1397,6 +1401,7 @@ async fn start_http_receiver(
     world: &mut ScenarioWorld,
     name: String,
     transport: ReceiverTransport,
+    length: LengthPolicy,
 ) {
     initialize_scenario_identity(world);
     let name = expand_placeholders(world, &name);
@@ -1406,7 +1411,7 @@ async fn start_http_receiver(
     );
     let port = draw_scenario_port(world, "HTTP receiver");
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let receiver = match HttpReceiver::start(address, transport).await {
+    let receiver = match HttpReceiver::start(address, transport, length).await {
         Ok(receiver) => receiver,
         Err(error) => panic!("HTTP receiver '{name}' failed to start: {error:?}"),
     };
@@ -1444,7 +1449,23 @@ fn certificate_hosts(world: &ScenarioWorld, hosts: &str) -> Vec<String> {
 
 #[given(expr = "HTTP receiver {string} is running")]
 async fn given_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
-    start_http_receiver(world, name, ReceiverTransport::Plain).await;
+    start_http_receiver(world, name, ReceiverTransport::Plain, LengthPolicy::Lenient).await;
+}
+
+/// A receiver as strict about framing as some origin servers are: a `POST`, `PUT` or `PATCH` that
+/// declares no length is answered `411 Length Required` and is not captured.
+#[given(
+    expr = "HTTP receiver {string} is running and requires a declared length on POST, PUT and \
+            PATCH requests"
+)]
+async fn given_strict_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Plain,
+        LengthPolicy::RequiredForContent,
+    )
+    .await;
 }
 
 #[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
@@ -1453,7 +1474,13 @@ async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
     };
-    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
 }
 
 #[given(
@@ -1469,7 +1496,32 @@ async fn given_https_receiver_requiring_client_certificates_is_running(
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
     };
-    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
+}
+
+/// Holds `address`, at the port of HTTP receiver `name`, behind a listener that never completes a
+/// connection, so a client whose DNS answer for the receiver's name lists `address` waits on that
+/// answer's handshake until it gives up on it.
+#[given(expr = "connections to {string} at the port of HTTP receiver {string} never complete")]
+async fn given_connections_to_address_at_http_receiver_port_never_complete(
+    world: &mut ScenarioWorld,
+    address: String,
+    name: String,
+) {
+    let ip = address
+        .parse::<std::net::IpAddr>()
+        .unwrap_or_else(|error| panic!("'{address}' is not an IP address: {error}"));
+    let port = http_receiver(world, &name).port();
+    let unaccepted = UnacceptedAddress::listen(SocketAddr::new(ip, port))
+        .await
+        .unwrap_or_else(|error| panic!("no listener could hold {address}:{port}: {error}"));
+    world.unaccepted_addresses.push(unaccepted);
 }
 
 /// Places the receiver's CA certificate and the client identity it issued where the node can mount
@@ -2150,7 +2202,13 @@ async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String,
 
     let reachable = match transport {
         OtlpTransport::HttpProtobuf => {
-            start_http_receiver(world, name.clone(), ReceiverTransport::Plain).await;
+            start_http_receiver(
+                world,
+                name.clone(),
+                ReceiverTransport::Plain,
+                LengthPolicy::Lenient,
+            )
+            .await;
             let receiver = http_receiver(world, &name);
             Reachable {
                 origin: receiver.origin(),

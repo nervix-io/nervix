@@ -529,7 +529,8 @@ errors keep those reports as typed fields while preserving their startup message
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
-response-header failure, or the socket or TLS error as the context beneath it, and attaches the
+response-header failure, the socket or TLS error, or the `AddressShareElapsed` of an address that
+accepted no connection within its share of `timeout_ms` as the context beneath it, and attaches the
 description of the whole chain, such as
 `HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`, to its publish failure. The
 emitter reports that description as its transient error and runtime event for as long as the
@@ -1782,7 +1783,12 @@ themselves, a clock mapping that cannot be projected, a resource version that is
 leader or differs from its catalog entry, a record that does not encode, and an archive the
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
-under which it acquired the cut. Owner capture failures are classified at the
+under which it acquired the cut. A cut that cannot reach a node it needs is refused as
+`StateOwnerUnreachable` when the cluster does not report a placement's scheduled primary live, and
+as `ExecutorUnreachable` when, before a quiesced cut pauses, it does not report a node that runs the
+domain's work live. Each carries the domain, the entity's kind and name and the node as typed
+fields, and names no state. A cut whose schedule places an entity whose state it archives on no
+node is refused as `StateUnplaced`, which carries the domain and the entity. Owner capture failures are classified at the
 interconnect boundary without guest bytes in the failure. A branch lifecycle or Kafka offset
 section names its entity when its checkpoint does not decode, its serializer scratch or conversion
 cannot be admitted to `restore_metadata`, or its record cannot be written; the failure renders every
