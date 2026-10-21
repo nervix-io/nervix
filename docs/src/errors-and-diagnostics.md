@@ -416,6 +416,16 @@ An endpoint that decodes a payload but cannot dispatch or flush its ingest group
 rendered report chain in its runtime event and log. A temporary unfolding admission refusal logs
 its report chain while preserving the endpoint's retryable refusal outcome.
 
+In endpoint `MODE ACK`, the public HTTP or WebSocket reply exposes exactly the shared client
+submission outcome's class and cause labels. A codec or local route refusal is HTTP 400 with
+`processing_failed` / `rejected`; downstream NACK has the same cause with HTTP 503. Capacity,
+timeout and interruption retain their existing typed client causes. No rendered report, payload,
+or error detail enters that object. Decode rejection and route error policies still consume the
+full typed report through their normal owner. Invalid request durations and ACK quiesce contracts
+are entrypoint-planning errors naming the ingestor and clause. A WebSocket ACK without a declared
+signaling protocol fails planning; an outbound format that cannot encode every outcome fails
+source composition with the protocol encoder's typed cause retained beneath the ingestor context.
+
 ### Stored Shapes And Archives
 
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
@@ -730,6 +740,12 @@ client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` 
 connector's description of the failure for the emitter's transient error. A message above the
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
+
+A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqSourceError`. `Bind`
+and `Connect` name the configured address and sit beneath `SourceError::Resume`, and `Receive` sits
+beneath `SourceError::Read`. The rendered chain therefore names both the address and the driver's
+cause, and the source host shows the deepest cause as the ingestor's transient error, such as the
+operating system refusing a bind because another socket holds the address.
 
 ### Connector Status Observation
 

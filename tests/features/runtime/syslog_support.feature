@@ -477,3 +477,60 @@ Feature: Syslog support
       | cluster_size | replica_count | split                  |
       | 1            | 0             | inside its octet count |
       | 3            | 1             | inside its payload     |
+
+  # The harness draws the ingest port when the scenario starts, and every node binds it only once
+  # the listener starts after START. A socket that took the port in between fails every bind the
+  # listener retries, so the address moves to a fresh port when a statement first names it.
+  @node_bound_port_taken
+  Scenario Outline: A Syslog UDP listener binds a fresh port when another socket took the port the scenario drew for it
+    Given a <cluster_size> node nervix cluster is started
+    And another socket binds UDP on the port the scenario drew for its syslog ingest address
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_event (
+        facility U8,
+        severity U8,
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
+      CREATE CLIENT syslog_listener
+        TYPE SYSLOG
+        CONFIG {
+          'protocol' = 'udp',
+          'addr' = '{{syslog_ingest_addr}}'
+        };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      ready: true
+      """
+    When Syslog UDP message is published to "{{syslog_ingest_addr}}"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - moved listener
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"moved listener"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -43,7 +43,8 @@ recorded = "OrderAnalysis"
 
 # The active-only build with Deloxide's bounded scheduling disturbance, `StressConfiguration::LANE`.
 # It runs every probe, conformance check and owner test, the lifecycle scenarios of the
-# `stress-scenarios` invocation and the paced-driver scenarios of `stress-paced-simulation`.
+# `stress-scenarios` and `stress-endpoint-acknowledgement` invocations and the paced-driver
+# scenarios of `stress-paced-simulation`.
 [[selection]]
 name = "deloxide-stress"
 recorded = "StressedActiveOnly"
@@ -178,6 +179,22 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide-stress"]
 tags = ["@deloxide_stress"]
+target = "test:scenarios"
+
+# The ten endpoint ACK lifecycle examples have a separate bounded serial phase. They do not
+# consume the baseline lifecycle process's suite budget; both phases share the lane's unchanged
+# workload budget and retain the same teardown reserve.
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+features = ["testing"]
+id = "stress-endpoint-acknowledgement"
+inputs = ["tests/features/runtime/endpoint_acknowledgement.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = ["deloxide-stress"]
+tags = ["@deloxide_stress_endpoint_ack"]
 target = "test:scenarios"
 
 # The paced-driver scenarios under the same disturbance, one at a time, with the stressed build of
@@ -2564,6 +2581,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.endpoint-ack-decision",
+  "stress.endpoint-ack-decision",
+  "scenario.endpoint-ack-ending",
+  "stress.endpoint-ack-ending",
+  "scenario.endpoint-ack-fanout",
+  "stress.endpoint-ack-fanout",
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
@@ -2583,6 +2606,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/force_flush.rs"
 workloads = [
+  "scenario.endpoint-ack-decision",
+  "stress.endpoint-ack-decision",
+  "scenario.endpoint-ack-ending",
+  "stress.endpoint-ack-ending",
+  "scenario.endpoint-ack-fanout",
+  "stress.endpoint-ack-fanout",
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
@@ -2599,6 +2628,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.endpoint-ack-decision",
+  "stress.endpoint-ack-decision",
+  "scenario.endpoint-ack-ending",
+  "stress.endpoint-ack-ending",
+  "scenario.endpoint-ack-fanout",
+  "stress.endpoint-ack-fanout",
   "scenario.mqtt-parallel-gather-at-quiesce",
   "stress.mqtt-parallel-gather-at-quiesce",
   "scenario.sqs-receive-at-quiesce",
@@ -2836,4 +2871,64 @@ id = "stress.sqs-receive-at-quiesce"
 invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Held request capacity and ACK/NACK resolution through a native consumer, including a remote emitter on three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "scenario.endpoint-ack-decision"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "scenarios"
+scenario = "An HTTP response follows the attached consumer's <decision> decision"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Held request capacity and ACK/NACK resolution through a native consumer, including a remote emitter on three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "stress.endpoint-ack-decision"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "An HTTP response follows the attached consumer's <decision> decision"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Held HTTP response cancellation on its configured deadline or scenario-driven node stop, on one and three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "scenario.endpoint-ack-ending"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "scenarios"
+scenario = "A held HTTP response ends when <ending>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Held HTTP response cancellation on its configured deadline or scenario-driven node stop, on one and three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "stress.endpoint-ack-ending"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "A held HTTP response ends when <ending>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Shared endpoint fanout to two attached consumers before either acknowledges, through source quiesce and ACK root lifecycle owners. Asynchronous windows and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "scenario.endpoint-ack-fanout"
+invariant = "Every binding receives a shared request before its response waits for all graph acknowledgements, and each window returns its own slot."
+invocation = "scenarios"
+scenario = "Shared endpoint intake reaches both consumers before either acknowledgement"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: shared endpoint fanout to two attached consumers before either acknowledges, through source quiesce and ACK root lifecycle owners. Asynchronous windows and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "stress.endpoint-ack-fanout"
+invariant = "Every binding receives a shared request before its response waits for all graph acknowledgements, and each window returns its own slot."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "Shared endpoint intake reaches both consumers before either acknowledgement"
 selections = ["deloxide-stress"]
