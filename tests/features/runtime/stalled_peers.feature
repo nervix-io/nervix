@@ -166,6 +166,156 @@ Feature: Stalled peers
       | 1            |
       | 3            |
 
+  Scenario Outline: A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "rabbitmq_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+        'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE RABBITMQ QUEUE INGESTOR rabbit_in
+        FROM rabbit_main QUEUE 'stalled_{{test_id}}' INSTANCES 1
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "rabbitmq_peer" eventually accepts a connection
+    And within "20s" DESCRIBE INGESTOR "rabbit_in" on the leader node contains
+      """
+      the AMQP handshake with the RabbitMQ broker did not finish within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "rabbitmq_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+        'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE EMITTER rabbit_out FROM notifications
+        TO RABBITMQ rabbit_main QUEUE stalled_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "rabbitmq_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "rabbit_out" on the leader node contains
+      """
+      the AMQP handshake with the RabbitMQ broker did not finish within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms
+    Given RabbitMQ is running
+    And a stallable RabbitMQ endpoint is configured
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And RabbitMQ queue "stalled_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge stalled-rabbitmq-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+        'addr' = '{{rabbitmq_stallable_addr}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE EMITTER rabbit_out FROM notifications
+        TO RABBITMQ rabbit_main QUEUE stalled_{{test_id}}
+        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-rabbitmq-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":1}
+      """
+    Then the observed broker receives a payload
+      """
+      {"user_id":1}
+      """
+    # The broker routes a message before its answer to the write's round trip reaches the emitter,
+    # so the emitter's own count shows that the first write ended before the endpoint stalls.
+    And within "20s" DESCRIBE EMITTER "rabbit_out" on the leader node contains
+      """
+      owner:
+      """
+    And the last command output owner is saved as placeholder "rabbit_owner"
+    And within "20s" DESCRIBE EMITTER "rabbit_out" on the leader node contains
+      """
+      messages_total sent relay=notifications physical_node={{rabbit_owner}} total=1
+      """
+    When the stallable endpoint "rabbitmq" is paused
+    And http payload is posted to host "stalled-rabbitmq-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":2}
+      """
+    Then within "20s" DESCRIBE EMITTER "rabbit_out" on the leader node contains
+      """
+      the round trip that ends a RabbitMQ NO ACK write did not finish within timeout_ms 1s
+      """
+    When the stallable endpoint "rabbitmq" is resumed
+    Then the observed broker receives a payload
+      """
+      {"user_id":2}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "syslog_peer" is listening
