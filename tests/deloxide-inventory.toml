@@ -477,6 +477,14 @@ selections = ["deloxide-order"]
 test = "order_context_and_retention_overload_leave_failure_evidence"
 
 [[workload]]
+coverage = "Locks that each live for one request, taken under the lock of an owner that outlives them, as relay admission records are under their relay peer owner."
+id = "probe.per-request-order-history"
+invariant = "A run that takes 32,768 per-request locks under one owner's lock keeps every instance edge within the order history and ends with qualifying evidence and no finding."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "per_request_locks_under_one_owner_stay_within_the_order_history"
+
+[[workload]]
 coverage = "Finding descriptions written to a failing or blocked standard error."
 id = "probe.output-failure"
 invariant = "A finding whose description cannot be written, or whose standard error stays blocked past the recording budget, ends the child with status 4 and nonqualifying evidence."

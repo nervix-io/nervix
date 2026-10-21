@@ -461,8 +461,8 @@ class InventoryTests(unittest.TestCase):
             if workload.selections == {"deloxide-order"}
         }
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide")), 14)
-        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-order")), 22)
-        self.assertEqual(len(order_only), 8)
+        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-order")), 23)
+        self.assertEqual(len(order_only), 9)
         self.assertEqual(
             list(inventory.invocations),
             ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
