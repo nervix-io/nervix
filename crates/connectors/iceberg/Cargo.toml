@@ -68,3 +68,4 @@ tokio = { workspace = true, features = [
   "net",
   "rt-multi-thread",
 ] }
+ubyte = { workspace = true }

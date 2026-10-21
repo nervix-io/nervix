@@ -1742,9 +1742,10 @@ runs every probe, conformance check and owner test of the active-only selection,
 drain of buffered branches before an alteration, interleaved branches with remote acknowledgement
 owners, a lost acknowledgement and a producer restart, session restarts that resume a producer and
 consumer, a domain restart that replaces its consumer, a memory-pressure pause of scheduled
-ingestors, a Roto function's column builder, TLS rebinding of every HTTPS listener, batched
-inference over interleaved branches, a restarted voter's ownership, and graceful shutdown with a
-slow cordon release and diagnostic server processes that stop gracefully, and its
+ingestors, an Iceberg commit that waits for room in the bulk memory class, a Roto function's
+column builder, TLS rebinding of every HTTPS listener, batched inference over interleaved branches,
+a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
+server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
 The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
 scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka

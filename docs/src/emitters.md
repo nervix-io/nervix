@@ -2431,14 +2431,15 @@ The REST catalog is the authority for namespace and table metadata. Nervix does 
 
 Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
 local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that
-batch to the Iceberg table, and commits the catalog update. The commit duration starts when a flush
-stages rows while none are staged, and rows later flushes stage join that commit without moving it,
-so a row waits at most `FLUSH EACH` in memory and then at most `COMMIT EACH` after it is staged.
-Staged files that reach `MAX SIZE` are committed at once. Both durations are domain-logical, so a
-paced domain's `TIME RATE` moves the flush and commit boundaries together; the maximum batch and
-commit sizes, the catalog retry backoff, and a drain remain independent of domain pace. The
-temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
+<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
+appends every one of those data files to the Iceberg table in one catalog commit. The commit
+duration starts when a flush stages rows while none are staged, and rows later flushes stage join
+that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
+`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
+together; the maximum batch and commit sizes, the catalog retry backoff, and a drain remain
+independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
+`--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Commit conflicts, table evolution after open, a dropped table, and unavailable
@@ -2448,6 +2449,29 @@ backpressure. Record-level expression and construction errors are attributed thr
 ERROR` before staging. An ambiguous failure after the catalog commit can append the rows again;
 Iceberg appends are not idempotent. See [ACK Semantics And Effective
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
+
+A commit holds the rows it reads back in memory until it has written them, so before it reads the
+staged files it charges every byte of them to the node's bulk memory class, and returns the charge
+once their rows are in data files. It takes the charge only when the class has room for it now
+rather than waiting in the class's queue, where a commit's charge would take every byte the class
+frees and hold the node's other bulk work behind it. When the class has no room, the commit keeps
+its staged files and their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for
+room in the bulk memory class for <bytes> staged bytes` as the emitter's transient error, and the
+emitter retries the commit with its declared policy and backpressure. The bulk class holds 32 MiB.
+Staged files that together exceed it are read in groups, each the run of consecutive files the
+class can hold, and each group's rows are written into data files of their own and its charge
+returned before the next group is read; the data files of every group are still appended in the
+one catalog commit. A single staged file holds the mapped rows of one input batch, which can be
+larger than the class when a route on the same node flushes batches above 32 MiB. Such a file is
+read alone once the whole class is free, charged with the whole class: that is every byte of it
+the class can account for, and it leaves no room for other bulk work beside the read. Until
+then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of <capacity>
+bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+
+A commit publishes the staged files it found when it began. Rows a flush stages while a failed
+commit waits for its retry are not in that commit's data files, so the retry first appends what the
+commit began with and then commits the newer rows: a retry still publishes everything staged, and
+acknowledges only rows a catalog commit holds.
 
 ## Codec Behavior On Emission
 
