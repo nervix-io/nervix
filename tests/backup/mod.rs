@@ -15,6 +15,7 @@ use nervix_models::{
     BackupArchiveSummary, CommandExecutionReference, DomainName, Statement, Timestamp,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_server::BackupCutBoundary;
 
 use super::*;
 use crate::common::{
@@ -161,10 +162,12 @@ async fn when_cli_backs_up(world: &mut ScenarioWorld, scope: String, node: Strin
     run_cli(world, &node, arguments).await;
 }
 
-#[given(expr = "the backup cut for domain {string} will pause after draining")]
+#[given(expr = "the backup cut for domain {string} will pause before its capture")]
 fn given_backup_cut_pauses(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
-    world.fault_injection.pause_backup_cut_on(domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain, BackupCutBoundary::Capture);
 }
 
 #[when(
@@ -215,18 +218,55 @@ fn when_cli_backup_begins_in_background(
 #[then(expr = "the backup cut for domain {string} has reached its pause")]
 async fn then_backup_cut_paused(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
+    // The cut reaches its pause after its lease, its pause and its drain, each of which a loaded
+    // runner delays; the wait ends as soon as the pause is reached.
     nervix_primitives::time::timeout(
-        Duration::from_secs(30),
-        world.fault_injection.wait_for_backup_cut_pause(&domain),
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_backup_cut_pause(&domain, BackupCutBoundary::Capture),
     )
     .await
-    .expect("the backup reaches its quiesced cut");
+    .expect("the backup reaches the pause before its capture");
 }
 
 #[when(expr = "the backup cut pause for domain {string} is released")]
 fn when_backup_cut_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
-    world.fault_injection.release_backup_cut_pause(&domain);
+    world
+        .fault_injection
+        .release_backup_cut_pause(&domain, BackupCutBoundary::Capture);
+}
+
+#[given(expr = "the backup cut for domain {string} will pause once it holds its lease")]
+fn given_backup_lease_pauses(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain, BackupCutBoundary::Lease);
+}
+
+#[then(expr = "the backup cut for domain {string} has reached its lease pause")]
+async fn then_backup_lease_paused(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    // The cut reaches this pause after its lease wait, which a loaded runner delays; the wait ends
+    // as soon as the pause is reached.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_backup_cut_pause(&domain, BackupCutBoundary::Lease),
+    )
+    .await
+    .expect("the backup holds its lease and reaches the pause before its reach check");
+}
+
+#[when(expr = "the backup lease pause for domain {string} is released")]
+fn when_backup_lease_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .release_backup_cut_pause(&domain, BackupCutBoundary::Lease);
 }
 
 #[then("the background CLI backup finishes")]
@@ -351,6 +391,7 @@ fn then_cli_backup_failed(world: &mut ScenarioWorld, code: String) {
 
 #[then(expr = "the CLI backup failure mentions {string}")]
 fn then_cli_backup_failure_mentions(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
     let report = cli_json(last_cli_output(world));
     let message = report["error"]["message"]
         .as_str()

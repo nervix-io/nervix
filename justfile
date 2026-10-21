@@ -491,6 +491,11 @@ coverage-consensus output *args:
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure one connector crate's unit tests, for a patch confined to it, through the configured
+# compiler cache.
+coverage-connector package output *args:
+    cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2159,7 +2164,8 @@ autoinherit-check:
     git diff --exit-code
 
 # Each package/configuration is a separate parallel dependency. The one Cargo recipe below
-# hashes its arguments and toolchain into an isolated directory, and `just --jobs N` bounds it.
+# hashes its package, arguments and toolchain into one of four shared build directories, and
+# `just --jobs N` bounds it.
 clippy_all_features_packages := [
     "nervix-approx-into",
     "nervix-arbitrary",
@@ -2309,14 +2315,20 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-stress testing"])
 
-# The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
-# profile and toolchain differences identify separate build directories. Keep kache configured.
-# On CI nothing reads a build directory after its lint and the runner's disk cannot hold them all,
-# so a target that passed deletes its own.
+# Clippy configurations share four build directories, so a dependency one configuration compiled is
+# fresh for the others in its directory that compile it alike. Cargo keeps the artifacts of
+# different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+# there. The SHA-256 of the package, Cargo arguments and toolchain, modulo four, selects the
+# directory, so a configuration returns to the one that holds its artifacts. Four divides 16, so the
+# hash's last hexadecimal digit decides the remainder.
+hexadecimal_modulo_four(hash) := if hash =~ '[048c]$' { "0" } else if hash =~ '[159d]$' { "1" } else if hash =~ '[26ae]$' { "2" } else { "3" }
+clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / hexadecimal_modulo_four(sha256(show([package, args, toolchain])))
+
+# The shared Clippy command accepts one package and its Cargo arguments. Configurations that share
+# a build directory take turns on its lock. Keep kache configured.
 [private]
 clippy-target package args toolchain="":
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
-    @{{ if env("CI", "") == "true" { "rm -rf " + quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) } else { "true" } }}
+    CARGO_TARGET_DIR={{ quote(clippy_build_directory(package, args, toolchain)) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
 
 # Lint one package and all of its targets; extra arguments retain their boundaries.
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])

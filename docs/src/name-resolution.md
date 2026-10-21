@@ -232,10 +232,12 @@ take a slot.
 
 A caller that dials for itself spends one physical `OperationBudget` on the lookup and the address
 attempts after it: the lookup receives what the caller declares it may take, the whole budget for an
-operation that is only a connection, and each answer, dialled in resolution order, receives an equal
+operation that is only a connection and at most half of it for the HTTP request emitter, which sends
+its request within the same budget, and each answer, dialled in resolution order, receives an equal
 share of whatever time remains when its attempt starts. An address that refuses at once leaves its
 unused share to the attempts after it, and one that never answers cannot consume their time.
-Handshakes that the caller performs after an address accepts use what is left of the same budget.
+Handshakes and requests that the caller performs after an address accepts use what is left of the
+same budget.
 
 A client library that resolves through one of the resolver's hooks cannot pass the deadline of the
 request it resolves for, so every hook lookup has a budget of thirty seconds, and the library's own
@@ -291,9 +293,9 @@ name again for every new connection it opens.
 | Interconnect: every pool connection to a discovered peer | `PeerResolver` inside each connection attempt | The attempt's five-second connection setup timeout | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
 | HTTP polling and Prometheus sources, Sentry and OTEL HTTP sinks | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig` | The client's `timeout_ms` for the whole request when it is set, which a Prometheus client must, otherwise the thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
-| Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer` | The thirty-second hook budget, inside OpenDAL's own operation timeouts | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
-| HTTP request emitter | The connector resolves each request's target host itself | The request's one physical `timeout_ms` | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
-| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts and TLS | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
+| Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer`; one initialized operator survives table metadata refreshes | The storage client's `timeout_ms` bounds an operation or I/O call, DNS, connection and TLS included; without it, the thirty-second hook ceiling sits inside the operator's 60-second metadata/delete and 10-second read/write bounds | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
+| HTTP request emitter | The connector resolves each request's target host itself | At most half of the request's one physical `timeout_ms`, whose rest bounds the address attempts, TLS and the request | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
+| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts, TLS, the AMQP handshake and the entity's channel | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse sinks, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
@@ -325,17 +327,16 @@ before any IPv6 answer and no attempt races another:
 | Caller | Budget | One address attempt | After an address succeeds |
 | --- | --- | --- | --- |
 | Interconnect pool connection | The connection setup timeout, five seconds | TCP connection | TLS, HTTP/2 and the connection hello within the same timeout; a failure there fails the attempt |
-| RabbitMQ source or sink | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS within the same budget, then Lapin's AMQP handshake, which has no deadline of its own |
+| RabbitMQ source or sink | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS, then Lapin's AMQP handshake and the entity's channel, all within the same budget; a step that runs out of it shuts the socket down, which ends Lapin's IO thread |
 | Syslog TCP sender | `connect_timeout_ms`, 30 seconds by default | TCP connection | No further step |
 | Syslog TLS sender | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | No further step |
 | WebSocket client source | `connect_timeout_ms`, 30 seconds by default | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
 | Redis Pub/Sub source | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
+| HTTP request emitter | `timeout_ms`, of which the lookup takes at most half | TCP connection | TLS, sending the request and reading its final response headers within the same timeout |
 | MQTT source, sink or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
 
 Syslog UDP has no connection to confirm, so a sender binds a socket in the family of each answer in
-turn and sends to the first answer whose socket setup succeeds. The HTTP request emitter tries the
-answers in order inside its one physical `timeout_ms`, which it does not divide: an answer that
-never responds uses the rest of that attempt.
+turn and sends to the first answer whose socket setup succeeds.
 
 A client library that resolves through a hook dials with its own connector. Reqwest, Smithy,
 ClickHouse's client and Tonic all dial through `hyper-util`'s `HttpConnector`, which tries the
@@ -452,7 +453,7 @@ is assumed to be covered:
 | MySQL pools, `mysql_async` 0.36.2 | The driver connects with Tokio's `TcpStream::connect((host, port))` | Its `resolved_ips` option fixes one address list for the life of the pool, which would pin a name to one answer |
 | Pulsar sources, their subscription removal, and sinks, `pulsar` 6.9.0 | The driver resolves broker and proxy URLs with `Url::socket_addrs` on a blocking worker, then dials the addresses. A subscription removal's lookup falls within its ten-second removal budget, which ends the removal but not a lookup the blocking worker already runs | No resolver hook |
 | Kafka sources and sinks, `rdkafka` 0.39.0 with librdkafka 2.12.1 | librdkafka resolves bootstrap and broker hosts in its own native threads | librdkafka's resolver callback is not exposed by the Rust binding |
-| ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))` | No socket hook |
+| ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))`. A connect-mode sink's connection, its lookups included, ends at its client's `connect_timeout_ms`, which ends the connection but not a lookup the blocking pool already runs | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
 Postgres observation clients in the test harness use that same SQLx resolution path. Their suite
@@ -590,6 +591,9 @@ The evidence above establishes these guarantees:
   seconds, and neither beyond its own TTL.
 - Apart from the interconnect's startup lookups, every path resolves its configured name again for
   each new connection.
+- A caller that dials for itself reaches a later answer when an earlier one never completes its
+  connection, because each answer's attempt ends with its share of the budget; the HTTP request
+  emitter does so within one request's `timeout_ms`, whose lookup takes at most half of it.
 - TLS verification, the HTTP authority and SQS request signing name the configured host, whichever
   address accepted the connection.
 - A failed lookup never rejects a record, acknowledges input or commits an offset.
@@ -606,8 +610,6 @@ Nervix does not guarantee:
 - That HTTP polling, Prometheus, Sentry, OTEL and Iceberg name the lookup failure in their
   diagnostics.
 - That an established connection follows a changed answer before its owner ends it.
-- That the HTTP request emitter reaches a later answer when an earlier one never responds within
-  its `timeout_ms`.
 
 ## Operator Diagnostics
 

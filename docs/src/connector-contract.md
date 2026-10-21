@@ -123,12 +123,20 @@ sink resolves each request's target host itself, as its [request transport](#sin
 describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
 resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
-OpenDAL's credential providers through its accessor info. That client takes no `timeout_ms`, CA file
-or client identity from the client's configuration; OpenDAL's own timeout layer bounds each storage
-operation. The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
+OpenDAL's credential providers through its accessor info. The object-store client's optional
+`timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
+OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
+the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
+That HTTP client takes no CA file or client identity from the client's configuration. The
+Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
 trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
-S3, GCS, and Azure property mappings, URL-derived bucket or container, timeout and retry layers, and
-commit boundary. The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
+S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
+emitter's location and the initial table's effective storage properties. Table metadata refreshes
+retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
+an object URL for a different storage root is refused. OpenDAL's credential providers keep their
+own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
+neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
 
@@ -139,7 +147,7 @@ startup, while a lookup failure reaches the existing source or sink failure path
 authority, proxy behavior, TLS verification, custom trust and identity, and connection pools remain
 with the HTTP client. A client's `timeout_ms` includes DNS resolution, connection setup, TLS and
 response handling; the resolver's own 30 second ceiling only bounds clients without a shorter
-request timeout, which includes both Iceberg clients. DNS failures use the host's existing retry
+request timeout, which includes the Iceberg REST client. DNS failures use the host's existing retry
 policy and do not create application-level probes or acknowledgements.
 
 ### DNS for RabbitMQ
@@ -154,8 +162,11 @@ completes the TLS handshake within what is left. The handshake verifies the brok
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
-handshake over it. The AMQP handshake still has no deadline of its own, and the URI's
-`connection_timeout` query parameter has no effect.
+handshake over it, within what remains of the same budget. The source then opens its channel, sets
+its prefetch window and starts its consumer, and the sink opens its channel, selects publisher
+confirms under `ACK` and checks its queue, within the rest. `connect_timeout_ms` therefore bounds
+every step before the entity is ready, and a step that runs out of it is reported naming the key
+and its bound. The URI's `connection_timeout` query parameter has no effect.
 
 Lapin's `hickory-dns` feature is deliberately not selected. It resolves through one process-wide
 async-rs resolver built on first use from the host's `/etc/resolv.conf`, which ignores the node's
@@ -166,15 +177,25 @@ the feature off in the isolated RabbitMQ connector and in the server, and checks
 stays on AWS-LC.
 
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
-unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their own
-variants, as is a Lapin runtime that could not be created. A source reports the failure as a resume
-failure and retries on its declared `RETRY POLICY`. A sink reports an invalid address or CA file as
-a configuration failure and every other connection failure as an initialization failure, and the
-emitter host reopens it on its backoff. Neither path acknowledges undelivered data: a source that
-cannot connect holds no delivery, and a sink that cannot connect confirms nothing, so the input
-stays unacknowledged until a later connection delivers it. A connection that fails before its AMQP
-handshake has started no Lapin thread, and a failed handshake ends that thread and closes the
-socket. An established connection is not closed because its host's answer changed or expired; the
+unreachable addresses, a failed or overdue TLS handshake, and a failed or overdue AMQP handshake are
+their own variants, as are a Lapin runtime that could not be created and a socket the node could not
+hold a second handle on. A channel step that fails or runs out of the budget is reported beneath the
+source's or sink's own context for that step, with the elapsed deadline as its typed cause. A source
+reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A sink reports
+an invalid address, CA file or deadline key as a configuration failure and every other connection
+failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
+acknowledges undelivered data: a source that cannot connect holds no delivery, and a sink that
+cannot connect confirms nothing, so the input stays unacknowledged until a later connection
+delivers it.
+
+Lapin runs a connection's IO on a thread of its own from the start of the AMQP handshake, and that
+thread ends only once its socket fails or the broker closes the connection. Before it hands the
+transport over, the connector therefore takes a second handle on the connection's TCP socket. Until
+the entity's channel is open, dropping that handle shuts the socket down, whether the budget ran
+out, a step failed or the caller stopped waiting, as a stopped resume or sink start does; Lapin's
+loop then fails every read and write, ends with its thread, and closes the socket. A connection that
+opened lets the handle go. A connection that fails before its AMQP handshake has started no Lapin
+thread. An established connection is not closed because its host's answer changed or expired; the
 next connection uses the new answer.
 
 ### DNS for Redis
@@ -364,8 +385,15 @@ itself, such as writing or reading a local file, goes through the node's bounded
 sink host hands a connector as `SinkHost::executor`. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg sink writes and reads its staged
-Arrow IPC files on the filesystem storage workers, so a node that cannot take the job now fails the
-publish or the commit, which the host retries as it retries any other.
+Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
+the publish, which the host retries as it retries any other. A commit charges the bulk memory class
+for every staged byte it reads back before it reads them, or the whole class for a single staged
+file larger than the class, and takes that charge only when the class has room now, because a
+place in the class's queue would take every byte the class frees and hold the node's other bulk
+work behind the commit. A refusal fails the commit, which keeps its staged files and
+acknowledgements while the host retries it. The read itself waits for a place among the filesystem
+workers instead of being refused, because nothing could present again the rows the sink already
+accepted.
 
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
@@ -428,9 +456,10 @@ its bound.
 
 A connector that dials for itself spends one `OperationBudget` from `nervix-dns` on an operation. The
 caller declares how much of it the name lookup may take: whatever is left for an operation that is
-only a connection, or at most a fixed share for one that sends a request after connecting. Each
-answer is then tried in resolution order within an equal share of what is left when its attempt
-starts, and what remains bounds the handshake and the request that follow.
+only a connection, or at most a fixed share for one that sends a request after connecting, as the
+HTTP request sink gives its lookup at most half of `timeout_ms`. Each answer is then tried in
+resolution order within an equal share of what is left when its attempt starts, and what remains
+bounds the handshake and the request that follow.
 
 #### Stalled peers
 
@@ -867,6 +896,11 @@ subscription missing; while the cursor is open, the broker refuses to create a s
 that name as a conflict. Each instance's consumer registers under `<domain>~<ingestor>-<instance>`.
 The [ingestor manual](./ingestors.md#pulsar) owns the public behavior.
 
+When an endpoint has multiple ingestor bindings, its host dispatches them concurrently and waits
+for all acknowledged bindings before completing the response. Each binding keeps its own declared
+window and deadline. A partial admission reports a processing failure rather than claiming that
+no input was admitted.
+
 ### Confirmed acknowledgements
 
 `acknowledge` returns only once the source's transport has confirmed the positions, as far as the
@@ -1060,7 +1094,7 @@ event. What a stop leaves to a finish, and what the finish does with it, differs
 | Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
-| ZeroMQ | Nothing: each send writes and flushes its frame to a peer's socket | Nothing to send |
+| ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
 
@@ -1386,14 +1420,22 @@ may already hold. One connector publish call awaits at most one request across t
 execution's served sources and branches. It sends them in their handed-over order, each on a
 fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
 configuration. The connection closes after final headers; no unread body can be reused. Its one
-physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers.
-The connector resolves the target's host through the node resolver within that timeout and tries
-the answers in order without dividing it among them. The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
-authentication challenge with another request, and has no independent retry policy. The host
-alone schedules another application attempt.
+physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers,
+and one `OperationBudget` divides it: resolving the target's host through the node resolver takes
+at most half of it, each answer is then dialled in resolution order within an equal share of what
+is left when its attempt starts, so an answer whose handshake never completes leaves the next one
+time to connect, and what remains bounds TLS, the send and the final headers. A lookup that runs out
+of its half fails the attempt as a DNS timeout, and an answer that runs out of its share fails it as
+a connection that was not accepted in time when no later answer connects. The connector sends no
+startup probe, follows no redirect, stores no response cookie, answers no authentication challenge
+with another request, and has no independent retry policy. The host alone schedules another
+application attempt.
 
-The transport generates `Host`, `Connection: close` and, for a present body,
-`Content-Length`. It does not add `Accept-Encoding` or `Content-Type`. Application header writes
+The transport generates `Host`, `Connection: close` and `Content-Length`: the length of a present
+body, and `0` for a bodyless request whose method defines request content, `POST`, `PUT` or
+`PATCH` in any ASCII case, as RFC 9110 asks of a client so that a server requiring a length accepts
+it. Another bodyless request declares no length. It does not add `Accept-Encoding` or
+`Content-Type`. Application header writes
 can supply `Accept`, content type, authorization and cookie values. Without an application
 `Accept`, the transport adds `Accept: */*`.
 
@@ -1542,17 +1584,25 @@ sequenceDiagram
   mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
   nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
-  retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
-  limits.
+  retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
+  and a single file larger than the class alone, charged with the whole class. It charges each
+  group before reading it, returns the charge once the group's rows are in data files, and appends
+  the data files of every group in one catalog commit. It covers the staged files it found when it
+  began, so the retry of a failed append commits files staged since then in a commit of their own
+  instead of acknowledging them unwritten.
+  [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
-  not one per message. A broker that closes the channel names its reason, and Lapin hands it only
-  to what was waiting on the channel at that moment, so the sink reads the reason from its
-  connection's events, once for every channel it loses. The size refusal leaves the connection
-  open, and the sink opens its next channel on it; a message the broker had not confirmed ahead of
-  the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
-  loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
+  not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer
+  within it fails the write with that bound as its typed cause, the write's messages stay
+  unresolved for the host's retry, and the host reopens the sink; without the key the round trip
+  waits as long as the connection lives. A broker that closes the channel names its reason, and
+  Lapin hands it only to what was waiting on the channel at that moment, so the sink reads the
+  reason from its connection's events, once for every channel it loses. The size refusal leaves the
+  connection open, and the sink opens its next channel on it; a message the broker had not
+  confirmed ahead of the refused one may be in its queue, so the attempt then fails for the host's
+  retry. Any other loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
   emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Client source.** Each client ingestor a node executes has one endpoint task that outlives
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
@@ -1647,6 +1697,21 @@ sequenceDiagram
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
   other domains publishing the same host and path. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
+  `MODE ACK MAX <n> ACK TIMEOUT <duration>` gives each node's intake an explicit 1–65,535-response
+  window. Immediate permit admission holds one response through the payload's existing ACK root;
+  codec or local route refusal yields HTTP 400, successful graph completion 200, and downstream
+  NACK, timeout, full capacity or intake ending 503 with the declared `RETRY AFTER`. ACK requires
+  reject-only quiesce. Intake stop observes the quiesce owner's publication; exact source ending
+  cancels the lifetime before publishing absence. A resumable quiesce preserves admitted work.
+  The host projects only the existing client outcome class and cause into the public object;
+  diagnostics retain their ordinary error owner. WebSocket ACK requires an explicit signaling
+  protocol whose outbound encoder can represent every fixed outcome. Its optional data-sink reply
+  also sends the frame during `ACCEPT DATA`. The request policy is a typed decision plan; it is
+  separate from broker positions, broker commits and the source loop's acknowledgement cadence.
+  Shared YAML encoding uses JSON-compatible flow syntax with quoted strings, preserving their
+  complete contents through signaling and codec round trips.
+  The source remains request-scoped. HTTP body reads and the driver's frame limits retain their
+  separate bounds. `MODE NO ACK` still confirms admission with 202.
 
 ## Failure and observation
 

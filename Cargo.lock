@@ -6814,6 +6814,7 @@ name = "nervix-connector-http"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "error-stack",
  "httparse",
  "httpdate",
@@ -6825,6 +6826,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -6869,6 +6871,7 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+ "ubyte",
  "url",
  "uuid",
  "webpki-roots 1.0.9",
@@ -7100,7 +7103,9 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
+ "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7240,6 +7245,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",

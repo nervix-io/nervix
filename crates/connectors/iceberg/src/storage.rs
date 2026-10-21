@@ -36,12 +36,13 @@ use iceberg::{
         StorageConfig, StorageFactory,
     },
 };
+use nervix_connector::ConfiguredDeadline;
 use nervix_dns::DnsResolver;
 use nervix_models::IcebergStorageBackend;
 use nervix_primitives::sync::StdArc;
 use opendal::{
     Operator,
-    layers::{HttpClientLayer, RetryLayer, TimeoutLayer},
+    layers::{HttpClientLayer, TimeoutLayer},
     raw::HttpClient,
     services::{AzdlsConfig, GcsConfig, S3Config},
 };
@@ -55,12 +56,20 @@ use url::Url;
 pub(super) struct DnsStorageFactory {
     backend: IcebergStorageBackend,
     client: HttpClient,
+    root: Url,
+    deadline: StorageDeadline,
 }
 
 impl DnsStorageFactory {
-    pub(super) fn new(backend: IcebergStorageBackend, dns: &DnsResolver) -> Result<Self> {
+    pub(super) fn new(
+        backend: IcebergStorageBackend,
+        dns: &DnsResolver,
+        root: &Url,
+        deadline: Option<ConfiguredDeadline>,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .dns_resolver(StdArc::new(dns.clone()))
+            .retry(reqwest::retry::never())
             .build()
             .map_err(|error| {
                 Error::new(
@@ -72,6 +81,10 @@ impl DnsStorageFactory {
         Ok(Self {
             backend,
             client: HttpClient::with(client),
+            root: root.clone(),
+            deadline: StorageDeadline {
+                configured: deadline,
+            },
         })
     }
 }
@@ -107,10 +120,12 @@ impl StorageFactory for DnsStorageFactory {
             IcebergStorageBackend::Gcs => Backend::Gcs(gcs_config(&props)),
             IcebergStorageBackend::AzureBlob => Backend::Azure(azure_config(&props)?),
         };
-        Ok(StdArc::new(DnsStorage {
+        Ok(StdArc::new(DnsStorage::new(
             backend,
-            client: self.client.clone(),
-        }))
+            self.client.clone(),
+            self.root.clone(),
+            self.deadline,
+        )?))
     }
 }
 
@@ -123,8 +138,47 @@ enum Backend {
 
 #[derive(Clone, Debug)]
 struct DnsStorage {
-    backend: Backend,
-    client: HttpClient,
+    root: Url,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::state(
+            installed,
+            reason = "one operator is initialized with this emitter's storage and retained by its \
+                      FileIO"
+        )
+    )]
+    operator: Operator,
+    deadline: StorageDeadline,
+}
+
+/// One configured deadline applies equally to an operation and an I/O call. Its absence keeps
+/// OpenDAL's documented operation and I/O bounds.
+#[derive(Debug, Clone, Copy, Default)]
+struct StorageDeadline {
+    configured: Option<ConfiguredDeadline>,
+}
+
+impl StorageDeadline {
+    fn layer(self) -> TimeoutLayer {
+        let layer = TimeoutLayer::new();
+        match self.configured {
+            Some(deadline) => layer
+                .with_timeout(deadline.bound())
+                .with_io_timeout(deadline.bound()),
+            None => layer,
+        }
+    }
+
+    fn failure(self, error: opendal::Error) -> Error {
+        let error = from_opendal_error(error);
+        match self.configured {
+            Some(deadline) => error.with_context(
+                deadline.key().key(),
+                deadline.bound().as_millis().to_string(),
+            ),
+            None => error,
+        }
+    }
 }
 
 impl Serialize for DnsStorage {
@@ -144,57 +198,77 @@ impl<'de> Deserialize<'de> for DnsStorage {
 }
 
 impl DnsStorage {
-    fn operator<'a>(&self, path: &'a str) -> Result<(Operator, &'a str)> {
+    fn new(
+        backend: Backend,
+        client: HttpClient,
+        root: Url,
+        deadline: StorageDeadline,
+    ) -> Result<Self> {
+        let operator = match backend {
+            Backend::S3(config) => {
+                let bucket = root.host_str().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "S3 object URL requires a bucket")
+                })?;
+                let mut config = *config;
+                config.bucket = bucket.to_string();
+                Operator::from_config(config)
+                    .map_err(from_opendal_error)?
+                    .layer(HttpClientLayer::new(client))
+                    .finish()
+            }
+            Backend::Gcs(mut config) => {
+                let bucket = root.host_str().ok_or_else(|| {
+                    Error::new(ErrorKind::DataInvalid, "GCS object URL requires a bucket")
+                })?;
+                config.bucket = bucket.to_string();
+                Operator::from_config(config)
+                    .map_err(from_opendal_error)?
+                    .layer(HttpClientLayer::new(client))
+                    .finish()
+            }
+            Backend::Azure(config) => {
+                let (config, _) = azure_path(&config, root.as_str(), &root)?;
+                Operator::from_config(config)
+                    .map_err(from_opendal_error)?
+                    .layer(HttpClientLayer::new(client))
+                    .finish()
+            }
+        };
+        Ok(Self {
+            root,
+            operator: operator.layer(deadline.layer()),
+            deadline,
+        })
+    }
+
+    fn operator<'storage, 'path>(
+        &'storage self,
+        path: &'path str,
+    ) -> Result<(&'storage Operator, &'path str)> {
         let url = Url::parse(path).map_err(|error| {
             Error::new(ErrorKind::DataInvalid, "invalid Iceberg object URL").with_source(error)
         })?;
-        let (operator, relative_path) = match &self.backend {
-            Backend::S3(config) => {
-                let bucket = url.host_str().ok_or_else(|| {
-                    Error::new(ErrorKind::DataInvalid, "S3 object URL requires a bucket")
-                })?;
-                let mut config = config.as_ref().clone();
-                config.bucket = bucket.to_string();
-                let operator = Operator::from_config(config)
-                    .map_err(from_opendal_error)?
-                    .layer(HttpClientLayer::new(self.client.clone()))
-                    .finish();
-                (operator, self.relative_path(path, &url)?)
-            }
-            Backend::Gcs(config) => {
-                let bucket = url.host_str().ok_or_else(|| {
-                    Error::new(ErrorKind::DataInvalid, "GCS object URL requires a bucket")
-                })?;
-                let mut config = config.clone();
-                config.bucket = bucket.to_string();
-                let operator = Operator::from_config(config)
-                    .map_err(from_opendal_error)?
-                    .layer(HttpClientLayer::new(self.client.clone()))
-                    .finish();
-                (operator, self.relative_path(path, &url)?)
-            }
-            Backend::Azure(config) => {
-                let (config, relative_path) = azure_path(config, path, &url)?;
-                let operator = Operator::from_config(config)
-                    .map_err(from_opendal_error)?
-                    .layer(HttpClientLayer::new(self.client.clone()))
-                    .finish();
-                (operator, relative_path)
-            }
-        };
-        // Keep the pinned Iceberg storage layer order: each retry gets its own timeout.
-        let operator = operator.layer(TimeoutLayer::new()).layer(RetryLayer::new());
-        Ok((operator, relative_path))
+        Ok((&self.operator, self.relative_path(path, &url)?))
     }
 
     fn relative_path<'a>(&self, path: &'a str, url: &Url) -> Result<&'a str> {
+        if url.scheme() != self.root.scheme()
+            || url.host_str() != self.root.host_str()
+            || url.port() != self.root.port()
+            || url.username() != self.root.username()
+            || url.password() != self.root.password()
+        {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                "Iceberg object URL does not match the emitter storage root",
+            ));
+        }
         let host = url.host_str().ok_or_else(|| {
             Error::new(ErrorKind::DataInvalid, "Iceberg object URL requires a host")
         })?;
-        let prefix = match &self.backend {
-            Backend::S3(_) => format!("{}://{host}/", url.scheme()),
-            Backend::Gcs(_) => format!("gs://{host}/"),
-            Backend::Azure(_) => return azure_relative_path(path, url),
+        let prefix = match self.root.scheme() {
+            "wasb" | "wasbs" | "abfs" | "abfss" => return azure_relative_path(path, url),
+            scheme => format!("{scheme}://{host}/"),
         };
         path.strip_prefix(&prefix).ok_or_else(|| {
             Error::new(
@@ -213,7 +287,7 @@ impl Storage for DnsStorage {
         operator
             .exists(relative_path)
             .await
-            .map_err(from_opendal_error)
+            .map_err(|error| self.deadline.failure(error))
     }
 
     async fn metadata(&self, path: &str) -> Result<FileMetadata> {
@@ -221,7 +295,7 @@ impl Storage for DnsStorage {
         let metadata = operator
             .stat(relative_path)
             .await
-            .map_err(from_opendal_error)?;
+            .map_err(|error| self.deadline.failure(error))?;
         Ok(FileMetadata {
             size: metadata.content_length(),
         })
@@ -229,38 +303,40 @@ impl Storage for DnsStorage {
 
     async fn read(&self, path: &str) -> Result<Bytes> {
         let (operator, relative_path) = self.operator(path)?;
-        Ok(opendal::Operator::read(&operator, relative_path)
+        Ok(opendal::Operator::read(operator, relative_path)
             .await
-            .map_err(from_opendal_error)?
+            .map_err(|error| self.deadline.failure(error))?
             .to_bytes())
     }
 
     async fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
         let (operator, relative_path) = self.operator(path)?;
-        Ok(Box::new(DnsStorageReader(
-            operator
+        Ok(Box::new(DnsStorageReader {
+            reader: operator
                 .reader(relative_path)
                 .await
-                .map_err(from_opendal_error)?,
-        )))
+                .map_err(|error| self.deadline.failure(error))?,
+            deadline: self.deadline,
+        }))
     }
 
     async fn write(&self, path: &str, bytes: Bytes) -> Result<()> {
         let (operator, relative_path) = self.operator(path)?;
-        opendal::Operator::write(&operator, relative_path, bytes)
+        opendal::Operator::write(operator, relative_path, bytes)
             .await
-            .map_err(from_opendal_error)?;
+            .map_err(|error| self.deadline.failure(error))?;
         Ok(())
     }
 
     async fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
         let (operator, relative_path) = self.operator(path)?;
-        Ok(Box::new(DnsStorageWriter(
-            operator
+        Ok(Box::new(DnsStorageWriter {
+            writer: operator
                 .writer(relative_path)
                 .await
-                .map_err(from_opendal_error)?,
-        )))
+                .map_err(|error| self.deadline.failure(error))?,
+            deadline: self.deadline,
+        }))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
@@ -268,7 +344,7 @@ impl Storage for DnsStorage {
         operator
             .delete(relative_path)
             .await
-            .map_err(from_opendal_error)
+            .map_err(|error| self.deadline.failure(error))
     }
 
     async fn delete_prefix(&self, path: &str) -> Result<()> {
@@ -282,42 +358,27 @@ impl Storage for DnsStorage {
             .delete_with(&prefix)
             .recursive(true)
             .await
-            .map_err(from_opendal_error)
+            .map_err(|error| self.deadline.failure(error))
     }
 
     async fn delete_stream(&self, mut paths: BoxStream<'static, String>) -> Result<()> {
-        let mut deleters = HashMap::<String, opendal::Deleter>::default();
+        let mut deleter = self
+            .operator
+            .deleter()
+            .await
+            .map_err(|error| self.deadline.failure(error))?;
         while let Some(path) = paths.next().await {
             nervix_primitives::task::consume_budget().await;
-            let url = Url::parse(&path).map_err(|error| {
-                Error::new(ErrorKind::DataInvalid, "invalid Iceberg object URL").with_source(error)
-            })?;
-            let key = format!(
-                "{}://{}@{}",
-                url.scheme(),
-                url.username(),
-                url.host_str().unwrap_or_default()
-            );
-            if let Some(deleter) = deleters.get_mut(&key) {
-                let relative_path = self.relative_path(&path, &url)?.to_string();
-                deleter
-                    .delete(relative_path)
-                    .await
-                    .map_err(from_opendal_error)?;
-            } else {
-                let (operator, relative_path) = self.operator(&path)?;
-                let mut deleter = operator.deleter().await.map_err(from_opendal_error)?;
-                deleter
-                    .delete(relative_path)
-                    .await
-                    .map_err(from_opendal_error)?;
-                deleters.insert(key, deleter);
-            }
+            let (_, relative_path) = self.operator(&path)?;
+            deleter
+                .delete(relative_path)
+                .await
+                .map_err(|error| self.deadline.failure(error))?;
         }
-        for (_, mut deleter) in deleters {
-            nervix_primitives::task::consume_budget().await;
-            deleter.close().await.map_err(from_opendal_error)?;
-        }
+        deleter
+            .close()
+            .await
+            .map_err(|error| self.deadline.failure(error))?;
         Ok(())
     }
 
@@ -330,30 +391,39 @@ impl Storage for DnsStorage {
     }
 }
 
-struct DnsStorageReader(opendal::Reader);
+struct DnsStorageReader {
+    reader: opendal::Reader,
+    deadline: StorageDeadline,
+}
 
 #[async_trait]
 impl FileRead for DnsStorageReader {
     async fn read(&self, range: std::ops::Range<u64>) -> Result<Bytes> {
-        Ok(opendal::Reader::read(&self.0, range)
+        Ok(opendal::Reader::read(&self.reader, range)
             .await
-            .map_err(from_opendal_error)?
+            .map_err(|error| self.deadline.failure(error))?
             .to_bytes())
     }
 }
 
-struct DnsStorageWriter(opendal::Writer);
+struct DnsStorageWriter {
+    writer: opendal::Writer,
+    deadline: StorageDeadline,
+}
 
 #[async_trait]
 impl FileWrite for DnsStorageWriter {
     async fn write(&mut self, bytes: Bytes) -> Result<()> {
-        opendal::Writer::write(&mut self.0, bytes)
+        opendal::Writer::write(&mut self.writer, bytes)
             .await
-            .map_err(from_opendal_error)
+            .map_err(|error| self.deadline.failure(error))
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.0.close().await.map_err(from_opendal_error)?;
+        self.writer
+            .close()
+            .await
+            .map_err(|error| self.deadline.failure(error))?;
         Ok(())
     }
 }
@@ -559,7 +629,12 @@ fn azure_relative_path<'a>(path: &'a str, url: &Url) -> Result<&'a str> {
 mod tests {
     use std::time::Duration;
 
+    use meticulous::ResultExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_primitives::sync::{
+        Arc, CancellationToken,
+        atomic::{AtomicUsize, Ordering},
+    };
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
     use opendal::raw::Access as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -568,6 +643,152 @@ mod tests {
 
     fn client() -> HttpClient {
         HttpClient::with(reqwest::Client::new())
+    }
+
+    fn test_storage(backend: Backend, root: &str) -> DnsStorage {
+        DnsStorage::new(
+            backend,
+            client(),
+            Url::parse(root).assured("the fixture root is a URL"),
+            StorageDeadline::default(),
+        )
+        .assured("the configured storage can initialize its operator")
+    }
+
+    struct UnansweredObjectStore;
+
+    impl opendal::raw::HttpFetch for UnansweredObjectStore {
+        async fn fetch(
+            &self,
+            _: http::Request<opendal::Buffer>,
+        ) -> opendal::Result<http::Response<opendal::raw::HttpBody>> {
+            std::future::pending().await
+        }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_storage_write_spends_the_configured_timeout_once() {
+        let deadline = ConfiguredDeadline::timeout(&[nervix_models::ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: "1000".to_string(),
+        }])
+        .assured("one second is a valid client deadline");
+        let factory = DnsStorageFactory {
+            backend: IcebergStorageBackend::S3,
+            client: HttpClient::with(UnansweredObjectStore),
+            root: Url::parse("s3://bucket/").assured("the fixture root is a URL"),
+            deadline: StorageDeadline {
+                configured: deadline,
+            },
+        };
+        #[expect(
+            clippy::disallowed_types,
+            reason = "Iceberg StorageConfig requires a standard-library map at its external API \
+                      boundary"
+        )]
+        let config = StorageConfig::from_props(std::collections::HashMap::from_iter([
+            (S3_REGION.to_string(), "us-east-1".to_string()),
+            (S3_ALLOW_ANONYMOUS.to_string(), "true".to_string()),
+            ("timeout_ms".to_string(), "1000".to_string()),
+        ]));
+        let storage = factory
+            .build(&config)
+            .assured("the configured storage client can be built without a request");
+        let started = nervix_primitives::time::Instant::now();
+        let error = storage
+            .write(
+                "s3://bucket/table/data.parquet",
+                Bytes::from_static(b"data"),
+            )
+            .await
+            .expect_err("the store never answers the write");
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert!(error.to_string().contains("timeout_ms: 1000"), "{error}");
+    }
+
+    #[test]
+    fn one_storage_owner_retains_its_operator_between_objects() {
+        let mut config = S3Config::default();
+        config.region = Some("us-east-1".to_string());
+        config.skip_signature = true;
+        let storage = test_storage(Backend::S3(Box::new(config)), "s3://bucket/");
+        let (first, first_path) = storage
+            .operator("s3://bucket/tables/first.parquet")
+            .assured("the first object names the configured backend");
+        let (second, second_path) = storage
+            .operator("s3://bucket/tables/second.parquet")
+            .assured("the second object names the configured backend");
+        assert_eq!(first_path, "tables/first.parquet");
+        assert_eq!(second_path, "tables/second.parquet");
+        assert!(
+            std::ptr::eq(first.inner().as_ref(), second.inner().as_ref()),
+            "objects of one storage owner must use its retained operator"
+        );
+        for path in [
+            "s3://another-bucket/tables/part.parquet",
+            "gs://bucket/tables/part.parquet",
+        ] {
+            let error = storage
+                .operator(path)
+                .expect_err("an object outside the initialized root cannot reach its operator");
+            assert_eq!(error.kind(), ErrorKind::DataInvalid);
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_transient_storage_failure_returns_to_the_host_after_one_request() {
+        let listener = nervix_primitives::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .assured("the scripted object store can listen on loopback");
+        let endpoint = listener
+            .local_addr()
+            .assured("the object store listener has a bound address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let cancellation = CancellationToken::new();
+        let shutdown = cancellation.clone();
+        let server = nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let (mut stream, _) = nervix_primitives::select! {
+                    _ = shutdown.cancelled() => return,
+                    connection = listener.accept() => connection
+                        .assured("the scripted object store accepts its client"),
+                };
+                let mut request = [0_u8; 4096];
+                let received = stream
+                    .read(&mut request)
+                    .await
+                    .assured("the object request carries a header");
+                assert!(received > 0);
+                observed.fetch_add(1, Ordering::Relaxed);
+                stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .assured("the transient response can be written");
+            }
+        });
+        let mut config = S3Config::default();
+        config.endpoint = Some(format!("http://{endpoint}"));
+        config.region = Some("us-east-1".to_string());
+        config.skip_signature = true;
+        let storage = test_storage(Backend::S3(Box::new(config)), "s3://bucket/");
+        let outcome = storage
+            .write(
+                "s3://bucket/table/data.parquet",
+                Bytes::from_static(b"data"),
+            )
+            .await;
+        cancellation.cancel();
+        server
+            .await
+            .assured("the object store task stops on cancellation");
+        assert!(outcome.is_err(), "the host must receive the failed attempt");
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            1,
+            "the emitter host owns the next retry"
+        );
     }
 
     #[test]
@@ -602,10 +823,7 @@ mod tests {
             config.server_side_encryption_aws_kms_key_id.as_deref(),
             Some("key-id")
         );
-        let storage = DnsStorage {
-            backend: Backend::S3(Box::new(config)),
-            client: client(),
-        };
+        let storage = test_storage(Backend::S3(Box::new(config)), "s3://bucket/");
         let (operator, relative) = storage
             .operator("s3://bucket/tables/part.parquet")
             .expect("the S3 object path is valid");
@@ -636,10 +854,7 @@ mod tests {
         assert!(config.skip_signature);
         assert!(config.disable_vm_metadata);
         assert!(config.disable_config_load);
-        let storage = DnsStorage {
-            backend: Backend::Gcs(config),
-            client: client(),
-        };
+        let storage = test_storage(Backend::Gcs(config), "gs://bucket/");
         let (operator, relative) = storage
             .operator("gs://bucket/tables/part.parquet")
             .expect("the GCS object path is valid");
@@ -654,10 +869,10 @@ mod tests {
             (ADLS_ACCOUNT_KEY.to_string(), "key".to_string()),
         ]);
         let config = azure_config(&props).expect("the Azure configuration is valid");
-        let storage = DnsStorage {
-            backend: Backend::Azure(config),
-            client: client(),
-        };
+        let storage = test_storage(
+            Backend::Azure(config),
+            "wasbs://container@account.blob.core.windows.net/",
+        );
         let (operator, relative) = storage
             .operator("wasbs://container@account.blob.core.windows.net/tables/part.parquet")
             .expect("the Azure object path is valid");
@@ -687,11 +902,12 @@ mod tests {
         let factory = DnsStorageFactory {
             backend: IcebergStorageBackend::S3,
             client: client(),
+            root: Url::parse("s3://bucket/").assured("the fixture root is a URL"),
+            deadline: StorageDeadline::default(),
         };
-        let storage = DnsStorage {
-            backend: Backend::S3(Box::default()),
-            client: client(),
-        };
+        let mut config = S3Config::default();
+        config.region = Some("us-east-1".to_string());
+        let storage = test_storage(Backend::S3(Box::new(config)), "s3://bucket/");
         assert!(serde_json::to_string(&factory).is_err());
         assert!(serde_json::to_string(&storage).is_err());
     }
@@ -748,15 +964,19 @@ mod tests {
                 .await
                 .expect("the token response is writable");
         });
-        let factory = DnsStorageFactory::new(IcebergStorageBackend::S3, &dns)
+        let root = Url::parse("s3://bucket/").assured("the fixture root is a URL");
+        let factory = DnsStorageFactory::new(IcebergStorageBackend::S3, &dns, &root, None)
             .expect("the object client uses the fixture resolver");
         let mut config = S3Config::default();
         config.region = Some("us-east-1".to_string());
         config.skip_signature = true;
-        let storage = DnsStorage {
-            backend: Backend::S3(Box::new(config)),
-            client: factory.client,
-        };
+        let storage = DnsStorage::new(
+            Backend::S3(Box::new(config)),
+            factory.client,
+            root,
+            StorageDeadline::default(),
+        )
+        .assured("the storage uses the fixture resolver");
         let (operator, _) = storage
             .operator("s3://bucket/file")
             .expect("the S3 operator can be built without a network request");
