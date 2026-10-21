@@ -120,6 +120,8 @@ pub enum BufferOverflow {
     /// of sending it, so it never reaches the connector, which cannot count it: a maximum packet
     /// size a protocol lets a client advertise when it connects.
     PeerDiscards,
+    /// The request is refused immediately; its sender owns retry.
+    RefuseRequest,
 }
 
 /// One network wait a connector performs.

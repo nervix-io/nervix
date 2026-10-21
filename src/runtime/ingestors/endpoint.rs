@@ -31,6 +31,7 @@ use super::{
 pub(in crate::runtime) struct EndpointSourcePlan {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
+    mode: EndpointRequestPlan,
 }
 
 /// An endpoint ingestor's source: the binding between the routes it receives requests on and the
@@ -42,6 +43,7 @@ pub(in crate::runtime) struct EndpointSourcePlan {
 pub(in crate::runtime) struct EndpointSource {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
+    mode: EndpointRequestPlan,
     /// The ingestor whose intake the routes are bound to, while they are bound.
     bound: Option<EndpointBinding<EndpointIngestBinding>>,
 }
@@ -54,6 +56,7 @@ impl SourceConnector for EndpointSource {
         Ok(Self {
             runtime: plan.runtime.clone(),
             routes: plan.routes.clone(),
+            mode: plan.mode.clone(),
             bound: None,
         })
     }
@@ -104,7 +107,8 @@ impl SourceInstance for EndpointSource {
     ) -> BoxFuture<'static, ()> {
         // Requests may arrive as soon as the ingestor's start returns, so the routes are bound
         // here rather than when the source loop first runs.
-        self.bind(host.request_intake());
+        let request = EndpointRequestPolicy::from(&self.mode);
+        self.bind(host.request_intake(request));
         host.mark_ready();
         Box::pin(run_request_source(*self, SourceHost::new(host), shutdown))
     }
@@ -117,7 +121,7 @@ impl EndpointIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let EndpointIngestorStartPlan { endpoint, mode: _ } = self;
+        let EndpointIngestorStartPlan { endpoint, mode } = self;
         let route = {
             let Some(execution) = runtime.inner.executions.get(&ingestor.domain) else {
                 return Err(Report::new(
@@ -133,6 +137,27 @@ impl EndpointIngestorStartPlan {
             return Err(ingestor
                 .source_start_failure(SourceStartError::EndpointNotInstantiated { endpoint }));
         };
+        if let EndpointRequestPlan::Ack { retry_after, .. } = &mode
+            && route.endpoint_type == EndpointType::Websockets
+        {
+            let Some(protocol) = &route.signaling_protocol else {
+                return Err(ingestor.source_start_failure(
+                    SourceStartError::EndpointAcknowledgementProtocolMissing { endpoint },
+                ));
+            };
+            for outcome in EndpointRequestOutcome::replies() {
+                let reply = EndpointRequestReply {
+                    outcome,
+                    retry_after: *retry_after,
+                };
+                protocol
+                    .encode_acknowledgement(reply.value())
+                    .change_context_lazy(|| SourceStartError::EndpointAcknowledgementEncoding {
+                        endpoint: endpoint.clone(),
+                    })
+                    .change_context_lazy(|| ingestor.initialize_failure())?;
+            }
+        }
         let routes = route
             .hostnames
             .iter()
@@ -147,6 +172,7 @@ impl EndpointIngestorStartPlan {
             connector: EndpointSourcePlan {
                 runtime: runtime.clone(),
                 routes,
+                mode,
             },
             capabilities: ingestor.source_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
@@ -195,7 +221,7 @@ pub(super) mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::runtime::endpoint::EndpointDispatchOutcome;
+    use crate::runtime::endpoint::{EndpointAdmission, EndpointDispatchOutcome};
 
     /// A running domain whose one endpoint ingestor reads `/events` on `edge.example.com` through
     /// its `event_wire` JSON wire schema.
@@ -354,7 +380,14 @@ pub(super) mod tests {
         };
         let references = Arc::strong_count(&probe.routes);
         for _ in 0..4 {
-            let outcome = route.dispatch(&runtime, br#"{"user_id":7}"#, &probe).await;
+            let outcome = route
+                .dispatch(
+                    &runtime,
+                    br#"{"user_id":7}"#,
+                    &probe,
+                    &CancellationToken::new(),
+                )
+                .await;
             assert!(outcome.is_accepted());
             assert_eq!(
                 probe.observed.load(Ordering::Relaxed),
@@ -383,7 +416,7 @@ pub(super) mod tests {
                     .resolve_endpoint("edge.example.com", "/events")
                     .assured("the benchmark route remains installed");
                 std::hint::black_box(route.endpoint_type());
-                std::hint::black_box(route.admission());
+                std::hint::black_box(route.refusal());
             }
             println!(
                 "endpoint-routing sample={sample} ns_per_request={} allocated_bytes_per_request={}",
@@ -403,7 +436,7 @@ pub(super) mod tests {
             let started = nervix_primitives::time::Instant::now();
             for _ in 0..10_000 {
                 nervix_primitives::task::consume_budget().await;
-                std::hint::black_box(retained.admission());
+                std::hint::black_box(retained.refusal());
             }
             println!(
                 "endpoint-retained sample={sample} ns_per_frame={} allocated_bytes_per_frame={}",
@@ -431,7 +464,12 @@ pub(super) mod tests {
             .resolve_endpoint("edge.example.com", "/events")
             .assured("the fixture installs its endpoint route");
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
 
         assert!(outcome.is_accepted());
@@ -520,7 +558,12 @@ pub(super) mod tests {
         assert!(describe.running);
         assert!(describe.ready);
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(outcome.is_accepted());
 
@@ -535,7 +578,12 @@ pub(super) mod tests {
         assert!(current.bindings().is_empty());
         assert!(route.bindings()[0].intake().is_none());
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":8}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":8}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(!outcome.is_accepted());
     }
@@ -574,28 +622,38 @@ pub(super) mod tests {
         // node could not promise.
         let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
         let refused = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             refused,
-            EndpointDispatchOutcome {
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 accepted: 0,
                 rejected: 1,
                 retry_after: None,
-            }
+            })
         );
 
         filled.release().await;
         let accepted = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             accepted,
-            EndpointDispatchOutcome {
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 accepted: 1,
                 rejected: 0,
                 retry_after: None,
-            }
+            })
         );
         runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
@@ -616,7 +674,12 @@ pub(super) mod tests {
 
         quiesce.engage(IngestorQuiesceCause::EntityHold);
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(
             outcome.is_accepted(),
@@ -698,7 +761,12 @@ pub(super) mod tests {
         for user_id in 1..=3 {
             let body = format!(r#"{{"user_id":{user_id}}}"#);
             let outcome = route
-                .dispatch(&runtime, body.as_bytes(), &NoIngestHeaders)
+                .dispatch(
+                    &runtime,
+                    body.as_bytes(),
+                    &NoIngestHeaders,
+                    &CancellationToken::new(),
+                )
                 .await;
             assert!(
                 outcome.is_accepted(),

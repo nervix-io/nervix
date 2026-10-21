@@ -70,12 +70,12 @@ pub(crate) use execution_revision::{
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
-    ClientIngestorStartPlan, EndpointIngestorStartPlan, HttpIngestorStartPlan, IngestorInputPlan,
-    IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
-    KafkaOffsetPlan, MqttIngestorStartPlan, NatsIngestorStartPlan, PrometheusIngestorStartPlan,
-    PulsarIngestorStartPlan, RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan,
-    SourceStartPlan, SqsIngestorStartPlan, SyslogIngestorStartPlan, TransportInputPlan,
-    WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+    ClientIngestorStartPlan, EndpointIngestorStartPlan, EndpointRequestPlan, HttpIngestorStartPlan,
+    IngestorInputPlan, IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement,
+    KafkaIngestorStartPlan, KafkaOffsetPlan, MqttIngestorStartPlan, NatsIngestorStartPlan,
+    PrometheusIngestorStartPlan, PulsarIngestorStartPlan, RabbitMqIngestorStartPlan,
+    RedisPubSubIngestorStartPlan, SourceStartPlan, SqsIngestorStartPlan, SyslogIngestorStartPlan,
+    TransportInputPlan, WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
 };
 #[cfg(test)]
 pub(crate) use message_error_plan::MessageErrorRouteSpec;

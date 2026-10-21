@@ -267,6 +267,10 @@ relay. Do not use them to scan across branches.
   shortening or lengthening a real retry wait.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
+- Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
+  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
+  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  transient error while the emitter retries.
 - Provision Iceberg table columns with names and nested types matching the emitter's `VALUES`.
   Opening the emitter rejects an incompatible mapped schema before staging records. UTC
   `DATETIME` values, including values inside lists and nested structures, use the containing
@@ -290,6 +294,10 @@ relay. Do not use them to scan across branches.
   Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
+- For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
+  And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
+  shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
+  declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
@@ -432,9 +440,12 @@ Choose checks relevant to the configured graph:
   sent alone from `nervix-cli`, a native client, or the web console, which saves it as a verified
   browser download. A normal backup quiesces each running domain
   before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
-  materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
-  PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
-  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
+  materialized relay generations, deduplicator keys and the rows windows retain. A backup is
+  refused while a node that owns the domain's state is down or no node can host part of it, and a
+  normal backup also while a node that runs its work is; send it again once the node is back,
+  failover has moved its work, or a node is uncordoned.
+  `WITHOUT PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures
+  only configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
   its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
   branch lifecycle sections stream within the 32 MiB bulk budget up to the 64 MiB record limit;
   their conversion is charged to the node's `restore_metadata` grant, sized below.

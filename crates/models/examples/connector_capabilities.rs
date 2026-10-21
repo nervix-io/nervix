@@ -216,6 +216,9 @@ fn buffer_bound(bound: BufferBound) -> String {
             "when full, its peer, told this capacity, discards what does not fit instead of \
              sending it"
         }
+        BufferOverflow::RefuseRequest => {
+            "when full, immediately refuses the request for its sender to retry"
+        }
     };
     format!("{capacity}; {overflow}")
 }

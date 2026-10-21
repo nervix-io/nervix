@@ -112,7 +112,7 @@ Feature: Configuration backup into a public archive
       START;
       """
     Given the active domain is "{{primary_domain}}"
-    And the backup cut for domain "{{primary_domain}}" will pause after draining
+    And the backup cut for domain "{{primary_domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{primary_domain}} --timeout 30s" from node "{{leader}}" into "isolated-cut.nvxb" in the background
     Then the backup cut for domain "{{primary_domain}}" has reached its pause
@@ -162,7 +162,7 @@ Feature: Configuration backup into a public archive
       CREATE SUBSCRIPTION events_subscription TO events;
       START;
       """
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "dropped.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
@@ -368,7 +368,7 @@ Feature: Configuration backup into a public archive
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "survivor"
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "interrupted.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
     When leadership is transferred from node "{{leader}}" to node "{{survivor}}"

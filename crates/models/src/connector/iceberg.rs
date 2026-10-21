@@ -14,14 +14,16 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::connector_sinks,
@@ -131,10 +133,18 @@ const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
-            wait: "object-store operations",
-            bound: WaitBound::Driver(
-                "60 s per operation and 10 s per read or write, retried 3 times",
-            ),
+            wait: "object-store metadata and delete operations",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Default(Duration::from_secs(60)),
+            },
+        },
+        DeclaredWait {
+            wait: "object-store reads and writes",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Default(Duration::from_secs(10)),
+            },
         },
     ],
     driver_limits: &[],
