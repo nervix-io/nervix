@@ -2,11 +2,12 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Controlled source dispatch and quiesce interleavings for the host loops, the
-//!   interleavings of a lost broker connection with the broker loop's acknowledgements and
+//!   interleavings of a stop or a suspension of intake with a broker read that gathers a batch,
+//!   the interleavings of a lost broker connection with the broker loop's acknowledgements and
 //!   rejections, and the interleavings of a drain's observation with a batch's confirmation.
 //! - **Depends on.** The production source loops, source contract, quiesce control, the runtime's
-//!   batch acknowledgement and confirmed ACK roots, the connection-bound doubles of the reconnect
-//!   tests and Shuttle.
+//!   batch acknowledgement and confirmed ACK roots, the gathering doubles of the read tests, the
+//!   connection-bound doubles of the reconnect tests and Shuttle.
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
 
 #![cfg_attr(
@@ -14,7 +15,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow};
+use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceReadCancellation};
 use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
@@ -22,6 +23,10 @@ use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
+    read_tests::{
+        GatheringSource, HostControl, ReadEvent, ReadInFlight, ReadLog, RecordingHost,
+        SourceSignals, assert_every_taken_position_taken_in_first, gathering_policy,
+    },
     reconnect_tests::{RedeliveringBroker, RedeliveringSource, RedeliveryHost, sequential_policy},
     *,
 };
@@ -59,6 +64,31 @@ impl SourceMessage for ChannelMessage {
 
 struct ChannelSource {
     messages: mpsc::Receiver<ChannelMessage>,
+    read: ReadInFlight,
+}
+
+impl ChannelSource {
+    fn new(messages: mpsc::Receiver<ChannelMessage>) -> Self {
+        Self {
+            messages,
+            read: ReadInFlight::default(),
+        }
+    }
+
+    async fn receive(
+        &mut self,
+        cancellation: &SourceReadCancellation,
+    ) -> nervix_connector::SourceResult<SourceBatch<ChannelMessage>> {
+        let Some(received) = cancellation.unless_cancelled(self.messages.recv()).await else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        match received {
+            Some(message) => Ok(SourceBatch::Messages(vec![message])),
+            None => Ok(SourceBatch::Closed),
+        }
+    }
 }
 
 #[async_trait]
@@ -77,6 +107,11 @@ impl SourceConnector for ChannelSource {
     async fn resume(&mut self) -> nervix_connector::SourceResult<SourceResume> {
         Ok(SourceResume::Ready)
     }
+
+    async fn close(&mut self) -> nervix_connector::SourceResult<()> {
+        self.read.assert_none_before("close");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -87,11 +122,12 @@ impl BrokerSourceConnector for ChannelSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> nervix_connector::SourceResult<SourceBatch<Self::Message>> {
-        match self.messages.recv().await {
-            Some(message) => Ok(SourceBatch::Messages(vec![message])),
-            None => Ok(SourceBatch::Closed),
-        }
+        self.read.start();
+        let batch = self.receive(cancellation).await;
+        self.read.finish();
+        batch
     }
 
     async fn acknowledge(
@@ -375,7 +411,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
             dispatched: dispatched.clone(),
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let source = ChannelSource { messages: receiver };
+        let source = ChannelSource::new(receiver);
         if matches!(family, SourceFamily::Request) {
             // Request sources only replay work already buffered when their loop starts.
             send_message(&replays, 1).await;
@@ -489,6 +525,79 @@ fn shuttle_request_source_observes_engagement_during_dispatch() {
     explore_family(SourceFamily::Request);
 }
 
+/// What interrupts a broker read in the gathering check.
+#[derive(Clone, Copy)]
+enum ReadInterruptionCause {
+    /// The source stops.
+    Stop,
+    /// Intake is suspended, as a quiesce engagement that stops reading suspends it.
+    Suspension,
+}
+
+/// A broker source gathering a batch of up to three messages while its transport delivers two, and
+/// a stop or a suspension of intake meets the read at any point of its gathering.
+fn interrupted_gathering(cause: ReadInterruptionCause) {
+    shuttle::future::block_on(async move {
+        let (transport, receiver) = mpsc::channel(2);
+        let events = ReadLog::new();
+        let signals = Arc::new(SourceSignals::new());
+        let control = Arc::new(HostControl::new());
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
+            GatheringSource::new(receiver, events.clone(), signals.clone()),
+            SourceHost::new(RecordingHost::new(events.clone(), control.clone())),
+            gathering_policy(3),
+            shutdown_rx,
+        ));
+        let deliverer = nervix_primitives::task::spawn(async move {
+            for position in [1, 2] {
+                // The source drops its transport once the loop has stopped, which may come first.
+                if transport.send(position).await.is_err() {
+                    break;
+                }
+            }
+            // The transport stays open, so only the stop or the suspension ends the read.
+            transport
+        });
+
+        match cause {
+            ReadInterruptionCause::Stop => {}
+            ReadInterruptionCause::Suspension => {
+                // Only a source the loop has resumed is suspended, so intake is suspended once the
+                // loop reads. The batch can never fill, so the loop always reaches the suspension.
+                signals.reading.notified().await;
+                control.suspend_intake();
+                signals.suspended.notified().await;
+            }
+        }
+        shutdown.send_replace(true);
+        loop_task.await.assured(JOIN);
+        let _transport = deliverer
+            .await
+            .assured("the deliverer ends once it sent both messages or the source stopped");
+
+        let events = events.events();
+        assert_every_taken_position_taken_in_first(&events);
+        if let ReadInterruptionCause::Suspension = cause {
+            assert!(
+                events.contains(&ReadEvent::Suspended),
+                "the suspension reached the source"
+            );
+        }
+    });
+}
+
+#[test]
+fn shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took() {
+    for cause in [
+        ReadInterruptionCause::Stop,
+        ReadInterruptionCause::Suspension,
+    ] {
+        check_random(move || interrupted_gathering(cause), 500);
+        check_pct(move || interrupted_gathering(cause), 500, 3);
+    }
+}
+
 /// A broker connection lost at any point of the loop, possibly twice, while the host acknowledges
 /// two messages one at a time.
 fn lost_connection_during_settlement(losses: usize) {
@@ -582,6 +691,7 @@ impl BrokerSourceConnector for ConfirmingChannelSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        _cancellation: &SourceReadCancellation,
     ) -> nervix_connector::SourceResult<SourceBatch<Self::Message>> {
         if self.queue.is_empty() {
             return Ok(SourceBatch::Closed);
@@ -815,4 +925,236 @@ fn drain_observing_a_confirmation() {
 fn shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch() {
     check_random(drain_observing_a_confirmation, 1_000);
     check_pct(drain_observing_a_confirmation, 1_000, 3);
+}
+
+/// The payload the refusing host's codec stand-in refuses, the one at position zero.
+const REFUSED_PAYLOAD: [u8; 1] = [0];
+
+/// A host that consumes each payload its codec stand-in refuses through the runtime's batch roots,
+/// as the source host consumes a decode rejection, and hands the roots of the rest to the check's
+/// graph, which resolves them.
+struct RefusingGraphHost {
+    trackers: IngestorAckRootTrackers,
+    roots: mpsc::Sender<Vec<AckSet>>,
+    /// The batch's roots no one has begun to resolve yet.
+    unresolved: StdArc<AtomicUsize>,
+    progress: StdArc<ConfirmationProgress>,
+    shutdown: watch::Receiver<bool>,
+}
+
+#[async_trait]
+impl SourceHostServices for RefusingGraphHost {
+    async fn intake_unacknowledged(
+        &mut self,
+        _messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()> {
+        panic!("the check's source reads in an acknowledged mode");
+    }
+
+    async fn intake_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
+        self.unresolved.store(messages.len(), Ordering::SeqCst);
+        let mut roots = BatchRoots::new(&self.trackers, messages.len());
+        let mut dispatched = Vec::with_capacity(messages.len());
+        for message in &messages {
+            if message.payload != REFUSED_PAYLOAD.as_slice() {
+                dispatched.push(roots.dispatched());
+                continue;
+            }
+            // The root is created and resolved in one step, so the batch is recorded resolved once
+            // its root exists: a drain that reads the batch resolved reads that root afterwards.
+            roots.consumed();
+            if self.unresolved.fetch_sub(1, Ordering::SeqCst) == 1 {
+                self.progress
+                    .resolved_batches
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        if !dispatched.is_empty() {
+            self.roots
+                .send(dispatched)
+                .await
+                .assured("the graph receives the one batch the check reads");
+        }
+        Ok(SourceBatchAcknowledgement::new(
+            roots.acknowledgement(self.shutdown.clone(), None),
+        ))
+    }
+
+    async fn flush(&mut self) -> SourceIntakeResult<()> {
+        Ok(())
+    }
+
+    async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
+        Ok(false)
+    }
+
+    fn next_flush(&self) -> Option<Instant> {
+        None
+    }
+
+    fn should_suspend_intake(&self) -> bool {
+        false
+    }
+
+    async fn wait_for_quiesce_change(&mut self) {
+        std::future::pending::<()>().await;
+    }
+
+    async fn wait_until_not_suspended(&mut self) {
+        std::future::pending::<()>().await;
+    }
+
+    async fn wait_until_active(&mut self) -> bool {
+        true
+    }
+
+    fn mark_ready(&self) {}
+    fn mark_unready(&self) {}
+    fn record_transient_error(&self, reason: String, _retry_after: Duration) {
+        panic!("the check's transport confirms every acknowledgement, but it failed: {reason}");
+    }
+    fn clear_transient_error(&self) {}
+    fn report_error(&self, message: String) {
+        panic!("the check's source reported an unexpected error: {message}");
+    }
+    fn handle_ack_failure(&self, reason: String) {
+        panic!("a consumed payload never fails its batch, but the batch failed: {reason}");
+    }
+    fn record_transport_redeliveries(&self, positions: usize) {
+        panic!("a replayable check source discarded {positions} positions after a reconnect");
+    }
+    fn record_unconfirmed_stop(&self, positions: usize) {
+        panic!("the check's source closes on its own, but {positions} positions were left");
+    }
+}
+
+/// A drain observes the domain at any point while the host consumes the refused payload of a
+/// batch, the graph resolves the root of every other payload in it, and the source's transport
+/// takes a round trip to confirm the batch. `queue` is the batch's positions, and the payload at
+/// position zero is the refused one.
+fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
+    shuttle::future::block_on(async move {
+        let trackers = IngestorAckRootTrackers::detached();
+        let progress = StdArc::new(ConfirmationProgress::default());
+        let unresolved = StdArc::new(AtomicUsize::new(0));
+        let (roots, mut batch_roots) = mpsc::channel(1);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let retry = ParsedRetryPolicy {
+            backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(1),
+        };
+        let policy = BrokerSourcePolicy {
+            acknowledgement: SourceAckPolicy::Parallel {
+                max_in_flight: NonZeroUsize::new(2).assured("two is a nonzero batch bound"),
+                batch_timeout: Duration::from_millis(1),
+                timeout: Duration::from_secs(1),
+                retry,
+            },
+            retry,
+            position_class: PositionClass::Replayable,
+        };
+        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
+            ConfirmingChannelSource {
+                queue: queue.to_vec(),
+                progress: progress.clone(),
+            },
+            SourceHost::new(RefusingGraphHost {
+                trackers: trackers.clone(),
+                roots,
+                unresolved: unresolved.clone(),
+                progress: progress.clone(),
+                shutdown: shutdown_rx.clone(),
+            }),
+            policy,
+            shutdown_rx,
+        ));
+        let graph = nervix_primitives::task::spawn({
+            let progress = progress.clone();
+            async move {
+                // A batch whose every payload was refused hands the graph nothing, and the host's
+                // sender goes once its source closes.
+                let Some(roots) = batch_roots.recv().await else {
+                    return;
+                };
+                let mut resolutions = Vec::with_capacity(roots.len());
+                for root in roots {
+                    let unresolved = unresolved.clone();
+                    let progress = progress.clone();
+                    resolutions.push(nervix_primitives::task::spawn(async move {
+                        nervix_primitives::task::yield_now().await;
+                        if unresolved.fetch_sub(1, Ordering::SeqCst) == 1 {
+                            progress.resolved_batches.fetch_add(1, Ordering::SeqCst);
+                        }
+                        root.ack_success();
+                    }));
+                }
+                for resolution in resolutions {
+                    resolution
+                        .await
+                        .assured("a root's resolution task does not panic");
+                }
+            }
+        });
+        let observer = nervix_primitives::task::spawn({
+            let trackers = trackers.clone();
+            let progress = progress.clone();
+            async move {
+                for _ in 0..DRAIN_OBSERVATIONS {
+                    nervix_primitives::task::yield_now().await;
+                    let resolved = progress.resolved_batches.load(Ordering::SeqCst);
+                    let outstanding = trackers.domain_outstanding_for_ownership_handoff();
+                    let confirmed = progress.confirmed_batches.load(Ordering::SeqCst);
+                    if outstanding == 0 {
+                        assert!(
+                            confirmed >= resolved,
+                            "a drain saw no outstanding work while a batch whose refused payload \
+                             was consumed waited for its transport to confirm it"
+                        );
+                    }
+                }
+            }
+        });
+
+        // The source closes once its one batch is settled, which ends the loop without a stop.
+        loop_task
+            .await
+            .assured("the host loop ends when its source closes");
+        graph
+            .await
+            .assured("the graph ends once it resolved the batch");
+        observer
+            .await
+            .assured("the drain observer ends after its reads");
+        drop(shutdown);
+
+        assert_eq!(
+            progress.confirmed_batches.load(Ordering::SeqCst),
+            1,
+            "the batch is confirmed, never rejected, with its refused payload"
+        );
+        assert_eq!(
+            trackers.domain_outstanding_for_ownership_handoff(),
+            0,
+            "the batch's work is released once its source confirmed it"
+        );
+        assert_eq!(trackers.ingestor_outstanding_for_ownership_handoff(), 0);
+    });
+}
+
+#[test]
+fn shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload() {
+    for queue in [[0].as_slice(), [0, 1].as_slice()] {
+        check_random(
+            move || drain_observing_a_batch_with_a_refused_payload(queue),
+            1_000,
+        );
+        check_pct(
+            move || drain_observing_a_batch_with_a_refused_payload(queue),
+            1_000,
+            3,
+        );
+    }
 }

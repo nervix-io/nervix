@@ -25,7 +25,7 @@ use nervix_models::{
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
     ModelName, NodeEndpoint, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, WasmStateResetScope,
+    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, Timestamp, WasmStateResetScope,
 };
 use nervix_primitives::{sync::mpsc, unmodeled::sync::OnceLock};
 use nervix_recovery::Discarded as _;
@@ -55,7 +55,8 @@ mod wire;
 pub use authentication::TransportClock;
 pub use connection::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
-    DuplexSender, EncodedMessage, IncomingByteStream, RelayAdmission, RelayCancellationGuard,
+    DuplexSender, EncodedMessage, IncomingByteStream, RELAY_CHANNEL_RETENTION, RelayAdmission,
+    RelayCancellationGuard,
 };
 pub use entropy::TransportEntropy;
 pub use identity::{TlsConfigBundle, TransportIdentity};
@@ -102,6 +103,13 @@ const DEFAULT_MAX_PEERS: usize = 64;
 const DEFAULT_MAX_CONNECTIONS: usize = 768;
 const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 32;
 const DEFAULT_INCOMING_QUEUE_CAPACITY: usize = 1024;
+/// One retained watermark takes about 180 bytes, so this holds about 1.4 MiB per peer and keeps the
+/// full retention for about 13 new channels a second between two nodes.
+const DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY: usize = 8192;
+const _: () = assert!(
+    DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY > DEFAULT_INCOMING_QUEUE_CAPACITY,
+    "the default watermark budget exceeds the attempts a peer may hold"
+);
 const DEFAULT_STREAM_WINDOW_BYTES: u32 = 64 * 1024;
 const DEFAULT_CONNECTION_WINDOW_BYTES: u32 = 256 * 1024;
 const DEFAULT_MAX_HEADER_BYTES: u32 = 16 * 1024;
@@ -122,6 +130,11 @@ pub struct TransportOptions {
     pub max_connections: usize,
     pub max_concurrent_handshakes: usize,
     pub incoming_queue_capacity: usize,
+    /// The relay channel watermarks the protocol owner of one peer retains. A watermark keeps a
+    /// channel's position and last outcome after its batch resolved; when the budget is full, the
+    /// least recently used one is forgotten so the peer's next channel is still admitted. It must
+    /// exceed `incoming_queue_capacity`.
+    pub relay_channel_watermark_capacity: usize,
     pub initial_stream_window_bytes: u32,
     pub initial_connection_window_bytes: u32,
     pub max_header_bytes: u32,
@@ -142,6 +155,7 @@ impl Default for TransportOptions {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_concurrent_handshakes: DEFAULT_MAX_CONCURRENT_HANDSHAKES,
             incoming_queue_capacity: DEFAULT_INCOMING_QUEUE_CAPACITY,
+            relay_channel_watermark_capacity: DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY,
             initial_stream_window_bytes: DEFAULT_STREAM_WINDOW_BYTES,
             initial_connection_window_bytes: DEFAULT_CONNECTION_WINDOW_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
@@ -170,6 +184,14 @@ impl TransportOptions {
                     reason: format!("{name} must be greater than zero"),
                 }));
             }
+        }
+        // A channel holds at most one attempt, so a larger budget always retains the watermark of
+        // a channel with no attempt outstanding, which a full budget can forget for a new one.
+        if self.relay_channel_watermark_capacity <= self.incoming_queue_capacity {
+            return Err(Report::new(TransportError::InvalidOptions {
+                reason: "relay_channel_watermark_capacity must exceed incoming_queue_capacity"
+                    .to_string(),
+            }));
         }
         if self.initial_stream_window_bytes == 0
             || self.initial_connection_window_bytes == 0
@@ -247,6 +269,9 @@ pub struct RelayPayload {
 /// The stable position of one relay batch in its sender-owned logical channel.
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct RelayDelivery {
+    /// The channel's identity. A sender process creates the incarnations of its channels in
+    /// increasing byte order; a receiver relies on that to refuse a channel it no longer retains
+    /// anything for, because every such channel lies at or below the greatest one it forgot.
     pub channel_incarnation: [u8; 16],
     pub sequence: u64,
 }
@@ -458,6 +483,8 @@ pub struct IngestorDescribeEnvelope {
     pub quiesce_dropped_total: u64,
     pub quiesce_rejected_total: u64,
     pub transport_redeliveries_total: u64,
+    pub decode_rejections_total: u64,
+    pub last_decode_rejection: Option<DecodeRejectionEnvelope>,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,
@@ -465,6 +492,35 @@ pub struct IngestorDescribeEnvelope {
     pub kafka_domain_offsets: Option<KafkaDomainOffsetDescribeEnvelope>,
     pub client_producers: Option<ClientProducersDescribeEnvelope>,
     pub metrics: Vec<String>,
+}
+
+/// The latest payload an ingestor's codec refused on the node that executes the ingestor, as that
+/// node reports it. Its code and operation are the same for every decode rejection, so they do not
+/// cross.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecodeRejectionEnvelope {
+    /// The rejection's UUID reference, as its 128 bits.
+    pub reference: u128,
+    pub codec: CodecName,
+    pub position: Option<TransportPositionEnvelope>,
+    /// The field paths the codec named at fault, sorted.
+    pub fields: Vec<String>,
+    /// The codec's rendered diagnostic, which names no payload value.
+    pub message: String,
+    pub occurred_at: Timestamp,
+}
+
+/// Where on its transport a refused payload was read.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransportPositionEnvelope {
+    Kafka {
+        topic: String,
+        partition: i32,
+        offset: i64,
+    },
+    Syslog {
+        peer: SocketAddr,
+    },
 }
 
 /// The producers attached to a client ingestor on the node that executes it.

@@ -2,10 +2,10 @@
 //!
 //! Outside the layer order: a test harness.
 //!
-//! - **Owns.** One loopback listener, the connection a sink's client opens to it, and the packets a
+//! - **Owns.** One loopback listener, the connection a connector's client opens to it, and the packets a
 //!   check reads from that client or writes to it.
 //! - **Depends on.** Tokio's TCP sockets and I/O traits.
-//! - **Must not know.** The connector's sink, the runtime host, or how a real broker decides.
+//! - **Must not know.** The connector's source or sink, the runtime host, or how a real broker decides.
 
 use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -72,6 +72,13 @@ impl ScriptedBroker {
 
     /// Accepts the client's connection and answers its CONNECT with `connack`.
     async fn accept_answering(&self, connack: &[u8]) -> ScriptedConnection {
+        let mut connection = self.accept_without_reply().await;
+        connection.write(connack).await;
+        connection
+    }
+
+    /// Accepts and reads CONNECT without answering, so a check can exercise the handshake budget.
+    pub(crate) async fn accept_without_reply(&self) -> ScriptedConnection {
         let (stream, _) = self
             .listener
             .accept()
@@ -80,7 +87,6 @@ impl ScriptedBroker {
         let mut connection = ScriptedConnection { stream };
         let (packet_type, _) = connection.read_packet().await;
         assert_eq!(packet_type, CONNECT, "the client opens with a CONNECT");
-        connection.write(connack).await;
         connection
     }
 }
@@ -111,7 +117,7 @@ impl ScriptedConnection {
     }
 
     /// Reads one packet: its type and the bytes its Remaining Length counts.
-    async fn read_packet(&mut self) -> (u8, Vec<u8>) {
+    pub(crate) async fn read_packet(&mut self) -> (u8, Vec<u8>) {
         let first = self
             .stream
             .read_u8()
@@ -138,7 +144,7 @@ impl ScriptedConnection {
         (first >> 4, body)
     }
 
-    async fn write(&mut self, bytes: &[u8]) {
+    pub(crate) async fn write(&mut self, bytes: &[u8]) {
         self.stream
             .write_all(bytes)
             .await

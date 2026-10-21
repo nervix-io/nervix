@@ -360,3 +360,74 @@ Feature: NATS emission
       | 3            |                                    | {"user_id":42}   |
       | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
       | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+
+  # One NATS message carries every record, which the ingest codec splits into one batch, so the
+  # emitter hands all of them to JetStream in one publish. The emitter publishes through an endpoint
+  # the scenario controls, which forwards its first 16 publishes and then stops reading from it, as
+  # a server that stopped reading would. JetStream answers those 16, while the records behind them
+  # back up in the client until it cannot take another one within ACK TIMEOUT. The confirmation
+  # window settles the 16 answers JetStream already gave before the publish fails, so the retry
+  # after the endpoint forwards again never sends those records a second time. A record the client
+  # had taken without an answer reaches the stream again, as at-least-once delivery allows.
+  @nats_jetstream_confirmation_window
+  Scenario Outline: A NATS JetStream emitter never resends the records JetStream confirmed before its client stopped taking records
+    Given NATS is running
+    And a NATS endpoint the scenario controls is configured
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS JetStream stream "window_{{test_id}}" exists for subject "window_out_{{test_id}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA window_input ( sequence I64 );
+      CREATE SCHEMA window_record ( sequence I64, padding STRING );
+      CREATE WIRE JSON SCHEMA window_record_wire MODE STRICT ( sequence integer, padding string );
+      CREATE CODEC window_input_codec FROM JSON TO SCHEMA window_input
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC window_record_codec
+        FROM WIRE JSON SCHEMA window_record_wire
+        TO SCHEMA window_record;
+      CREATE RELAY window_records SCHEMA window_record UNBRANCHED;
+      CREATE CLIENT nats_in TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS SUBJECT INGESTOR window_in
+        FROM nats_in SUBJECT 'window_in_{{test_id}}' QUEUE GROUP 'window_in_group_{{test_id}}' INSTANCES 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING window_input_codec
+        TO window_records
+          INHERIT ALL
+          SET padding = repeat('x', 1000)
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT nats_out TYPE NATS CONFIG { 'addr' = '{{nats_controlled_addr}}' };
+      CREATE EMITTER window_out FROM window_records
+        TO NATS nats_out SUBJECT window_out_{{test_id}}
+          MODE JETSTREAM ACK PARALLEL MAX 16384 ACK TIMEOUT 3s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING window_record_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "window_in" on the leader node contains
+      """
+      ready: true
+      """
+    When the controlled NATS endpoint holds what each client sends after 16 publishes
+    And a NATS message carrying records 1 to 12000 by field "sequence" is published to subject "window_in_{{test_id}}"
+    Then within "60s" DESCRIBE EMITTER "window_out" on the leader node contains
+      """
+      timed out: didn't receive ack in time
+      """
+    When the controlled NATS endpoint forwards everything
+    Then within "180s" NATS JetStream stream "window_{{test_id}}" holds every record from 1 to 12000 by field "sequence", and records 1 to 16 exactly once
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

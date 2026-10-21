@@ -3,8 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** A client's pass-through configuration entry, the one resource version it mounts,
-//!   its declared connection-pool bounds, and the declaration every connector module writes its
-//!   client Model with.
+//!   its declared connection-pool bounds, the declaration every connector module writes its
+//!   client Model with, and what every client of a connector declares: whether it is pooled, who
+//!   reads its configuration keys and the options its statement writes.
 //! - **Depends on.** Resource names and the connector kinds.
 //! - **Must not know.** What a configuration key means to a driver, how a mount is resolved to
 //!   files, or how a pool is sized at run time.
@@ -21,7 +22,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ResourceName;
+use crate::{OptionDeclaration, ResourceName};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -114,16 +115,48 @@ impl ClientPoolBounds {
     }
 }
 
+/// Whether a client keeps a pool of connections, which its statement bounds with `POOL SIZE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientPooling {
+    Pooled,
+    Unpooled,
+}
+
+/// Who reads the keys of a client's `CONFIG { … }` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientConfigOwner {
+    /// Every key is Nervix's own configuration, which its connector reads.
+    Nervix,
+    /// Every key is the driver's, which Nervix passes through to it unread.
+    Driver,
+    /// The keys are Nervix's own, except the query options of the `addr` URL, which Nervix passes
+    /// through to the driver.
+    NervixWithAddressQuery,
+    /// The keys are Nervix's own, except the property namespaces of the object store or the
+    /// catalog, which Nervix passes through to the driver.
+    NervixWithPropertyNamespaces,
+}
+
+/// What every client of one connector declares, whatever its statement says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientDeclaration {
+    pub pooling: ClientPooling,
+    pub config: ClientConfigOwner,
+    /// The options its statement writes after its kind, before its mount, in order.
+    pub options: &'static [OptionDeclaration],
+}
+
 /// Declares the client Model of one connector: its name, its mount and its configuration.
 ///
 /// A pooled client carries its declared [`ClientPoolBounds`] as well, because connection capacity
 /// belongs to the client itself rather than to the connector's string configuration. Every client
 /// states the connector it configures as `CONNECTOR`, which is the one declaration the Model
-/// union and canonical rendering read.
+/// union and canonical rendering read, and what it declares as `DECLARATION`: whether it is
+/// pooled, which the Model's shape decides, and who reads its configuration keys.
 macro_rules! configured_client {
     (
         $(#[$meta:meta])*
-        $Connector:ident: unpooled $Client:ident => $Config:ident
+        $Connector:ident: unpooled, config $Owner:ident, $Client:ident => $Config:ident
     ) => {
         $(#[$meta])*
         #[derive(
@@ -144,12 +177,12 @@ macro_rules! configured_client {
         }
 
         $crate::connector::configured_client::configured_client!(
-            @connector $Connector: $Client => $Config
+            @connector $Connector: Unpooled, $Owner, $Client => $Config
         );
     };
     (
         $(#[$meta:meta])*
-        $Connector:ident: pooled $Client:ident => $Config:ident
+        $Connector:ident: pooled, config $Owner:ident, $Client:ident => $Config:ident
     ) => {
         $(#[$meta])*
         #[derive(
@@ -171,15 +204,22 @@ macro_rules! configured_client {
         }
 
         $crate::connector::configured_client::configured_client!(
-            @connector $Connector: $Client => $Config
+            @connector $Connector: Pooled, $Owner, $Client => $Config
         );
     };
-    (@connector $Connector:ident: $Client:ident => $Config:ident) => {
+    (@connector $Connector:ident: $Pooling:ident, $Owner:ident, $Client:ident => $Config:ident) => {
         pub type $Config = $crate::ClientConfigEntry;
 
         impl<Version> $Client<Version> {
             /// The connector this client configures.
             pub const CONNECTOR: $crate::ConnectorKind = $crate::ConnectorKind::$Connector;
+
+            /// What every client of this connector declares.
+            pub const DECLARATION: $crate::ClientDeclaration = $crate::ClientDeclaration {
+                pooling: $crate::ClientPooling::$Pooling,
+                config: $crate::ClientConfigOwner::$Owner,
+                options: &[],
+            };
         }
     };
 }

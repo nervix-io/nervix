@@ -511,6 +511,14 @@ fn invalid_transport_options_report_the_failed_contract() {
                 ..TransportOptions::default()
             },
         ),
+        (
+            "relay_channel_watermark_capacity",
+            TransportOptions {
+                incoming_queue_capacity: 4,
+                relay_channel_watermark_capacity: 4,
+                ..TransportOptions::default()
+            },
+        ),
     ];
     for (contract, options) in cases {
         let error = options
@@ -1426,6 +1434,15 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         error.current_context(),
         TransportError::RemoteRejected { status: 403, .. }
     ));
+    // Admission progress shares the sender's bounded application queue. Keep one update queued
+    // so terminal delivery cannot assume the application has consumed every progress frame.
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Alive)),
+        )
+        .await
+        .expect("admission progress should enter the sender application queue");
     transport_a
         .send(
             &node_b,
@@ -1451,17 +1468,34 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     ));
 
     drop(first);
-    transport_b
-        .send(
+    let terminal = timeout(Duration::from_secs(2), async {
+        loop {
+            let received = incoming_a
+                .recv()
+                .await
+                .expect("the sender application queue should remain open");
+            if let Envelope::Ack(resolution) = &received.envelope
+                && resolution.outcome.is_progress()
+            {
+                assert_eq!(resolution.registration, registration(1, &node_a));
+                continue;
+            }
+            break received.envelope;
+        }
+    });
+    let (sent, terminal) = futures_util::future::join(
+        transport_b.send(
             &node_a,
             Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack)),
-        )
-        .await
-        .expect("the first relay terminal outcome should be sent");
-    let _terminal = timeout(Duration::from_secs(2), incoming_a.recv())
-        .await
-        .expect("the terminal outcome should enter the sender application queue")
-        .expect("the sender application queue should remain open");
+        ),
+        terminal,
+    )
+    .await;
+    sent.expect("the first relay terminal outcome should be sent");
+    assert_eq!(
+        terminal.expect("the terminal outcome should enter the sender application queue"),
+        Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
     transport_a
         .send(
             &node_b,

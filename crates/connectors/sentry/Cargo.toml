@@ -25,3 +25,8 @@ sentry-types = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+bolero = { workspace = true }
+meticulous = { workspace = true }

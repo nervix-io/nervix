@@ -14,25 +14,31 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, RetryPolicy, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
     SourceReferenceKind, TopicName,
 };
 
-configured_client!(Kafka: unpooled CreateClientKafka => KafkaConfigEntry);
+configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
 
 /// The longest topic Kafka admits, in bytes.
 const KAFKA_TOPIC_MAX: usize = 249;
@@ -43,9 +49,10 @@ const KAFKA_CONSUMER_GROUP_MAX: usize = 255;
 external_names! {
     /// A Kafka topic: 1 to 249 ASCII letters, digits, `.`, `_` and `-`, and neither `.` nor `..`,
     /// as the broker itself requires.
-    pub struct KafkaTopicName => kafka_topic_rule;
+    pub struct KafkaTopicName => kafka_topic_rule, label "kafka_topic", example "orders";
     /// A Kafka consumer group: 1 to 255 bytes without control characters.
-    pub struct KafkaConsumerGroupName => kafka_consumer_group_rule;
+    pub struct KafkaConsumerGroupName => kafka_consumer_group_rule, label "kafka_consumer_group",
+        example "readers";
 }
 
 fn kafka_topic_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -81,6 +88,100 @@ pub struct KafkaTopicSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
+const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages librdkafka prefetches",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver(
+                "queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536",
+            ),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection setup: TCP, TLS and SASL",
+            bound: WaitBound::Driver("socket.connection.setup.timeout.ms, 30 s"),
+        },
+        DeclaredWait {
+            wait: "a fetch",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s"),
+        },
+        DeclaredWait {
+            wait: "a consumer-group commit under ACK",
+            bound: WaitBound::Fixed(Duration::from_secs(30)),
+        },
+        DeclaredWait {
+            wait: "offset lookups, watermarks and seeks",
+            bound: WaitBound::Fixed(Duration::from_secs(5)),
+        },
+        DeclaredWait {
+            wait: "subscribe, assign and unsubscribe",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[
+        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "receive.message.max.bytes 100000000",
+    ],
+};
+
+/// What the connector of a KAFKA TOPIC emitter holds and how long it waits.
+const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "records the producer queues under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records the producer queues under NO ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::FailPublish,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records awaiting confirmation under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ACK PARALLEL MAX"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "a produce request",
+            bound: WaitBound::Driver("request.timeout.ms, 30 s"),
+        },
+        DeclaredWait {
+            wait: "delivery under NO ACK",
+            bound: WaitBound::Driver("message.timeout.ms, 300 s"),
+        },
+        DeclaredWait {
+            wait: "delivery under ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+    ],
+    driver_limits: &[
+        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "message.max.bytes 1000000",
+        "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
+         ON MESSAGE ERROR.",
+    ],
+};
+
 impl SourceEntity for KafkaTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -88,7 +189,37 @@ impl SourceEntity for KafkaTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
-        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
+        delivery: &[
+            DeclaredDelivery::NO_ACK,
+            DeclaredDelivery::ACK_SEQUENTIAL,
+            DeclaredDelivery::ACK_PARALLEL,
+        ],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::External(KafkaTopicName::DECLARATION),
+        }),
+        options: &[
+            OptionDeclaration {
+                keywords: "OFFSET BY",
+                presence: OptionPresence::Required,
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "DOMAIN",
+                        value: None,
+                        example: "OFFSET BY DOMAIN",
+                    },
+                    OptionChoice {
+                        name: "CONSUMER GROUP",
+                        value: Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION)),
+                        example: "OFFSET BY CONSUMER GROUP 'readers'",
+                    },
+                ]),
+            },
+            OptionDeclaration::INSTANCES,
+        ],
+        bounds: KAFKA_SOURCE_BOUNDS,
     };
 }
 
@@ -103,10 +234,6 @@ impl SourceBody for KafkaTopicSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(quiesce, IngestQuiesceMode::Suspend)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -189,18 +316,25 @@ pub struct KafkaTopicSink {
 impl SinkEntity for KafkaTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        reference: SinkReferenceKind::Client(ConnectorKind::Kafka),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::NoAck,
+            EmitterPublishingModeKind::BrokerAck,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "TOPIC",
+            name: LocatorName::Unquoted {
+                label: "topic_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: KAFKA_SINK_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
-        )
-    }
 }
 
 impl SinkBody for KafkaTopicSink {

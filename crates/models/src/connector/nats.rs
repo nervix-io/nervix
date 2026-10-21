@@ -20,19 +20,24 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ClientName, ConnectorKind, EmitSinkCapabilities,
-    EmitterBatchRequirement, EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, SubjectName,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
 };
 
-configured_client!(Nats: unpooled CreateClientNats => NatsConfigEntry);
+configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
 
 /// The longest subject Nervix subscribes to, in bytes.
 const NATS_SUBJECT_MAX: usize = 1024;
@@ -43,9 +48,11 @@ external_names! {
     /// A NATS subject a queue subscription listens on: at most 1,024 bytes of tokens joined by `.`,
     /// none of them empty, without whitespace or control characters. `*` stands for one token and
     /// `>` for every remaining token, each only as a whole token, and `>` only as the last one.
-    pub struct NatsSubjectName => nats_subject_rule;
+    pub struct NatsSubjectName => nats_subject_rule, label "nats_subject",
+        example "orders.created";
     /// A NATS queue group: 1 to 255 bytes without whitespace or control characters.
-    pub struct NatsQueueGroupName => nats_queue_group_rule;
+    pub struct NatsQueueGroupName => nats_queue_group_rule, label "nats_queue_group",
+        example "workers";
 }
 
 /// The first whitespace or control character of `text`, which neither a subject nor a queue group
@@ -98,6 +105,68 @@ pub struct NatsSubjectSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a NATS SUBJECT ingestor holds and how long it waits.
+const NATS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages the subscription holds ahead of the host",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("65,536 messages"),
+            overflow: BufferOverflow::DropUncounted,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("5 s per address"),
+        },
+        DeclaredWait {
+            wait: "the subscription's flush",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: WaitBound::Driver(
+                "a ping every 60 s; the connection ends after 2 go unanswered",
+            ),
+        },
+    ],
+    driver_limits: &[],
+};
+
+/// What the connector of a NATS SUBJECT emitter holds and how long it waits.
+const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "commands queued for the connection",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("2048 commands"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("5 s per address"),
+        },
+        DeclaredWait {
+            wait: "a core publish and its flush",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a JetStream acknowledgement",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+    ],
+    driver_limits: &["Messages above the server's max_payload are rejected."],
+};
+
 impl SourceEntity for NatsSubjectSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -106,6 +175,24 @@ impl SourceEntity for NatsSubjectSource {
         reference: SourceReferenceKind::Client(ConnectorKind::Nats),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        locator: Some(LocatorDeclaration {
+            keywords: "SUBJECT",
+            name: LocatorName::External(NatsSubjectName::DECLARATION),
+        }),
+        options: &[
+            OptionDeclaration {
+                keywords: "QUEUE GROUP",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Name(NatsQueueGroupName::DECLARATION),
+                    example: "QUEUE GROUP 'workers'",
+                },
+            },
+            OptionDeclaration::INSTANCES.required(),
+        ],
+        bounds: NATS_SOURCE_BOUNDS,
     };
 }
 
@@ -120,13 +207,6 @@ impl SourceBody for NatsSubjectSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -173,18 +253,25 @@ pub struct NatsSubjectSink {
 impl SinkEntity for NatsSubjectSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        reference: SinkReferenceKind::Client(ConnectorKind::Nats),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::NoAck,
+            EmitterPublishingModeKind::NatsJetStream,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "SUBJECT",
+            name: LocatorName::Unquoted {
+                label: "subject_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: NATS_SINK_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::NatsJetStream { .. }
-        )
-    }
 }
 
 impl SinkBody for NatsSubjectSink {

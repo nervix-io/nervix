@@ -12,17 +12,27 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(Postgres: pooled CreateClientPostgres => PostgresConfigEntry);
+configured_client!(Postgres: pooled, config NervixWithAddressQuery, CreateClientPostgres => PostgresConfigEntry);
 
 pub type PostgresValueMapping = SinkValueMapping;
 
@@ -46,18 +56,62 @@ pub enum PostgresConflictAction {
     DoUpdate { target: Vec<String> },
 }
 
+/// What the connector of a POSTGRES TABLE holds and how long it waits.
+const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "a pool acquire: name resolution, connection, TLS and authentication",
+            bound: WaitBound::Fixed(Duration::from_secs(30)),
+        },
+        DeclaredWait {
+            wait: "an insert and its metadata query",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SinkEntity for PostgresTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        reference: SinkReferenceKind::Client(ConnectorKind::Postgres),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "INSERT TO TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[OptionDeclaration {
+            keywords: "ON CONFLICT",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Choice(&[
+                OptionChoice {
+                    name: "DO NOTHING",
+                    value: None,
+                    example: "ON CONFLICT DO NOTHING",
+                },
+                OptionChoice {
+                    name: "DO UPDATE",
+                    value: None,
+                    example: "ON CONFLICT ('id') DO UPDATE",
+                },
+            ]),
+        }],
+        envelope: &[],
+        properties: &[],
+        bounds: POSTGRES_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for PostgresTableSink {

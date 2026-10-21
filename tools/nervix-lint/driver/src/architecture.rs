@@ -15,7 +15,7 @@ use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{Span, Symbol, def_id::DefId};
 use rustc_trait_selection::traits::type_known_to_meet_bound_modulo_regions;
 
-use crate::contracts::{Flow, INVALID_CONTRACT};
+use crate::contracts::{Flow, INVALID_CONTRACT, contract_attribute};
 
 declare_tool_lint! { pub nervix::MODEL_IN_DATA_PLANE, Deny, "execution consumes plans rather than configuration models", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::PARSER_DEPENDENCY, Deny, "language definitions belong only to language and edge consumers", report_in_external_macro: true }
@@ -81,8 +81,7 @@ fn kind(attribute: &rustc_hir::Attribute) -> Option<Symbol> {
 }
 
 fn declared(tcx: TyCtxt<'_>, definition: DefId, name: &str) -> Option<Symbol> {
-    let path = [Symbol::intern("nervix"), Symbol::intern(name)];
-    kind(tcx.get_attrs_by_path(definition, &path).next()?)
+    kind(contract_attribute(tcx, definition, name)?)
 }
 
 /// An explicit trait/method boundary can be inherited; its unrelated module default cannot

@@ -13,9 +13,11 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, future};
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceResult};
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, SourceReadCancellation, SourceResult,
+};
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::{reconnect_tests::sequential_policy, *};
@@ -82,11 +84,13 @@ impl SourceMessage for ConfirmingDelivery {
 }
 
 /// A source whose queue the loop reads one message at a time, and whose transport fails a set
-/// number of acknowledgements before it confirms the rest.
+/// number of acknowledgements and rejections before it confirms or takes back the rest.
 struct ConfirmingSource {
     queue: VecDeque<u64>,
     /// Acknowledgements the transport fails before it confirms one.
     failing_acknowledgements: usize,
+    /// Rejections the transport fails before it takes positions back.
+    failing_rejections: usize,
     trackers: IngestorAckRootTrackers,
     record: Arc<Mutex<ConfirmationRecord>>,
 }
@@ -100,6 +104,7 @@ impl ConfirmingSource {
         Self {
             queue: positions.into_iter().collect(),
             failing_acknowledgements: 0,
+            failing_rejections: 0,
             trackers,
             record,
         }
@@ -130,6 +135,7 @@ impl BrokerSourceConnector for ConfirmingSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        _cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(position) = self.queue.pop_front() else {
             return Ok(SourceBatch::Closed);
@@ -161,6 +167,12 @@ impl BrokerSourceConnector for ConfirmingSource {
     }
 
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
+        if let Some(failing) = self.failing_rejections.checked_sub(1) {
+            self.failing_rejections = failing;
+            return Err(Report::new(SourceError::Reject {
+                connector: "confirming",
+            }));
+        }
         self.record
             .lock()
             .events
@@ -337,13 +349,38 @@ async fn a_failed_confirmation_is_a_transient_status_until_a_later_one_is_confir
     assert_eq!(
         record.lock().events,
         vec![
-            // The resume that opened the source.
-            ConfirmationEvent::Cleared,
             ConfirmationEvent::Transient,
             ConfirmationEvent::Rejected(vec![1]),
             ConfirmationEvent::Acknowledged(vec![1]),
             ConfirmationEvent::Cleared,
             ConfirmationEvent::Acknowledged(vec![2]),
+            ConfirmationEvent::Cleared,
+            ConfirmationEvent::Closed,
+        ]
+    );
+}
+
+/// A transport that could neither confirm a batch nor take it back shows the failed rejection as
+/// the ingestor's transient status too, whether it fails as the batch is settled or as the loop
+/// retries it, and only a later confirmation clears it.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_failed_rejection_is_a_transient_status_until_a_later_confirmation() {
+    let mut check = ConfirmationCheck::reading([1]);
+    check.source.failing_acknowledgements = 1;
+    check.source.failing_rejections = 2;
+
+    let (_trackers, record) = check.run().await;
+
+    assert_eq!(
+        record.lock().events,
+        vec![
+            // The confirmation failed, and so did the rejection of the batch it settled.
+            ConfirmationEvent::Transient,
+            ConfirmationEvent::Transient,
+            // The loop's retry of that rejection failed before the source was reestablished.
+            ConfirmationEvent::Transient,
+            ConfirmationEvent::Rejected(vec![1]),
+            ConfirmationEvent::Acknowledged(vec![1]),
             ConfirmationEvent::Cleared,
             ConfirmationEvent::Closed,
         ]
@@ -384,7 +421,6 @@ async fn a_stop_after_a_batch_resolved_still_confirms_the_batch_before_closing()
         assert_eq!(
             record.lock().events,
             vec![
-                ConfirmationEvent::Cleared,
                 ConfirmationEvent::Acknowledged(vec![1]),
                 ConfirmationEvent::Cleared,
                 ConfirmationEvent::Closed,
@@ -406,11 +442,7 @@ async fn a_stop_before_a_batch_resolved_reports_its_positions_unconfirmed() {
 
     assert_eq!(
         record.lock().events,
-        vec![
-            ConfirmationEvent::Cleared,
-            ConfirmationEvent::Unconfirmed(1),
-            ConfirmationEvent::Closed,
-        ]
+        vec![ConfirmationEvent::Unconfirmed(1), ConfirmationEvent::Closed,]
     );
     // The unresolved roots ended with the host, which releases what they counted.
     assert_eq!(trackers.domain_outstanding_for_ownership_handoff(), 0);

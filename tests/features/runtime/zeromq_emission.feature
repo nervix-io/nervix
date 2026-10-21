@@ -170,3 +170,60 @@ Feature: ZeroMQ emission
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  # The emitter's client connects to an address whose port refuses every connection, so the driver
+  # retries the connection until the client's connect_timeout_ms ends the attempt.
+  @zeromq_emitter_open_deadline @deloxide_stress
+  Scenario Outline: A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears
+    Given a <cluster_size> node nervix cluster is started
+    And the ZeroMQ emission endpoint refuses connections
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge zeromq-open-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE EMITTER zeromq_out FROM notifications
+        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 2s
+        ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "zeromq-open-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":42}
+      """
+    Then within "20s" DESCRIBE EMITTER "zeromq_out" on the leader node contains
+      """
+      connecting to the ZeroMQ peer did not finish within connect_timeout_ms 1s
+      """
+    When a ZeroMQ peer starts listening on the emission endpoint
+    Then the observed broker receives a payload
+      """
+      {"user_id":42}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

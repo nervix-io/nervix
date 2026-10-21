@@ -167,8 +167,8 @@ users, and each domain's revision, section count and bytes. A download that stil
 `ClientError::BackupDownload` with the backup's execution reference, above the typed
 `BackupDownloadError` that says why. Running the same `ExecutionHandle` again returns the recorded outcome and
 downloads the archive again, and `Client::download_backup(reference, summary, destination)`
-downloads a summary's archive directly. A download that receives the whole archive releases it on
-the server, and a later download of it is refused.
+downloads a summary's archive directly. A download releases the archive on the server once the
+server has queued its last frame, and a later download of it is refused.
 
 For recovery from another process, `Client::prepare_backup_with_reference(backup, reference)`
 creates a handle for `execute_prepared` with that durable reference. Select the original domain

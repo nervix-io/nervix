@@ -38,6 +38,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("min_pool_size", "1"),
     ("mqtt_qos", "1"),
     ("operation_number", "1"),
+    ("request_window", "8"),
     ("resource_version", "1"),
     // Deliberately constant: a conflict target has to name a column the VALUES record already
     // maps, so a fresh name per occurrence would never match.

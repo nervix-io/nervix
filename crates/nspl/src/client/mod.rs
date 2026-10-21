@@ -310,6 +310,9 @@ pub fn suggest_create_client_kafka(input: &str, cursor: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::lexer::lex;

@@ -27,8 +27,8 @@
 use error_stack::{AttachmentKind, FrameKind, ResultExt as _};
 use nervix_connector::{
     SinkAcknowledgementServices, SinkAcknowledgements, SinkBoundedExecution, SinkEventReporter,
-    SinkGeneralErrorHandler, SinkHost, SinkStagingDirectory, SinkTransientErrorStatus,
-    physical_time::actual_utc_now,
+    SinkFinish, SinkFinishError, SinkGeneralErrorHandler, SinkHost, SinkStagingDirectory,
+    SinkTransientErrorStatus, physical_time::actual_utc_now,
 };
 
 use super::*;
@@ -175,6 +175,8 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     StopDeadlineElapsed,
     #[error("emitter final flush failed")]
     FinalFlush,
+    #[error("the emitter could not finish its sink's transport client")]
+    FinishTransport,
     #[error("failed to encode emitter batch")]
     EncodeBatch,
     #[error("the node's bounded execution did not take the emitter's encoding")]
@@ -222,6 +224,7 @@ impl EmitterRuntimeError {
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
             | Self::FinalFlush
+            | Self::FinishTransport
             | Self::FlushTiming
             | Self::RetryTiming
             | Self::EncodeBatch
@@ -338,6 +341,59 @@ impl EmitterSinkContext {
         );
     }
 
+    /// Records what finishing the sink's transport client did when the emitter stopped.
+    fn record_finished(&self, sink: &str, ending: EmitterEnding, finished: SinkFinish) {
+        match finished {
+            SinkFinish::NothingHeld => debug!(
+                domain = self.domain.as_str(),
+                emitter = self.emitter.as_str(),
+                sink,
+                ending = ending.as_ref(),
+                "emitter's transport client held no records when it stopped"
+            ),
+            SinkFinish::Flushed => info!(
+                domain = self.domain.as_str(),
+                emitter = self.emitter.as_str(),
+                sink,
+                ending = ending.as_ref(),
+                "emitter sent the records its transport client held"
+            ),
+            SinkFinish::Discarded => warn!(
+                domain = self.domain.as_str(),
+                emitter = self.emitter.as_str(),
+                sink,
+                ending = ending.as_ref(),
+                "emitter closed a transport client that may still hold records it delivered"
+            ),
+        }
+    }
+
+    /// Records a finish that did not send every record the sink's transport client held, which
+    /// are lost with the client: as the emitter's transient error, an error event and a warning.
+    fn record_unfinished(
+        &self,
+        sink: &str,
+        ending: EmitterEnding,
+        error: &Report<SinkFinishError>,
+    ) {
+        let reason = format!("{error:#}");
+        self.record_failure(reason.clone());
+        self.runtime.events().report_error(format!(
+            "emitter '{}' in domain '{}' stopped before its {sink} transport client sent every \
+             record it held: {reason}",
+            self.emitter.as_str(),
+            self.domain.as_str(),
+        ));
+        warn!(
+            domain = self.domain.as_str(),
+            emitter = self.emitter.as_str(),
+            sink,
+            ending = ending.as_ref(),
+            error = reason,
+            "emitter stopped before its transport client sent every record it held"
+        );
+    }
+
     /// Reads the emitter's domain execution time for a cadence decision.
     pub(super) fn execution_snapshot(&self) -> EmitterRuntimeResult<DomainExecutionSnapshot> {
         self.clock
@@ -386,7 +442,7 @@ impl SinkAcknowledgementServices for AckSet {
 
 impl SinkTransientErrorStatus for EmitterSinkContext {
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
-        self.status.fail(
+        self.status.fail_connector(
             reason,
             Some(EmitterRetryStatus {
                 kind: EmitterRetryKind::Infrastructure,
@@ -399,7 +455,7 @@ impl SinkTransientErrorStatus for EmitterSinkContext {
     }
 
     fn clear_transient_error(&self) {
-        self.status.clear();
+        self.status.clear_connector();
     }
 }
 
@@ -505,6 +561,19 @@ enum EmitterPublishErrorReport {
     Publish,
 }
 
+/// How an emitter task's loop ended, which decides who finishes its sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+enum EmitterEnding {
+    /// A stop drained the emitter and finished its sink before the loop returned.
+    Stop,
+    /// The loop's relay interaction stopped without a stop, so the loop drained its buffer and
+    /// returned with the sink unfinished.
+    InteractionStopped,
+    /// Terminal teardown ended the loop wherever it was, possibly in the middle of a publish.
+    Teardown,
+}
+
 #[derive(Clone, Copy)]
 struct EmitterPublishOutcomeContext<'a> {
     sink_label: &'a str,
@@ -561,6 +630,35 @@ impl EmitterTaskState {
 
     fn receives_input(&self, buffered_messages: usize) -> bool {
         !self.retry.is_active() || buffered_messages == 0
+    }
+
+    /// Finishes the sink after the loop ended without a stop, by the deadline on the task's stop
+    /// signal, and records what that did.
+    ///
+    /// A stopping domain execution gives every emitter that deadline before its teardown ends the
+    /// task. A task ended without one, such as a task whose execution was dropped without
+    /// stopping, has nothing to bound a finish by, so its sink closes unfinished.
+    async fn finish_after_loop(
+        &mut self,
+        context: &EmitterSinkContext,
+        sink: &str,
+        ending: EmitterEnding,
+        deadline: Option<Instant>,
+    ) {
+        let Some(deadline) = deadline else {
+            debug!(
+                domain = context.domain.as_str(),
+                emitter = context.emitter.as_str(),
+                sink,
+                ending = ending.as_ref(),
+                "emitter task ended without a stop deadline, so its sink is not finished"
+            );
+            return;
+        };
+        match self.sink.finish_transport(deadline).await {
+            Ok(finished) => context.record_finished(sink, ending, finished),
+            Err(error) => context.record_unfinished(sink, ending, &error),
+        }
     }
 
     async fn handle_publish_result(
@@ -1011,15 +1109,7 @@ impl EmitterTask {
                 stop_rx: &mut stop_rx,
                 stop_signal: &task_stop_signal,
             };
-            // The interaction observes shutdown while waiting for work, but a connector can be
-            // inside an external publish attempt when terminal teardown begins. Dropping the
-            // task at that boundary releases its volatile prepared requests and unresolved ACK
-            // guards without reporting them as delivered or waiting for the attempt timeout.
-            nervix_primitives::select! {
-                biased;
-                _ = super::emitter_publishing::wait_for_emitter_work_cancel(&mut terminal_shutdown_rx) => {}
-                _ = task_loop.run() => {}
-            }
+            task_loop.run_to_end(&mut terminal_shutdown_rx).await;
             drop(work_cancel_forwarder);
         });
         Ok(ScheduledEmitterTask {
@@ -1031,6 +1121,40 @@ impl EmitterTask {
 }
 
 impl EmitterTaskLoop<'_> {
+    /// Runs the loop until a stop ends it or terminal teardown cancels it, and then finishes the
+    /// sink unless the stop already did.
+    ///
+    /// The interaction observes shutdown while waiting for work, but a connector can be inside an
+    /// external publish attempt when terminal teardown begins. Dropping the loop at that boundary
+    /// releases its volatile prepared requests and unresolved ACK guards without reporting them as
+    /// delivered or waiting for the attempt timeout. The sink's transport client is then finished,
+    /// by the deadline the stopping domain execution gave this task, so records a publish
+    /// delivered still reach it.
+    async fn run_to_end(&mut self, terminal_shutdown_rx: &mut watch::Receiver<bool>) {
+        let ending = nervix_primitives::select! {
+            biased;
+            _ = super::emitter_publishing::wait_for_emitter_work_cancel(terminal_shutdown_rx) => {
+                EmitterEnding::Teardown
+            }
+            ending = self.run() => ending,
+        };
+        match ending {
+            EmitterEnding::Stop => {}
+            EmitterEnding::InteractionStopped | EmitterEnding::Teardown => {
+                self.finish_after_loop(ending).await;
+            }
+        }
+    }
+
+    /// Finishes the sink once the loop ended without a stop, by the deadline on the task's stop
+    /// signal.
+    async fn finish_after_loop(&mut self, ending: EmitterEnding) {
+        let deadline = *self.stop_rx.borrow();
+        self.state
+            .finish_after_loop(self.context, self.plan.sink.label(), ending, deadline)
+            .await;
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1038,7 +1162,7 @@ impl EmitterTaskLoop<'_> {
             reason = "the retained sink task handles input, retries, flush and commit cadence"
         )
     )]
-    async fn run(&mut self) {
+    async fn run(&mut self) -> EmitterEnding {
         loop {
             nervix_primitives::task::consume_budget().await;
             let wake = self.state.wake(self.context);
@@ -1139,18 +1263,34 @@ impl EmitterTaskLoop<'_> {
                         let report = sink
                             .flush_all(self.plan.sink.label(), self.context, &mut control, buffer)
                             .await?;
-                        sink.finish_transport(deadline).await?;
-                        Ok::<_, Report<EmitterRuntimeError>>(report)
+                        let finished = match sink.finish_transport(deadline).await {
+                            Ok(finished) => finished,
+                            Err(error) => {
+                                // The finish's own description, which names what the client
+                                // still held, is how the stop reports a finish that did not send
+                                // everything.
+                                let description = error.current_context().to_string();
+                                return Err(error
+                                    .change_context(EmitterRuntimeError::FinishTransport)
+                                    .attach_printable(description));
+                            }
+                        };
+                        Ok::<_, Report<EmitterRuntimeError>>((report, finished))
                     })
                     .await;
                     let result = match drained {
-                        Ok(Ok(report)) => {
+                        Ok(Ok((report, finished))) => {
                             self.state.backoff.reset();
                             self.state.retry.clear();
                             self.context.status.clear();
                             if let Some(report) = report.as_ref() {
                                 self.batch_context.observe_sent(report);
                             }
+                            self.context.record_finished(
+                                self.plan.sink.label(),
+                                EmitterEnding::Stop,
+                                finished,
+                            );
                             Ok(())
                         }
                         Ok(Err(error)) => {
@@ -1177,7 +1317,7 @@ impl EmitterTaskLoop<'_> {
                         clear_emitter_stop_signal(self.stop_signal, deadline);
                     }
                     if response.send(result).is_ok() && should_stop {
-                        break;
+                        break EmitterEnding::Stop;
                     }
                     if should_stop {
                         clear_emitter_stop_signal(self.stop_signal, deadline);
@@ -1276,7 +1416,7 @@ impl EmitterTaskLoop<'_> {
                                 MessageErrorOperation::Publish,
                             )
                             .await;
-                        break;
+                        break EmitterEnding::InteractionStopped;
                     }
                     let flush_result = {
                         let EmitterTaskState {
@@ -1310,7 +1450,7 @@ impl EmitterTaskLoop<'_> {
                                 .await;
                         }
                     }
-                    break;
+                    break EmitterEnding::InteractionStopped;
                 }
                 RelayInteractionEvent::Wake => {
                     let retry_was_active = self.state.retry.is_active();
@@ -1968,6 +2108,8 @@ impl EmitterBatchContext<'_> {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use nervix_connector::{SinkFinishResult, SinkLifecycle};
+
     use super::*;
     use crate::runtime::test_fixtures::{input_batch, sink_context};
 
@@ -2378,6 +2520,83 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn connector_status_progress_keeps_publish_and_commit_failures() {
+        use meticulous::OptionExt as _;
+
+        for kind in [EmitterRetryKind::Infrastructure, EmitterRetryKind::Commit] {
+            let context = sink_context();
+            let host = context.sink_host();
+            let reason = "the broker did not answer within ACK TIMEOUT 10s";
+            let backoff = Duration::from_secs(1);
+            context.record_retry(reason, backoff, kind);
+
+            host.clear_transient_error();
+
+            let failure = context
+                .status
+                .snapshot()
+                .assured("connection progress preserves the task's unresolved failure");
+            assert_eq!(failure.error, reason);
+            let retry = failure
+                .retry
+                .as_ref()
+                .assured("record_retry supplied the pending retry");
+            assert_eq!(retry.kind, kind);
+            assert_eq!(retry.reconnect.backoff, backoff);
+
+            context.status.clear();
+            assert!(context.status.snapshot().is_none());
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn connector_and_task_failures_are_both_described() {
+        let context = sink_context();
+        let host = context.sink_host();
+        let task_reason = "mqtt client refused the record: Request channel is full";
+        let connector_reason =
+            "resolving MQTT host 'mqtt.nervix.test' failed: the name does not exist";
+        let backoff = Duration::from_secs(1);
+
+        context.record_retry(task_reason, backoff, EmitterRetryKind::Infrastructure);
+        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
+
+        let observed = transient_error(&context).assured("both failures remain published");
+        assert!(observed.contains(task_reason), "{observed}");
+        assert!(observed.contains(connector_reason), "{observed}");
+
+        let selected = context
+            .status
+            .snapshot()
+            .assured("the task retry is active");
+        let retry = selected.retry.as_ref().assured("the task selected a retry");
+        assert_eq!(retry.kind, EmitterRetryKind::Infrastructure);
+        assert_eq!(retry.reconnect.backoff, backoff);
+
+        host.clear_transient_error();
+        assert_eq!(transient_error(&context).as_deref(), Some(task_reason));
+        host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
+        context.status.clear();
+        assert_eq!(transient_error(&context).as_deref(), Some(connector_reason));
+        host.clear_transient_error();
+        assert!(context.status.snapshot().is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn connector_status_failure_survives_task_success() {
+        let context = sink_context();
+        let host = context.sink_host();
+        let reason = "the MQTT connection is unavailable";
+        host.record_transient_error(reason.to_string(), Duration::from_millis(25));
+
+        context.status.clear();
+
+        assert_eq!(transient_error(&context).as_deref(), Some(reason));
+        host.clear_transient_error();
+        assert!(context.status.snapshot().is_none());
+    }
+
+    #[nervix_primitives::test]
     async fn sink_host_delegates_runtime_services_and_general_error_policy() {
         let context = sink_context();
         let host = context.sink_host();
@@ -2457,5 +2676,154 @@ mod tests {
         acks.acknowledge();
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         assert!(SinkAcknowledgements::new(AckSet::empty()).is_empty());
+    }
+
+    /// A sink whose transport client still holds records once the loop ends. It answers its
+    /// finish as `answer` says and reports the deadline the host finished it by.
+    struct HoldingSink {
+        answer: fn() -> SinkFinishResult,
+        finished_by: watch::Sender<Option<Instant>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SinkLifecycle for HoldingSink {
+        async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+            self.finished_by.send_replace(Some(deadline));
+            (self.answer)()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmitterSink for HoldingSink {
+        fn lifecycle(&self) -> &dyn SinkLifecycle {
+            self
+        }
+
+        fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+            self
+        }
+
+        async fn publish_batches(
+            &mut self,
+            _context: &EmitterSinkContext,
+            _publication: EmitterPublication<'_>,
+        ) -> EmitterRuntimeResult<()> {
+            Ok(())
+        }
+    }
+
+    /// The state of an emitter whose open sink is a [`HoldingSink`] answering `answer`, and what
+    /// reports the deadline that sink was finished by.
+    fn holding_task_state(
+        context: &EmitterSinkContext,
+        answer: fn() -> SinkFinishResult,
+    ) -> (EmitterTaskState, watch::Receiver<Option<Instant>>) {
+        let (finished_by, finished) = watch::channel(None);
+        let state = EmitterTaskState::new(
+            EmitterSinkState::opened(Box::new(HoldingSink {
+                answer,
+                finished_by,
+            })),
+            EmitterBatchBuffer::default(),
+            RuntimeReconnectBackoff::default(),
+            context,
+        );
+        (state, finished)
+    }
+
+    fn transient_error(context: &EmitterSinkContext) -> Option<String> {
+        context
+            .runtime
+            .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
+            .error
+    }
+
+    #[nervix_primitives::test]
+    async fn teardown_finishes_the_sink_by_the_deadline_its_stopping_execution_gave() {
+        let context = sink_context();
+        let (mut state, finished) = holding_task_state(&context, || Ok(SinkFinish::Flushed));
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        state
+            .finish_after_loop(&context, "test", EmitterEnding::Teardown, Some(deadline))
+            .await;
+
+        assert_eq!(
+            *finished.borrow(),
+            Some(deadline),
+            "teardown finishes the sink by the deadline on the task's stop signal"
+        );
+        assert_eq!(
+            transient_error(&context),
+            None,
+            "a client that sent what it held leaves no transient error"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn teardown_reports_the_records_a_finish_left_unsent() {
+        let context = sink_context();
+        let mut events = context.runtime.events().subscribe();
+        let (mut state, _finished) = holding_task_state(&context, || {
+            Err(Report::new(SinkFinishError::Unsent {
+                sink: "test",
+                records: 2,
+            }))
+        });
+
+        state
+            .finish_after_loop(
+                &context,
+                "test",
+                EmitterEnding::Teardown,
+                Some(Instant::now()),
+            )
+            .await;
+
+        let error = transient_error(&context).expect("an unsent finish is the transient error");
+        assert_eq!(
+            error,
+            "test sink's transport client still held 2 records when its finish deadline passed"
+        );
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("the unsent finish publishes an error event");
+        assert_eq!(
+            message,
+            "emitter 'output' in domain 'emitter_tests' stopped before its test transport client \
+             sent every record it held: test sink's transport client still held 2 records when \
+             its finish deadline passed"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_task_ended_without_a_stop_deadline_leaves_its_sink_unfinished() {
+        let context = sink_context();
+        let (mut state, finished) = holding_task_state(&context, || Ok(SinkFinish::Flushed));
+
+        state
+            .finish_after_loop(&context, "test", EmitterEnding::InteractionStopped, None)
+            .await;
+
+        assert_eq!(
+            *finished.borrow(),
+            None,
+            "nothing bounds a finish the task was given no deadline for"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_without_an_open_sink_holds_nothing_to_finish() {
+        let mut sink = EmitterSinkState::Unavailable {
+            reason: "test sink is unavailable".to_string(),
+        };
+
+        let finished = sink
+            .finish_transport(Instant::now())
+            .await
+            .expect("an emitter without a client has nothing to send");
+
+        assert_eq!(finished, SinkFinish::NothingHeld);
     }
 }

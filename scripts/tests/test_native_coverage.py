@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
             [producer.name for producer in native_coverage.PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom", "test-turmoil",
+             "test-primitives-deloxide", "nspl-completion-walk", "validate-connector-matrix", "test-shuttle", "test-loom", "test-turmoil",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
              "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
@@ -1324,7 +1324,9 @@ class CollectTests(unittest.TestCase):
             return {
                 "selection": "deloxide",
                 "verdict": verdict,
-                "workspace": {"attempt": "target/native-coverage-build-deloxide/test-deloxide/deloxide/run.x"},
+                "stages": [{"name": name, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0} for name in ("build", "workloads")],
+                "build_measurements": [{"kind": kind, "duration_seconds": 0.5} for kind in ("initial", "warm")],
+                "workspace": {"attempt": "target/native-coverage-build-deloxide/test-deloxide/deloxide/run.x", "instrumented": True},
                 "counts": {"discovered": 3, "selected": 2, "executed": 2, "completed": 2},
                 "workloads": [{"id": "probe.a", "completed": True}, {"id": "probe.b", "completed": True}],
                 "findings": {"observations": 4, "qualifying": 4},
@@ -1354,7 +1356,7 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn("instrument-coverage", lane["RUSTFLAGS"])
         self.assertEqual(record["instrumentation"]["instrumented_crates"], "workspace")
 
-        for case, content in {"no record": None, "a failed lane": lane_record("failed")}.items():
+        for case, content in {"no record": None, "a failed lane": lane_record("failed"), "builds only": lane_record("built")}.items():
             with self.subTest(case=case):
                 self.setUp()
                 commands = FakeCommands(self.root, {"test-deloxide-workloads": writes(content)})
@@ -1378,7 +1380,9 @@ class CollectTests(unittest.TestCase):
                 path.write_text(json.dumps({
                     "selection": selection,
                     "verdict": "complete",
-                    "workspace": {"attempt": "target/native-coverage-build-deloxide-stress/test-deloxide/x/run.y"},
+                    "stages": [{"name": name, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0} for name in ("build", "workloads")],
+                    "build_measurements": [{"kind": kind, "duration_seconds": 0.5} for kind in ("initial", "warm")],
+                    "workspace": {"attempt": "target/native-coverage-build-deloxide-stress/test-deloxide/x/run.y", "instrumented": True},
                     "counts": {"discovered": 2, "selected": 2, "executed": 2, "completed": 2},
                     "workloads": [{"id": "stress.a", "completed": True}],
                     "findings": {"observations": 1, "qualifying": 1},

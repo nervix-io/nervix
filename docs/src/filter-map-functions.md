@@ -1367,6 +1367,9 @@ literal is the nearest binary float, which can lie on either side of a decimal t
 - `round(2.675, 2)` is `2.67`, because the `F64` nearest to `2.675` is slightly below it.
 - An `F32` rounds its own stored value: the `F32` nearest to `0.15` is slightly above `0.15`, so
   `round(x, 1)` of that `F32` is `0.2`.
+- At a power of two the adjacent float toward zero can be closer than the adjacent float away
+  from zero. For the `F64` value `5.0321474762477604e-234`, rounding to 249 places returns the
+  adjacent value toward zero, `5.03214747624776e-234`.
 
 A float result that is zero keeps the sign of `x`, as `round(-0.004, 2)` is `-0.0`. Rounding to a
 multiple of a power of ten can exceed the largest finite value, as `round(1.7976931348623157e308,

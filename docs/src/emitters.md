@@ -149,6 +149,42 @@ discard a record.
 
 ### Client emitters
 
+<!-- connector-matrix:emit-client-consumer:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO CLIENT SCHEMA <schema>
+    MODE <mode>
+  <construction>
+  BATCH MAX MESSAGES <count> MAX SIZE <bytes>
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SCHEMA &lt;schema&gt; |
+| Locator and validation rule | Not offered: The body references the native schema; there is no external topic, queue or table to locate. |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope. |
+| Body | native Arrow output; no codec |
+| BATCH | required |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | batches retained for consumers on a node: at most 134217728 bytes; when full, holds back what fills it |
+| Network waits | a delivery attempt: `ACK TIMEOUT` |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [CLIENT CONSUMER capability and mirror reference](connector-capabilities.md#client-consumer-emit).
+<!-- connector-matrix:emit-client-consumer:end -->
+
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter connects
 construction, competing consumers, application ACK, buffering and lifecycle in a complete graph.
 
@@ -194,13 +230,43 @@ request through host preparation, the connector, retry, lifecycle and qualificat
 An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
 selection in this order:
 
-```nspl,ignore
-TO HTTP <client>
-  METHOD <string_expression>
-  PATH <string_expression>
-  MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-  (ENCODE USING <codec> | WITHOUT BODY)
+<!-- connector-matrix:emit-http-request:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO HTTP <client>
+  (METHOD 'POST')
+  (PATH '/events')
+    MODE <mode>
+    ENCODE USING <codec> | WITHOUT BODY
+  <construction>
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | HTTP client |
+| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
+| Headers | `write_header` |
+| Body | ENCODE USING &lt;codec&gt; \| WITHOUT BODY |
+| BATCH | unavailable: send one request per record |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |
+| Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-emit).
+<!-- connector-matrix:emit-http-request:end -->
 
 `METHOD` and `PATH` are structured expressions. They may read qualified source fields such as
 `input.method` and `input.path`; parentheses, arrays and string literals keep clause words inside
@@ -318,11 +384,16 @@ The HTTP sink speaks HTTP/1.1. It creates a connection for each attempt and clos
 headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
 connection acquisition, TLS negotiation, the complete request send, interim responses and
 complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
-request and host retry backoff do not consume the next attempt's timeout. HTTPS validates trust and
+request and host retry backoff do not consume the next attempt's timeout. Resolving the endpoint's
+host takes at most half of `timeout_ms`, whatever the name servers do, and each address it resolves
+to is tried in turn within an equal share of what is left, so an address that never answers leaves
+the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
 the destination hostname and uses the client's pinned CA and optional client certificate mounts.
 Starting the sink reads local configuration and sends no probe.
 
-The transport writes `Host`, `Connection: close`, and `Content-Length` when a body exists. It adds
+The transport writes `Host`, `Connection: close`, and `Content-Length`: the body's length when a
+body exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
+a length expect; any other method declared `WITHOUT BODY` carries no `Content-Length`. It adds
 `Accept: */*` only when the application did not write `Accept`. It adds no `Accept-Encoding` or
 `Content-Type`. The application may write `Accept`, `Content-Type`, `Authorization`, and `Cookie`
 with `write_header`. Response cookies are
@@ -645,9 +716,9 @@ to another broker checks against the new one's. A Pulsar topic can also set a sm
 `maxMessageSize` policy of its own. Only the broker applies it, measuring the metadata and payload
 with ten bytes of framing, so such a message is written and refused afterwards. In `MODE ACK` the
 refusal rejects every member the same way, with the broker's reason, such as
-`pulsar rejected record: the Pulsar broker does not allow the message: Exceed maximum message
+`PULSAR rejected record: the Pulsar broker does not allow the message: Exceed maximum message
 size`. In `MODE NO_ACK` the message was already delivered when the producer accepted it, so the
-refusal is not observed.
+refusal is reported at finish through the sink's typed failure, after that earlier completion.
 
 The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
 setting that AMQP never tells a client, and the broker compares it with the message body alone. A
@@ -915,39 +986,150 @@ CREATE IF NOT EXISTS CLIENT kafka_tls
   };
 ```
 
+## Client Deadlines
+
+A client's `timeout_ms` and `connect_timeout_ms` mean the same thing for every connector that reads
+them. `timeout_ms` bounds the whole of one request or operation: name resolution, connection setup,
+TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name resolution, the
+address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
+milliseconds.
+
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `ZEROMQ` and the Iceberg emitter's object-store
+clients read `timeout_ms`; an `HTTP` request emitter's client requires it. A `RABBITMQ` client's
+`timeout_ms` bounds the round trip that ends a `NO_ACK` write. `RABBITMQ`, `REDIS`, `SYSLOG` and
+`ZEROMQ` clients read `connect_timeout_ms`, and allow 30 seconds when it is left out; a `REDIS`
+command pool also waits no longer than that to check out a connection. A `RABBITMQ` client's
+`connect_timeout_ms` covers resolving the broker, the address attempts, TLS, the AMQP handshake,
+opening the emitter's channel, selecting publisher confirms under `ACK` and checking its queue. A
+`ZEROMQ` client's `connect_timeout_ms` covers a connect-mode socket's connection and its ZMTP
+handshake, and its `timeout_ms` bounds each send. A request, send, connection or round trip that
+runs out of its deadline becomes the emitter's transient status, and the emitter retries on its
+policy; a deadline that runs out is reported naming the key and its bound.
+[Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
+bounds each one, including the waits nothing bounds yet.
+
 ## Supported Emitter Sinks
 
 ### Kafka
 
-```nspl,ignore
-TO KAFKA <client> TOPIC <topic>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-     | ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
-         RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-kafka-topic:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO KAFKA <client> TOPIC orders
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | KAFKA client |
+| Locator and validation rule | TOPIC orders (topic_name) |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | `write_header` |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT` |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
+<!-- connector-matrix:emit-kafka-topic:end -->
+
 `ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration; Nervix's `ACK TIMEOUT` independently bounds
-the report wait. `NO_ACK` is fire-and-forget after local admission: Nervix acknowledges the
-emitter's `ATTACHED` ACK share when librdkafka accepts the record into its producer queue and does
-not wait for a delivery report. A later broker error, producer timeout, crash, or process exit can
-therefore lose an accepted record. A full local queue is an infrastructure condition paced by the
-declared retry policy with backpressure. Graceful shutdown drains queued records within the node
-drain bound in both modes. A definitive record-specific rejection, such as an oversized message,
-follows `ON MESSAGE ERROR`.
+compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
+also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
+name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
+the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
+delivering it later beside the copy the retry sends. An `ACK TIMEOUT` longer than the 2147483647
+milliseconds librdkafka holds refuses the emitter when it starts. `NO_ACK` is fire-and-forget after
+local admission: Nervix acknowledges the emitter's `ATTACHED` ACK share when librdkafka accepts the
+record into its producer queue and does not wait for a delivery report. A later broker error,
+producer timeout, crash, or process exit can therefore lose an accepted record. In `ACK`, a full
+local queue applies backpressure: Nervix waits for the oldest outstanding delivery report, settles
+it, and tries to enqueue the same refused record again. The effective confirmation window is
+limited by both `MAX` and the producer queue's record and byte capacities. If no outstanding report
+remains, Nervix waits for the native delivery callback to release its queue place, bounded by
+`ACK TIMEOUT`. An unanswered or failed delivery report still ends the attempt after settling every
+answer already given, and only unresolved records are retried. In `NO_ACK`, a temporarily full
+queue is an infrastructure condition paced by the declared retry policy. In either mode, a record
+whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
+`ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
+the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
+When the emitter stops, it flushes what the producer still queues, in both modes and
+regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
+the node's graceful shutdown each give that flush their deadline. Records still awaiting their
+delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
+transient error, counting records alone and never the errors or statistics waiting in librdkafka's
+queue beside them, and a replacement that cannot flush fails and keeps the running emitter. Because
+a record counts until its delivery report arrives, the producer always reports every record and
+overrides `delivery.report.only.error` in the client's `CONFIG`. A definitive record-specific
+rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 
 ### Pulsar
 
-```nspl,ignore
-TO PULSAR <client> TOPIC <topic>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-     | ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
-         RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-pulsar-topic:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO PULSAR <client> TOPIC orders
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
-`ACK` waits for each broker receipt. `NO_ACK` acknowledges producer acceptance and does not expose
-later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
-pipelines producer work.
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | PULSAR client |
+| Locator and validation rule | TOPIC orders (topic_name) |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | `write_header` |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | receipts held under NO ACK: at most 100 receipts; when full, holds back what fills it<br>messages the driver queues for its connection: driver default, 100 messages; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 10 s per address<br>topic lookup, producer creation and receipts: driver default, the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK |
+| Driver limits | Messages above the broker's announced maximum are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-emit).
+<!-- connector-matrix:emit-pulsar-topic:end -->
+
+`ACK` waits for each broker receipt, for up to `ACK TIMEOUT` after that record's hand-over. The
+driver uses the same timeout, including values longer than thirty seconds. If a later enqueue
+fails, receipts already given are settled before retry, so confirmed records are not sent again.
+`NO_ACK` acknowledges producer acceptance and does not expose later broker errors as per-record
+outcomes; its throughput advantage may be smaller than Kafka's because Pulsar already pipelines
+producer work. On stop, Nervix waits for the accepted messages' outstanding receipts until the
+stop's deadline. A driver failure or receipts still unanswered then fail the finish and are
+reported by the host. This final wait does not change the earlier `NO_ACK` completion point.
+Receipt bookkeeping is bounded to 100 accepted messages, matching the driver's outbound channel
+capacity. At that bound, another hand-over waits for a receipt to free a place; the accepted
+records keep their earlier completion point.
 
 A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
 connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
@@ -968,12 +1150,42 @@ Pulsar TLS currently supports server trust configuration only. Nervix does not y
 
 ### RabbitMQ
 
-```nspl,ignore
-TO RABBITMQ <client> QUEUE <queue>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-     | ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
-         RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-rabbitmq-queue:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO RABBITMQ <client> QUEUE orders
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | RABBITMQ client |
+| Locator and validation rule | QUEUE orders (queue_name) |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | `write_header` |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
+| Driver limits | A frame above the negotiated frame_max ends the connection. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
+
+See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
+<!-- connector-matrix:emit-rabbitmq-queue:end -->
 
 `ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
 infrastructure failure and is retried with backpressure. In `NO_ACK` the broker confirms nothing,
@@ -981,7 +1193,10 @@ so once a write's messages are on the channel, the emitter asks the channel for 
 which the broker answers only after it has taken every message written before it, and that answer
 acknowledges them. A `NO_ACK` write therefore waits for one round trip to the broker however many
 messages it carries, and a channel or connection lost before the answer leaves the write's messages
-to the retry.
+to the retry. When the client sets `timeout_ms`, a round trip the broker does not answer within it
+fails the write, reported naming the key and its bound, and leaves the write's messages to the
+retry, which reopens the emitter's connection first. Without `timeout_ms` the round trip waits as
+long as the connection lives.
 
 The broker's `max_message_size`, 16 MiB by default in RabbitMQ 4.x, bounds each message body;
 headers do not count. The broker closes the channel a larger body arrives on, and the emitter
@@ -992,18 +1207,52 @@ acknowledging it, then keeps publishing on a new channel of the same connection;
 The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
 when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
 on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
-an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection and, for
-`amqps`, the TLS handshake have 30 seconds together; the broker certificate must name the host
-`addr` names. A connection that fails, including a name that does not resolve, leaves the emitter
-unavailable with the failure as its transient error; it confirms nothing, so its input stays
-unacknowledged, and it reopens on its `RETRY POLICY` backoff.
+an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection, for
+`amqps` the TLS handshake, the AMQP handshake, opening the channel, selecting publisher confirms
+under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 seconds when it is
+left out; the broker certificate must name the host `addr` names. A connection that fails or runs
+out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
+the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
+reopens on its `RETRY POLICY` backoff.
 
 ### Redis Pub/Sub
 
-```nspl,ignore
-TO REDIS PUBSUB <client> CHANNEL <channel>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-redis-pubsub:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO REDIS PUBSUB <client> CHANNEL orders
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | REDIS client |
+| Locator and validation rule | CHANNEL orders (channel_name) |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | checking out a connection, a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to a PUBLISH: driver default, 500 ms |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+
+See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
+<!-- connector-matrix:emit-redis-pubsub:end -->
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
@@ -1016,15 +1265,49 @@ still verifies the configured hostname and uses its configured CA and optional c
 
 ### MQTT
 
-```nspl,ignore
-TO MQTT <client> TOPIC <topic>
-  MODE QOS 0 RETRY POLICY BACKOFF <duration> MAX <duration>
-     | QOS (1 | 2) ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
-         RETRY POLICY BACKOFF <duration> MAX <duration>
+The default client identity is `<domain>~<emitter>`. A `client_id` in the client configuration
+overrides that identity.
+
+<!-- connector-matrix:emit-mqtt-topic:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO MQTT <client> TOPIC orders
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
-QoS 0 acknowledges client acceptance. QoS 1 waits for `PUBACK`; QoS 2 waits for the complete
-exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | MQTT client |
+| Locator and validation rule | TOPIC orders (topic_name) |
+| Modes (complete bodies after MODE) | QOS 0 RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | publishes queued for the driver: set by 1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2; when full, fails the publish for the host to retry |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded |
+| Driver limits | Packets above the broker's maximum packet size are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
+<!-- connector-matrix:emit-mqtt-topic:end -->
+
+QoS 0 acknowledges client acceptance, and QoS 0 publishes still queued in the client when the
+emitter stops are discarded with it, which the node logs at `warn`. QoS 1 waits for `PUBACK`; QoS 2
+waits for the complete exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
 policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
@@ -1044,34 +1327,145 @@ QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
 
 ### NATS
 
-```nspl,ignore
-TO NATS <client> SUBJECT <subject>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-     | JETSTREAM ACK (SEQUENTIAL | PARALLEL MAX <n>) ACK TIMEOUT <duration>
-         RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-nats-subject:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO NATS <client> SUBJECT orders
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | NATS client |
+| Locator and validation rule | SUBJECT orders (subject_name) |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | `write_header` |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush: unbounded<br>a JetStream acknowledgement: `ACK TIMEOUT` |
+| Driver limits | Messages above the server's max_payload are rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
+<!-- connector-matrix:emit-nats-subject:end -->
 
 `NO_ACK` publishes through Core NATS and acknowledges after the connection flush. `JETSTREAM`
 waits for one `PubAck` per record. The stream must already exist and capture the subject; a missing
 stream is an infrastructure error that remains under backpressure until an operator provisions it.
 
+`JETSTREAM` hands records to the client one after another, with at most `MAX <n>` of them awaiting
+their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
+hand-over. A publish that fails, because a `PubAck` failed or did not arrive in time, or because the
+client did not take a record within `ACK TIMEOUT` while its connection stopped draining, first
+settles every `PubAck` JetStream already returned: a confirmed record is delivered and never sent
+again. The retry sends the records whose `PubAck` never arrived, which JetStream may already hold,
+so delivery is at least once.
+
 ### ZeroMQ
 
-```nspl,ignore
-TO ZEROMQ <client>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-zeromq-push:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO ZEROMQ <client>
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | ZEROMQ client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | bytes queued for a peer: unbounded |
+| Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |
+| Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
+
+See the [ZEROMQ PUSH capability and mirror reference](connector-capabilities.md#zeromq-push-emit).
+<!-- connector-matrix:emit-zeromq-push:end -->
 
 ZeroMQ has no delivery acknowledgment; success is socket acceptance. Transient socket failures are
 paced by the declared retry policy.
 
+A client that connects rather than binds connects when the emitter starts. The driver retries a
+refused connection on its own and waits for the peer's ZMTP handshake, so the client's
+`connect_timeout_ms`, 30 seconds when it is left out, is what ends the attempt of a peer that never
+accepts: the start fails naming the key and its bound, and the emitter opens the socket again on its
+retry policy. The driver has no high-water mark, so a send to a peer that stops reading waits until
+the connection's buffers drain. The client's `timeout_ms` bounds that wait for each send; a send that
+runs out of it fails the publish, and the emitter opens a new socket and sends the message again,
+since the one it left partly written on the old connection is never completed. Without `timeout_ms`
+a send waits for as long as the peer reads nothing.
+
 ### Syslog
 
-```nspl,ignore
-TO SYSLOG <client>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-  ENCODE USING <codec>
+<!-- connector-matrix:emit-syslog-collector:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO SYSLOG <client>
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SYSLOG client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+
+See the [SYSLOG COLLECTOR capability and mirror reference](connector-capabilities.md#syslog-collector-emit).
+<!-- connector-matrix:emit-syslog-collector:end -->
 
 The client sends UDP datagrams, persistent RFC 6587 TCP frames, or RFC 5425 TLS frames. TCP uses
 octet-counting by default and may select non-transparent framing; TLS always uses octet counting.
@@ -1086,10 +1480,43 @@ octet-counted TCP/TLS frame, or one non-transparent TCP frame when it contains n
 
 ### SQS
 
-```nspl,ignore
-TO SQS <client> QUEUE <queue> [FIFO GROUP (FROM BRANCH | <string_expression>)]
-  MODE (SINGLE | BATCH) RETRY POLICY BACKOFF <duration> MAX <duration>
+<!-- connector-matrix:emit-sqs-queue:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO SQS <client> QUEUE orders
+  [FIFO GROUP tenant | FIFO GROUP FROM BRANCH]
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SQS client |
+| Locator and validation rule | QUEUE orders (queue_name) |
+| Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |
+| Headers | `write_header` |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | 256KiB |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |
+| Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-emit).
+<!-- connector-matrix:emit-sqs-queue:end -->
 
 `SINGLE` issues one request per message. `BATCH` groups messages within SQS's fixed limit of ten
 entries and 256 KiB per request; both modes issue requests sequentially and acknowledge service
@@ -1139,6 +1566,43 @@ the emitter's `WHERE` drops is never sent, so a failure of its group is never re
 
 ### Sentry
 
+<!-- connector-matrix:emit-sentry-event:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO SENTRY <client>
+    MODE <mode>
+    ENCODE USING <codec>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | SENTRY client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported. |
+| Body | ENCODE USING &lt;codec&gt; |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | yes |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; unbounded when omitted |
+| Driver limits | An event above 1,000,000 bytes is rejected. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [SENTRY EVENT capability and mirror reference](connector-capabilities.md#sentry-event-emit).
+<!-- connector-matrix:emit-sentry-event:end -->
+
 Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and
 public key:
 
@@ -1168,6 +1632,13 @@ protocol, such as `message`, `level`, `environment`, `release`, `tags`, `extra`,
 authentication header from the DSN, and submits the event. An invalid event object is handled as a
 route-local encoding error.
 
+Nervix prepares and retains the complete encoded envelope once per payload, before its first
+publish attempt. If `event_id` is omitted, Nervix generates a UUID once during that preparation.
+A supplied valid `event_id` keeps its exact spelling, including hyphens and letter case; the
+envelope header and event body carry the same value. Every retry of the retained payload sends
+the same envelope bytes, including the event id and any default fields, even when the connector
+is reopened after a failed request.
+
 Sentry sends one event per envelope and acknowledges the successful HTTP response. On `429` or
 `503`, Nervix honors `Retry-After` and `X-Sentry-Rate-Limits`; the server interval extends the
 declared retry delay when it is longer.
@@ -1187,6 +1658,133 @@ Sentry resolves the DSN endpoint through the node's configured DNS resolver; a `
 includes that lookup, connection setup, TLS, and the response.
 
 ### OTEL
+
+#### OTEL LOGS
+
+<!-- connector-matrix:emit-otel-logs:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO OTEL <client> LOGS
+    VALUES { '<field>' = <expression>, ... }
+  [ATTRIBUTES {'tenant' = 'eu'}]
+  [RESOURCE {'service.name' = 'nervix'}]
+  [SCOPE 'nervix' VERSION '1.0']
+    MODE <mode>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | OTEL client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | the export request of a publish without BATCH: unbounded |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | gRPC responses above 4 MiB are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [OTEL LOGS capability and mirror reference](connector-capabilities.md#otel-logs-emit).
+<!-- connector-matrix:emit-otel-logs:end -->
+
+#### OTEL TRACES
+
+<!-- connector-matrix:emit-otel-traces:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO OTEL <client> TRACES
+    VALUES { '<field>' = <expression>, ... }
+  [ATTRIBUTES {'tenant' = 'eu'}]
+  [RESOURCE {'service.name' = 'nervix'}]
+  [SCOPE 'nervix' VERSION '1.0']
+    MODE <mode>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | OTEL client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | the export request of a publish without BATCH: unbounded |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | gRPC responses above 4 MiB are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [OTEL TRACES capability and mirror reference](connector-capabilities.md#otel-traces-emit).
+<!-- connector-matrix:emit-otel-traces:end -->
+
+#### OTEL METRICS
+
+<!-- connector-matrix:emit-otel-metrics:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO OTEL <client>
+  (METRIC 'temperature' UNIT 'Cel' GAUGE | METRIC 'requests' UNIT '1' SUM MONOTONIC DELTA | METRIC 'latency' UNIT 'ms' HISTOGRAM CUMULATIVE)
+    VALUES { '<field>' = <expression>, ... }
+  [ATTRIBUTES {'tenant' = 'eu'}]
+  [RESOURCE {'service.name' = 'nervix'}]
+  [SCOPE 'nervix' VERSION '1.0']
+    MODE <mode>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | OTEL client |
+| Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `METRIC 'temperature' UNIT 'Cel' GAUGE` (composed clause); `METRIC 'requests' UNIT '1' SUM MONOTONIC DELTA` (composed clause); `METRIC 'latency' UNIT 'ms' HISTOGRAM CUMULATIVE` (composed clause); required<br>`ATTRIBUTES {'tenant' = 'eu'}` (named expressions); optional; omitted when unset<br>`RESOURCE {'service.name' = 'nervix'}` (named expressions); optional; omitted when unset<br>`SCOPE 'nervix' VERSION '1.0'` (composed clause); optional; omitted when unset |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | the export request of a publish without BATCH: unbounded |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | gRPC responses above 4 MiB are refused. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [OTEL METRICS capability and mirror reference](connector-capabilities.md#otel-metrics-emit).
+<!-- connector-matrix:emit-otel-metrics:end -->
 
 OTEL emission is a codec-free direct sink for OTLP logs, traces, and metric data points. It uses a
 `TYPE OTEL` client and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
@@ -1333,6 +1931,43 @@ endpoint must already exist; an unreachable endpoint remains an initialization o
 
 ### ClickHouse
 
+<!-- connector-matrix:emit-clickhouse-table:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO CLICKHOUSE <client> INSERT TO TABLE orders
+    VALUES { '<field>' = <expression>, ... }
+    MODE <mode>
+  <construction>
+  BATCH MAX MESSAGES <count> MAX SIZE <bytes>
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | CLICKHOUSE client |
+| Locator and validation rule | INSERT TO TABLE orders (table_name) |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | No entity-specific options. |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | required |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | The connector holds no buffer between its transport and the host. |
+| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; unbounded when omitted |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [CLICKHOUSE TABLE capability and mirror reference](connector-capabilities.md#clickhouse-table-emit).
+<!-- connector-matrix:emit-clickhouse-table:end -->
+
 ```nspl
 CREATE EMITTER to_ch
   FROM notifications
@@ -1389,9 +2024,11 @@ stores unchanged, where schemaful JSON codecs write padded base64.
 For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
 record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
 record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
-land and only poison rows follow `ON MESSAGE ERROR`. Isolation can reapply rows from the failed
-insert; use the sink's idempotent write facilities where available. Dividing a flush into inserts
-also means one flush is not an atomic database transaction.
+land and only poison rows follow `ON MESSAGE ERROR`. Postgres and MySQL re-execute them on the
+connection the failed insert already holds, so isolation does not wait for the client's pool again,
+as [Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
+reapply rows from the failed insert; use the sink's idempotent write facilities where available.
+Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
 SQLSTATE and code. Destination response text can quote a bound value, so it is not included in
 diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
@@ -1423,11 +2060,43 @@ healthy records are re-executed.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
-```nspl,ignore
-ON CONFLICT ("postgres_user_id") DO UPDATE
-ON CONFLICT ("postgres_user_id") DO NOTHING
-ON CONFLICT DO NOTHING
+<!-- connector-matrix:emit-postgres-table:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO POSTGRES <client> INSERT TO TABLE orders
+    VALUES { '<field>' = <expression>, ... }
+  [ON CONFLICT DO NOTHING | ON CONFLICT ('id') DO UPDATE]
+    MODE <mode>
+  <construction>
+  BATCH MAX MESSAGES <count> MAX SIZE <bytes>
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | POSTGRES client |
+| Locator and validation rule | INSERT TO TABLE orders (table_name) |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | required |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | a pool acquire: name resolution, connection, TLS and authentication: fixed 30s<br>an insert and its metadata query: unbounded |
+| Driver limits | None declared. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
+<!-- connector-matrix:emit-postgres-table:end -->
 
 `DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, and requires a conflict target. `DO NOTHING` may be used with or without a target.
 Postgres refuses a `DO UPDATE` insert that carries one conflict key twice, so such an insert is
@@ -1474,16 +2143,52 @@ MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INS
 `MAX MESSAGES` records and no more than fit the 65,535 placeholders one statement binds, and its
 statement text and bound values measure at most `MAX SIZE` bytes, as
 [Database writes](#database-writes) describes. The insert result acknowledges those records.
+An insert and its row-by-row isolation use one borrowed connection, returned before the next
+insert. Isolation obtains each row's outcome without a second acquisition from the client's pool,
+even when other emitters are waiting. The host handles those outcomes when the write completes.
 Conflict clauses are the user's tool for bounding duplicates when poison isolation re-executes a
 failed insert. Declare a `MAX SIZE` no larger than the server's `max_allowed_packet`, 64 MiB by
 default on MySQL 8.x, which the client applies to every packet it sends.
 
 MySQL emitters may include an insert conflict policy after `VALUES`:
 
-```nspl,ignore
-ON CONFLICT DO UPDATE
-ON CONFLICT DO NOTHING
+<!-- connector-matrix:emit-mysql-table:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO MYSQL <client> INSERT TO TABLE orders
+    VALUES { '<field>' = <expression>, ... }
+  [ON CONFLICT DO NOTHING | ON CONFLICT DO UPDATE]
+    MODE <mode>
+  <construction>
+  BATCH MAX MESSAGES <count> MAX SIZE <bytes>
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | MYSQL client |
+| Locator and validation rule | INSERT TO TABLE orders (table_name) |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT DO UPDATE` (keyword choice); optional; omitted when unset |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | required |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | connection, its handshake and an insert: unbounded |
+| Driver limits | The driver has no connect, read or write timeout. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
+<!-- connector-matrix:emit-mysql-table:end -->
 
 MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table, so the NSPL conflict policy does not accept a target list. `DO UPDATE` uses `ON DUPLICATE KEY UPDATE` for all mapped `VALUES` columns. `DO NOTHING` uses a no-op duplicate-key update.
 
@@ -1536,10 +2241,43 @@ is genuinely NULL is still written as BSON null.
 
 MongoDB emitters may include an insert conflict policy after `VALUES`:
 
-```nspl,ignore
-ON CONFLICT ("mongodb_user_id") DO UPDATE
-ON CONFLICT ("mongodb_user_id") DO NOTHING
+<!-- connector-matrix:emit-mongodb-collection:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO MONGODB <client> INSERT TO COLLECTION orders
+    VALUES { '<field>' = <expression>, ... }
+  [ON CONFLICT ('id') DO NOTHING | ON CONFLICT ('id') DO UPDATE]
+    MODE <mode>
+  <construction>
+  BATCH MAX MESSAGES <count> MAX SIZE <bytes>
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | MONGODB client |
+| Locator and validation rule | INSERT TO COLLECTION orders (collection_name) |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `ON CONFLICT ('id') DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | required |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |
+| Driver limits | A document above 16 MiB is rejected. |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |
+
+See the [MONGODB COLLECTION capability and mirror reference](connector-capabilities.md#mongodb-collection-emit).
+<!-- connector-matrix:emit-mongodb-collection:end -->
 
 MongoDB conflict policies require a target list because the emitter must build an explicit upsert filter. Target fields must be mapped in `VALUES`. `DO UPDATE` updates every mapped field except the conflict target fields and inserts the full mapped document when no existing document matches. `DO NOTHING` inserts only when no document matches the target.
 
@@ -1562,6 +2300,46 @@ CREATE CLIENT mongodb
 For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
 
 ### Iceberg
+
+<!-- connector-matrix:emit-iceberg-table:start -->
+```plexus,ignore
+CREATE EMITTER <name>
+  FROM <relay>
+  TO ICEBERG ON (S3 | GCS | AZURE_BLOB) <store> TABLE orders
+    VALUES { '<field>' = <expression>, ... }
+  (LOCATION 's3://warehouse/orders')
+  (CATALOG catalog)
+  (COMMIT EACH 10s MAX SIZE 64MiB)
+    MODE <mode>
+  <construction>
+  [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Angle brackets and alternatives form a synopsis; option values shown are declared examples. Choose one complete mode from the table.
+
+| Capability | Declaration |
+| --- | --- |
+| Reference | S3 \| GCS \| AZURE_BLOB store and catalog clients |
+| Locator and validation rule | TABLE orders (table_name) |
+| Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
+| Options in statement order | `LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
+| Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
+| Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
+| BATCH | optional |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
+| Batch transformation required | no |
+| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |
+| Network waits | catalog requests: unbounded<br>object-store metadata and delete operations: `timeout_ms`; 1m when omitted<br>object-store reads and writes: `timeout_ms`; 10s when omitted |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
+
+See the [ICEBERG TABLE capability and mirror reference](connector-capabilities.md#iceberg-table-emit).
+<!-- connector-matrix:emit-iceberg-table:end -->
 
 ```nspl
 CREATE CLIENT s3_main
@@ -1598,10 +2376,23 @@ CREATE EMITTER iceberg_notifications
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
 
+At open, the emitter checks each mapped column's name and Iceberg type against the loaded table's
+current schema. A missing or incompatible column is a typed configuration failure before any row
+is staged. Nervix narrows UTC `DATETIME` values from nanoseconds to the containing microsecond at
+every depth of a mapped list or nested value, including values before the Unix epoch. A table
+schema changed after open can still fail a later commit and enters the commit retry path.
+
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
 initialization or commit retry path; they do not advance the commit or ACK boundary.
+
+Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
+operation, including DNS, connection, TLS and credential requests. It also bounds each read or
+write call of a streaming object. If omitted, metadata and delete operations allow 60 seconds and
+reads and writes allow 10 seconds. A failed storage call returns to the emitter's declared retry
+policy after one attempt. The operator and the initial table's effective storage settings are
+retained across table metadata refreshes; changing those settings requires reopening the emitter.
 
 GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
 
@@ -1671,23 +2462,47 @@ The REST catalog is the authority for namespace and table metadata. Nervix does 
 
 Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
 local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that
-batch to the Iceberg table, and commits the catalog update. The commit duration starts when a flush
-stages rows while none are staged, and rows later flushes stage join that commit without moving it,
-so a row waits at most `FLUSH EACH` in memory and then at most `COMMIT EACH` after it is staged.
-Staged files that reach `MAX SIZE` are committed at once. Both durations are domain-logical, so a
-paced domain's `TIME RATE` moves the flush and commit boundaries together; the maximum batch and
-commit sizes, the catalog retry backoff, and a drain remain independent of domain pace. The
-temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
+<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
+appends every one of those data files to the Iceberg table in one catalog commit. The commit
+duration starts when a flush stages rows while none are staged, and rows later flushes stage join
+that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
+`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
+together; the maximum batch and commit sizes, the catalog retry backoff, and a drain remain
+independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
+`--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
-ACK boundary. Commit conflicts, incompatible table evolution, a dropped table, and unavailable
+ACK boundary. Commit conflicts, table evolution after open, a dropped table, and unavailable
 catalog or object storage are table-level infrastructure failures: Nervix reports them in runtime
 and drain status and retries all affected staged records with the declared policy and
 backpressure. Record-level expression and construction errors are attributed through `ON MESSAGE
 ERROR` before staging. An ambiguous failure after the catalog commit can append the rows again;
 Iceberg appends are not idempotent. See [ACK Semantics And Effective
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
+
+A commit holds the rows it reads back in memory until it has written them, so before it reads the
+staged files it charges every byte of them to the node's bulk memory class, and returns the charge
+once their rows are in data files. It takes the charge only when the class has room for it now
+rather than waiting in the class's queue, where a commit's charge would take every byte the class
+frees and hold the node's other bulk work behind it. When the class has no room, the commit keeps
+its staged files and their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for
+room in the bulk memory class for <bytes> staged bytes` as the emitter's transient error, and the
+emitter retries the commit with its declared policy and backpressure. The bulk class holds 32 MiB.
+Staged files that together exceed it are read in groups, each the run of consecutive files the
+class can hold, and each group's rows are written into data files of their own and its charge
+returned before the next group is read; the data files of every group are still appended in the
+one catalog commit. A single staged file holds the mapped rows of one input batch, which can be
+larger than the class when a route on the same node flushes batches above 32 MiB. Such a file is
+read alone once the whole class is free, charged with the whole class: that is every byte of it
+the class can account for, and it leaves no room for other bulk work beside the read. Until
+then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of <capacity>
+bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+
+A commit publishes the staged files it found when it began. Rows a flush stages while a failed
+commit waits for its retry are not in that commit's data files, so the retry first appends what the
+commit began with and then commits the newer rows: a retry still publishes everything staged, and
+acknowledges only rows a catalog commit holds.
 
 ## Codec Behavior On Emission
 
@@ -1732,8 +2547,11 @@ resends only records not yet confirmed or definitively rejected. With the
 [batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
 yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
-after a crash or downstream failure. External broker durability and idempotence settings remain
-the user's client and service configuration.
+after a crash or downstream failure. A stop sends what a Kafka producer still queues and waits
+for accepted Pulsar messages' receipts within the stop's deadline. MQTT QoS 0 discards what its
+client still queues; see
+[Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
+idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
 completes only after every attached emitter reaches its sink completion point. A failure on any
@@ -1776,10 +2594,10 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
 `ATTACHED` waits only for that declared point and cannot make an earlier `NO_ACK` boundary durable.
-MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a message after Nervix observes
-client-side acceptance, and RabbitMQ `NO_ACK` after the broker's channel has taken it. `DETACHED`
-cannot turn a confirming mode into fire-and-forget inside the emitter; it changes only whether the
-result participates upstream.
+Kafka and Pulsar `NO_ACK`, MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a
+message after Nervix observes client-side acceptance, and RabbitMQ `NO_ACK` after the broker's
+channel has taken it. `DETACHED` cannot turn a confirming mode into fire-and-forget inside the
+emitter; it changes only whether the result participates upstream.
 
 Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
 graph. Downstream consumers and queries can use that key to suppress retries within that admitted

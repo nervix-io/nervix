@@ -313,6 +313,22 @@ original = ".compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering:
 path = "src/runtime/backup_capture_fence.rs"
 weakened = ".compare_exchange_weak(state, state + 1, Ordering::Release, Ordering::Relaxed)"
 
+[[qualification]]
+failure = "the cut omitted a publication registered before it closed"
+id = "server.backup.relaxed-drain-observation"
+invariant = "server.backup.cut-includes-publication"
+original = "while fence.state.load(Ordering::Acquire) & ACTIVE != 0 {"
+path = "src/runtime/backup_capture_fence.rs"
+weakened = "while fence.state.load(Ordering::Relaxed) & ACTIVE != 0 {"
+
+[[qualification]]
+failure = "a publisher observed the cut generation without its prior writes"
+id = "server.backup.relaxed-cut-close"
+invariant = "server.backup.cut-generation"
+original = "let previous = fence.state.fetch_or(CLOSED, Ordering::Release);"
+path = "src/runtime/backup_capture_fence.rs"
+weakened = "let previous = fence.state.fetch_or(CLOSED, Ordering::Relaxed);"
+
 [[invariant]]
 claim = "Concurrent runtime admission and transport cancellation choose exactly one irreversible relay verdict; later participants cannot overwrite the winner."
 id = "interconnect.relay.irreversible-admission"

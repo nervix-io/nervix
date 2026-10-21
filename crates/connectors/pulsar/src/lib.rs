@@ -5,7 +5,7 @@
 //! - **Owns.** Pulsar client and producer configuration, its TLS options, topic
 //!   qualification, the shared-subscription consumers a source reads through, message
 //!   properties as ingest headers, per-message acknowledgement, record and property
-//!   publication, and the classification of a send or its receipt, including a message the
+//!   publication, the bounded receipts a NO_ACK producer retains through finish, and the classification of a send or its receipt, including a message the
 //!   client refuses because it exceeds the maximum message size the broker announced.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `pulsar`.
@@ -26,34 +26,45 @@
 
 mod source;
 
-use std::{collections::VecDeque, time::Duration};
+#[cfg(test)]
+mod receipt_tests;
 
+use std::future::Future;
+
+use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use error_stack::Report;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt as _, stream::FuturesUnordered};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
+    ConfirmationWindowError, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish,
+    SinkFinishError, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord,
+    SinkRecordId, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
 };
-use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
-use nervix_primitives::time::{Instant, sleep};
+use nervix_models::{ClientConfigEntry, ConnectorKind, Timestamp, TopicName};
+use nervix_primitives::{
+    task::unconstrained,
+    time::{Instant, timeout_at},
+};
 use pulsar::{
     ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
     TlsOptions as PulsarTlsOptions, TokioExecutor,
     error::{ConnectionError as PulsarConnectionError, ProducerError as PulsarProducerError},
-    message::proto::ServerError as PulsarServerError,
+    message::proto::{CommandSendReceipt, ServerError as PulsarServerError},
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
 pub use source::{
-    PulsarMessageProperties, PulsarSource, PulsarSourceError, PulsarSourceMessage,
-    PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
+    PulsarAckReceipts, PulsarMessageProperties, PulsarRefusal, PulsarSource, PulsarSourceError,
+    PulsarSourceMessage, PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
+    PulsarUnresolvedRequest,
 };
 use thiserror::Error;
 
-const PULSAR: &str = "pulsar";
+const PULSAR: ConnectorKind = ConnectorKind::Pulsar;
+const PULSAR_OUTBOUND_CAPACITY: usize = 100;
+const _: () = assert!(PULSAR_OUTBOUND_CAPACITY > 0);
 
 /// Why one message is refused for good: sending it again cannot succeed while the broker keeps its
 /// configuration.
@@ -70,6 +81,12 @@ enum PulsarRecordError {
     /// size.
     #[error("the Pulsar broker does not allow the message: {reason}")]
     NotAllowed { reason: String },
+}
+
+impl PulsarRecordError {
+    fn message(&self) -> String {
+        format!("{PULSAR} rejected record: {self}")
+    }
 }
 
 /// What a failed send, or a failed receipt for a sent message, means for the record it carried.
@@ -116,30 +133,210 @@ pub struct PulsarSinkConfig {
 
 pub struct PulsarSink {
     producer: pulsar::Producer<TokioExecutor>,
-    mode: BrokerPublishingMode,
+    publishing: PulsarPublishing,
 }
 
-struct PendingPulsarConfirmation {
-    record: SinkRecordId,
-    occurred_at: Timestamp,
-    deadline: Instant,
-    confirmation: PulsarSendFuture,
+enum PulsarPublishing {
+    NoAck(UnconfirmedPulsarPublication),
+    Ack(AckConfirmation),
+}
+
+impl From<BrokerPublishingMode> for PulsarPublishing {
+    fn from(mode: BrokerPublishingMode) -> Self {
+        match mode {
+            BrokerPublishingMode::NoAck => Self::NoAck(UnconfirmedPulsarPublication::default()),
+            BrokerPublishingMode::Ack(settings) => Self::Ack(settings),
+        }
+    }
+}
+
+/// The receipts of records delivered at producer acceptance. This state belongs to one sink
+/// task, and keeps no record payload or upstream acknowledgement.
+struct UnconfirmedPulsarPublication<A = PulsarSendFuture> {
+    receipts: FuturesUnordered<A>,
+    failure: Option<PulsarError>,
+}
+
+impl<A> Default for UnconfirmedPulsarPublication<A> {
+    fn default() -> Self {
+        Self {
+            receipts: FuturesUnordered::new(),
+            failure: None,
+        }
+    }
+}
+
+impl UnconfirmedPulsarPublication {
+    async fn publish(
+        &mut self,
+        producer: &mut pulsar::Producer<TokioExecutor>,
+        records: Vec<SinkRecord>,
+    ) -> PerRecordOutcome<SinkRecordId> {
+        self.collect_ready();
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        for record in records {
+            nervix_primitives::task::consume_budget().await;
+            self.make_room().await;
+            let record_id = record.id;
+            let occurred_at = record.occurred_at;
+            let sent = producer
+                .send_non_blocking(PulsarSink::message(record))
+                .await;
+            match sent.map_err(PulsarSendFailure::from) {
+                Ok(receipt) => {
+                    self.retain(receipt);
+                    outcome.deliver(record_id);
+                }
+                Err(PulsarSendFailure::Rejected(rejection)) => {
+                    outcome.reject(PulsarSink::rejected(record_id, occurred_at, &rejection));
+                }
+                Err(PulsarSendFailure::Infrastructure(error)) => {
+                    outcome.fail(PulsarSink::publish_error(error));
+                    return outcome;
+                }
+            }
+        }
+        self.collect_ready();
+        outcome
+    }
+}
+
+impl<A> UnconfirmedPulsarPublication<A>
+where
+    A: Future<Output = Result<CommandSendReceipt, PulsarError>> + Unpin,
+{
+    fn retain(&mut self, receipt: A) {
+        assert!(
+            self.receipts.len() < PULSAR_OUTBOUND_CAPACITY,
+            "make_room provides a slot before the sink hands another record over"
+        );
+        self.receipts.push(receipt);
+    }
+
+    /// Receipt bookkeeping shares the driver's outbound channel capacity. A full set applies
+    /// backpressure before another hand-over; records already accepted retain their NO_ACK
+    /// completion point. The driver's operation timeout bounds each outstanding receipt.
+    async fn make_room(&mut self) {
+        self.collect_ready();
+        if self.receipts.len() == PULSAR_OUTBOUND_CAPACITY {
+            let answer =
+                self.receipts.next().await.verified(
+                    "the receipt set holds the nonzero outbound capacity before this read",
+                );
+            self.record_answer(answer);
+        }
+    }
+
+    fn record_answer(&mut self, answer: Result<CommandSendReceipt, PulsarError>) {
+        if let Err(error) = answer
+            && self.failure.is_none()
+        {
+            self.failure = Some(error);
+        }
+    }
+
+    /// Visit each retained future once without waiting. A stream's own cooperative poll budget
+    /// can return Pending before visiting every future, so counting at an expired deadline needs
+    /// this complete pass of at most PULSAR_OUTBOUND_CAPACITY futures. Keeping it synchronous
+    /// also leaves every pending receipt in its
+    /// owner if the surrounding finish is cancelled at an await.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "polls the external Pulsar driver's receipt futures without \
+                                   waiting; their implementations belong to the driver")
+    )]
+    fn collect_ready(&mut self) {
+        let receipts = std::mem::take(&mut self.receipts);
+        for mut receipt in receipts {
+            match unconstrained(&mut receipt).now_or_never() {
+                Some(answer) => self.record_answer(answer),
+                None => self.receipts.push(receipt),
+            }
+        }
+    }
+
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        let had_receipts = !self.receipts.is_empty();
+        if Instant::now() >= deadline {
+            self.collect_ready();
+            return self.finish_outcome(had_receipts);
+        }
+        self.collect_ready();
+        while !self.receipts.is_empty() {
+            nervix_primitives::task::consume_budget().await;
+            match timeout_at(deadline, self.receipts.next()).await {
+                Ok(Some(answer)) => self.record_answer(answer),
+                Ok(None) => break,
+                Err(_) => {
+                    self.collect_ready();
+                    return self.finish_outcome(had_receipts);
+                }
+            }
+        }
+        self.finish_outcome(had_receipts)
+    }
+
+    fn finish_outcome(&mut self, had_receipts: bool) -> SinkFinishResult {
+        if !self.receipts.is_empty() {
+            return Err(self.failed(SinkFinishError::Unsent {
+                sink: PULSAR.keyword(),
+                records: self.receipts.len().arch_into(),
+            }));
+        }
+        if self.failure.is_some() {
+            return Err(self.failed(SinkFinishError::Flush {
+                sink: PULSAR.keyword(),
+            }));
+        }
+        if had_receipts {
+            Ok(SinkFinish::Flushed)
+        } else {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
+
+    fn failed(&mut self, context: SinkFinishError) -> Report<SinkFinishError> {
+        match self.failure.take() {
+            Some(source) => {
+                let message = source.to_string();
+                Report::new(source)
+                    .change_context(context)
+                    .attach_printable(message)
+            }
+            None => Report::new(context),
+        }
+    }
 }
 
 impl PulsarSink {
     pub async fn new(config: PulsarSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let producer = Self::producer_from_config(&config.config, config.topic.as_str()).await?;
+        if let BrokerPublishingMode::Ack(settings) = config.mode
+            && Instant::now().checked_add(settings.timeout).is_none()
+        {
+            let error = ConfirmationWindowError::DeadlineOutOfRange {
+                timeout: settings.timeout,
+            };
+            let message = error.to_string();
+            return Err(Report::new(error)
+                .change_context(SinkStartError::InvalidConfiguration {
+                    sink: PULSAR.keyword(),
+                })
+                .attach_printable(message));
+        }
+        let producer =
+            Self::producer_from_config(&config.config, config.topic.as_str(), config.mode).await?;
         Ok(Self {
             producer,
-            mode: config.mode,
+            publishing: config.mode.into(),
         })
     }
 
     async fn producer_from_config(
         config: &[ClientConfigEntry],
         topic: &str,
+        mode: BrokerPublishingMode,
     ) -> SinkStartResult<pulsar::Producer<TokioExecutor>> {
-        let pulsar = Self::client_from_config(config).await?;
+        let pulsar = Self::client_from_config(config, mode).await?;
         let topic_name = Self::topic_from_config(config, topic);
         pulsar
             .producer()
@@ -151,12 +348,14 @@ impl PulsarSink {
 
     async fn client_from_config(
         config: &[ClientConfigEntry],
+        mode: BrokerPublishingMode,
     ) -> SinkStartResult<Pulsar<TokioExecutor>> {
         let addr = Self::config_value(config, "addr")?;
-        let (connection_retry_options, operation_retry_options) = Self::retry_options();
+        let (connection_retry_options, operation_retry_options) = Self::retry_options(mode);
         let mut builder = Pulsar::builder(addr, TokioExecutor)
             .with_connection_retry_options(connection_retry_options)
-            .with_operation_retry_options(operation_retry_options);
+            .with_operation_retry_options(operation_retry_options)
+            .with_outbound_channel_size(PULSAR_OUTBOUND_CAPACITY);
         if let Some(tls_options) = Self::tls_options_from_config(config)? {
             if let Some(certificate_chain) = tls_options.certificate_chain {
                 builder = builder.with_certificate_chain(certificate_chain);
@@ -170,16 +369,22 @@ impl PulsarSink {
         builder.build().await.map_err(Self::start_error)
     }
 
-    fn retry_options() -> (ConnectionRetryOptions, OperationRetryOptions) {
+    fn retry_options(
+        mode: BrokerPublishingMode,
+    ) -> (ConnectionRetryOptions, OperationRetryOptions) {
+        let mut operation = OperationRetryOptions {
+            max_retries: Some(0),
+            ..Default::default()
+        };
+        if let BrokerPublishingMode::Ack(settings) = mode {
+            operation.operation_timeout = settings.timeout;
+        }
         (
             ConnectionRetryOptions {
                 max_retries: 0,
                 ..Default::default()
             },
-            OperationRetryOptions {
-                max_retries: Some(0),
-                ..Default::default()
-            },
+            operation,
         )
     }
 
@@ -215,7 +420,9 @@ impl PulsarSink {
                     Err(error) => Err({
                         let message = error.current_context().to_string();
                         error
-                            .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                            .change_context(SinkStartError::InvalidConfiguration {
+                                sink: PULSAR.keyword(),
+                            })
                             .attach_printable(message)
                     }),
                 }
@@ -240,92 +447,44 @@ impl PulsarSink {
         format!("persistent://{namespace}/{topic}")
     }
 
-    /// `MODE NO_ACK`: a record is delivered once the producer accepts it, and the send receipt it
-    /// would have produced is dropped rather than awaited.
-    async fn publish_unconfirmed(
-        &mut self,
-        records: Vec<SinkRecord>,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) {
-        for record in records {
-            nervix_primitives::task::consume_budget().await;
-            let record_id = record.id;
-            let occurred_at = record.occurred_at;
-            let sent = self.producer.send_non_blocking(Self::message(record)).await;
-            match sent.map_err(PulsarSendFailure::from) {
-                Ok(confirmation) => {
-                    drop(confirmation);
-                    outcome.deliver(record_id);
-                }
-                Err(PulsarSendFailure::Rejected(rejection)) => {
-                    outcome.reject(Self::rejected(record_id, occurred_at, &rejection));
-                }
-                Err(PulsarSendFailure::Infrastructure(source)) => {
-                    outcome.fail(Self::publish_error(format!(
-                        "failed to enqueue pulsar message: {source}"
-                    )));
-                    return;
-                }
-            }
-        }
-    }
-
-    /// `MODE ACK`: at most `max_in_flight` send receipts are outstanding at once, and every one is
-    /// awaited before the batch finishes. The window carries the confirmation settings, so the
-    /// drain below never has to ask a mode that has no confirmations what its timeout is.
+    /// Every way an ACK publish ends goes through the shared window, which settles answers
+    /// already given before returning a driver, enqueue or timeout failure.
     async fn publish_confirmed(
         &mut self,
         records: Vec<SinkRecord>,
-        AckConfirmation {
-            max_in_flight,
-            timeout,
-        }: AckConfirmation,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) {
-        let mut pending: VecDeque<PendingPulsarConfirmation> = VecDeque::new();
+        settings: AckConfirmation,
+    ) -> PerRecordOutcome<SinkRecordId> {
+        let mut window = ConfirmationWindow::new(PULSAR.keyword(), settings, records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             let sent = self.producer.send_non_blocking(Self::message(record)).await;
-            let confirmation = match sent.map_err(PulsarSendFailure::from) {
-                Ok(confirmation) => confirmation,
+            let receipt = match sent.map_err(PulsarSendFailure::from) {
+                Ok(receipt) => receipt,
                 Err(PulsarSendFailure::Rejected(rejection)) => {
-                    outcome.reject(Self::rejected(record_id, occurred_at, &rejection));
+                    window.reject(Self::rejected(record_id, occurred_at, &rejection));
                     continue;
                 }
-                Err(PulsarSendFailure::Infrastructure(source)) => {
-                    outcome.fail(Self::publish_error(format!(
-                        "failed to enqueue pulsar message: {source}"
-                    )));
-                    return;
+                Err(PulsarSendFailure::Infrastructure(error)) => {
+                    return window.fail(Self::publish_error(error));
                 }
             };
-            let Some(deadline) = Instant::now().checked_add(timeout) else {
-                outcome.fail(Self::publish_error(
-                    "pulsar ACK TIMEOUT exceeds the monotonic clock range",
-                ));
-                return;
-            };
-            pending.push_back(PendingPulsarConfirmation {
-                record: record_id,
-                occurred_at,
-                deadline,
-                confirmation,
-            });
-            if pending.len() >= max_in_flight.get()
-                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await
-            {
-                outcome.fail(error);
-                return;
+            let answer = receipt.map(Self::broker_answer);
+            if let Err(failure) = window.admit(record_id, occurred_at, answer).await {
+                return window.fail(failure);
             }
         }
-        while !pending.is_empty() {
-            nervix_primitives::task::consume_budget().await;
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await {
-                outcome.fail(error);
-                return;
-            }
+        window.finish().await
+    }
+
+    fn broker_answer(answer: Result<CommandSendReceipt, PulsarError>) -> BrokerAnswer {
+        match answer.map_err(PulsarSendFailure::from) {
+            Ok(_receipt) => Ok(BrokerVerdict::Confirmed),
+            Err(PulsarSendFailure::Rejected(rejection)) => Ok(BrokerVerdict::Rejected {
+                message: rejection.message(),
+            }),
+            Err(PulsarSendFailure::Infrastructure(error)) => Err(Self::publish_error(error)),
         }
     }
 
@@ -338,118 +497,25 @@ impl PulsarSink {
         }
     }
 
-    async fn confirm_oldest(
-        pending: &mut VecDeque<PendingPulsarConfirmation>,
-        timeout: Duration,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) -> SinkPublishResult<()> {
-        let Some(oldest) = pending.front_mut() else {
-            return Err(Self::publish_error(
-                "pulsar acknowledgment window unexpectedly became empty",
-            ));
-        };
-        let remaining = oldest
-            .deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO);
-        if remaining.is_zero() {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(Self::publish_error(format!(
-                "pulsar receipt exceeded ACK TIMEOUT {}",
-                humantime::format_duration(timeout)
-            )));
-        }
-        let result = nervix_primitives::select! {
-            biased;
-            result = &mut oldest.confirmation => Some(result),
-            _ = sleep(remaining) => None,
-        };
-        let Some(result) = result else {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(Self::publish_error(format!(
-                "pulsar receipt exceeded ACK TIMEOUT {}",
-                humantime::format_duration(timeout)
-            )));
-        };
-        let record_id = oldest.record;
-        let occurred_at = oldest.occurred_at;
-        match result.map_err(PulsarSendFailure::from) {
-            Ok(_receipt) => {
-                pending.pop_front();
-                outcome.deliver(record_id);
-                Ok(())
-            }
-            Err(PulsarSendFailure::Rejected(rejection)) => {
-                pending.pop_front();
-                outcome.reject(Self::rejected(record_id, occurred_at, &rejection));
-                Ok(())
-            }
-            Err(PulsarSendFailure::Infrastructure(source)) => {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                Err(Self::publish_error(source))
-            }
-        }
-    }
-
-    /// Collects the records behind the oldest one whose confirmation already resolved.
-    ///
-    /// The caller reached here because the oldest record failed or timed out, and it is about to
-    /// return that failure for the whole publish. Records behind it that already succeeded or were
-    /// individually rejected are recorded so the retry does not send them again. Anything else is
-    /// deliberately left in neither list: its failure is the same infrastructure failure the
-    /// caller is returning, and classifying it per record would report one outage many times.
-    fn harvest_ready_after_oldest_failure(
-        pending: &mut VecDeque<PendingPulsarConfirmation>,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) {
-        let mut index = 1;
-        while index < pending.len() {
-            let ready = pending
-                .get_mut(index)
-                .and_then(|confirmation| (&mut confirmation.confirmation).now_or_never());
-            let Some(result) = ready else {
-                index += 1;
-                continue;
-            };
-            let confirmation = pending.remove(index).verified(
-                "the index came from scanning this same pending window, which nothing else \
-                 removes from",
-            );
-            match result.map_err(PulsarSendFailure::from) {
-                Ok(_receipt) => outcome.deliver(confirmation.record),
-                Err(PulsarSendFailure::Rejected(rejection)) => {
-                    outcome.reject(Self::rejected(
-                        confirmation.record,
-                        confirmation.occurred_at,
-                        &rejection,
-                    ));
-                }
-                Err(PulsarSendFailure::Infrastructure(_)) => {}
-            }
-        }
-    }
-
     fn rejected(
         record: SinkRecordId,
         occurred_at: Timestamp,
         rejection: &PulsarRecordError,
     ) -> RejectedSinkRecord<SinkRecordId> {
-        RejectedSinkRecord::external(
-            record,
-            occurred_at,
-            format!("pulsar rejected record: {rejection}"),
-        )
+        RejectedSinkRecord::external(record, occurred_at, rejection.message())
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
         {
-            let mapping_input = client_config_value(config, key, "Pulsar");
+            let mapping_input = client_config_value(config, key, PULSAR.keyword());
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(error) => Err({
                     let message = error.current_context().to_string();
                     error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                        .change_context(SinkStartError::InvalidConfiguration {
+                            sink: PULSAR.keyword(),
+                        })
                         .attach_printable(message)
                 }),
             }
@@ -467,7 +533,9 @@ impl PulsarSink {
                 Err(error) => Err({
                     let message = error.current_context().to_string();
                     error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                        .change_context(SinkStartError::InvalidConfiguration {
+                            sink: PULSAR.keyword(),
+                        })
                         .attach_printable(message)
                 }),
             }
@@ -475,12 +543,19 @@ impl PulsarSink {
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::InvalidConfiguration { sink: PULSAR })
-            .attach_printable(error.to_string())
+        Report::new(SinkStartError::InvalidConfiguration {
+            sink: PULSAR.keyword(),
+        })
+        .attach_printable(error.to_string())
     }
 
-    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::Initialize { sink: PULSAR }).attach_printable(error.to_string())
+    fn start_error(error: PulsarError) -> Report<SinkStartError> {
+        let message = error.to_string();
+        Report::new(error)
+            .change_context(SinkStartError::Initialize {
+                sink: PULSAR.keyword(),
+            })
+            .attach_printable(message)
     }
 
     #[cfg_attr(
@@ -488,28 +563,38 @@ impl PulsarSink {
         nervix::dispatch(reason = "formats the typed external Pulsar driver failure; no \
                                    internal runtime ownership is inferred")
     )]
-    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
-        Report::new(SinkPublishError::Publish { sink: PULSAR }).attach_printable(error.to_string())
+    fn publish_error(error: PulsarError) -> Report<SinkPublishError> {
+        let message = error.to_string();
+        Report::new(error)
+            .change_context(SinkPublishError::Publish {
+                sink: PULSAR.keyword(),
+            })
+            .attach_printable(message)
     }
 }
 
 #[async_trait]
-impl SinkLifecycle for PulsarSink {}
+impl SinkLifecycle for PulsarSink {
+    /// Producer acceptance completes NO_ACK records, while finish waits for their receipts before
+    /// dropping the producer. An ACK publish already settled all answers it could observe.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        match &mut self.publishing {
+            PulsarPublishing::NoAck(receipts) => receipts.finish(deadline).await,
+            PulsarPublishing::Ack(_) => Ok(SinkFinish::NothingHeld),
+        }
+    }
+}
 
 #[async_trait]
 impl RecordSink for PulsarSink {
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
-        let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        match self.mode {
-            BrokerPublishingMode::NoAck => {
-                self.publish_unconfirmed(records, &mut outcome).await;
+        let settings = match &mut self.publishing {
+            PulsarPublishing::NoAck(receipts) => {
+                return receipts.publish(&mut self.producer, records).await;
             }
-            BrokerPublishingMode::Ack(confirmation) => {
-                self.publish_confirmed(records, confirmation, &mut outcome)
-                    .await;
-            }
-        }
-        outcome
+            PulsarPublishing::Ack(settings) => *settings,
+        };
+        self.publish_confirmed(records, settings).await
     }
 }
 
@@ -519,12 +604,14 @@ impl RecordSink for PulsarSink {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::{num::NonZeroUsize, time::Duration};
 
-    use futures_util::{SinkExt as _, StreamExt as _};
+    use futures_util::SinkExt as _;
+    use meticulous::ResultExt as _;
     use nervix_primitives::{
         net::{TcpListener, TcpStream},
-        sync::mpsc,
+        sync::{CancellationToken, mpsc},
+        time::sleep,
     };
     use pulsar::message::{
         Codec as PulsarCodec, Message as PulsarFrame,
@@ -670,10 +757,14 @@ mod tests {
     }
 
     /// When the fake broker answers the messages it receives.
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Debug)]
     enum AnswerOrder {
         /// Each message is answered as it arrives.
         OnArrival,
+        /// Every receipt waits for the declared dependency fault duration.
+        After(Duration),
+        /// A test's action explicitly releases the held broker answer.
+        OnRelease(CancellationToken),
         /// The answers wait until this many messages arrived, and the oldest is answered last.
         OldestLastAfter(usize),
     }
@@ -714,7 +805,7 @@ mod tests {
                         Framed::new(stream, PulsarCodec),
                         lookup_url.clone(),
                         max_message_size,
-                        order,
+                        order.clone(),
                         received_tx.clone(),
                     ));
                 }
@@ -736,6 +827,7 @@ mod tests {
             while let Some(Ok(frame)) = connection.next().await {
                 nervix_primitives::task::consume_budget().await;
                 let command = frame.command;
+                let is_send = command.send.is_some();
                 let mut replies = Vec::new();
                 if command.connect.is_some() {
                     replies.push(Self::connected(max_message_size));
@@ -756,13 +848,20 @@ mod tests {
                         // The test that reads the payloads has finished.
                         return;
                     }
-                    replies.extend(Self::due_answers(&mut held, order));
+                    replies.extend(Self::due_answers(&mut held, &order));
                 } else if command.ping.is_some() {
                     replies.push(Self::pong());
                 } else if let Some(request) = command.close_producer {
                     replies.push(Self::success(request.request_id));
                 }
                 for reply in replies {
+                    if is_send {
+                        match &order {
+                            AnswerOrder::After(delay) => sleep(*delay).await,
+                            AnswerOrder::OnRelease(release) => release.cancelled().await,
+                            AnswerOrder::OnArrival | AnswerOrder::OldestLastAfter(_) => {}
+                        }
+                    }
                     if connection.send(reply).await.is_err() {
                         return;
                     }
@@ -771,10 +870,12 @@ mod tests {
         }
 
         /// The answers the broker writes now, in the order it writes them.
-        fn due_answers(held: &mut Vec<HeldMessage>, order: AnswerOrder) -> Vec<PulsarFrame> {
+        fn due_answers(held: &mut Vec<HeldMessage>, order: &AnswerOrder) -> Vec<PulsarFrame> {
             let due = match order {
-                AnswerOrder::OnArrival => std::mem::take(held),
-                AnswerOrder::OldestLastAfter(count) if held.len() >= count => {
+                AnswerOrder::OnArrival | AnswerOrder::After(_) | AnswerOrder::OnRelease(_) => {
+                    std::mem::take(held)
+                }
+                AnswerOrder::OldestLastAfter(count) if held.len() >= *count => {
                     let mut due = std::mem::take(held);
                     due.rotate_left(1);
                     due
@@ -992,6 +1093,112 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn finishing_waits_for_the_receipt_of_an_unconfirmed_record() {
+        let release = CancellationToken::new();
+        let unconfirmed_broker =
+            FakeBroker::start(None, AnswerOrder::OnRelease(release.clone())).await;
+        let mut unconfirmed = sink(&unconfirmed_broker, BrokerPublishingMode::NoAck).await;
+        let confirming_broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+        let mut confirming = sink(&confirming_broker, confirmed(1)).await;
+
+        let published = unconfirmed
+            .publish(vec![record(0, b"held".to_vec())])
+            .await
+            .into_parts();
+        assert_eq!(published.delivered, vec![SinkRecordId::new(0)]);
+        let mut finishing = Box::pin(unconfirmed.finish(Instant::now() + Duration::from_secs(60)));
+        assert!(
+            finishing.as_mut().now_or_never().is_none(),
+            "finish must await the held receipt"
+        );
+        release.cancel();
+        let flushed = finishing
+            .await
+            .assured("the loopback broker answers the accepted record before the finish deadline");
+        let nothing_held = confirming
+            .finish(Instant::now())
+            .await
+            .assured("the confirming sink has published no record and holds nothing");
+
+        assert_eq!(flushed, SinkFinish::Flushed);
+        assert_eq!(nothing_held, SinkFinish::NothingHeld);
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_counts_the_unconfirmed_records_that_missed_its_deadline() {
+        let mut broker = FakeBroker::start(None, AnswerOrder::OldestLastAfter(3)).await;
+        let mut sink = sink(&broker, BrokerPublishingMode::NoAck).await;
+        let published = sink
+            .publish(vec![record(0, b"held".to_vec())])
+            .await
+            .into_parts();
+        assert_eq!(published.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(broker.next_payload().await, b"held");
+
+        let Err(failure) = sink.finish(Instant::now()).await else {
+            panic!("the finish must report the receipt the broker has not answered");
+        };
+        assert_eq!(
+            *failure.current_context(),
+            nervix_connector::SinkFinishError::Unsent {
+                sink: PULSAR.keyword(),
+                records: 1
+            }
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_receipt_waits_for_the_declared_timeout_above_the_driver_default() {
+        let broker = FakeBroker::start(None, AnswerOrder::After(Duration::from_secs(35))).await;
+        let mode = BrokerPublishingMode::Ack(AckConfirmation {
+            max_in_flight: NonZeroUsize::new(1).assured("one record is a nonempty window"),
+            timeout: Duration::from_secs(45),
+        });
+        let mut sink = sink(&broker, mode).await;
+        let outcome = sink
+            .publish(vec![record(0, b"delayed".to_vec())])
+            .await
+            .into_parts();
+        assert!(
+            outcome.infrastructure_error.is_none(),
+            "{:?}",
+            outcome.infrastructure_error
+        );
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert!(outcome.rejected.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_timeout_past_the_clock_range_is_refused_before_the_driver_uses_it() {
+        let broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+        let config = PulsarSinkConfig {
+            config: vec![entry("addr", &broker.service_url)],
+            topic: TopicName::parse("limited").assured("the fixture topic is a valid name"),
+            mode: BrokerPublishingMode::Ack(AckConfirmation {
+                max_in_flight: NonZeroUsize::new(1).assured("one is nonzero"),
+                timeout: Duration::MAX,
+            }),
+        };
+        let Err(failure) = PulsarSink::new(config, SinkHost::new(SilentHost)).await else {
+            panic!("the driver's timer must not receive a timeout past the clock range");
+        };
+        assert_eq!(
+            *failure.current_context(),
+            SinkStartError::InvalidConfiguration {
+                sink: PULSAR.keyword()
+            }
+        );
+        assert_eq!(
+            failure.downcast_ref::<nervix_connector::ConfirmationWindowError>(),
+            Some(
+                &nervix_connector::ConfirmationWindowError::DeadlineOutOfRange {
+                    timeout: Duration::MAX
+                }
+            )
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn a_message_above_the_announced_maximum_is_rejected_before_it_is_written() {
         for mode in [BrokerPublishingMode::NoAck, confirmed(1)] {
             let mut broker = FakeBroker::start(Some(4096), AnswerOrder::OnArrival).await;
@@ -1012,7 +1219,7 @@ mod tests {
             };
             assert_eq!(*rejected, SinkRecordId::new(0));
             assert!(
-                message.starts_with("pulsar rejected record: Pulsar message of 50"),
+                message.starts_with("PULSAR rejected record: Pulsar message of 50"),
                 "{message}"
             );
             assert!(
@@ -1050,7 +1257,7 @@ mod tests {
             rejected_messages(&outcome.rejected),
             vec![(
                 SinkRecordId::new(0),
-                "pulsar rejected record: the Pulsar broker does not allow the message: Exceed \
+                "PULSAR rejected record: the Pulsar broker does not allow the message: Exceed \
                  maximum message size"
                     .to_string()
             )]
@@ -1095,7 +1302,7 @@ mod tests {
 
     #[test]
     fn client_retries_are_disabled_in_favor_of_the_declared_retry_policy() {
-        let (connection, operation) = PulsarSink::retry_options();
+        let (connection, operation) = PulsarSink::retry_options(BrokerPublishingMode::NoAck);
 
         assert_eq!(connection.max_retries, 0);
         assert_eq!(operation.max_retries, Some(0));

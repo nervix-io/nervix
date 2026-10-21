@@ -80,12 +80,29 @@ struct ReviewedOperations {
 
 type ExpectationCounts = HashMap<ExpectedLint, ReviewedOperations>;
 
+/// The `nervix::<name>` source contract `definition` declares, if any.
+///
+/// Every contract lookup reads through here. An `extern` block holds no contract: placement
+/// validation rejects one there, and crate metadata keeps no attributes for another crate's
+/// block, so asking for them panics the compiler. A walk from a foreign item therefore goes on
+/// to the module that holds its block.
+pub fn contract_attribute<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    definition: DefId,
+    name: &str,
+) -> Option<&'tcx rustc_hir::Attribute> {
+    if tcx.def_kind(definition) == DefKind::ForeignMod {
+        return None;
+    }
+    let path = [Symbol::intern("nervix"), Symbol::intern(name)];
+    tcx.get_attrs_by_path(definition, &path).next()
+}
+
 /// Narrowest metadata contract wins. Parent contracts supply defaults for their definitions;
 /// call reachability can make a helper recurring even when its inherited default is cold.
 pub fn context(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Context> {
     loop {
-        let path = [Symbol::intern("nervix"), Symbol::intern("context")];
-        if let Some(attribute) = tcx.get_attrs_by_path(definition, &path).next() {
+        if let Some(attribute) = contract_attribute(tcx, definition, "context") {
             return parse_context(attribute).ok();
         }
         if let Some(value) = binding_context(tcx, definition) {
@@ -104,11 +121,9 @@ pub fn context(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Context> {
                 .instantiate_identity()
                 .skip_norm_wip()
                 .kind()
+            && let Some(attribute) = contract_attribute(tcx, adt.did(), "context")
         {
-            let path = [Symbol::intern("nervix"), Symbol::intern("context")];
-            if let Some(attribute) = tcx.get_attrs_by_path(adt.did(), &path).next() {
-                return parse_context(attribute).ok();
-            }
+            return parse_context(attribute).ok();
         }
         // Derives implement data operations, not the module's task entry contract. An explicit
         // type or method contract above still applies; acquisitions remain independently checked.
@@ -146,8 +161,7 @@ fn lifecycle_boundary(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
         if matches!(tcx.def_kind(definition), DefKind::Mod) {
             return false;
         }
-        let path = [Symbol::intern("nervix"), Symbol::intern("context")];
-        if let Some(attribute) = tcx.get_attrs_by_path(definition, &path).next() {
+        if let Some(attribute) = contract_attribute(tcx, definition, "context") {
             return parse_context(attribute).is_ok_and(|value| value.is_lifecycle());
         }
         if let Some(value) = binding_context(tcx, definition) {
@@ -165,7 +179,7 @@ fn lifecycle_boundary(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
                 .instantiate_identity()
                 .skip_norm_wip()
                 .kind()
-            && let Some(attribute) = tcx.get_attrs_by_path(adt.did(), &path).next()
+            && let Some(attribute) = contract_attribute(tcx, adt.did(), "context")
         {
             return parse_context(attribute).is_ok_and(|value| value.is_lifecycle());
         }
@@ -183,14 +197,7 @@ pub fn has_callee_contract(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
         if matches!(tcx.def_kind(definition), DefKind::Mod) {
             return false;
         }
-        if tcx
-            .get_attrs_by_path(
-                definition,
-                &[Symbol::intern("nervix"), Symbol::intern("context")],
-            )
-            .next()
-            .is_some()
-        {
+        if contract_attribute(tcx, definition, "context").is_some() {
             return true;
         }
         if let Some(item) = tcx.opt_associated_item(definition)
@@ -740,25 +747,12 @@ impl Flow {
     fn has_dispatch(&self, tcx: TyCtxt<'_>, owner: LocalDefId) -> bool {
         let mut definition = owner.to_def_id();
         loop {
-            if tcx
-                .get_attrs_by_path(
-                    definition,
-                    &[Symbol::intern("nervix"), Symbol::intern("dispatch")],
-                )
-                .next()
-                .is_some()
-            {
+            if contract_attribute(tcx, definition, "dispatch").is_some() {
                 return true;
             }
             if let Some(item) = tcx.opt_associated_item(definition)
                 && let Some(trait_item) = item.trait_item_def_id()
-                && tcx
-                    .get_attrs_by_path(
-                        trait_item,
-                        &[Symbol::intern("nervix"), Symbol::intern("dispatch")],
-                    )
-                    .next()
-                    .is_some()
+                && contract_attribute(tcx, trait_item, "dispatch").is_some()
             {
                 return true;
             }

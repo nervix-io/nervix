@@ -15,14 +15,22 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
-    ClientName, CollectionName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings,
+    ClientName, CollectionName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality,
+    EmitterBodyForm, EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice,
+    OptionDeclaration, OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings,
 };
 
-configured_client!(MongoDb: pooled CreateClientMongoDb => MongoDbConfigEntry);
+configured_client!(MongoDb: pooled, config NervixWithAddressQuery, CreateClientMongoDb => MongoDbConfigEntry);
 
 pub type MongoDbValueMapping = SinkValueMapping;
 
@@ -46,18 +54,66 @@ pub enum MongoDbConflictAction {
     DoUpdate { target: Vec<String> },
 }
 
+/// What the connector of a MONGODB COLLECTION holds and how long it waits.
+const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("connectTimeoutMS, 10 s"),
+        },
+        DeclaredWait {
+            wait: "server selection",
+            bound: WaitBound::Driver("30 s"),
+        },
+        DeclaredWait {
+            wait: "the handshake, a pool wait and a write",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A document above 16 MiB is rejected."],
+};
+
 impl SinkEntity for MongoDbCollectionSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        reference: SinkReferenceKind::Client(ConnectorKind::MongoDb),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "INSERT TO COLLECTION",
+            name: LocatorName::Unquoted {
+                label: "collection_name",
+            },
+        }),
+        options: &[OptionDeclaration {
+            keywords: "ON CONFLICT",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Choice(&[
+                OptionChoice {
+                    name: "DO NOTHING",
+                    value: None,
+                    example: "ON CONFLICT ('id') DO NOTHING",
+                },
+                OptionChoice {
+                    name: "DO UPDATE",
+                    value: None,
+                    example: "ON CONFLICT ('id') DO UPDATE",
+                },
+            ]),
+        }],
+        envelope: &[],
+        properties: &[],
+        bounds: MONGODB_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for MongoDbCollectionSink {

@@ -231,6 +231,68 @@ Feature: Client wire failure regressions
       resource: leader_batch_resource
       """
 
+  @client_wire_transaction_batch_finalization_recovery
+  Scenario: A committed transaction batch keeps its one outcome when leadership moves while each attempt records it
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given command finalization on node "{{old_leader}}" pauses before its outcome is recorded
+    And command finalization on node "{{new_leader}}" pauses before its outcome is recorded
+    When the active session begins this NSPL command request with execution reference "finalized-batch-{{test_id}}" in the background
+      """
+      BEGIN;
+      CREATE RESOURCE finalized_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the command finalization pause on node "{{old_leader}}" is reached
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    When the command finalization pause on node "{{old_leader}}" is released
+    Then the background command request reports an unknown outcome because leadership moved
+    And the command finalization pause on node "{{new_leader}}" is reached
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    Then node "{{old_leader}}" eventually reports leader "{{old_leader}}"
+    When the command finalization pause on node "{{new_leader}}" is released
+    And this NSPL command request with execution reference "finalized-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      CREATE RESOURCE finalized_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    When this NSPL command request with execution reference "finalized-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      CREATE RESOURCE finalized_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    When this NSPL command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE finalized_batch_resource;
+      """
+    Then the last command output contains
+      """
+      resource: finalized_batch_resource
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "batch_transaction"
+    And the last command output contains
+      """
+      state=COMMITTED
+      """
+
   @client_wire_transaction_batch_restart
   Scenario: An exact transaction batch retry survives a full durable restart without repeating effects
     Given a 1 node nervix cluster is started
@@ -271,7 +333,7 @@ Feature: Client wire failure regressions
 
   @client_wire_execution_history
   Scenario Outline: A reclaimed command identity stays expired after a durable restart
-    Given command retry identities are valid for "1s"
+    Given command retry identities are valid for "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -529,8 +591,8 @@ Feature: Client wire failure regressions
 
   @client_wire_stalled_commit
   Scenario: A stalled commit cannot block expiry, another domain, or tombstone cleanup
-    Given the transaction idle timeout is configured as "1s"
-    And the transaction tombstone retention is configured as "1s"
+    Given the transaction idle timeout is configured as "15s"
+    And the transaction tombstone retention is configured as "30s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands

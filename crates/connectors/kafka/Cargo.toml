@@ -11,18 +11,25 @@ workspace = true
 [features]
 benchmarks = []
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-connector/shuttle",
+  "nervix-execution/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
 testing = []
 
 [dependencies]
+arch-into = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
-futures-util = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
 rdkafka = { workspace = true, features = [
   "tokio",
   "curl-static",
@@ -32,12 +39,16 @@ rdkafka = { workspace = true, features = [
   "static-linking",
   "aws-lc",
 ] }
+shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
 criterion = { workspace = true }
+# The test host hands a sink the node's executor, as the server's host does.
+nervix-execution = { workspace = true }
+nervix-model-harness = { workspace = true }
 
 [[bench]]
 harness = false

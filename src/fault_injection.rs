@@ -26,7 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
@@ -36,23 +36,34 @@ use nervix_primitives::{
     collections::DashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        blocking::{Mutex, RwLock},
+        atomic::{AtomicBool, Ordering},
+        blocking::RwLock,
         broadcast, mpsc, oneshot, watch,
     },
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _};
+use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod backup_cut;
 mod consensus;
 mod domain_clock;
+mod domain_resume;
+mod execution;
 mod pause;
+mod relocation_commit;
 mod restarted_voter;
+mod shutdown_handoff;
+mod standalone_transaction;
 
+pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
+pub use domain_resume::DomainResumeBoundary;
+use execution::NodeExecution;
 use pause::TestPause;
+use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::StartupVoterGossip;
+pub use standalone_transaction::StandaloneTransactionBoundary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
@@ -111,6 +122,14 @@ struct FaultInjectionState {
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
+    /// One-shot, domain-scoped transport failures of the next ownership-handoff gate engagement
+    /// request a coordinator sends to a remote node. Each keeps whether it was delivered, so a
+    /// scenario proves the failure happened instead of assuming it.
+    handoff_engagement_transport_failures:
+        DashMap<DomainName, HandoffEngagementTransportFailure, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
+    /// it was delivered.
+    refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -273,13 +292,6 @@ enum RelayMemoryFill {
     },
 }
 
-#[derive(Debug)]
-struct NodeExecution {
-    executor: Executor,
-    /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
@@ -319,14 +331,34 @@ enum RemoteAcknowledgementLoss {
     Lost,
 }
 
+/// Whether the transport failure a scenario armed for a domain's next ownership-handoff gate
+/// engagement request was delivered yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandoffEngagementTransportFailure {
+    Armed,
+    Delivered,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    StandaloneTransaction {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: StandaloneTransactionBoundary,
+    },
+    DomainResume {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: DomainResumeBoundary,
+    },
     Admission(ClusterNodeName),
     RuntimeInstallation(ClusterNodeName),
+    ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
+    Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
@@ -334,7 +366,10 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
-    BackupCut(DomainName),
+    BackupCut {
+        domain: DomainName,
+        boundary: BackupCutBoundary,
+    },
     BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
@@ -343,6 +378,8 @@ enum CommandPausePoint {
     RestoreBranchStateConversion(DomainName),
     IngestorRoutePoll(DomainNodeRef),
     OwnershipHandoffFlush(DomainName),
+    OwnershipHandoffActivation(DomainName),
+    GracefulDrain(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -394,6 +431,8 @@ impl Default for FaultInjection {
                 stalled_emitter_sinks: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
+                handoff_engagement_transport_failures: DashMap::default(),
+                refused_relocation_commits: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
@@ -1060,6 +1099,23 @@ impl FaultInjection {
         self.inner.failed_entity_gate_engagements.insert(domain, ());
     }
 
+    /// Fails the next ownership-handoff gate engagement request a coordinator sends to a remote
+    /// node in `domain` in transport, as a broken interconnect stream would, without sending it.
+    pub fn break_next_handoff_engagement_transport(&self, domain: DomainName) {
+        self.inner
+            .handoff_engagement_transport_failures
+            .insert(domain, HandoffEngagementTransportFailure::Armed);
+    }
+
+    /// Whether the transport failure armed for `domain`'s next ownership-handoff gate engagement
+    /// request was delivered.
+    pub fn handoff_engagement_transport_failure_delivered(&self, domain: &DomainName) -> bool {
+        let Some(failure) = self.inner.handoff_engagement_transport_failures.get(domain) else {
+            return false;
+        };
+        *failure == HandoffEngagementTransportFailure::Delivered
+    }
+
     /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
     /// complete status observation. The one-shot seam lets timeout recovery tests exercise that
     /// outcome without making successful cluster work race a short duration.
@@ -1131,93 +1187,6 @@ impl FaultInjection {
         self.inner
             .failed_https_listener_installations
             .insert(node_id, ());
-    }
-
-    /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
-    pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        let node = match self.inner.executions.get(node_id) {
-            Some(node) => node,
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        let executor = node.executor.clone();
-        let holders = node.holders.clone();
-        drop(node);
-        let workers = executor.snapshot().cpu_class(class).workers;
-        let started = Arc::new(AtomicUsize::new(0));
-        for _ in 0..workers {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
-            holders.lock().push(holder);
-            let executor = executor.clone();
-            let started = started.clone();
-            nervix_primitives::task::spawn(async move {
-                executor
-                    .run_cpu(class, reservation, move |_charge, _cancellation| {
-                        started.fetch_add(1, Ordering::AcqRel);
-                        // Park until the scenario drops the holder so occupancy consumes no
-                        // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
-                        // than a failure.
-                        held.recv().discarded(
-                            "dropping the holder is how the scenario releases this worker",
-                        );
-                    })
-                    .await
-                    .discarded(
-                        "this job exists to hold a worker until the scenario releases it; its \
-                         outcome is not what the scenario reads",
-                    );
-            });
-        }
-        while started.load(Ordering::Acquire) < workers {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
-    /// once the class refuses the next job it is handed.
-    pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        self.occupy_execution(node_id, class).await;
-        let executor = match self.inner.executions.get(node_id) {
-            Some(node) => node.executor.clone(),
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        let capacity = executor.snapshot().cpu_class(class).queue_capacity;
-        for _ in 0..capacity {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let waiter = executor.clone();
-            nervix_primitives::task::spawn(async move {
-                waiter
-                    .run_cpu(class, reservation, |_charge, _cancellation| ())
-                    .await
-                    .discarded(
-                        "this job exists to hold a place in the wait queue; once the scenario \
-                         releases the workers it runs empty",
-                    );
-            });
-        }
-        while executor.snapshot().cpu_class(class).pending < capacity {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
-    /// behind them then run empty.
-    pub fn release_execution(&self, node_id: &ClusterNodeName) {
-        let node = match self.inner.executions.get(node_id) {
-            Some(node) => node,
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        node.holders.lock().clear();
     }
 
     pub fn arm_health_response_pause(
@@ -1337,6 +1306,34 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
     }
 
+    /// Resume a held initial installation only after forced recovery observes its missing
+    /// schedule. The observation precedes release, so the fixture never races two scenario steps
+    /// against the recovery budget.
+    pub fn resume_installation_after_missing_recovery_schedule(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ForcedRecoveryMissingSchedule(node_id));
+    }
+
+    pub async fn wait_for_missing_recovery_schedule(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ForcedRecoveryMissingSchedule(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub(crate) fn missing_recovery_schedule_if_armed(&self, node_id: &ClusterNodeName) {
+        let point = CommandPausePoint::ForcedRecoveryMissingSchedule(node_id.clone());
+        let pause = match self.inner.command_pauses.get(&point) {
+            Some(pause) => pause.value().clone(),
+            None => return,
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        self.release_runtime_installation_pause(node_id);
+        // Keep the one-shot observation until the scenario observes it or finishes cleanup.
+    }
+
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
     }
@@ -1386,6 +1383,21 @@ impl FaultInjection {
 
     pub fn release_command_durable_admission_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::DurableAdmission(node_id.clone()));
+    }
+
+    /// Holds the next persistent command whose effects returned a terminal result, before the
+    /// node proposes that outcome for its execution reference.
+    pub fn pause_command_finalization_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::Finalization(node_id));
+    }
+
+    pub async fn wait_for_command_finalization_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::Finalization(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_finalization_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::Finalization(node_id.clone()));
     }
 
     /// Holds a relocation after it has computed its target schedule but before it validates and
@@ -1456,20 +1468,6 @@ impl FaultInjection {
             node_id: node_id.clone(),
             step: step.clone(),
         });
-    }
-
-    /// Holds a backup after its domain drain and before any owner captures state.
-    pub fn pause_backup_cut_on(&self, domain: DomainName) {
-        self.arm_command_pause(CommandPausePoint::BackupCut(domain));
-    }
-
-    pub async fn wait_for_backup_cut_pause(&self, domain: &DomainName) {
-        self.wait_for_command_pause(&CommandPausePoint::BackupCut(domain.clone()))
-            .await;
-    }
-
-    pub fn release_backup_cut_pause(&self, domain: &DomainName) {
-        self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
     }
 
     /// Holds the next backup archive download on `node_id`, once, after the node opened the
@@ -2065,6 +2063,23 @@ impl FaultInjection {
             .is_some()
     }
 
+    /// Delivers the armed transport failure of `domain`'s next ownership-handoff gate engagement
+    /// request once, and records that it was delivered.
+    pub(crate) fn take_handoff_engagement_transport_failure(&self, domain: &DomainName) -> bool {
+        let Some(mut failure) = self
+            .inner
+            .handoff_engagement_transport_failures
+            .get_mut(domain)
+        else {
+            return false;
+        };
+        if *failure != HandoffEngagementTransportFailure::Armed {
+            return false;
+        }
+        *failure = HandoffEngagementTransportFailure::Delivered;
+        true
+    }
+
     /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
     pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
         self.inner
@@ -2152,17 +2167,6 @@ impl FaultInjection {
         Some(*delay)
     }
 
-    /// Record the executor whose workers a scenario may fill.
-    pub(crate) fn register_executor(&self, node_id: ClusterNodeName, executor: Executor) {
-        self.inner.executions.insert(
-            node_id,
-            NodeExecution {
-                executor,
-                holders: Arc::default(),
-            },
-        );
-    }
-
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,
@@ -2210,6 +2214,11 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_command_finalization_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::Finalization(node_id.clone()))
+            .await;
+    }
+
     pub(crate) async fn pause_relocation_publication_if_armed(&self, domain: &DomainName) {
         self.pause_command_if_armed(CommandPausePoint::RelocationPublication(domain.clone()))
             .await;
@@ -2234,11 +2243,6 @@ impl FaultInjection {
 
     pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::BackupDownload(node_id.clone()))
-            .await;
-    }
-
-    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
-        self.pause_command_if_armed(CommandPausePoint::BackupCut(domain.clone()))
             .await;
     }
 

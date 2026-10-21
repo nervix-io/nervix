@@ -31,6 +31,7 @@ use super::{
 pub(in crate::runtime) struct EndpointSourcePlan {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
+    mode: EndpointRequestPlan,
 }
 
 /// An endpoint ingestor's source: the binding between the routes it receives requests on and the
@@ -42,6 +43,7 @@ pub(in crate::runtime) struct EndpointSourcePlan {
 pub(in crate::runtime) struct EndpointSource {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
+    mode: EndpointRequestPlan,
     /// The ingestor whose intake the routes are bound to, while they are bound.
     bound: Option<EndpointBinding<EndpointIngestBinding>>,
 }
@@ -54,6 +56,7 @@ impl SourceConnector for EndpointSource {
         Ok(Self {
             runtime: plan.runtime.clone(),
             routes: plan.routes.clone(),
+            mode: plan.mode.clone(),
             bound: None,
         })
     }
@@ -104,7 +107,8 @@ impl SourceInstance for EndpointSource {
     ) -> BoxFuture<'static, ()> {
         // Requests may arrive as soon as the ingestor's start returns, so the routes are bound
         // here rather than when the source loop first runs.
-        self.bind(host.request_intake());
+        let request = EndpointRequestPolicy::from(&self.mode);
+        self.bind(host.request_intake(request));
         host.mark_ready();
         Box::pin(run_request_source(*self, SourceHost::new(host), shutdown))
     }
@@ -117,7 +121,7 @@ impl EndpointIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let EndpointIngestorStartPlan { endpoint, mode: _ } = self;
+        let EndpointIngestorStartPlan { endpoint, mode } = self;
         let route = {
             let Some(execution) = runtime.inner.executions.get(&ingestor.domain) else {
                 return Err(Report::new(
@@ -133,6 +137,27 @@ impl EndpointIngestorStartPlan {
             return Err(ingestor
                 .source_start_failure(SourceStartError::EndpointNotInstantiated { endpoint }));
         };
+        if let EndpointRequestPlan::Ack { retry_after, .. } = &mode
+            && route.endpoint_type == EndpointType::Websockets
+        {
+            let Some(protocol) = &route.signaling_protocol else {
+                return Err(ingestor.source_start_failure(
+                    SourceStartError::EndpointAcknowledgementProtocolMissing { endpoint },
+                ));
+            };
+            for outcome in EndpointRequestOutcome::replies() {
+                let reply = EndpointRequestReply {
+                    outcome,
+                    retry_after: *retry_after,
+                };
+                protocol
+                    .encode_acknowledgement(reply.value())
+                    .change_context_lazy(|| SourceStartError::EndpointAcknowledgementEncoding {
+                        endpoint: endpoint.clone(),
+                    })
+                    .change_context_lazy(|| ingestor.initialize_failure())?;
+            }
+        }
         let routes = route
             .hostnames
             .iter()
@@ -147,6 +172,7 @@ impl EndpointIngestorStartPlan {
             connector: EndpointSourcePlan {
                 runtime: runtime.clone(),
                 routes,
+                mode,
             },
             capabilities: ingestor.source_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
@@ -167,6 +193,7 @@ impl EndpointIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
             connector_label: "endpoint",
+            domain_offsets: None,
         })
     }
 }
@@ -194,7 +221,7 @@ pub(super) mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::runtime::endpoint::EndpointDispatchOutcome;
+    use crate::runtime::endpoint::{EndpointAdmission, EndpointDispatchOutcome};
 
     /// A running domain whose one endpoint ingestor reads `/events` on `edge.example.com` through
     /// its `event_wire` JSON wire schema.
@@ -353,7 +380,14 @@ pub(super) mod tests {
         };
         let references = Arc::strong_count(&probe.routes);
         for _ in 0..4 {
-            let outcome = route.dispatch(&runtime, br#"{"user_id":7}"#, &probe).await;
+            let outcome = route
+                .dispatch(
+                    &runtime,
+                    br#"{"user_id":7}"#,
+                    &probe,
+                    &CancellationToken::new(),
+                )
+                .await;
             assert!(outcome.is_accepted());
             assert_eq!(
                 probe.observed.load(Ordering::Relaxed),
@@ -361,7 +395,7 @@ pub(super) mod tests {
                 "request routing must borrow the prepared routes without cloning the intake"
             );
         }
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[cfg(feature = "benchmarks")]
@@ -382,7 +416,7 @@ pub(super) mod tests {
                     .resolve_endpoint("edge.example.com", "/events")
                     .assured("the benchmark route remains installed");
                 std::hint::black_box(route.endpoint_type());
-                std::hint::black_box(route.admission());
+                std::hint::black_box(route.refusal());
             }
             println!(
                 "endpoint-routing sample={sample} ns_per_request={} allocated_bytes_per_request={}",
@@ -402,7 +436,7 @@ pub(super) mod tests {
             let started = nervix_primitives::time::Instant::now();
             for _ in 0..10_000 {
                 nervix_primitives::task::consume_budget().await;
-                std::hint::black_box(retained.admission());
+                std::hint::black_box(retained.refusal());
             }
             println!(
                 "endpoint-retained sample={sample} ns_per_frame={} allocated_bytes_per_frame={}",
@@ -414,11 +448,13 @@ pub(super) mod tests {
                     / 10_000
             );
         }
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
+    /// A body its codec refuses is accepted and consumed as a decode rejection, which the
+    /// ingestor's `ON GENERAL ERROR LOG` reports with the codec's whole chain, counts and describes.
     #[nervix_primitives::test]
-    async fn a_payload_its_codec_rejects_is_reported_with_the_whole_codec_chain() {
+    async fn a_body_its_codec_refuses_is_consumed_as_a_decode_rejection() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
@@ -428,20 +464,41 @@ pub(super) mod tests {
             .resolve_endpoint("edge.example.com", "/events")
             .assured("the fixture installs its endpoint route");
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
 
         assert!(outcome.is_accepted());
         let RuntimeEvent::Error(message) = events
             .recv()
             .await
-            .expect("the rejected payload is reported to the node's observers");
+            .expect("the refused body is reported to the node's observers");
+        let described = runtime
+            .describe_local_ingestor(&domain, &ingestor)
+            .expect("the fixture's ingestor describes itself");
+        let rejection = described
+            .last_decode_rejection
+            .assured("the refused body is the ingestor's last decode rejection");
         assert_eq!(
             message,
-            "failed to decode http message for ingestor 'event_source' in domain 'default': codec \
-             'event_json' failed to parse field 'user_id': expected Integer, found a JSON string"
+            format!(
+                "ingestor 'event_source' general error in domain 'default': decode rejection \
+                 {rejection}"
+            )
         );
-        runtime.shutdown().await;
+        assert!(
+            rejection.to_string().ends_with(
+                ": codec 'event_json' refused the payload: codec 'event_json' failed to parse \
+                 field 'user_id': expected Integer, found a JSON string"
+            ),
+            "the rejection renders the codec's whole chain: {rejection}"
+        );
+        assert_eq!(described.decode_rejections_total, 1);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -473,7 +530,7 @@ pub(super) mod tests {
             format!("{report:#}"),
             "ingestor 'event_source' in domain 'default' is already running"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -501,7 +558,12 @@ pub(super) mod tests {
         assert!(describe.running);
         assert!(describe.ready);
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(outcome.is_accepted());
 
@@ -516,7 +578,12 @@ pub(super) mod tests {
         assert!(current.bindings().is_empty());
         assert!(route.bindings()[0].intake().is_none());
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":8}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":8}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(!outcome.is_accepted());
     }
@@ -555,36 +622,45 @@ pub(super) mod tests {
         // node could not promise.
         let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
         let refused = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             refused,
-            EndpointDispatchOutcome {
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 accepted: 0,
                 rejected: 1,
                 retry_after: None,
-            }
+            })
         );
 
         filled.release().await;
         let accepted = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             accepted,
-            EndpointDispatchOutcome {
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 accepted: 1,
                 rejected: 0,
                 retry_after: None,
-            }
+            })
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
-    /// A body its codec rejects as it drains after resume is reported and leaves the buffer, as any
-    /// retained body that fails after its 202 does.
+    /// A body its codec refuses as it drains after resume leaves the buffer as a decode rejection.
     #[nervix_primitives::test]
-    async fn a_retained_body_its_codec_rejects_is_reported_and_leaves_the_buffer() {
+    async fn a_retained_body_its_codec_refuses_leaves_the_buffer_as_a_decode_rejection() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
@@ -598,7 +674,12 @@ pub(super) mod tests {
 
         quiesce.engage(IngestorQuiesceCause::EntityHold);
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(
             outcome.is_accepted(),
@@ -610,8 +691,14 @@ pub(super) mod tests {
         let RuntimeEvent::Error(message) =
             nervix_primitives::time::timeout(Duration::from_secs(10), errors.recv())
                 .await
-                .expect("the drain reports the body its codec rejected")
+                .expect("the drain reports the body its codec refused")
                 .expect("the node keeps its observers while it runs");
+        assert!(
+            message.starts_with(
+                "ingestor 'event_source' general error in domain 'default': decode rejection "
+            ),
+            "the drain reports a decode rejection: {message}"
+        );
         assert!(
             message.contains(
                 "codec 'event_json' failed to parse field 'user_id': expected Integer, found a \
@@ -624,7 +711,7 @@ pub(super) mod tests {
             IngestorQuiesceCounters::default(),
             "the rejected body leaves the buffer"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     /// A body `BUFFER` retained was already answered 202, so when the extension workers cannot
@@ -674,7 +761,12 @@ pub(super) mod tests {
         for user_id in 1..=3 {
             let body = format!(r#"{{"user_id":{user_id}}}"#);
             let outcome = route
-                .dispatch(&runtime, body.as_bytes(), &NoIngestHeaders)
+                .dispatch(
+                    &runtime,
+                    body.as_bytes(),
+                    &NoIngestHeaders,
+                    &CancellationToken::new(),
+                )
                 .await;
             assert!(
                 outcome.is_accepted(),
@@ -738,6 +830,6 @@ pub(super) mod tests {
         );
         assert_eq!(quiesce.counters().buffered_records, 0);
         assert_eq!(quiesce.counters().buffered_bytes, 0);
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 }

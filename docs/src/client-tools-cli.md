@@ -41,6 +41,7 @@ nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cer
 | `--username <NAME>` | `NERVIX_USERNAME` | `default` | registry user |
 | `--password <PASSWORD>` | `NERVIX_PASSWORD` | | prompted interactively when unset |
 | `--command <NSPL>` | | | run statements once and exit |
+| `--backup-wait-timeout <DURATION>` | | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by

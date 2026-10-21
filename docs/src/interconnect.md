@@ -179,8 +179,9 @@ A discovered peer is registered at the interconnect endpoint it advertised, and 
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
 deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
 that remains, so an address that refuses or never answers leaves time for the next one. The
-connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
-outbound connector transports; interconnect retains its socket and peer failure classification.
+operation budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
+outbound connector transports; an attempt's lookup may take the whole of its deadline, and
+interconnect retains its socket and peer failure classification.
 The first address that accepts carries the TLS handshake, HTTP/2 and the connection hello, inside
 the same deadline; a failure there fails the attempt. The advertised host stays the TLS server
 name, which the peer's certificate must name, and the authority of every request on the connection;
@@ -319,7 +320,11 @@ therefore remains explicit cleanup work. A participant that refuses capture, pre
 recovery preparation, confirmation, activation, or reconciliation answers with a rejection whose
 text is its complete failure chain rather than only the outermost failure, so the coordinator
 reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
-module, and saved state revision. Discard is exact and idempotent over the coordination
+module, and saved state revision. A destination whose own process incarnation has advertised that
+it is terminating refuses a planned-handoff preparation before it validates the request, with
+`destination node '<node_id>' is terminating`: the coordinator plans from its gossip view, which can
+still list a stopping peer as eligible, while the destination's own advertisement is authoritative.
+Discard is exact and idempotent over the coordination
 identity, transition ID, domain, and entity; a delayed discard for one operation cannot remove a
 replacement prepared by another operation.
 
@@ -337,12 +342,19 @@ The coordinator then queries the exact operation's drain status. A participant p
 freeze before returning a drained status, and capture requires that coordination identity's freeze
 in addition to its held gate. Pending status retains the work counts used by timeout diagnostics.
 Each engagement request keeps the two-second reply bound; a typed timeout retries the same identity
-and complete scope within the original preparation deadline. A retry observes the existing
-receiver-owned operation and lease. Other request failures keep their existing classification.
+and complete scope within the original preparation deadline. A transport failure, such as a stream
+that broke, leaves delivery as uncertain as a lost reply, so it retries the same identity and scope
+too, after a 100-millisecond pause that gives the connection time to be replaced. A retry observes
+the existing receiver-owned operation and lease. Other request failures keep their existing
+classification.
 
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
-an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
+an operation in a partially engaged state or cancel cleanup after the receiver accepted it. Those
+tasks and each lease's deadline task belong to the receiver's runtime. A receiver that stops ends
+every lease it holds once its domains have stopped and waits for those tasks, so a lease its
+coordinator never released ends with the receiver rather than at a deadline past its stop, and an
+engagement that reaches a receiver whose runtime has stopped fails.
 
 Each receiver lease is a distinct in-memory instance even when an identical request is re-engaged
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
@@ -434,7 +446,7 @@ each message's metadata, its body, and each column buffer inside that body. A bo
 otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
 back, and a column buffer is never sliced outside its message. The same scan refuses, as
 undecodable, a body whose schema declares a field type Nervix does not carry, a dictionary encoding
-among them, or whose record batch is at odds with that schema. It opens every Arrow section of a
+among them, or whose record batch is compressed or at odds with that schema. It opens every Arrow section of a
 sealed snapshot, a checkpoint or a backup archive.
 
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
@@ -613,7 +625,10 @@ do. Only the failed class carries the answering node's own description, because 
 another node's subsystem is opaque to the caller and that text exists for the operator reading it.
 State snapshot exchange, dataflow node status, domain and entity drain status, entity gating, metric
 description, relay, hash map and ingestor description, hash map queries, and subscription-interest
-visibility all answer in these terms.
+visibility all answer in these terms. An ingestor description is the execution owner's report of
+the ingestor. Its last decode rejection crosses as a typed record: a reference, an instant, a codec
+name, field paths, an optional Kafka or syslog position and the rendered codec diagnostic. The
+asking node renders that record; it never parses one.
 
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation
 finds its handler without taking a lock and registrations that race each other all take effect.
@@ -700,6 +715,11 @@ remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that reta
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.
+
+Progress and terminal acknowledgements share the bounded application receive queue. The application
+keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
+capacity test explicitly queues progress, consumes it while sending the terminal acknowledgement,
+and verifies that the next relay grant fits only after that terminal send completes.
 
 ### Acknowledgement Registrations
 
@@ -816,15 +836,44 @@ including when runtime still borrows an admitted intake. Its admitted verdict re
 Decoded metadata keeps its memory charge until its last borrower releases it.
 
 With incoming queue capacity `Q`, each peer holds at most `Q` grants, attempts, active channels and
-admission records, at most `2Q` channel watermarks, and at most `2Q` outbound attempts and admission
-correlations. New unrelated channels are refused when retained watermarks occupy their budget;
-they are never evicted early to admit a replay. Lost terminal replies remain reconcilable. A
-sixty-second sweep reclaims protocol state after ten minutes without progress or reconciliation;
-live admission reports renew retained records. Authentication before gossip membership permits
-discovery, while relay operations wait for live membership. An owner still awaiting membership
-ends after ten minutes and closes its bound intake connections. Routing publication has at most
-the configured peer limit; normal frame and ACK operations use retained owners rather than a
-node-wide shared-map guard.
+admission records, and at most `2Q` outbound attempts and admission correlations. These bound the
+work in flight. The channel watermarks that keep a channel's position and last outcome after its
+work resolved have a budget of their own: at most 8,192 per peer, independent of `Q`. One retained
+watermark takes about 180 bytes, so the budget holds at most about 1.4 MiB per peer and 90 MiB
+across the 64-peer limit, and it keeps a full ten minutes of watermarks while two nodes open fewer
+than about 13 new channels a second between them.
+
+A full watermark budget never refuses a channel. Before it records the watermark of another
+channel, the owner forgets the least recently recorded or consulted watermark of a channel with no
+batch outstanding, and raises the peer's retired-channel floor to that channel's incarnation. The
+budget exceeds `Q` and a channel has at most one batch outstanding, so a full budget always holds
+such a watermark, and a channel keeps its watermark while it has a batch outstanding. A sender
+process creates its channel
+incarnations in increasing order, so every channel the owner forgot has an incarnation at or below
+the floor, and a channel the sender opens afterwards is above it. A request for a channel the owner
+holds neither a watermark nor an attempt for, and whose incarnation is at or below the floor, is
+answered as an earlier position of a retained channel would be: its grant is refused as retired, and
+status and cancellation return `Retired`. A delayed or repeated request for a forgotten delivery
+identity is therefore never admitted again, however late it arrives, and its sender learns that the
+outcome is no longer known there. A channel opened just before one that was forgotten can be
+refused the same way; its sender handles that as any retired delivery and reopens the channel under
+a fresh incarnation. The floor and every retained watermark end with the peer's bound process epoch.
+
+Lost terminal replies remain reconcilable while their watermark is retained. A sixty-second sweep
+reclaims attempts, outbound correlations and channel watermarks after ten minutes without progress
+or reconciliation; live admission reports renew retained records. The sweep forgets a watermark the
+same way, raising the floor, and passes over the watermark of a channel with a batch outstanding.
+Because a sender rotates a channel after five minutes without a batch, a sweep can leave a live
+channel's next request at or below the floor with no watermark retained for it only when that request
+arrives more than five minutes after its sender created it, long after the sender stopped waiting for
+its answer.
+`nervix_interconnect_relay_channel_watermarks` shows how many watermarks a node retains, and
+`nervix_interconnect_relay_channel_watermarks_evicted_total` counts the ones forgotten to make room
+for another channel; a count that keeps rising means a peer opens more channels within ten minutes
+than the budget holds. Authentication before gossip membership permits discovery, while relay
+operations wait for live membership. An owner still awaiting membership ends after ten minutes and
+closes its bound intake connections. Routing publication has at most the configured peer limit;
+normal frame and ACK operations use retained owners rather than a node-wide shared-map guard.
 
 ### Ordering, Retry, And Reconciliation
 
@@ -834,12 +883,19 @@ the same identity with different content is rejected.
 
 After a connection loss, the sender first reconciles with the same receiver process. If the body was
 already received or the batch was admitted, the receiver returns that known state and the sender
-does not resend the body. Sequence watermarks reject reordering and duplicate enqueue. Inactive
-sender channels rotate after five minutes. A receiver keeps a channel's watermark while a batch
-granted on that channel is unresolved, and for at least ten minutes after the watermark was last
-recorded or consulted by a grant, status, or cancellation request, so ordinary reconnects can still
-reconcile. A consultation refreshes retention under that peer's protocol guard, together with its
-sequence decision. Independent peers have independent guards.
+does not resend the body. Sequence watermarks reject reordering and duplicate enqueue. A receiver
+keeps a channel's watermark while a batch granted on that channel is unresolved, and for ten minutes
+after the watermark was last recorded or consulted by a grant, status, or cancellation request, so
+ordinary reconnects can still reconcile. A sender channel that has carried no batch for five minutes,
+counted from when it opened or from its last batch, opens a fresh incarnation for its next batch. That
+rotation is shorter than the retention, so a channel its sender resumes still finds its watermark, and no
+batch carries an incarnation opened more than five minutes before it. A consultation
+refreshes retention under that peer's protocol guard, together with its sequence decision.
+Independent peers have independent guards. When a peer opens more channels than its watermark
+budget holds, the least recently used watermarks go first, as
+[Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes. A sender
+that then resumes or reconciles a forgotten channel is answered `Retired`, treats the delivery as
+indeterminate, and reopens the channel under a fresh incarnation.
 
 The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
 check this boundary through the production authenticated connection. They lose the reply after an
@@ -865,9 +921,29 @@ before admission permanently fences that delivery identity, including when cance
 receiver before the original grant request. If admission has already won, cancellation returns the
 known admitted result and does not undo work handed to the runtime.
 
-Removing or evicting a concrete branch cancels its unadmitted channel generation and releases its
-reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
-keeps a previous branch lifetime from being confused with the new runtime instance.
+Removing or evicting a concrete branch cancels the unadmitted generation of the channels that
+branch ends and releases their reserved work. A relay owner's branch ends the channels through
+which the owner routes that relay's branch. A processor's, ingestor's or reingestor's branch ends
+the channels of the relays it publishes through for its key; the producers of one relay on a node
+share that relay's channel for a key. The channels of every other relay keep their generation,
+even when another relay or processor holds a branch with the same key, because each ends only with
+its own branch's lifetime. If a branch appears again, its channels use a fresh channel incarnation
+and sequence. This keeps a previous branch lifetime from being confused with the new runtime
+instance. An ended channel's watermark stays on its receiver for the retention that
+[Ordering, Retry, And Reconciliation](#ordering-retry-and-reconciliation) describes, or until the
+peer's watermark budget needs its position for another channel. A burst of ended channels therefore
+never refuses the peer's new channels: a thousand branches that expire after a pause and then
+return open a thousand new channels, and the watermarks of the channels that ended make room for
+them.
+
+A committed forced ownership change also retires changing relay routes' preceding channel
+generation before the local graph installer waits for dispatch quiescence. The sender interrupts
+its admission wait and uses the same cancellation operation and five-second reconciliation budget.
+It need not wait for the fenced former owner to resume. An admitted result keeps the receiver's
+record-ACK obligation; an unconfirmed or cancelled delivery fails its held record ACKs for source
+retry, with possible replay duplicates. No transport message or automatic replay contract changes.
+The installer publishes successor routes only after completing the local swap, so another dispatch
+cannot open a fresh channel toward a preceding consumer while that fence is held.
 
 ### Consumers That Leave The Receiver
 
@@ -1035,10 +1111,15 @@ the active decoded section are resident at once.
 node fetches a resource archive and how it verifies and records the fetched version.
 
 Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
-each node's admitted work through a management-class drain request and requests a separate
-confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
-request with its coordination identity and applied cut revision to each live node, then reads each
-node's management-class inventory of staged sections. A capture request's deadline is the remaining
+the admitted work of every live node and every node the domain's schedule assigns its work to
+through a management-class drain request, and requests a separate confirming force-flush round after
+all nodes appear quiet. The leader sends a management-class capture request with its coordination
+identity and applied cut revision to the scheduled primary of every placement whose state the
+archive captures, and for a `WITHOUT PAUSE` capture, whose schedule may move, to every other live
+node too, then reads each node's management-class inventory of staged sections. A cut refuses
+before it sends a request when the cluster does not report one of those nodes live, or when the
+schedule places an entity whose state the archive captures on no node, so a scheduled owner is
+never silently left out of an archive. A capture request's deadline is the remaining
 budget of the domain's cut rather than a fixed request deadline, because an owner stages its share of
 the domain's state before it answers; a `WITHOUT PAUSE` capture takes the default cut budget. A receiver waits up to five seconds for its
 state machine to apply that revision, installs its current runtime plan, and rechecks the sending
@@ -1047,7 +1128,9 @@ capture; a follower that is still applying the cut does not produce an archive f
 A captured section is fetched over a
 snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
 and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
-staged section only for the coordinator process that requested it and releases expired stages.
+staged section only for the coordinator process that requested it, serves it once in 1 MiB reads,
+and releases a stage nobody fetched 600 seconds after staging it. One owner's inventory of a
+domain's capture is one management reply, at most 64 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
@@ -1071,8 +1154,9 @@ The coordinator streams native lifecycle and Kafka metadata into quota-owned fil
 installation. It retains the verified description's separate `restore_metadata` preparation
 charge through conversion, while buffered file I/O reserves 2 MiB of bulk memory. Complete
 encoded records are never copied into a local request or retained for remote transmission.
-Native checkpoints and guest saves share the file source and bounded chunk path. See
-[Backup And Restore](backup-and-restore.md#restoring) for preparation admission and its limits.
+Native checkpoints and guest saves share the file source and bounded chunk path. See [Restore
+Intake And Preparation](./backup-and-restore-architecture.md#restore-intake-and-preparation) for
+preparation admission and [Backup And Restore](./backup-and-restore.md#limits) for its limits.
 
 Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
 published. The leader admits a replicated installation authority carrying its identity and term,
@@ -1091,8 +1175,6 @@ snapshot as the other captured state. Each reader retains its selected namespace
 bounded identity conversion and raw Arrow staging finish. Running and paused domains use fresh generation
 capture under their assignment barriers. The capture inventory carries both through the existing
 materialized section kinds and Snapshot stream contract. Stored capture never activates the domain.
-
-Large materialized containers never use the encoded metadata install request.
 
 After all checkpoints are staged, the leader sends each target node a publish request with the
 complete checkpoint and byte counts. The receiver reserves a fixed 2 MiB, validates receipts,
@@ -1119,8 +1201,8 @@ finish and publishes only after a complete new 36 MiB transfer. The handlers ret
 digests; these checks qualify the authenticated transport, while the public restore scenarios
 and storage checks qualify native containers, atomic publication and activation.
 Their 300-second simulated completion deadline follows two intentional request deadlines and
-allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
-latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
+allows the fixture's 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms
+maximum latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
 still fail a transfer that does not complete.
 
 The registered `backup-capture-wire` property checks complete drain, capture, inventory and fetch
@@ -1137,9 +1219,10 @@ archive paths. These properties supply wire and mapping evidence; the transport 
 public scenarios retain the authentication, fencing and recovery evidence described above. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) for their domains and commands.
 
-Capture fetch and state installation share the peer connection's one reserved snapshot stream
-slot. The archive staging phase finishes and releases its fetch stream before installation starts;
-an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
+A backup's capture fetches and a restore's installation requests share the peer connection's one
+reserved snapshot stream slot. A completed fetch releases its stream before the coordinator verifies
+and stages what it received, and every installation action is one request that holds no stream while
+the installer awaits its next snapshot request to that peer.
 Staging and publication run on the admitted filesystem worker class. Authority is checked inside
 the storage job after admission, so waiting for a worker cannot preserve an expired installation
 right. Durable synchronization does not run on the async reactor.
@@ -1167,6 +1250,12 @@ activate after a later one is committed. The control plane computes the exact fi
 committed schedule before runtime installation and carries it in the complete typed execution
 revision used for activation and reconciliation; a node does not reconstruct it from a second
 schedule view.
+Before forced-recovery checkpoint selection, the destination waits for its local execution schedule
+to finish installing within the existing preparation deadline. It still validates the request's
+base fingerprint and entity against that installed revision. A startup installation wait does not
+classify the replica's checkpoints as absent; expiry is an installation deadline failure carrying
+the domain and entity. The request, process-incarnation fence and response envelope are unchanged.
+
 WASM handoff and forced-recovery preparation on a passive revision validate and retain the complete
 checkpoint inventory without running guest callbacks or reading the stopped domain clock. The
 guest validates its saved bytes when `START` installs the active revision, so stopped time is not
@@ -1408,7 +1497,11 @@ one. The serving node sends `Open` with the domain, ingestor, expected fields, c
 largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
 bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
 with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
-`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`.
+`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`. The
+serving node checked the committed domain, schedule and ingestor before it forwarded the open, so
+an owning node that runs no endpoint of the ingestor yet, as one that has not installed its domains
+again since it started, refuses it as `EndpointUnavailable` rather than classifying the endpoint
+from its own installation.
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other
@@ -1709,7 +1802,8 @@ receiver restart is reported as indeterminate, and why an acknowledgement regist
 run of the node that registered it.
 
 An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
-lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an
+lease, or ending it with its node's runtime, removes the runtime fence but does not report a
+persisted preparation as cleaned up. Only an
 exact durable discard, activation, or schedule-based reconciliation resolves that preparation.
 
 ## Observability
@@ -1722,9 +1816,12 @@ whether pressure originates in transport, execution, or the protocol using it. A
 that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
 setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
 
-Typed-request observations identify application health as operation `liveness` and replaceable
-domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
-request counts, outcomes, latency, and quota failures can be evaluated independently. A client
+Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
+application health together with the other requests of that subquota, the drain-status polls of
+backups, domains and entities among them, and operation `progress` counts replaceable domain-clock
+delivery and HTTPS listener installation probes, so their request counts, outcomes, latency, and
+quota failures can be evaluated independently. Only unary requests are counted there; a streamed
+response, such as a backup section fetch, appears in the bulk-transfer byte series. A client
 producer link's opening, failure, silence, and the producers it ends or detaches are logged at
 `debug` on both ends; the owning node's client-ingestor metrics count forwarded producers apart
 from local ones.
