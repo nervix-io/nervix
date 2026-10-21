@@ -36,9 +36,9 @@ Interconnect](./interconnect.md), [Data-Plane Concurrency](./data-plane-concurre
 | Engines and infrastructure | The interconnect | The typed drain-status, capture, inventory, section-fetch and state-installation operations, with their pools, subquotas, deadlines and coordination identity. |
 | Decisions | The restore planner | A pure plan from the archive description, the statement, the existing users and domains, and the steps already recorded: the user policy, the name checks, the resource versions a restore imports and the versions every model pins, the stopped domain state and the `RESUME` activation. |
 | Decisions | The transaction planner | Each restored domain's model run, planned against the domain as the restore will create it. |
-| Data plane | Owner capture | Forcing branch publications and lifecycle checkpoints, the capture fence, sealing source offsets and lifecycle durably, one database snapshot, and producing each section into node staging. |
+| Data plane | Owner capture | For the placements the node is the scheduled primary of: forcing branch publications and lifecycle checkpoints, the capture fence, sealing source offsets and lifecycle durably, one database snapshot, and producing each section into node staging. |
 | Data plane | Branch restore | Installing every branch a restored lifecycle names, rebuilding windows from their retained rows, and binding restored state as a branch starts. |
-| Control plane | The backup coordinator on the leader | Executing an admitted `BACKUP`: each domain's cut, owner capture, section transfer, assembly under the staging quota, retention under the execution reference, and the report. |
+| Control plane | The backup coordinator on the leader | Executing an admitted `BACKUP`: each domain's cut and the nodes it must reach, owner capture, section transfer, assembly under the staging quota, retention under the execution reference, and the report. |
 | Control plane | The restore coordinator on the leader | Staging and verifying an archive, preparing and planning it, admitting the restore, applying its steps in order, and installing state. |
 | Control plane | Restore checkpoint maintenance on every node | The sweep that reclaims abandoned restore attempts and unreferenced checkpoint chunks, and the staging measurements it publishes. |
 | Edges | Archive assembly and restore preparation | Rendering committed Models as canonical Plexus text and parsing it back, and parsing archived text into Models. Both name the language parser, which is an edge dependency. |
@@ -156,24 +156,36 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
    holds. It then takes the domain's leader-local alteration guard, which keeps the leader's own
    reconciliation from resuming the paused domain, and failover and automatic placement from
    moving its work, while the cut is held.
-3. **Pause.** A replicated pause stops intake as each ingestor's `ON QUIESCE` declares, and every
+3. **Reach.** From the domain's committed schedule, which the lease now holds still, the
+   coordinator takes every node the schedule assigns the domain's work to, and the scheduled
+   primary of every placement whose state the archive captures. When the cluster does not report
+   one of them live, the coordinator refuses the cut before anything pauses, naming the domain, an
+   entity of that node and the node. It could neither observe that node's admitted work nor
+   capture its state: a crashed node lost what it held, and a partitioned one may still admit
+   work. It refuses as well, naming the domain and the entity, when the schedule places an entity
+   whose state the archive captures on no node, as when every node that could host it is cordoned
+   or down: that entity's last state lies on a node the cut cannot name.
+4. **Pause.** A replicated pause stops intake as each ingestor's `ON QUIESCE` declares, and every
    live node applies the paused state.
-4. **Drain.** The coordinator polls every live node every 50 milliseconds for the admitted work it
-   still holds: admitting ingestors and generators, outstanding source acknowledgement roots, relays
-   that admitted a batch while the node read its view, relay and node buffers, and emitter buffers
-   and publishes. That is the view the shutdown drain uses. Two kinds of held work are exempt,
+5. **Drain.** Every 50 milliseconds, the coordinator polls every live node and every node the
+   schedule assigns the domain's work to for the admitted work it still holds: admitting ingestors
+   and generators, outstanding source acknowledgement roots, relays that admitted a batch while the
+   node read its view, relay and node buffers, and emitter buffers and publishes. That is the view
+   the shutdown drain uses. A scheduled node that stops answering keeps the round open until the
+   deadline. Two kinds of held work are exempt,
    because their acknowledgements wait for input the paused domain does not admit and the cut
    captures them as state: messages parked by `REQUIRED WAIT`, and the rows a window retains until
    it steps past them, whose acknowledgement shares park the same way. Once every node reports no
    admitted work, the coordinator asks every node to start a confirming force-flush generation and
    waits until every node reports it finished with no admitted work. New work restarts the round.
-5. **Capture.** Under the remaining budget, the coordinator checks its tenure, reads the domain's
+6. **Capture.** Under the remaining budget, the coordinator checks its tenure, reads the domain's
    configuration at the applied revision, which becomes the revision and Raft log entry the archive
-   records, and asks every owner to capture at that revision, as described in [Capture On The
-   Owners](#capture-on-the-owners). It checks its tenure again afterwards.
-6. **Resume.** The coordinator always resumes the domain, outside the deadline, and records the
+   records, and asks every scheduled state owner to capture at that revision, as described in
+   [Capture On The Owners](#capture-on-the-owners). It refuses the cut when one of them is no
+   longer reported live, and checks its tenure again afterwards.
+7. **Resume.** The coordinator always resumes the domain, outside the deadline, and records the
    release time and the quiesce counters.
-7. **Release.** It always releases the lease, and checks its tenure a last time.
+8. **Release.** It always releases the lease, and checks its tenure a last time.
 
 A drain that does not finish by the deadline fails the backup with the counts each node still held
 and resumes the domain; an unavailable sink keeps its publish and acknowledgement counts outstanding
@@ -183,9 +195,10 @@ reconciliation resumes the domain if it is still paused, and it re-executes ever
 under its execution reference: it rejoins the command's lease, pauses again, cuts, resumes,
 releases, and retains its own archive for the client that retries the reference.
 
-A stopped cut takes the lease and asks the owners to capture without guard, pause or drain. Only
-then are the captured sections transferred, so neither the archive's size nor a client's download
-rate lengthens a freeze.
+A stopped cut takes the lease and asks the scheduled state owners to capture without guard, pause
+or drain, and refuses, as a quiesced cut does at its capture, when the cluster does not report one
+of them live or the schedule places an entity whose state it archives on no node. Only then are the captured sections transferred, so neither the archive's size nor a
+client's download rate lengthens a freeze.
 
 ### The Capture Fence
 
@@ -200,11 +213,18 @@ under [Qualification Evidence](#qualification-evidence).
 
 ## Capture On The Owners
 
-The coordinator sends each live node, and itself, one capture request naming the domain, the cut
-revision and whether the cut is quiesced. A remote request's deadline is what remains of the cut's
-budget, because staging a domain's state takes as long as that state is large. A live cut's owners
-receive the default 60-second budget. The coordinator's own share of a stopped or live capture runs
-without a deadline.
+The coordinator sends one capture request, naming the domain, the cut revision and whether the cut
+is quiesced, to every node the committed schedule names as the primary of a placement whose state
+the archive captures: a WASM guest save, Kafka domain offsets, the branch lifecycle of an ingestor,
+a reingestor or a processor, a materialized relay, a deduplicator keyspace or a window. A live cut
+holds no lease, so the schedule can move a placement while it runs; it sends the request to every
+other live node as well, and each owner stages what its own applied schedule assigns it. A cut
+whose scheduled state owner the cluster does not report live fails, naming the domain, the entity
+and the node, and so does a cut whose schedule places such an entity on no node, naming the domain
+and the entity; neither assembles an archive without that state. A remote request's deadline is
+what remains of the cut's budget, because staging a domain's state takes as long as that state is
+large. A live cut's owners receive the default 60-second budget. The coordinator's own share of a
+stopped or live capture runs without a deadline.
 
 An owner accepts a capture only from the current leader. It waits up to five seconds to apply the
 cut revision, brings its runtime plan current, checks the sender is still the leader, and reads the
@@ -258,12 +278,17 @@ quota. A section that cannot be staged because the node's staging quota is full 
 than waited for. A staged section stays registered under the capture's coordination identity until
 the coordinator fetches it or 600 seconds pass.
 
-Every node an entity's state is assigned to, its executors and its replicas, runs the capture
-steps above, but only the node the committed schedule names as the placement's primary stages its
-sections, so the archive holds each placement once. Owners agree on the primary because the cut's
-mutation lease keeps the domain's schedule from changing, automatic placement included, while the
-cut is held. After an owner has staged its sections, the coordinator asks it for its inventory: the
-path, length, digest and kind of every section it staged for this capture.
+Only the node the committed schedule names as a placement's primary captures it. An owner runs the
+capture steps above for the placements it is the primary of and for no others, so the archive holds
+each placement once. A replica's copy is never sealed, listed, read or charged, so a replica's
+admission refusal cannot fail a cut. Owners agree on the primary because the cut's mutation lease
+keeps the domain's schedule from changing, automatic placement included, while the cut is held; a
+replica owns a placement only once failover promotes it, after a cut has released the lease. An
+entity that executes on every cluster node, such as an HTTP or WebSocket endpoint ingestor or a
+Syslog listener, still has a scheduled primary: the first node by name that the schedule assigns
+it to, and only that node archives its branch lifecycle. After an owner has staged its sections,
+the coordinator asks it for its inventory: the path, length, digest and kind of every section it
+staged for this capture.
 
 ## Transfer, Assembly And Retention
 
@@ -273,8 +298,8 @@ sending process:
 
 | Operation | Direction and form | Pool and subquota | Deadline | What the receiver checks |
 | --- | --- | --- | --- | --- |
-| Drain status | The coordinator to every live node, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then flushes if idle, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
-| Capture | The coordinator to every live node and itself, concurrently | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision within five seconds, its runtime plan is current and the sender is still the leader. |
+| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then flushes if idle, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
+| Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision within five seconds, its runtime plan is current and the sender is still the leader. |
 | Capture inventory | The coordinator to each node, unary | Management, Shared | 5 seconds | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 64 KiB. |
 | Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Snapshot | 30 seconds to open the stream, then 5 seconds without progress | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
 
@@ -721,6 +746,7 @@ routing could not reach. A section path names a branch by the BLAKE3 fingerprint
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
 | Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled sink recovers. |
+| Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |
 | Section transfer or assembly | A fetch fails, or the archive cannot be staged or encoded | No archive is retained | Send the backup again. |
@@ -745,6 +771,10 @@ Backup and restore guarantee that:
   archive;
 - a quiesced cut reflects every input acknowledged before it, with no admitted work at the cut, and
   freezes the domain only for one drain and one publication round;
+- a quiesced or stopped cut archives the state of every placement its committed schedule assigns,
+  each from its scheduled primary, or fails naming the domain, the entity and the node it could not
+  reach, and refuses while its schedule places an entity whose state it archives on no node; it
+  never assembles an archive that lacks a placement's state;
 - no step of a restore is applied twice, whatever retries, disconnects and leader changes occur;
 - a restored domain never runs with partial state: every assigned owner and replica publishes its
   complete set, and the gate refuses `START` until every node has;
@@ -754,13 +784,20 @@ Backup and restore guarantee that:
 
 They hold within these limits:
 
-- **Owners the cut reaches.** A cut asks the nodes the cluster reports live, and only a placement's
-  scheduled primary stages its sections, while the cut's lease keeps failover from moving them. A
-  primary the cluster already reports down when the cut starts is not asked, its placements
-  contribute nothing, and nothing compares what the owners staged with the schedule, so the archive
-  holds none of that state unless the cut fails for another reason, such as an ingestor on that node
-  whose quiesce counters it reads. An owner that fails while the cluster still reports it live fails
-  the backup.
+- **Reachable owners.** A cut whose scheduled state owner is down fails until that node is back or
+  failover has moved its placements, which happens only once the cut has released its lease; a
+  replica's copy is never archived in the owner's place. A quiesced cut likewise refuses while a
+  node the schedule assigns the domain's work to is down, and every cut while the schedule places
+  an entity whose state it archives on no node, which lasts until a node can host the entity
+  again. Liveness is the cluster's availability
+  view, gossip bridged by application health: a node it still reports live is asked, and fails the
+  backup if it does not answer, and a stopped node leaves it once its health probes have failed for
+  the node-unavailability timeout, 10 seconds by default.
+- **Live cuts and moving placements.** A live cut takes no lease, so failover or relocation can move
+  a placement while its owners capture. Each owner stages what its own applied schedule assigns it,
+  so a placement that moves during the cut can be staged by neither node, or by both, and a section
+  staged twice fails the archive's layout. A quiesced or stopped cut holds the lease, so its
+  schedule cannot move.
 - **Memory.** One record section is at most 64 MiB, one archive 64 GiB, and a node stages at most
   128 GiB of artifacts. Restore preparation is bounded by the `restore_metadata` class, 2 GiB per node
   by default; capture conversion charges to it as well. Individual materialized relays, keyspaces,
@@ -814,7 +851,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Guarantee | Evidence |
 | --- | --- |
 | Archive fidelity | Registered Bolero properties over complete archives, records and descriptors, streamed records against rkyv's encoding, Arrow groups, native lifecycle and Kafka conversion, the capture section mapping, and the restore installation and staging records, each with a malformed-input target; [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) lists them. |
-| Cut and capture | `backup.feature` and `backup_wait.feature` on one and three nodes: configuration-only, stopped, live and quiesced cuts, parked `REQUIRED WAIT` work, an unavailable emitter, a committing transaction's lease, a leader change during a cut and between cuts; `backup_stored_branch_capture.feature`, `backup_metadata.feature` and `backup_guest_saves.feature` for stored and large state within the bulk budget. |
+| Cut and capture | `backup.feature` and `backup_wait.feature` on one and three nodes: configuration-only, stopped, live and quiesced cuts, parked `REQUIRED WAIT` work, an unavailable emitter, a committing transaction's lease, a leader change during a cut and between cuts; `backup_owners.feature` on three nodes, where a quiesced and a stopped cut, with no replica and with one, refuse once their deduplicator's scheduled owner has stopped and the leader no longer reports it live, a quiesced cut refuses before it pauses once the deduplicator's owner, or a node that only runs the domain's work, has stopped, and a quiesced and a live cut refuse while no node can host the deduplicator; `backup_stored_branch_capture.feature`, `backup_metadata.feature` and `backup_guest_saves.feature` for stored and large state within the bulk budget. |
 | Capture fence | The Loom models `server.backup.cut-includes-publication` and `server.backup.cut-generation`, each qualified by weakenings that must fail, and the Shuttle checks of the fence, of forced deduplicator and window publication at the cut, and of materialized capture against eviction. |
 | Downloads and retention | `backup.feature` and `backup_delivery.feature`, and the Shuttle checks that a download stays bounded, a lost client releases its hold once, and concurrent downloads collect an archive once. |
 | Restore progress | `restore.feature` on one and three nodes: verification refusals, a failed step, an interrupted upload, joined retries and a leader change while applying; the Shuttle checks that a resumed restore never repeats a recorded effect, an abandoned upload releases its quota once, and concurrent retries join one execution. |

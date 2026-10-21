@@ -45,6 +45,7 @@ use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod backup_cut;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
@@ -54,6 +55,7 @@ mod relocation_commit;
 mod restarted_voter;
 mod shutdown_handoff;
 
+pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use execution::NodeExecution;
@@ -357,7 +359,10 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
-    BackupCut(DomainName),
+    BackupCut {
+        domain: DomainName,
+        boundary: BackupCutBoundary,
+    },
     BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
@@ -1458,20 +1463,6 @@ impl FaultInjection {
         });
     }
 
-    /// Holds a backup after its domain drain and before any owner captures state.
-    pub fn pause_backup_cut_on(&self, domain: DomainName) {
-        self.arm_command_pause(CommandPausePoint::BackupCut(domain));
-    }
-
-    pub async fn wait_for_backup_cut_pause(&self, domain: &DomainName) {
-        self.wait_for_command_pause(&CommandPausePoint::BackupCut(domain.clone()))
-            .await;
-    }
-
-    pub fn release_backup_cut_pause(&self, domain: &DomainName) {
-        self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
-    }
-
     /// Holds the next backup archive download on `node_id`, once, after the node opened the
     /// retained archive and before it streams any frame of it, so the archive is not collected.
     pub fn pause_backup_download_on(&self, node_id: ClusterNodeName) {
@@ -2245,11 +2236,6 @@ impl FaultInjection {
 
     pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::BackupDownload(node_id.clone()))
-            .await;
-    }
-
-    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
-        self.pause_command_if_armed(CommandPausePoint::BackupCut(domain.clone()))
             .await;
     }
 

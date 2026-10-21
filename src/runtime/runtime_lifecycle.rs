@@ -448,10 +448,14 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+    pub(crate) async fn pause_backup_cut_if_armed(
+        &self,
+        domain: &DomainName,
+        boundary: crate::fault_injection::BackupCutBoundary,
+    ) {
         self.inner
             .fault_injection
-            .pause_backup_cut_if_armed(domain)
+            .pause_backup_cut_if_armed(domain, boundary)
             .await;
     }
 

@@ -526,7 +526,11 @@ its own branch, and `ON REJECTED STATE RESET`. See
 
 A normal domain backup acquires a replicated mutation lease under its persistent command
 execution. The leader also takes its node-local alteration guard, pauses and drains the domain,
-reads the configuration at the cut, and asks state owners to stage their checkpoints. It resumes
+reads the configuration at the cut, and asks the scheduled state owners to stage their checkpoints.
+A cut refuses, naming the domain, the entity and the node, when the cluster does not report a
+scheduled state owner live, or, before a quiesced cut pauses, a node that runs the domain's work,
+and naming the domain and the entity when the schedule places an entity whose state it archives on
+no node. It resumes
 the domain and explicitly releases that domain's lease before transferring its sections into the
 archive. A cluster backup repeats this process per domain, so one domain's archive transfer does
 not hold another domain paused or mutation locked. A stopped domain is confirmed under its lease
@@ -534,7 +538,8 @@ and has no intake to pause; `WITHOUT STATE` takes no mutation lease, and `WITHOU
 either and reads a live checkpoint without quiescing. A retry still uses the command execution's
 stable identity and outcome, and a new leader re-executes an applying backup under it. [The
 Quiesced Cut](./backup-and-restore-architecture.md#the-quiesced-cut) describes the protocol.
-The backup drain reads admitted work on every live node and uses a separate confirming force-flush
+The backup drain reads admitted work on every live node and every node the schedule assigns the
+domain's work to, and uses a separate confirming force-flush
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
 not keep the cut open, and neither do the rows a window retains, which the cut captures as window
 state. If work reappears, the leader drains and confirms again. Each drain request

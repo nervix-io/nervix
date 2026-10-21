@@ -436,9 +436,12 @@ Choose checks relevant to the configured graph:
   sent alone from `nervix-cli`, a native client, or the web console, which saves it as a verified
   browser download. A normal backup quiesces each running domain
   before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
-  materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
-  PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
-  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
+  materialized relay generations, deduplicator keys and the rows windows retain. A backup is
+  refused while a node that owns the domain's state is down or no node can host part of it, and a
+  normal backup also while a node that runs its work is; send it again once the node is back,
+  failover has moved its work, or a node is uncordoned.
+  `WITHOUT PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures
+  only configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
   its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
   branch lifecycle sections stream within the 32 MiB bulk budget up to the 64 MiB record limit;
   their conversion is charged to the node's `restore_metadata` grant, sized below.
