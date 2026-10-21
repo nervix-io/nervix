@@ -130,8 +130,9 @@ impl ZeroMqSink {
 
     /// Sends one message, and fails the send once it has taken longer than the client's
     /// `timeout_ms`: a peer that stops reading fills the connection's buffers and holds the send.
-    /// The host opens a new socket after a failed publish, so a message a timed-out send left
-    /// partly written is never continued.
+    /// The driver returns a peer to its round robin only when a send to it completes, so this
+    /// socket never writes to that connection again and a message a timed-out send left partly
+    /// written is never continued; the host opens a new socket after the failed publish.
     async fn send(&mut self, payload: Vec<u8>) -> SinkPublishResult<()> {
         let send_timeout = self.send_timeout;
         let send = self.socket.send(ZmqMessage::from(payload));
@@ -192,8 +193,9 @@ impl ZeroMqSink {
 
 #[async_trait]
 impl SinkLifecycle for ZeroMqSink {
-    /// Each send writes and flushes its frame to a peer's socket before it returns, so the
-    /// socket holds nothing.
+    /// A send that completes has written and flushed its frame to a peer's socket, and what a
+    /// timed-out send left belongs to a record its publish failed, so the socket holds no record a
+    /// publish reported delivered.
     async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
         Ok(SinkFinish::NothingHeld)
     }
