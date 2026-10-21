@@ -1418,6 +1418,12 @@ See the [ZEROMQ PUSH capability and mirror reference](connector-capabilities.md#
 ZeroMQ has no delivery acknowledgment; success is socket acceptance. Transient socket failures are
 paced by the declared retry policy.
 
+The sink is a PUSH socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
+endpoint. With `'bind' = 'true'` the socket binds that address and peers connect to it; otherwise
+it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the way an
+ingestor renders it, so it can name the client's `MOUNT`; see
+[Client Config Mounts](resources.md#client-config-mounts).
+
 A client that connects rather than binds connects when the emitter starts. The driver retries a
 refused connection on its own and waits for the peer's ZMTP handshake, so the client's
 `connect_timeout_ms`, 30 seconds when it is left out, is what ends the attempt of a peer that never
@@ -1427,6 +1433,17 @@ the connection's buffers drain. The client's `timeout_ms` bounds that wait for e
 runs out of it fails the publish, and the emitter opens a new socket and sends the message again,
 since the one it left partly written on the old connection is never completed. Without `timeout_ms`
 a send waits for as long as the peer reads nothing.
+
+The driver has no heartbeat and never reconnects on its own; the emitter's retry is what replaces a
+socket. A send that finds its connection broken fails the publish, and the emitter opens a new
+socket on its retry policy, which connects again in connect mode. A record whose send completed is
+not sent again, even when its connection broke before the peer read it. A bound socket sends only
+to peers that have connected to it and finished their handshake, and with none a send fails at
+once. The emitter then retries through a new socket, which must bind the address again. That bind
+fails while the failed socket still holds the address; once a bind succeeds, the retried publish
+goes out at once, usually before any peer has reconnected, and fails the same way. A bound emitter
+can therefore keep failing after a single failed publish, such as one for a record that arrived
+before its first peer connected. Where you can, let the emitter connect to a bound peer instead.
 
 ### Syslog
 
