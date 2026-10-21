@@ -419,6 +419,31 @@ mod tests {
         );
     }
 
+    /// HTTP REQUEST emitters declare sorted by name with lowercase names: the application headers
+    /// keep one value per name as ASCII lowercase records it, the last one written, and a request
+    /// carries them in ascending order of name.
+    #[test]
+    fn application_headers_keep_the_last_value_of_each_lowercase_name_in_name_order() {
+        let mut headers = HttpApplicationHeaders::default();
+        for (name, value) in [
+            ("X-Trace", "a"),
+            ("Tenant", "x"),
+            ("x-trace", "b"),
+            ("Accept", "y"),
+        ] {
+            let name = HttpHeaderName::parse(name).assured("each name is an application field");
+            let value = HttpHeaderValue::parse(value).assured("each value is a valid field value");
+            headers
+                .insert(name, value)
+                .assured("four short headers fit the application envelope");
+        }
+        let mut carried = Vec::new();
+        for (name, value) in headers.iter() {
+            carried.push(format!("{}={}", name.as_str(), value.as_str()));
+        }
+        assert_eq!(carried, ["accept=y", "tenant=x", "x-trace=b"]);
+    }
+
     #[test]
     fn endpoint_accepts_only_an_explicit_origin() {
         assert!(HttpOrigin::parse("http://localhost:8080/").is_ok());

@@ -617,6 +617,52 @@ mod tests {
             .expect("a string list attribute builds");
         assert_eq!(SqsMessageAttributes::attribute_value(&list), "a,b");
     }
+
+    /// Both SQS QUEUE sides declare last wins with exact names: a record's header writes become
+    /// one attribute per name, the last value written for it, and a reader of the sent message
+    /// finds exactly those attributes, names that differ in letter case staying two names.
+    #[test]
+    fn written_headers_read_back_as_one_attribute_per_name_holding_the_last_value() {
+        let mut written = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            written.push((name.to_string(), value.to_string()));
+        }
+        let record = nervix_connector::SinkRecord::new(
+            nervix_connector::SinkRecordId::new(0),
+            None,
+            b"{}".to_vec(),
+            written,
+            nervix_models::Timestamp::from_unix_nanos(0),
+        );
+        let prepared = crate::PreparedSqsRecord::new(record)
+            .expect("four writes of three valid names make a valid message");
+        // The service takes the attributes as the request carries them, a map of name to value.
+        let sent: std::collections::HashMap<_, _> = prepared.attributes.into_iter().collect();
+        let message = SqsMessage::builder()
+            .body("{}")
+            .set_message_attributes(Some(sent))
+            .build();
+        let headers = SqsMessageAttributes { message };
+        let mut visited = std::collections::BTreeMap::new();
+        headers.visit(&mut |name, value| {
+            let earlier = visited.insert(name.to_string(), value.to_string());
+            assert_eq!(
+                earlier, None,
+                "a message carries one attribute named {name}"
+            );
+        });
+        let expected = std::collections::BTreeMap::from([
+            ("Tenant".to_string(), "x".to_string()),
+            ("tenant".to_string(), "y".to_string()),
+            ("trace".to_string(), "b".to_string()),
+        ]);
+        assert_eq!(visited, expected);
+    }
 }
 
 #[cfg(test)]

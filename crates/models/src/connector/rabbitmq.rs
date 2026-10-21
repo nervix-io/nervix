@@ -31,10 +31,10 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionDeclaration, PositionClass, QueueName, RetryPolicy, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass, QueueName, RetryPolicy,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -137,7 +137,8 @@ const RABBITMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for RabbitMqQueueSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // An AMQP field table holds one value per name, in ascending order of name.
+        headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::RabbitMq),
@@ -219,7 +220,8 @@ pub struct RabbitMqQueueSink {
 
 impl SinkEntity for RabbitMqQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // An AMQP field table holds one value per name, in ascending order of name.
+        headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         reference: SinkReferenceKind::Client(ConnectorKind::RabbitMq),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

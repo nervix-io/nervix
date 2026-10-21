@@ -253,7 +253,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
-| Headers | `write_header` |
+| Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Body | ENCODE USING &lt;codec&gt; \| WITHOUT BODY |
 | BATCH | unavailable: send one request per record |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -364,9 +364,12 @@ materialized state its batch was admitted with; with a codec it also reads the a
 The method keeps its spelling. The request goes to exactly the normalized target: encoded
 separators such as `%2F`, repeated query parameters, a literal `+`, and the empty query of a
 trailing `?` stay as they are. Header names compare without ASCII case and a later write replaces an
-earlier value; an empty string is sent as an empty value. An invalid or reserved write rejects its
-record even when a later write would replace it, and the 128-header and 32 KiB bounds apply after
-every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+earlier value, so the request carries each name once, in lowercase and in ascending order of name;
+an empty string is sent as an empty value. Two writes whose names are string literals naming the
+same field, such as `write_header('X-Tenant', …)` and `write_header('x-tenant', …)`, are refused when
+the statement is validated, because the earlier one could never be sent; a name an expression
+computes is replaced at run time. An invalid or reserved write rejects its record even when a later
+write would replace it, and the 128-header and 32 KiB bounds apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
 newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
 `Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
 
@@ -909,10 +912,29 @@ expressions and is valid only as a top-level `INVOKE` call. Sensitive values req
 mutations are staged in a temporary route-local envelope; invocation failure prevents payload and
 partial-envelope publication.
 
-Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
-Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
-behavior. Redis, MQTT, Syslog, ZeroMQ, Sentry, OTEL, direct database sinks, and Iceberg reject
-header writes.
+Each emitter that writes transport headers declares a
+[header model](./connector-contract.md#header-models), which `DESCRIBE EMITTER` shows as its
+`headers:` line:
+
+<!-- connector-matrix:emit-headers:start -->
+| Emitter | Header model | What a record's `write_header` calls become |
+| --- | --- | --- |
+| `HTTP REQUEST` | `sorted_by_name`, lowercase names | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+
+`CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
+<!-- connector-matrix:emit-headers:end -->
+
+Where a sink keeps one value per name, a second `write_header` whose name is a string literal equal,
+as the sink compares names, to an earlier literal one is refused when the statement is validated,
+with a message such as `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again
+at #3, but PULSAR TOPIC emitters keep one value per header name, so the later write would replace
+the earlier one on every record`. A name an expression computes is not compared then: at run time a
+later write of the name replaces the earlier value, as the model states.
 
 Emitter expressions use the same typed surface as other runtime nodes:
 
@@ -1034,7 +1056,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC orders (topic_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1104,7 +1126,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC orders (topic_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1172,7 +1194,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE orders (queue_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1349,7 +1371,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT orders (subject_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1503,7 +1525,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE orders (queue_name) |
 | Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |
-| Headers | `write_header` |
+| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | 256KiB |
@@ -1524,7 +1546,9 @@ responses. Per-entry transient failures retry only those entries, while invalid 
 message larger than 256 KiB, counting its attributes and FIFO message group, follow
 `ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
-attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. SQS
+attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
+later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
+names keep their last value: eleven writes of ten names make a message SQS accepts. SQS
 accepts the characters of the XML 1.0 `Char` production: tab, line feed, carriage return, U+0020
 to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and the noncharacters
 U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are

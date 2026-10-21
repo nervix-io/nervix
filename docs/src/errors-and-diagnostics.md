@@ -855,6 +855,13 @@ is created. The refusal names the connector, the client and the domain, with the
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
+An emitter whose sink keeps one value per header name and whose `INVOKE` clause writes one literal
+header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
+emitter, the sink's connector and entity, the header as the sink's
+[header model](./connector-contract.md#header-models) records it, and both `INVOKE` positions, such as
+`emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC
+emitters keep one value per header name, so the later write would replace the earlier one on every
+record`. The header is a name the statement writes, never a value a record carries.
 Planning failures
 likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:

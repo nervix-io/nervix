@@ -845,6 +845,14 @@ mod subscription_tests;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use pulsar::{
+        consumer::data::MessageData,
+        message::{
+            Payload,
+            proto::{KeyValue, MessageIdData, MessageMetadata},
+        },
+    };
+
     use super::*;
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -908,5 +916,41 @@ mod tests {
         assert_eq!(options.certificate_chain.as_deref(), Some(&b"test CA"[..]));
         assert!(!options.tls_hostname_verification_enabled);
         assert!(!options.allow_insecure_connection);
+    }
+
+    /// PULSAR TOPIC ingestors declare ordered repeats with exact names: a message's properties
+    /// are visited in the order the message carries them, a repeated name once for each of its
+    /// values, and names that differ in letter case stay two names.
+    #[test]
+    fn properties_are_visited_in_the_order_carried_with_every_repeat() {
+        let mut properties = Vec::new();
+        for (key, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            properties.push(KeyValue {
+                key: key.to_string(),
+                value: value.to_string(),
+            });
+        }
+        let payload = Payload {
+            metadata: MessageMetadata {
+                properties,
+                ..Default::default()
+            },
+            data: Vec::new(),
+        };
+        let message_id = MessageData {
+            id: MessageIdData::default(),
+            batch_size: None,
+        };
+        let headers = PulsarMessageProperties {
+            message: PulsarMessage::new("persistent://public/default/events", message_id, payload),
+        };
+        let mut visited = Vec::new();
+        headers.visit(&mut |name, value| visited.push(format!("{name}={value}")));
+        assert_eq!(visited, ["trace=a", "Tenant=x", "trace=b", "tenant=y"]);
     }
 }

@@ -31,11 +31,11 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
@@ -184,7 +184,8 @@ const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for KafkaTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // A Kafka record carries its headers as a list, in the order written, repeats included.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: SourceMetadataScope::Kafka,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
@@ -315,7 +316,8 @@ pub struct KafkaTopicSink {
 
 impl SinkEntity for KafkaTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // A Kafka record carries its headers as a list, in the order written, repeats included.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: SinkReferenceKind::Client(ConnectorKind::Kafka),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

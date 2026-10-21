@@ -30,10 +30,10 @@ use crate::{
     AcknowledgementConfirmation, BatchUnavailability, ClientName, ConnectorKind, DeclaredDelivery,
     DeclaredQuiesce, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchLegality,
     EmitterBodyForm, EmitterPublishingModeKind, EndpointIngestMode, EndpointName, EndpointType,
-    Expression, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    Expression, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSourceCapabilities, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfigEntry);
@@ -112,7 +112,9 @@ const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for HttpRequestSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
+        // value of a repeated field together under its name.
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Http),
@@ -174,7 +176,9 @@ pub struct HttpEndpointSource {
 
 impl SourceEntity for HttpEndpointSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
+        // value of a repeated field together under its name.
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Endpoint(EndpointType::Http),
@@ -232,7 +236,9 @@ pub struct HttpRequestSink {
 
 impl SinkEntity for HttpRequestSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // A request's application fields: names in lowercase, a later write of a name replacing the
+        // earlier one, written in ascending order of name.
+        headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),
         reference: SinkReferenceKind::Client(ConnectorKind::Http),
         body: EmitterBodyForm::CodecOrWithoutBody,
         batch: EmitterBatchLegality::Unavailable {
