@@ -78,7 +78,8 @@ See [Domains And Time](domains-and-time.md) for the full clock split. The
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its sink clause: flush
-writes local Arrow IPC staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
+writes local Arrow IPC staging files, and commit writes their rows into Parquet data files and
+appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary. Which sinks gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
@@ -122,13 +123,15 @@ The shared variables are:
   system recovers or an operator repairs its provisioning.
 
 Request/response sinks—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
-`ACK TIMEOUT`; their client request timeout bounds the response. SQS, Sentry, OTEL, and ClickHouse
-clients expose that bound as the optional `timeout_ms` CONFIG key, and a client an HTTP emitter
-uses must declare it. For every sink, Nervix accounts for records individually
-wherever the transport exposes individual results: delivered records acknowledge upstream,
-definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records that are
-neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used to
-discard a record.
+`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response: SQS, Sentry,
+OTEL, and ClickHouse clients expose that bound as the optional `timeout_ms` CONFIG key, and a client
+an HTTP emitter uses must declare it. An Iceberg emitter's object-store client bounds each storage
+call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog requests,
+as [Iceberg retries](#iceberg-retries) describes. For every sink, Nervix accounts for records
+individually wherever the transport exposes individual results: delivered records acknowledge
+upstream, definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records
+that are neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used
+to discard a record.
 
 | Sink | Mode forms | Publish success boundary |
 | --- | --- | --- |
@@ -2393,23 +2396,10 @@ CREATE EMITTER iceberg_notifications
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
 
-At open, the emitter checks each mapped column's name and Iceberg type against the loaded table's
-current schema. A missing or incompatible column is a typed configuration failure before any row
-is staged. Nervix narrows UTC `DATETIME` values from nanoseconds to the containing microsecond at
-every depth of a mapped list or nested value, including values before the Unix epoch. A table
-schema changed after open can still fail a later commit and enters the commit retry path.
-
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
 initialization or commit retry path; they do not advance the commit or ACK boundary.
-
-Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
-operation, including DNS, connection, TLS and credential requests. It also bounds each read or
-write call of a streaming object. If omitted, metadata and delete operations allow 60 seconds and
-reads and writes allow 10 seconds. A failed storage call returns to the emitter's declared retry
-policy after one attempt. The operator and the initial table's effective storage settings are
-retained across table metadata refreshes; changing those settings requires reopening the emitter.
 
 GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
 
@@ -2477,6 +2467,35 @@ CREATE EMITTER iceberg_notifications
 
 The REST catalog is the authority for namespace and table metadata. Nervix does not write a separate object-store catalog pointer file and does not provision catalog entries from the emitter runtime path.
 
+#### Iceberg table schema
+
+At open, the emitter loads the table through the catalog and requires the table's registered
+location to equal `LOCATION`. It then compares every mapped column, by name, with the table's
+current schema. The column must exist, and its Iceberg type must equal the table column's at every
+depth: the same primitive type, and for a `VEC` or `ARRAY` value an Iceberg list of the same element
+type. A column the table lacks or whose type differs fails the open before any row is staged.
+`DESCRIBE EMITTER` shows the failure as the emitter's transient error, naming the column and, for a
+mismatch, both types, such as `mapped column 'user_id' has Iceberg type string, but the table
+requires long`, and the emitter retries the open on its declared retry policy.
+
+The comparison uses the types the emitter writes. An Iceberg `timestamptz` column stores
+microseconds, so Nervix narrows every UTC `DATETIME` from nanoseconds to the microsecond that
+contains it, at every depth of a mapped `VEC` or `ARRAY` value such as `VEC<VEC<DATETIME>>`,
+including values before the Unix epoch. A `DATETIME` therefore maps to a `timestamptz` column, at
+the top level or as a list element, and a `timestamptz_ns` column is refused at open. A table
+schema changed after open is not checked again: a later commit can fail on it, and that commit
+enters the retry path that [Iceberg retries](#iceberg-retries) describes.
+
+The open-time comparison does not cover the order of the mapped columns, the table columns
+`VALUES` leaves unmapped, or whether a table column is required, and a commit writes the mapped
+columns into the table's columns by position, in the table's column order. `VALUES` must therefore
+map every column of the table, in the table's column order. Mapped columns in another order write
+values into the wrong columns when their types agree, and fail every commit when they differ; a
+table column left unmapped fails every commit. A null mapped to a required table column is not
+refused: the data file stores a non-null value in its place, such as `0` for a `long`.
+
+#### Iceberg staging and commits
+
 Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
 local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
 <bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
@@ -2485,41 +2504,67 @@ duration starts when a flush stages rows while none are staged, and rows later f
 that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
 `COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
 durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
-together; the maximum batch and commit sizes, the catalog retry backoff, and a drain remain
+together; the maximum batch and commit sizes, the commit retry backoff, and a drain remain
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
 `--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
-ACK boundary. Commit conflicts, table evolution after open, a dropped table, and unavailable
-catalog or object storage are table-level infrastructure failures: Nervix reports them in runtime
-and drain status and retries all affected staged records with the declared policy and
-backpressure. Record-level expression and construction errors are attributed through `ON MESSAGE
-ERROR` before staging. An ambiguous failure after the catalog commit can append the rows again;
-Iceberg appends are not idempotent. See [ACK Semantics And Effective
+ACK boundary. Record-level expression and construction errors are attributed through `ON MESSAGE
+ERROR` before staging. See [ACK Semantics And Effective
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
 
-A commit holds the rows it reads back in memory until it has written them, so before it reads the
-staged files it charges every byte of them to the node's bulk memory class, and returns the charge
-once their rows are in data files. It takes the charge only when the class has room for it now
-rather than waiting in the class's queue, where a commit's charge would take every byte the class
-frees and hold the node's other bulk work behind it. When the class has no room, the commit keeps
-its staged files and their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for
-room in the bulk memory class for <bytes> staged bytes` as the emitter's transient error, and the
-emitter retries the commit with its declared policy and backpressure. The bulk class holds 32 MiB.
-Staged files that together exceed it are read in groups, each the run of consecutive files the
-class can hold, and each group's rows are written into data files of their own and its charge
-returned before the next group is read; the data files of every group are still appended in the
-one catalog commit. A single staged file holds the mapped rows of one input batch, which can be
-larger than the class when a route on the same node flushes batches above 32 MiB. Such a file is
-read alone once the whole class is free, charged with the whole class: that is every byte of it
-the class can account for, and it leaves no room for other bulk work beside the read. Until
-then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of <capacity>
-bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+A commit holds the rows it reads back in memory until it has written them into data files, so it
+charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged files in
+groups, each the run of consecutive files the class can hold together. Before it reads a group it
+charges every byte of the group's files, and once their rows are in data files it returns the
+charge before it reads the next group; the data files of every group are appended in the one
+catalog commit. It takes a charge only when the class has room for it now rather than waiting in
+the class's queue, where a commit's charge would take every byte the class frees and hold the
+node's other bulk work behind it. When the class has no room, the commit keeps its staged files and
+their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
+class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
+commit on its declared retry policy. A single staged file holds the mapped rows of one input batch,
+which can be larger than the class when a route on the same node flushes batches above 32 MiB.
+Such a file is read alone once the whole class is free, charged with the whole class: that is every
+byte of it the class can account for, and it leaves no room for other bulk work beside the read.
+Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
+<capacity> bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
 
-A commit publishes the staged files it found when it began. Rows a flush stages while a failed
-commit waits for its retry are not in that commit's data files, so the retry first appends what the
-commit began with and then commits the newer rows: a retry still publishes everything staged, and
-acknowledges only rows a catalog commit holds.
+#### Iceberg retries
+
+The emitter's declared `RETRY POLICY` is the only retry of a failed open, staging write or commit.
+The emitter retries it after the policy's backoff and keeps the acknowledgements of its staged rows
+alive meanwhile. The catalog library's own commit retries are disabled, and an object-store call
+makes one attempt: OpenDAL has no retry layer, and the object-store HTTP client resends no request.
+
+Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
+operation, including DNS, connection, TLS and credential requests. It also bounds each read or
+write call of a streaming object. If omitted, metadata and delete operations allow 60 seconds and
+reads and writes allow 10 seconds. A call that runs out of its deadline fails the attempt it
+belongs to, and with `timeout_ms` set the failure names the key and its bound. Nervix sets no
+deadline on REST catalog requests: a request the catalog accepts and never answers waits until its
+connection fails or a stop ends the wait. The operator and the initial table's effective storage
+settings are retained across table metadata refreshes; changing those settings requires reopening
+the emitter.
+
+Commit conflicts, table evolution after open, a dropped table, and unavailable catalog or object
+storage are table-level infrastructure failures: Nervix reports them in runtime and drain status and
+retries all affected staged records with the declared policy and backpressure. While a failed
+commit waits for its retry, the emitter takes no new input from its relays: a row that reaches a
+relay during the backoff waits upstream, unless a stop drains the relays. The rows a flush stages
+before the retry are therefore input the emitter's `COLLECT FOR` policy held, which comes due
+during the backoff, and the relay input a stop drains. A commit publishes the staged files it found
+when it began, so those rows are not in its data files: the retry first appends what the commit
+began with and then commits the newer rows in a commit of their own. A retry still publishes
+everything staged, and acknowledges only rows a catalog commit holds.
+
+Each commit names its append with an identity it records in the snapshot it adds. A commit whose
+catalog answer fails or is lost reloads the table, and the commit and every retry of it look for
+that identity in the current snapshot's history before appending, so a retry never appends the
+same staged files twice. Rows are still appended again when their source redelivers them: after a
+lost upstream ACK, after an attached sibling emitter fails, or after the emitter ends before a
+retry learns whether the catalog applied its commit, because it ended without acknowledging the
+rows it still held staged. Iceberg appends are not idempotent.
 
 ## Codec Behavior On Emission
 
@@ -2607,7 +2652,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MongoDB | Retry after an ambiguous write result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed write can survive a crash before Nervix observes success | `ON CONFLICT` |
-| Iceberg | Retry after a commit with a lost ACK or attached sibling failure; appends repeat rows | Crash before catalog commit loses staged work unless the attached source redelivers; detached mode accepts that loss | None; appends are not idempotent |
+| Iceberg | Redelivery after a lost ACK, an attached sibling failure, or an emitter that ended before a retry learned whether the catalog applied its commit; appends repeat rows | Crash before catalog commit loses staged work unless the attached source redelivers; detached mode accepts that loss | None; appends are not idempotent |
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
 `ATTACHED` waits only for that declared point and cannot make an earlier `NO_ACK` boundary durable.
