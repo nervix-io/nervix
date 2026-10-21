@@ -53,7 +53,8 @@ jobs:
     name: build-${{ matrix.image }}-${{ matrix.arch }}
     needs: meta
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 80
+    # Run 39534273321's amd64 build took 65 minutes. Reserve another half plus upload headroom.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

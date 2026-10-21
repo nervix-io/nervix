@@ -188,7 +188,7 @@ mod tests {
         suite_watchdog::{
             DEPENDENCY_SHUTDOWN_BUDGET, LiveCluster, LiveClusterHandle, LiveClusterRegistration,
             NodeStop, SUITE_BUDGET, SUITE_BUDGET_ENV, StalledScenario, SuiteOutcome, SuiteRun,
-            SuiteTeardown, SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs,
+            SuiteTeardown, SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs, WORKFLOW_JOB_LIMIT,
         },
     };
 
@@ -5112,6 +5112,25 @@ mod tests {
     struct StandInSuiteCli {
         #[command(flatten)]
         watchdog: SuiteWatchdogArgs,
+    }
+
+    #[test]
+    fn the_suite_budget_and_its_workflow_share_the_same_outer_limit() {
+        let workflow = include_str!("../.github/workflows/check.yaml");
+        let (_, scenario_job) = workflow
+            .split_once("\n  scenarios:\n")
+            .expect("the workflow must declare its scenarios job");
+        let minutes = scenario_job
+            .lines()
+            .find_map(|line| line.strip_prefix("    timeout-minutes: "))
+            .expect("the scenarios job must declare an emergency limit")
+            .parse::<u64>()
+            .expect("the job limit must be a number of minutes");
+        assert_eq!(
+            WORKFLOW_JOB_LIMIT,
+            Duration::from_secs(minutes * 60),
+            "the harness must leave its setup and cleanup reserves inside the actual CI job"
+        );
     }
 
     #[test]

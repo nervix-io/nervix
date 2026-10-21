@@ -321,7 +321,7 @@ factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1
 `--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
 16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
 attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
-the unchanged 41-minute suite budget. The additional slots use the observed CPU and memory
+that run's 41-minute suite budget. The additional slots use the observed CPU and memory
 headroom; their complete-suite qualification retains runner load and the actual margin rather than
 assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
 without charging a slot.
@@ -698,7 +698,7 @@ second module runs the operation, it is named after the owner.
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
-| The whole scenario run | `suite_watchdog.rs` | 41 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
+| The whole scenario run | `suite_watchdog.rs` | 75 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
 | Dropping the runtime after the run | `suite_watchdog.rs`, run by `tests/scenarios.rs` | 60 seconds | Blocking tasks still running are abandoned |
 
@@ -750,7 +750,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
 | Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
-| Suite, 41 minutes | The 60-minute scenario job limit, less 14 minutes allowed for pre-suite work and a 5-minute reserve after it | Split-job runs took 11m37s and 10m08s before the suite, then 21m49s and 20m26s for the suite; the 22-minute ceiling leaves at least 15 minutes of slack |
+| Suite, 75 minutes | The 120-minute scenario job limit, less 30 minutes for pre-suite work and a 15-minute reserve after it | Run 39569675589 completed 3,336 attempts in 34m28s; twice the rounded 35-minute healthy ceiling plus five minutes of slack fits the budget. Run 39656928785's partial progress projects about 55 minutes |
 
 The assertions keep these orderings, among others:
 
@@ -764,10 +764,12 @@ The assertions keep these orderings, among others:
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
   runtime shutdown together.
 
-The 22-minute observed suite ceiling plus 15 minutes of slack fits the 41-minute budget with four
-minutes to spare. The second split-job run passed in 20m26s with seven retries and 94.3% run-slot
-utilization. Increasing either measured input eventually fails the compile-time assertion. Measure
-both again whenever the suite, its concurrency, or the runner changes.
+The suite funds a runner at half the measured healthy throughput, with five further minutes for
+retries and the final active attempts. Slow-run variation multiplies the whole workload, so the
+headroom scales the measured ceiling instead of adding one fixed allowance to an increasingly
+large inventory. Increasing a measured input eventually fails the compile-time assertion. Measure
+again whenever the suite, its concurrency, or the runner changes. A harness regression compares
+the workflow's actual job limit with the limit that derives the suite budget.
 
 ## Status Requests And Status Waits
 
@@ -1706,7 +1708,7 @@ and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
-The scenario run has one budget, 41 minutes from the moment it starts, which `--suite-budget` or
+The scenario run has one budget, 75 minutes from the moment it starts, which `--suite-budget` or
 `NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`, read by the same guarded duration
 parser as a node's options. The budget is a clock rather than
 a count of failures. Cucumber's fail-fast stops scheduling scenarios and leaves those already
@@ -1759,7 +1761,7 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 
 The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, after that job's
 instrumented server, CLI and paced simulation driver builds. The `tests` job runs at the same time
-on another runner. The `scenarios` job's `timeout-minutes` is 60, and the suite budget is derived
+on another runner. The `scenarios` job's `timeout-minutes` is 120, and the suite budget is derived
 from it so that the job ends on its own.
 
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
@@ -1789,9 +1791,9 @@ Deloxide selections reach its Rust and Python drivers on one-node and three-node
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.1 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
-| The scenario run | 41 minutes | What the limit leaves |
-| After the budget expires | 5-minute reserve | At most 60 seconds of cleanup window, 2 minutes of dependency stop, and 60 seconds of runtime shutdown, four minutes in all, and then the log upload, measured at 2 to 3 seconds with 8 seconds of steps after it |
+| Work before the scenario binary starts | 30 minutes | Run 39656928785 took 13m40s; twice that measurement, rounded up, funds cold builds and setup variation |
+| The scenario run | 75 minutes | What the limit leaves; twice the rounded 35-minute healthy ceiling plus five minutes |
+| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export, uploads and cache publication after a successful run |
 
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
@@ -1803,16 +1805,55 @@ manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and t
 already published every entry those jobs built. A suite that fails or runs out of its budget leaves
 publication `not-run`, so the reserve stays with the cleanup.
 
-The first split-job PR run completed its suite in 21m49s with 88.3% run-slot utilization and four
-retries. One Raft snapshot scenario failed all three attempts because its setup accepted a purge
-that preceded the backlog under test. The corrected scenario waits for a purge beyond the measured
-backlog peak. The next run passed in 20m26s with 94.3% utilization and seven retries, so the
-22-minute ceiling and 15-minute slack fit both measured runs.
+Run 39569675589 completed 3,336 attempts in 2,068.2 seconds with 99.0% utilization and
+98,309.3 slot-seconds. Run 39656928785 exhausted its 2,460-second allowance with 2,516 attempts
+completed and 833 active, including 785 waiting for a run slot. Its 117,587.3 slot-seconds divided
+by completed attempts, extended to all 3,349 registered attempts and divided by 48 slots, projects
+about 55 minutes. This projection assumes the remaining attempts cost as much as the completed
+ones; it is a sizing estimate, not evidence that the remaining scenarios passed. Independent
+Syslog run 39654966701 also exhausted that allowance; matching first attempts cost 1.486 times the
+slot time of the green run. Those distributed slowdowns justify proportional headroom.
 
 The job's limit remains the emergency guard outside the budget rather than the mechanism that ends a
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
 mid-scenario, with no summary and no record of what each scenario was doing. The limit and the
 harness's copy of it change together.
+
+### CI Budget Review
+
+The review of 21 October 2026 compares execution allowances with retained progress rather than
+restarting an unchanged run after its watchdog expires. The new suite allowance is 75 minutes in a
+120-minute job. Other narrow bounds use at least 1.5 times the observed duration or current shard
+estimate, with time left for their surrounding work. The rows below cover the workflow job families
+and their nested execution guards; a missing completion is reported as incomplete evidence.
+
+| Guard | Evidence | Current allowance and decision |
+| --- | --- | --- |
+| Scenario suite and job | 34m28s complete; about 55 minutes projected from the exhausted run | 75-minute suite, 120-minute job, including 30 minutes before and 15 after the suite |
+| Ordinary Bolero job | 47m10s in run 39649567371 | 90 minutes; 1.5 times the measurement is 70m45s |
+| Sanitizer shards | The current 205-target, three-shard plan estimates at most 114 minutes before discovery, qualification and uploads | 240 minutes; 1.5 times the estimate is 171 minutes, leaving 69 for surrounding work and cold-build variation |
+| Ordinary image builds | 65m01s for amd64 in Docker Build 39534273321; 56m43s in 39654966533 | 120 minutes; 1.5 times the slower complete build is about 98 minutes |
+| Diagnostic image build | 24m23s in Docker Build 39531575177 | 80 minutes retains ample build and upload margin |
+| Stressed lifecycle invocation | 19m49s in Check 39569675589 | 45 minutes, of which 39 are available to scenarios after their six-minute teardown reserve; 1.5 times the measurement is under 30 minutes |
+| Other diagnostic invocations and stages | Order workloads completed in 40m46s; stress workloads in 35m02s; restore scenarios in 35m33s in 39569675589 | Retain the 80-minute build and workload stages, 175-minute collecting step and 200-minute job; restore's 70-minute invocation leaves 64 for execution, and the other invocation bounds retain their reserves |
+| Workspace checks | 43m13s complete in 39569675589; interrupted at 58m38s in 39656928785 | Retain 120 minutes; the interrupted run establishes progress, not a completion ceiling |
+| Extra checks | 56m32s complete in 39656928785 | Retain 120 minutes, beyond 1.5 times that duration plus exports |
+| Ordinary tests | 22 minutes in 39649567371 | Retain 60 minutes |
+| Loom and qualification shards | 20m43s and at most 49m37s in 39649567371 | Retain 60 and 120 minutes |
+| Shuttle | Interrupted after 58m34s in 39649567371 | Retain 120 minutes; no completed duration is inferred from cancellation |
+| Turmoil and client conformance | 14m49s and 18m42s in 39649567371 | Retain 30 and 60 minutes, including the runners' own post-build bounds |
+| Book build | 24m30s in Docker Build 39534273321 | Retain 60 minutes |
+| Ordinary and diagnostic Chaos smoke | 15m15s and 15m22s in Docker Build 39531575177 | Retain the inventory-derived 45-minute step and 66-minute job; soak bounds remain derived from their declared timelines, teardown and CI reserves |
+| Coverage merge and union | 1m15s and 27 seconds in 39569675589 | Retain 20 and 15 minutes |
+| Diagnostic evidence; selection, title, metadata, manifests and verdicts | Diagnostic evidence took at most 2m30s in the sampled runs; the other jobs took seconds | Retain their explicit 5–45-minute guards and the title job's workflow default |
+| Cache publication and failure cleanup | Publication took 3–4 seconds in the sampled diagnostic jobs, bounded at 120 seconds within a four-minute step | Retain the existing bounded cleanup, publication and artifact reserves |
+| Benchmark job | No benchmark completion in these sampled runs | Retain its 120-minute job guard; benchmark iterations and measurement time remain with their runner |
+
+Per-case model bounds, sanitizer campaign lengths, product deadlines and the assertions a scenario
+declares retain their own meanings. More execution time lets the suite report all of its outcomes;
+a failed product deadline or assertion remains a failure that needs its owning repair. The budget
+review changes no synchronization protocol or tracked lock path, so Deloxide does not apply to the
+budget changes themselves. The inventory and workflow contract tests validate the affected guards.
 
 A same-commit rerun of the scenarios job replaces that job's four report artifacts: scenario logs,
 runner load, kache report, and scenario coverage. This lets a rerun publish its own diagnostics
@@ -1943,8 +1984,9 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 67
-lifecycle scenario runs tagged `@deloxide_stress`, bounded at 30 minutes, and the
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 96
+lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, the ten endpoint ACK
+examples in their own 15-minute invocation, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of 51 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
