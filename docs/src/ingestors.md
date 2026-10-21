@@ -602,7 +602,8 @@ address attempts, TLS and the protocol's own handshake. Each value is a positive
 milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
-`connect_timeout_ms`, and allow 30 seconds when it is left out. A `RABBITMQ` client's deadline
+`connect_timeout_ms`, and allow 30 seconds when it is left out. A `ZEROMQ PULL` ingestor reads
+neither key, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's deadline
 covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the ingestor's
 channel, setting its prefetch window and starting its consumer. A request or connection that runs
 out of its deadline becomes the ingestor's transient status, and the ingestor retries on its
@@ -1168,9 +1169,14 @@ See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
 Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
-records decoded from it have been acknowledged through the graph. A delivery whose acknowledgement
-fails, or whose payload cannot be decoded, is negatively acknowledged with requeue, so RabbitMQ
-delivers it again and the ingestor retries it on its declared `RETRY POLICY` cadence.
+records decoded from it have been acknowledged through the graph. A failed or timed-out graph
+acknowledgement, or a failed transport acknowledgement, makes the instance try to negatively
+acknowledge the delivery with requeue. When that requeue succeeds, RabbitMQ can deliver the message
+again and the instance waits on its declared `RETRY POLICY` cadence before reading again. If the
+requeue fails, the instance suspends and reconnects as described below.
+
+A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
+`ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
 Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
@@ -1180,7 +1186,8 @@ re-provisions it; Nervix never creates it.
 A connection that closes while a delivery is still unacknowledged, because the broker restarted,
 closed it, or the network dropped it, also makes RabbitMQ requeue that delivery. The acknowledgement
 or the requeue the ingestor still owes it can only be sent on the connection it arrived on, so the
-instance reconnects on its `RETRY POLICY` cadence, discards what it owed, counts it in
+instance reconnects on its `RETRY POLICY` cadence. Once that reconnect succeeds, it discards the
+pending positions instead of retrying them on the new connection, counts them once in
 `nervix_ingestor_transport_redeliveries_total`, which `DESCRIBE INGESTOR` also prints, and consumes
 again. RabbitMQ then delivers the message again: a delivery that failed in the graph is retried,
 and one the graph had already acknowledged is ingested a second time, so delivery across a
@@ -1426,9 +1433,39 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [ZEROMQ PULL capability and mirror reference](connector-capabilities.md#zeromq-pull-ingest).
 <!-- connector-matrix:ingest-zeromq-pull:end -->
 
-The source is a PULL socket. `SUSPEND` keeps it open but unread, so transport buffers fill and the
-peer's own high-water-mark policy determines whether sends queue, block, or drop. Buffered transport
-data is read on resume. `BUFFER` and `DROP` keep reading locally.
+The source is a PULL socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
+endpoint. With `'bind' = 'true'` the socket binds that address and pushing peers connect to it;
+otherwise it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the
+way an emitter renders it, so it can name the client's `MOUNT`, and the ingestor keeps the mount
+for as long as it runs; see [Client Config Mounts](resources.md#client-config-mounts). A value that
+does not render, or a mount the node cannot provide, keeps the ingestor from starting, and
+`DESCRIBE INGESTOR` shows that failure as its transient error, naming the entry or the resource.
+
+The ingestor reads no deadline key: a `ZEROMQ` client's `timeout_ms` and `connect_timeout_ms` bound
+only an emitter's waits. A connecting socket connects when the ingestor starts. The driver retries a
+refused connection on its own, without limit and at most about five seconds apart, and waits for
+the peer's ZMTP handshake without a deadline. Until a peer accepts, `DESCRIBE INGESTOR` shows the
+ingestor not ready, and the refused attempts are not reported as a transient error. Any other
+failure to bind or connect, such as another socket holding the address or a host name that does
+not resolve, is the ingestor's transient error. The ingestor then opens a new socket on the host's
+reconnect cadence: the delay starts at 250 ms, doubles after each failed attempt up to 30 s, and
+`DESCRIBE INGESTOR` shows it as the reconnect backoff. A stop or a quiesce change ends a connection
+attempt that is still waiting.
+
+The driver has no heartbeat and never reconnects. A bound socket accepts every peer that connects,
+including one that reconnects after its connection ended. When several peers push to it, the driver
+can leave a message one of them already delivered unread until some peer sends again. A connecting
+socket keeps the one
+connection it made: when the peer closes it or goes away, the driver reports nothing and does not
+connect again, so the ingestor stays ready and receives nothing more until it is started again by
+an alteration, a move to another node or a restart of its node. Where a peer can restart, bind the
+ingestor's socket and let the pushing peers connect to it. The driver also understands no ZMTP
+command after the handshake, so it closes the connection of a peer that sends a heartbeat at the
+first one; leave heartbeats off on the peers. A message still in a connection when it ends is lost.
+
+`SUSPEND` keeps the socket open but unread, so transport buffers fill and the peer's own
+high-water-mark policy determines whether sends queue, block, or drop. Buffered transport data is
+read on resume. `BUFFER` and `DROP` keep reading locally.
 
 ### Syslog
 

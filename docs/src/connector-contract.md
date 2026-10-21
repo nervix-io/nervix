@@ -718,10 +718,10 @@ waits for its ACK tree; `Parallel` requests up to the declared in-flight limit w
 timeout. The host takes in an acknowledged batch as one batch acknowledgement and waits for every
 accepted message's ACK outcome before acknowledging the batch's transport positions; a message a
 quiesce buffer or drop policy took over adds nothing to wait for. A failed or timed-out ACK rejects
-the positions and retries according to the source's delivery policy. What the host does when
-rejection itself fails depends on the position class each source entity declares, which states what
-its positions still mean once the connection that delivered them is gone. The host handles each
-class once:
+the positions and retries according to the source's delivery policy. A successful rejection lets
+the host read again after its retry delay. A failed rejection becomes a transient source error;
+whether the host retains and retries those positions depends on the position class each source
+entity declares, which states what its positions still mean once their connection is gone:
 
 <!-- connector-matrix:position:start -->
 | Position class | Entities | Meaning |
@@ -950,9 +950,12 @@ be acknowledged until it resolves.
 A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
 a later acknowledgement is confirmed, and the host rejects the positions for their position class to
 handle. A rejection that fails is the ingestor's transient status as well, whether the host rejects
-a batch whose confirmation or acknowledgement roots failed or retries a rejection it holds, so a
-source whose transport can neither confirm a batch nor take it back shows why it holds the batch
-until a later acknowledgement is confirmed. A stop that reaches the source loop once a batch's
+a batch whose confirmation or acknowledgement roots failed or retries a rejection it holds. Only
+a `replayable` source retries that same rejection after resuming, before reading another batch.
+A `broker_redelivered` source such as RabbitMQ instead discards and counts the pending positions
+once resume succeeds, then reads the deliveries the broker presents again; a source of class `none`
+retains no pending positions. The status reports the settlement failure while recovery follows
+that class's contract. A stop that reaches the source loop once a batch's
 acknowledgement roots have resolved does not abandon the batch: the loop takes the resolved outcome
 before the stop and confirms the batch first. A batch whose roots had not all resolved when its
 source stopped is left unconfirmed; the source instance logs `source instance stopped before its

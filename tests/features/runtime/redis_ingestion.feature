@@ -4,12 +4,12 @@ Feature: Redis ingestion
     Given Redis is running
     And entity gate deadline is configured as "30s"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands are executed
+    When these Plexus statements are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -31,7 +31,7 @@ Feature: Redis ingestion
       START;
       """
     Then Redis channel "bounded_{{test_id}}" eventually has 1 subscribers
-    When these NSPL commands begin executing in the background
+    When these Plexus statements begin executing in the background
       """
       ALTER REDIS PUBSUB INGESTOR redis_notifications SET DECODE USING notification_after_hold;
       """
@@ -57,7 +57,7 @@ Feature: Redis ingestion
       nervix_ingestor_quiesce_dropped_total: <dropped>
       """
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     When Redis message is published to channel "bounded_{{test_id}}"
       """
       {"user_id":73}
@@ -83,11 +83,11 @@ Feature: Redis ingestion
     Given Redis is running
     And a stallable endpoint "redis_idle_peer" stands in front of "redis_addr"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus statements are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
