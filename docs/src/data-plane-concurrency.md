@@ -1782,6 +1782,11 @@ the existing 360-second teardown reserve. The baseline lifecycle process retains
 bound, and every invocation shares the selection's unchanged 4,800-second workload budget. The
 inventory checks require the baseline and endpoint groups to be disjoint and account for every
 registered example; this partition changes no product deadline or ordinary scenario concurrency.
+The six transaction-retention examples carry `@deloxide_stress_transaction_retention` in the
+separate serial `stress-transaction-retention` invocation, with the same 900-second process bound
+and 360-second teardown reserve. This phase runs before the baseline lifecycle process and shares
+the selection workload budget. Inventory checks cover all three disjoint lifecycle groups and
+their complete correspondence with the active-only workloads.
 The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
 scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
 offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore

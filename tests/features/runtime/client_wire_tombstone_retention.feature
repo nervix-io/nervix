@@ -1,5 +1,5 @@
 Feature: Applying commands retain their transaction outcomes
-  @client_wire_tombstone_retention @deloxide_stress
+  @client_wire_tombstone_retention @deloxide_stress_transaction_retention
   Scenario Outline: An applying command keeps its transaction through a retention sweep
     Given the transaction tombstone retention is configured as "2s"
     And a <cluster_size> node nervix cluster is started
@@ -69,7 +69,7 @@ Feature: Applying commands retain their transaction outcomes
       | 1            | BEGIN; CREATE RESOURCE retained_resource; COMMIT; |
       | 3            | BEGIN; CREATE RESOURCE retained_resource; COMMIT; |
 
-  @client_wire_tombstone_recovery @deloxide_stress
+  @client_wire_tombstone_recovery @deloxide_stress_transaction_retention
   Scenario Outline: Leadership recovery uses a finished transaction beyond its age retention
     Given the transaction tombstone retention is configured as "2s"
     And the production sticky scheduler is configured

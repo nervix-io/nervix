@@ -360,6 +360,14 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
+A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
+addition to the transaction-list snapshot. `StoreInner::state` releases its read guard after the
+snapshot clone and before the pure eligibility decision. Replicated removal rechecks the same
+references when it applies. `transaction_bindings` receives one removal attempt for each retained
+finished transaction per pass; an applying execution can extend these attempts beyond the minimum
+tombstone age. These remain control-plane sweeps, including absent-key shard writes. Retaining a
+tombstone does not retain a session binding: terminal request handling and session close release it.
+
 ### Rust client attachment recovery
 
 Client I/O 03 extends the client registries below. These are client-side lifecycle maps, outside

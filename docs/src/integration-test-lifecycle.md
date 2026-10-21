@@ -135,6 +135,14 @@ lifecycle invocation keeps its 1,800-second bound; all phases share the unchange
 selection workload budget. Inventory discovery checks both groups completely, and the ordinary
 suite continues to admit these examples beside its other scenarios.
 
+The six transaction-retention examples use `@deloxide_stress_transaction_retention` in the
+`stress-transaction-retention` invocation, before the baseline lifecycle process. It uses the
+same 900-second process bound and 360-second teardown reserve. A run that combined these examples
+with the baseline expired at its 1,440-second suite watchdog after 80 completed attempts, with
+21 queued and one running for about 11 seconds. The six retention examples had completed before
+that timeout, each below the 29.1-second tenth-longest completed attempt. Their separate serial
+phase accounts for every example while preserving the baseline and selection limits.
+
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
 `@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
 `@client_io_03_generation`, `@udf_column_builder`, `@vhost_tls_rebinding` and
@@ -1941,10 +1949,12 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 67
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 96
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 30 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
-bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
+bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
+invocations, each bounded at 15 minutes, within the same selection workload budget.
+`deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of 51 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
 bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
 

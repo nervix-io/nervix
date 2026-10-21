@@ -43,7 +43,8 @@ recorded = "OrderAnalysis"
 
 # The active-only build with Deloxide's bounded scheduling disturbance, `StressConfiguration::LANE`.
 # It runs every probe, conformance check and owner test, the lifecycle scenarios of the
-# `stress-scenarios` and `stress-endpoint-acknowledgement` invocations and the paced-driver
+# `stress-transaction-retention`, `stress-scenarios` and `stress-endpoint-acknowledgement`
+# invocations and the paced-driver
 # scenarios of `stress-paced-simulation`.
 [[selection]]
 name = "deloxide-stress"
@@ -161,6 +162,22 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = ["@paced_simulation_reopen"]
+target = "test:scenarios"
+
+# The six transaction-retention examples own a bounded serial phase before the baseline lifecycle
+# process. Its fixed watchdog therefore covers its existing scenarios, while both phases share
+# the selection's workload budget and teardown reserve.
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+features = ["testing"]
+id = "stress-transaction-retention"
+inputs = ["tests/features/runtime/client_wire_tombstone_retention.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = ["deloxide-stress"]
+tags = ["@deloxide_stress_transaction_retention"]
 target = "test:scenarios"
 
 # The lifecycle scenarios the stress selection runs under Deloxide's scheduling disturbance, tagged
@@ -2959,7 +2976,7 @@ examples = 4
 feature = "tests/features/runtime/client_wire_tombstone_retention.feature"
 id = "stress.command-transaction-retention"
 invariant = "An applying ordinary command or transaction batch keeps its finished transaction through a later tombstone sweep; finalization permits cleanup."
-invocation = "stress-scenarios"
+invocation = "stress-transaction-retention"
 scenario = "An applying command keeps its transaction through a retention sweep"
 selections = ["deloxide-stress"]
 
@@ -2979,6 +2996,6 @@ examples = 2
 feature = "tests/features/runtime/client_wire_tombstone_retention.feature"
 id = "stress.command-transaction-retention-recovery"
 invariant = "Recovery of an ordinary command or transaction batch beyond tombstone age returns its recorded outcome without applying the effect again."
-invocation = "stress-scenarios"
+invocation = "stress-transaction-retention"
 scenario = "Leadership recovery uses a finished transaction beyond its age retention"
 selections = ["deloxide-stress"]
