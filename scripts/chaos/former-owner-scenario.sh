@@ -49,20 +49,6 @@ owners_are() {
     done
 }
 
-# True when Kafka ingestion runs only on OWNER: every source consumer-group member is at OWNER's
-# fixed address and one of them holds the partition. No member can then remain at another node.
-ingestion_on() {
-    local output_dir="$1"
-    local owner="$2"
-    mkdir -p "${output_dir}"
-    consumer_group_snapshot "${output_dir}/consumer-group.json" || return 1
-    jq -e --arg owner "nervix-${owner##*-}" '
-        (.members | length) > 0
-        and (.members | all(.node_host == $owner))
-        and ([.members[].partitions] | add) == 1
-    ' "${output_dir}/consumer-group.json" >/dev/null
-}
-
 # True when the log of a node container since SINCE contains TEXT.
 node_log_contains() {
     local container_id="$1"

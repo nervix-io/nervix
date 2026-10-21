@@ -3,6 +3,8 @@
 
 # shellcheck source=crash-scenario.sh
 source "${script_dir}/crash-scenario.sh"
+# shellcheck source=consumer-group.sh
+source "${script_dir}/consumer-group.sh"
 
 # External budgets, in seconds. They bound how long the runner waits for each published behavior
 # and are kept apart from the product liveness settings the result records.
@@ -41,11 +43,6 @@ partition_finding() {
         --arg at "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
         '{case:$case,phase:$phase,message:$message,at:$at}' \
         | tee -a "${case_dir}/findings.ndjson" >>"${artifact_dir}/results/partition-findings.ndjson"
-}
-
-node_address() {
-    local variable="CHAOS_NODE_${1##*-}_ADDRESS"
-    printf '%s\n' "${!variable}"
 }
 
 container_address() {
@@ -256,29 +253,6 @@ sample_statuses() {
         jq -c --arg label "${label}" '. + {sample: $label}' \
             "${output_dir}/${label}/status-${host}.json" >>"${output_dir}/samples.ndjson"
     done
-}
-
-consumer_group_snapshot() {
-    local output="$1"
-    broker_admin /opt/kafka/bin/kafka-consumer-groups.sh \
-        --bootstrap-server broker:9092 --group chaos_baseline --describe --members \
-        >"${output}.txt" 2>&1 || return 1
-    local address_map
-    address_map="$(for host in "${node_hosts[@]}"; do printf '%s %s\n' "$(node_address "${host}")" "${host}"; done)"
-    awk -v address_map="${address_map}" '
-        BEGIN {
-            count = split(address_map, entries, "\n")
-            for (i = 1; i <= count; i++) {
-                split(entries[i], pair, " ")
-                host_of[pair[1]] = pair[2]
-            }
-        }
-        $1 == "chaos_baseline" && $3 ~ /^\// {
-            address = substr($3, 2)
-            host = (address in host_of) ? host_of[address] : "unattributed"
-            printf "{\"consumer\":\"%s\",\"address\":\"%s\",\"node_host\":\"%s\",\"partitions\":%d}\n", $2, address, host, $NF
-        }
-    ' "${output}.txt" | jq -s '{members: .}' >"${output}"
 }
 
 # Kafka hands the source partition to exactly one group member. Execution has converged when every

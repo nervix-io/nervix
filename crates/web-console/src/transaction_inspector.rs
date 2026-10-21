@@ -204,37 +204,58 @@ impl InspectorSignals {
             self.open.set(true);
         }
 
-        if let Some(status) = attached
-            && status.lifecycle().is_active()
-            && status.transaction_id() == inspection.transaction.transaction_id()
-            && status.accepted_operations() == inspection.report.position()
-        {
-            let key = PreviewKey {
-                transaction_id: status.transaction_id().to_string(),
-                position: inspection.report.position(),
-            };
-            if !inspection.report.completeness().is_complete() {
-                self.preview_bases.update(|bases| {
-                    bases.remove(&key);
-                });
-                self.inspection.set(Some(inspection));
-                return;
-            }
-            let preview = TransactionPreviewIdentity {
-                transaction_id: status.transaction_id().to_string(),
-                position: inspection.report.position(),
-                planning_basis: inspection.report.planning_basis(),
-            };
-            self.preview_bases.update(|bases| {
-                bases.insert(key, preview);
-                // A console session retains only its most recent 256 preview positions. A
-                // refresh of one position replaces its basis in place.
-                while bases.len() > 256 {
-                    bases.pop_first();
-                }
-            });
-        }
+        self.record_preview_basis(&inspection, attached);
         self.inspection.set(Some(inspection));
+    }
+
+    /// Records what an inspection of the attached transaction means for its commit.
+    ///
+    /// A complete report is the commit basis of the position it names, and an incomplete one
+    /// withdraws that position's basis. The position can be ahead of the attached status: an
+    /// inspection runs beside the session's commands, so its reply can overtake the outcome of the
+    /// append that reached the position. Its basis then waits under that position until the
+    /// outcome brings the status there.
+    fn record_preview_basis(
+        self,
+        inspection: &TransactionInspection,
+        attached: Option<&TransactionStatus>,
+    ) {
+        let Some(status) = attached else {
+            return;
+        };
+        if !status.lifecycle().is_active()
+            || status.transaction_id() != inspection.transaction.transaction_id()
+        {
+            return;
+        }
+        // A report of a position the status has already passed describes nothing the session can
+        // still commit.
+        if inspection.report.position() < status.accepted_operations() {
+            return;
+        }
+        let key = PreviewKey {
+            transaction_id: status.transaction_id().to_string(),
+            position: inspection.report.position(),
+        };
+        if !inspection.report.completeness().is_complete() {
+            self.preview_bases.update(|bases| {
+                bases.remove(&key);
+            });
+            return;
+        }
+        let preview = TransactionPreviewIdentity {
+            transaction_id: status.transaction_id().to_string(),
+            position: inspection.report.position(),
+            planning_basis: inspection.report.planning_basis(),
+        };
+        self.preview_bases.update(|bases| {
+            bases.insert(key, preview);
+            // A console session retains only its most recent 256 preview positions. A
+            // refresh of one position replaces its basis in place.
+            while bases.len() > 256 {
+                bases.pop_first();
+            }
+        });
     }
 
     pub fn commit_basis(self, status: &TransactionStatus) -> Option<TransactionPreviewIdentity> {
@@ -1268,6 +1289,107 @@ mod tests {
             assert!(inspector.inspection.get_untracked().is_none());
             assert!(inspector.target.get_untracked().is_none());
             assert!(!inspector.open.get_untracked());
+        });
+    }
+
+    #[test]
+    fn a_report_that_overtakes_its_appends_outcome_is_the_basis_once_the_status_reaches_it() {
+        Owner::new().with(|| {
+            let inspector = InspectorSignals::new();
+            let inspected = configured_inspection();
+            let before_append = TransactionStatus::new(
+                inspected.transaction.transaction_id().to_string(),
+                inspected.transaction.domain().clone(),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(0),
+                0,
+            )
+            .assured("an open transaction that accepted nothing has applied nothing");
+            inspector.open_attached();
+            inspector.requested(1);
+            inspector.accept(
+                inspected.clone(),
+                1,
+                Some(&TransactionInspectionTarget::Attached),
+                Some(&before_append),
+            );
+
+            assert_eq!(inspector.commit_basis(&before_append), None);
+            assert_eq!(
+                inspector.commit_basis(&inspected.transaction),
+                Some(TransactionPreviewIdentity {
+                    transaction_id: inspected.transaction.transaction_id().to_string(),
+                    position: inspected.report.position(),
+                    planning_basis: inspected.report.planning_basis(),
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn a_report_of_a_position_the_attached_status_passed_supplies_no_basis() {
+        Owner::new().with(|| {
+            let inspector = InspectorSignals::new();
+            let older = inspection("attached", 1);
+            let attached = configured_inspection().transaction;
+            inspector.open_attached();
+            inspector.requested(1);
+            inspector.accept(
+                older.clone(),
+                1,
+                Some(&TransactionInspectionTarget::Attached),
+                Some(&attached),
+            );
+
+            assert_eq!(inspector.commit_basis(&attached), None);
+            assert_eq!(inspector.commit_basis(&older.transaction), None);
+        });
+    }
+
+    #[test]
+    fn an_inspection_without_an_attached_transaction_supplies_no_basis() {
+        Owner::new().with(|| {
+            let inspector = InspectorSignals::new();
+            let inspected = configured_inspection();
+            inspector.open_attached();
+            inspector.requested(1);
+            inspector.accept(
+                inspected.clone(),
+                1,
+                Some(&TransactionInspectionTarget::Attached),
+                None,
+            );
+
+            assert_eq!(inspector.commit_basis(&inspected.transaction), None);
+            assert!(inspector.inspection.get_untracked().is_some());
+        });
+    }
+
+    #[test]
+    fn the_console_keeps_the_preview_bases_of_its_latest_256_positions() {
+        Owner::new().with(|| {
+            let inspector = InspectorSignals::new();
+            inspector.open_attached();
+            let inspected = (0..=256_u64)
+                .map(|index| inspection(&format!("attached-{index:03}"), 1))
+                .collect::<Vec<_>>();
+            for (order, reply) in (1..).zip(&inspected) {
+                inspector.requested(order);
+                inspector.accept(
+                    reply.clone(),
+                    order,
+                    Some(&TransactionInspectionTarget::Attached),
+                    Some(&reply.transaction),
+                );
+            }
+
+            assert_eq!(inspector.commit_basis(&inspected[0].transaction), None);
+            assert!(inspector.commit_basis(&inspected[1].transaction).is_some());
+            assert!(
+                inspector
+                    .commit_basis(&inspected[256].transaction)
+                    .is_some()
+            );
         });
     }
 

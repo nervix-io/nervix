@@ -458,8 +458,6 @@ pub enum SinkPublishError {
     NotInitialized { sink: &'static str },
     #[error("failed to publish through {sink} sink")]
     Publish { sink: &'static str },
-    #[error("failed to finish {sink} sink")]
-    Finish { sink: &'static str },
     #[error("failed to commit {sink} sink")]
     Commit { sink: &'static str },
     #[error("{sink} sink cannot accept this write as it is configured")]
@@ -467,6 +465,41 @@ pub enum SinkPublishError {
 }
 
 pub type SinkPublishResult<T> = Result<T, Report<SinkPublishError>>;
+
+/// What finishing a sink did with the records its transport client still held.
+///
+/// A publish reports a record delivered at the completion point its mode declares. Where that point
+/// is the client taking the record, the client can still hold delivered records when the emitter
+/// stops, so the host finishes every sink once the emitter will publish nothing more through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkFinish {
+    /// The client holds no record once a publish returns, so there was nothing to send.
+    NothingHeld,
+    /// The client held records and sent every one of them before the deadline.
+    Flushed,
+    /// The client can still hold records a publish reported delivered, and the sink closes it
+    /// without sending them.
+    Discarded,
+}
+
+/// Why finishing a sink did not send every record its transport client still held.
+///
+/// The host retries neither: a stop that asked for the finish fails, and terminal teardown records
+/// what the client still held as lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SinkFinishError {
+    /// The deadline passed while the client still held `records` records it had not sent.
+    #[error(
+        "{sink} sink's transport client still held {records} records when its finish deadline \
+         passed"
+    )]
+    Unsent { sink: &'static str, records: u64 },
+    /// The client failed while it sent the records it held.
+    #[error("{sink} sink's transport client failed while it sent the records it held")]
+    Flush { sink: &'static str },
+}
+
+pub type SinkFinishResult = Result<SinkFinish, Report<SinkFinishError>>;
 
 /// How long the external system asked the host to wait before its next attempt.
 ///
@@ -487,9 +520,14 @@ pub struct SinkRetryDelay(pub Duration);
     )
 )]
 pub trait SinkLifecycle: Send {
-    async fn finish(&mut self, _deadline: Instant) -> SinkPublishResult<()> {
-        Ok(())
-    }
+    /// Sends what the transport client still holds of the records a publish reported delivered, by
+    /// `deadline`, and answers with what that did.
+    ///
+    /// The host calls this once the emitter will publish nothing more through this sink: after a
+    /// stop drained the emitter's buffer, and after terminal teardown ended the emitter task,
+    /// possibly in the middle of a publish. Every sink answers for what its own client holds, so
+    /// this hook has no default.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult;
 
     fn keeps_client_on_publish_failure(&self) -> bool {
         false
@@ -548,7 +586,28 @@ pub trait SinkLifecycle: Send {
     )
 )]
 pub trait RecordSink: SinkLifecycle {
+    /// Prepares the external bytes of one newly encoded payload. The host retains the result
+    /// until delivery or rejection, and never prepares a retained payload again on a retry or
+    /// through a reopened connector. Most connectors send the codec's bytes unchanged.
+    ///
+    /// A refusal is the payload's definitive message error, shared by all its source members.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            outcome,
+            reason = "a connector's definitive payload refusal is a fixed public message outcome"
+        )
+    )]
+    fn prepare_payload(
+        &mut self,
+        payload: Vec<u8>,
+        _occurred_at: Timestamp,
+    ) -> Result<Vec<u8>, StructuredMessageError> {
+        Ok(payload)
+    }
+
     /// Writes `records` and answers for each of them by its identity.
+    /// Payloads are the retained bytes returned by `prepare_payload`.
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId>;
 }
 

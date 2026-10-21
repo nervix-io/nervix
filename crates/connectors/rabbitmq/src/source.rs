@@ -34,7 +34,8 @@ use lapin::{
 };
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
@@ -105,38 +106,47 @@ impl RabbitMqSourcePlan {
         }
     }
 
+    /// Connects and starts the consumer of one instance, every step within the client's
+    /// `connect_timeout_ms`.
     async fn consume(&self, instance_index: u64) -> RabbitMqSourceResult<RabbitMqConsumer> {
         let broker = RabbitMqBroker::from_config(&self.config, self.dns.clone())
             .change_context(RabbitMqSourceError::Connect)?;
-        let connection = broker
+        let opening = broker
             .connect()
             .await
             .change_context(RabbitMqSourceError::Connect)?;
-        let channel = connection.create_channel().await.map_err(|source| {
-            Report::new(RabbitMqSourceError::Channel).attach_printable(source.to_string())
-        })?;
-        channel
-            .basic_qos(1, BasicQosOptions::default())
-            .await
-            .map_err(|source| {
-                Report::new(RabbitMqSourceError::Qos).attach_printable(source.to_string())
-            })?;
-        let consumer = channel
-            .basic_consume(
-                self.queue.as_str().into(),
-                format!("{}-{instance_index}", self.consumer_tag).into(),
-                BasicConsumeOptions::default(),
-                FieldTable::default(),
+        let channel = opening
+            .within_budget(
+                "opening the RabbitMQ consumer's channel",
+                opening.connection().create_channel(),
             )
             .await
-            .map_err(|source| {
-                Report::new(RabbitMqSourceError::Consume {
+            .map_err(|failure| failure.beneath(RabbitMqSourceError::Channel))?;
+        opening
+            .within_budget(
+                "setting the RabbitMQ prefetch window",
+                channel.basic_qos(1, BasicQosOptions::default()),
+            )
+            .await
+            .map_err(|failure| failure.beneath(RabbitMqSourceError::Qos))?;
+        let consumer = opening
+            .within_budget(
+                "starting the RabbitMQ consumer",
+                channel.basic_consume(
+                    self.queue.as_str().into(),
+                    format!("{}-{instance_index}", self.consumer_tag).into(),
+                    BasicConsumeOptions::default(),
+                    FieldTable::default(),
+                ),
+            )
+            .await
+            .map_err(|failure| {
+                failure.beneath(RabbitMqSourceError::Consume {
                     queue: self.queue.as_str().to_string(),
                 })
-                .attach_printable(source.to_string())
             })?;
         Ok(RabbitMqConsumer {
-            _connection: connection,
+            _connection: opening.opened(),
             _channel: channel,
             consumer,
         })
@@ -307,11 +317,20 @@ impl BrokerSourceConnector for RabbitMqSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        match consumer.consumer.next().await {
+        let Some(received) = cancellation
+            .unless_cancelled(consumer.consumer.next())
+            .await
+        else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        match received {
             Some(Ok(delivery)) => Ok(SourceBatch::Messages(vec![RabbitMqSourceMessage::new(
                 delivery,
             )])),

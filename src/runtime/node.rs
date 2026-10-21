@@ -38,7 +38,7 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
     pub(in crate::runtime) memory_pressure: MemoryPressurePause,
     pub(in crate::runtime) ingestor_statuses:
-        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<RuntimeReconnectStatus>>, RandomState>,
+        DashMap<DomainNodeRef, Arc<IngestorStatus>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
@@ -102,6 +102,10 @@ pub(in crate::runtime) struct RuntimeInner {
     /// its lease expires.
     pub(in crate::runtime) frozen_ownership_handoff_entities:
         Arc<DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>>,
+    /// Owns the tasks that finish entity-gate engagements and releases and end each lease, so
+    /// teardown can end every lease this node holds once its domains have stopped and wait for
+    /// them, rather than leave one to a deadline past the node's stop.
+    pub(in crate::runtime) entity_gate_tasks: EntityGateTasks,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     pub(in crate::runtime) active_domain_alters:
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,

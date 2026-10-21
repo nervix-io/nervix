@@ -463,15 +463,24 @@ impl BufferedIngestPayload {
             .row()
     }
 
-    pub(super) fn metadata_rows(&self) -> Vec<IngestMetadataRow<'_>> {
-        self.metadata
+    /// The payloads this buffer holds, each with its place in the buffer, which
+    /// [`Self::metadata_row`] reads the payload's metadata at.
+    pub(super) fn indexed_payloads(&self) -> impl Iterator<Item = BatchPayload<'_, usize>> {
+        self.payloads
             .iter()
-            .map(BufferedIngestMetadata::row)
-            .collect()
+            .enumerate()
+            .map(|(index, payload)| BatchPayload {
+                payload,
+                entry: index,
+            })
     }
 
-    pub(super) fn payloads(&self) -> impl Iterator<Item = &[u8]> {
-        self.payloads.iter().map(Vec::as_slice)
+    /// The metadata row of the payload at `index` in this buffer.
+    pub(super) fn metadata_row(&self, index: usize) -> IngestMetadataRow<'_> {
+        self.metadata
+            .get(index)
+            .assured("the metadata is row-aligned with the payloads every index names")
+            .row()
     }
 
     pub(super) const fn observed_at(&self) -> Timestamp {
@@ -991,6 +1000,24 @@ impl IngestorQuiesceControl {
         }
     }
 
+    /// Held endpoint responses end when intake stops for shutdown or ownership handoff. A
+    /// resumable pause still lets an admitted request finish through its existing ACK root.
+    pub(in crate::runtime) async fn wait_until_intake_stops(&self) {
+        let mut observation = self.observation();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if observation
+                .publication
+                .decision
+                .cause()
+                .is_some_and(IngestorQuiesceCause::stops_intake_regardless_of_mode)
+            {
+                return;
+            }
+            self.wait_for_change_since(&mut observation).await;
+        }
+    }
+
     /// Runs `delivery`, the work that brings a live payload to its ingest group, until it
     /// completes, `stop` turns true, or a publication newer than `decided` replaces the decision
     /// the payload was taken in under. A new decision leaves `decided` observing it, and ends
@@ -1131,16 +1158,34 @@ pub(super) struct RuntimeReconnectStatus {
     pub(super) retry_at: Instant,
 }
 
+/// What the sources of one ingestor publish about it on this node, for its `DESCRIBE INGESTOR`.
+#[derive(Debug, Default)]
+pub(super) struct IngestorStatus {
+    /// The connector's failure and the retry that follows it, while it has one.
+    pub(super) connection: task_status::TaskStatus<RuntimeReconnectStatus>,
+    /// The latest decode rejection of a payload the ingestor's codec refused on this node.
+    last_decode_rejection: ArcSwapOption<DecodeRejection>,
+}
+
+impl IngestorStatus {
+    /// Publishes `rejection` as the latest decode rejection, in place of the one before it.
+    pub(super) fn record_decode_rejection(&self, rejection: DecodeRejection) {
+        self.last_decode_rejection
+            .store(Some(StdArc::new(rejection)));
+    }
+
+    pub(super) fn last_decode_rejection(&self) -> Option<StdArc<DecodeRejection>> {
+        self.last_decode_rejection.load_full()
+    }
+}
+
 impl Runtime {
-    pub(super) fn ingestor_status(
-        &self,
-        key: &DomainNodeRef,
-    ) -> Arc<task_status::TaskStatus<RuntimeReconnectStatus>> {
+    pub(super) fn ingestor_status(&self, key: &DomainNodeRef) -> Arc<IngestorStatus> {
         if let Some(status) = self.inner.ingestor_statuses.get(key) {
             return status.clone();
         }
         // Execution preparation serializes this entity's first registration before instances start.
-        let status = Arc::new(task_status::TaskStatus::<RuntimeReconnectStatus>::default());
+        let status = Arc::new(IngestorStatus::default());
         self.inner
             .ingestor_statuses
             .insert(key.clone(), status.clone());
@@ -1154,7 +1199,9 @@ impl Runtime {
         error: impl Into<String>,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        self.ingestor_status(&key).record_error(error.into());
+        self.ingestor_status(&key)
+            .connection
+            .record_error(error.into());
     }
 
     pub(in crate::runtime) fn clear_ingestor_transient_error(
@@ -1164,7 +1211,7 @@ impl Runtime {
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if let Some(status) = self.inner.ingestor_statuses.get(&key) {
-            status.clear();
+            status.connection.clear();
         }
     }
 
@@ -2138,6 +2185,7 @@ mod tests {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],
+                domain_offsets: None,
             },
         );
         runtime.inner.ingestor_quiescence.insert(

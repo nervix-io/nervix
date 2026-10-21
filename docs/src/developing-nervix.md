@@ -57,6 +57,18 @@ Both recipes require the repository's remote compiler-cache configuration: `KACH
 and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
 are available for publishing builds.
 
+The `builder` stage installs its build tools at the exact versions that `ARG`s in
+`Dockerfile.debian` pin, and every image build runs that step. kache and trunk come from their
+projects' release archives for the build architecture, fetched from the release download URL with
+no GitHub API call, and each archive is checked against its pinned SHA-256 before anything is taken
+out of it. Both projects build their releases with fat LTO in one codegen unit, which would take
+minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install --locked` against
+the lockfile each crate published, so a later compatible release of one of their dependencies can
+neither change them nor stop them compiling. Moving a tool to another version changes its version
+pin and, for an archive, the checksum of each build architecture; an archive that does not match
+its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
+install, which the recipes pass to the build.
+
 `Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
 binaries and Sonic bundle from the shared `builder` stage using `COPY --link`, so those artifact
@@ -272,15 +284,18 @@ The `[parallel]` groups map package lists onto that recipe, including the packag
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
-`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
-so each configuration has its own build directory lock. `just cargo-clippy-package <package>
-[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
-builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
-reads a build directory after its lint and the runner's disk cannot hold every configuration's at
-once, a target that passed deletes its own; a failed target keeps its directory, and a local run
-keeps them all for the next one.
+Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
+package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
+configuration returns to the directory that holds its artifacts. The configurations in a directory
+share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
+different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+there. Configurations in the same directory take turns on its build directory lock, so two of them
+selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
+four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe. The compiler driver builds keep their
+separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
+compiler job limit applies separately within each invocation.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
@@ -725,8 +740,9 @@ just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nerv
 just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
 ```
 
-`scripts/chaos/README.md` describes every scenario, the suites, diagnostic images, their budgets
-and artifacts, and how to reproduce or replay a failed run.
+[External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
+the suites, diagnostic images, their budgets and artifacts, and how to reproduce or replay a failed
+run.
 
 ### Release evidence
 
@@ -773,7 +789,8 @@ corresponding ClickUp task; keep durable architectural conclusions in the chapte
 
 [Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the ordinary producer
 catalog, native collection, source mapping, report integrity, advisory patch coverage and CRAP,
-and their relationship to the deterministic complexity ratchet. Start with its
+the full workspace union, and their relationship to the deterministic complexity ratchet. Start
+with its
 [local reproduction commands](./coverage-reports.md#the-ordinary-workspace-report) or
 [native collection commands](./coverage-reports.md#native-collection).
 
@@ -811,12 +828,12 @@ phases a scenario reports, and how each failure reaches CI output.
 `just book <version>` renders this book, and `just book-pdf <version>` additionally produces
 `nervix.pdf` through pandoc and XeLaTeX.
 
-Both recipes require the exact mdBook release pinned by `MDBOOK_VERSION` in
-`scripts/build_book.py`, and they fail with that version in the message when a different one is
-installed. CI resolves the same constant, so a local build always matches what is published. The
-pin is exact because the rendered theme targets mdBook's internal element IDs and because the PDF
-relies on mdBook rewriting print-page links into in-document anchors — on an older release every
-cross-chapter link in the PDF would point back at the website instead.
+Both recipes accept stable mdBook patch releases in the major/minor series selected by
+`MDBOOK_VERSION` in `scripts/build_book.py`: the current `0.5.3` pin accepts `0.5.x`, including
+`0.5.4`. A different major or minor version, or a malformed version, fails with the supported series
+in the message. CI installs the exact pinned release for reproducible publication. The series
+requirement protects the theme's element IDs and mdBook's rewriting of print-page links into
+in-document anchors, which the PDF uses for cross-chapter links.
 
 Install the pinned release with:
 

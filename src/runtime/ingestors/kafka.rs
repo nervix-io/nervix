@@ -16,10 +16,10 @@
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use nervix_connector::{SourceAckPolicy, SourceConnector, SourcePlan};
+use nervix_connector::{SourceConnector, SourcePlan};
 use nervix_connector_kafka::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
     KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceOffsetMode, KafkaSourcePlan,
     TopicPartitionInspector,
 };
@@ -38,7 +38,9 @@ struct RuntimeKafkaDomainOffsets {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
-    state: KafkaOffsetStateOriginator,
+    /// The originator this ingestor instance acts under, which schedule application replaces when
+    /// a reassignment keeps the instance running.
+    state: StdArc<KafkaOffsetOriginatorSlot>,
 }
 
 #[async_trait]
@@ -72,6 +74,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
         };
         let start = match last_start {
             nervix_models::DomainStartPoint::Resume => {
+                let state = self.state.current();
                 let missing_partition_timestamp = self
                     .runtime
                     .current_paced_domain_time(&self.domain)
@@ -81,7 +84,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                     })?;
                 let mut positions = Vec::new();
                 for partition in partitions {
-                    if let Some(offset) = self.state.read().next_offset(&self.topic, *partition) {
+                    if let Some(offset) = state.read().next_offset(&self.topic, *partition) {
                         positions.push(KafkaOffsetPosition {
                             topic: self.topic.clone(),
                             partition: *partition,
@@ -114,15 +117,17 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     }
 
     async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
+        let state = self.state.current();
         self.runtime
-            .reset_domain_kafka_offsets(&self.state, positions)
+            .reset_domain_kafka_offsets(&state, positions)
             .await
             .change_context(KafkaDomainOffsetError::Reset)
     }
 
     async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
+        let state = self.state.current();
         self.runtime
-            .commit_domain_kafka_offset(&self.state, position)
+            .commit_domain_kafka_offset(&state, position)
             .await
             .change_context(KafkaDomainOffsetError::Commit)
     }
@@ -146,6 +151,28 @@ impl Runtime {
             .replicated_kafka_offset_states
             .get(&ingestor.kafka_offset_state_placement())?;
         ReplicatedKafkaOffsetState::current_originator(state.value())
+    }
+
+    /// Hands a Kafka ingestor that keeps running here across a reassignment the originator its
+    /// offsets' new binding issued, since the rebind superseded the one the ingestor holds. While
+    /// the ingestor is not running there is nothing to hand it to: its next start takes the
+    /// binding in force.
+    pub(in crate::runtime) fn reissue_kafka_offset_originator(
+        &self,
+        domain: &DomainName,
+        ingestor: &NodeRef,
+        originator: KafkaOffsetStateOriginator,
+    ) {
+        let key = DomainNodeRef {
+            domain: domain.clone(),
+            node: ingestor.clone(),
+        };
+        let Some(running) = self.inner.ingestors.get(&key) else {
+            return;
+        };
+        if let Some(slot) = running.domain_offsets.as_ref() {
+            slot.replace(originator);
+        }
     }
 }
 
@@ -285,18 +312,20 @@ impl KafkaIngestorStartPlan {
             }));
         }
 
-        let enable_auto_commit = acknowledgement == SourceAckPolicy::None
-            && matches!(offsets, KafkaOffsetPlan::ConsumerGroup(_));
+        let mut domain_offsets = None;
         let source_offset_mode = match offsets {
             KafkaOffsetPlan::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
                 group_id: group.as_str().to_string(),
+                commit: KafkaGroupCommit::for_acknowledgement(acknowledgement),
             },
             KafkaOffsetPlan::Domain(placement) => {
-                let Some(state) = runtime.kafka_offset_originator(ingestor, &placement) else {
+                let Some(originator) = runtime.kafka_offset_originator(ingestor, &placement) else {
                     return Err(ingestor.source_start_failure(
                         SourceStartError::KafkaDomainOffsetsNotAuthoritative,
                     ));
                 };
+                let state = StdArc::new(KafkaOffsetOriginatorSlot::new(originator));
+                domain_offsets = Some(state.clone());
                 let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
                     lifecycle: runtime
                         .domain_clock_lifecycle(domain)
@@ -326,7 +355,6 @@ impl KafkaIngestorStartPlan {
                 config: resolved_client.entries,
                 topic,
                 offset_mode: source_offset_mode,
-                enable_auto_commit,
             },
             capabilities: ingestor.source_capabilities(instances, acknowledgement.support()),
             acknowledgement,
@@ -362,6 +390,7 @@ impl KafkaIngestorStartPlan {
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved_client.mounts.into_iter().collect(),
             connector_label: "kafka",
+            domain_offsets,
         })
     }
 }

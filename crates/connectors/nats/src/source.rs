@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The core NATS connection and queue subscription each source instance reads
-//!   through, its TLS options, and message headers as ingest headers.
+//!   through, its TLS options, the end of that subscription when the connection is lost, and
+//!   message headers as ingest headers.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
-//!   Tokio and `async-nats`.
+//!   the boundary's channels and `async-nats`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
 #![cfg_attr(
@@ -20,16 +21,17 @@
     )
 )]
 
-use async_nats::{Client as NatsClient, Message as NatsMessage, Subscriber};
+use async_nats::{Client as NatsClient, Event as NatsEvent, Message as NatsMessage, Subscriber};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, ServiceUrl, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
+use nervix_primitives::sync::mpsc::{self, error::TrySendError};
 use thiserror::Error;
 
 const NATS: &str = "nats";
@@ -47,8 +49,10 @@ pub enum NatsSourceError {
     Subscribe { subject: String },
     #[error("failed to flush the NATS subscription")]
     Flush,
-    #[error("NATS subscription closed")]
-    SubscriptionClosed,
+    /// The client lost its connection to the server, which ends the subscription that connection
+    /// carried.
+    #[error("NATS connection lost")]
+    ConnectionLost,
 }
 
 type NatsSourceResult<T> = Result<T, Report<NatsSourceError>>;
@@ -63,10 +67,41 @@ pub struct NatsSourcePlan {
 }
 
 /// One instance's connection and queue subscription, kept together because the subscription
-/// lives only as long as its client.
+/// lives only as long as its client, with the signal the client raises when it loses the
+/// connection.
 struct NatsSubscription {
     _client: NatsClient,
     subscriber: Subscriber,
+    /// Receives a signal when the client loses its connection to the server, and ends once the
+    /// client's connection task has ended.
+    connection_lost: mpsc::Receiver<()>,
+}
+
+/// What a subscription's wait for its next message ended with.
+enum NatsReceipt {
+    Message(NatsMessage),
+    /// The subscription ended: the client lost its connection, or the subscription's stream ended
+    /// with the client's connection task.
+    Ended,
+}
+
+impl NatsSubscription {
+    /// Waits for the next message the subscription delivers, or for the subscription to end.
+    ///
+    /// A message the client already received is taken before a lost connection ends the
+    /// subscription, so a loss never discards what reached the client before it.
+    async fn next_message(&mut self) -> NatsReceipt {
+        nervix_primitives::select! {
+            biased;
+            message = self.subscriber.next() => match message {
+                Some(message) => NatsReceipt::Message(message),
+                // The client ends a subscription's stream only when its connection task ended,
+                // which a lost connection the client did not restore does.
+                None => NatsReceipt::Ended,
+            },
+            _ = self.connection_lost.recv() => NatsReceipt::Ended,
+        }
+    }
 }
 
 impl NatsSourcePlan {
@@ -83,7 +118,9 @@ impl NatsSourcePlan {
     }
 
     async fn subscribe(&self) -> NatsSourceResult<NatsSubscription> {
-        let client = Self::client_from_config(&self.config).await?;
+        // One pending signal is enough: the instance ends its subscription on the first.
+        let (lost, connection_lost) = mpsc::channel(1);
+        let client = Self::client_from_config(&self.config, lost).await?;
         let subscriber = client
             .queue_subscribe(
                 self.subject.as_str().to_string(),
@@ -102,13 +139,32 @@ impl NatsSourcePlan {
         Ok(NatsSubscription {
             _client: client,
             subscriber,
+            connection_lost,
         })
     }
 
-    async fn client_from_config(config: &[ClientConfigEntry]) -> NatsSourceResult<NatsClient> {
+    /// Connects a client that signals `lost` when it loses its connection to the server.
+    ///
+    /// The host reopens a lost connection on its own reconnect cadence, so the client reports the
+    /// loss instead of reconnecting in the background. The client cannot be told to make no
+    /// attempt of its own, so it makes one before its connection task ends; the instance has
+    /// ended its subscription by then, and that attempt only lets the task end.
+    async fn client_from_config(
+        config: &[ClientConfigEntry],
+        lost: mpsc::Sender<()>,
+    ) -> NatsSourceResult<NatsClient> {
         let addr = client_config_value(config, "addr", "NATS")
             .change_context(NatsSourceError::ClientConfig)?;
-        let mut options = async_nats::ConnectOptions::new();
+        let mut options = async_nats::ConnectOptions::new()
+            .max_reconnects(1)
+            .event_callback(move |event| {
+                let lost = lost.clone();
+                async move {
+                    if let NatsEvent::Disconnected = event {
+                        Self::signal_connection_lost(&lost);
+                    }
+                }
+            });
         let tls = client_tls_paths(config);
         if let Some(ca_file) = tls.ca_file.as_ref() {
             options = options.add_root_certificates(ca_file.clone());
@@ -131,6 +187,17 @@ impl NatsSourcePlan {
         options.connect(addr).await.map_err(|source| {
             Report::new(NatsSourceError::Connect).attach_printable(source.to_string())
         })
+    }
+
+    /// Tells the instance whose client lost its connection that its subscription ended.
+    fn signal_connection_lost(lost: &mpsc::Sender<()>) {
+        match lost.try_send(()) {
+            Ok(()) => {}
+            // A loss is already pending, and the instance ends its subscription on the first one.
+            Err(TrySendError::Full(())) => {}
+            // The instance already ended this subscription and no longer listens for its end.
+            Err(TrySendError::Closed(())) => {}
+        }
     }
 }
 
@@ -232,13 +299,24 @@ impl BrokerSourceConnector for NatsSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(subscription) = self.subscription.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let Some(message) = subscription.subscriber.next().await else {
+        let Some(receipt) = cancellation
+            .unless_cancelled(subscription.next_message())
+            .await
+        else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let NatsReceipt::Message(message) = receipt else {
+            // The subscription ended with its connection. The host shows the loss as a transient
+            // status and resumes the instance on its reconnect cadence, which connects again.
             self.subscription = None;
-            return Err(Report::new(NatsSourceError::SubscriptionClosed)
+            return Err(Report::new(NatsSourceError::ConnectionLost)
                 .change_context(SourceError::Read { connector: NATS }));
         };
         Ok(SourceBatch::Messages(vec![NatsSourceMessage {
@@ -262,7 +340,17 @@ impl BrokerSourceConnector for NatsSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::{num::NonZeroUsize, time::Duration};
+
+    use nervix_primitives::{sync::oneshot, time::timeout};
+
     use super::*;
+    use crate::scripted_server::ScriptedServer;
+
+    /// How long a check waits for the source to observe what the stand-in server did. It bounds a
+    /// wait for an event that follows at once on a loopback connection, so only a source that
+    /// never observes it reaches the bound.
+    const OBSERVATION_BOUND: Duration = Duration::from_secs(30);
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
         ClientConfigEntry {
@@ -272,8 +360,190 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_cancelled_read_takes_nothing_and_leaves_the_next_message_to_the_next_read() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let (allow_delivery, delivery_allowed) = oneshot::channel::<()>();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let subscription = connection.expect_subscription().await;
+            connection.answer_ping().await;
+            delivery_allowed
+                .await
+                .expect("the test allows the delivery once its read was cancelled");
+            connection
+                .deliver(&subscription, b"delivered after the cancelled read")
+                .await;
+            // The connection stays open until the test has read the delivery.
+            connection
+        });
+        let plan = NatsSourcePlan::new(
+            vec![entry("addr", &addr)],
+            NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
+            NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
+        );
+        let request = SourceBatchRequest {
+            max_messages: NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let mut source = NatsSource::open(&plan, 0)
+            .await
+            .expect("opening a NATS source does not connect");
+        source
+            .resume()
+            .await
+            .expect("the source subscribes through the stand-in server");
+
+        let cancellation = SourceReadCancellation::new();
+        cancellation.cancel();
+        let interrupted = timeout(OBSERVATION_BOUND, source.next_batch(request, &cancellation))
+            .await
+            .expect("a cancelled read ends at once")
+            .expect("a cancelled read is not a failure");
+        let SourceBatch::Interrupted { gathered } = interrupted else {
+            panic!("a read the host cancelled ends as interrupted");
+        };
+        assert!(gathered.is_empty(), "nothing was delivered to take");
+
+        allow_delivery
+            .send(())
+            .expect("the scripted server waits for the delivery to be allowed");
+        let batch = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the delivered message reaches the source")
+        .expect("the delivered message is read");
+        let SourceBatch::Messages(messages) = batch else {
+            panic!("the source reads the delivered message as a batch");
+        };
+        let payloads = messages
+            .iter()
+            .map(|message| message.payload().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads,
+            vec![b"delivered after the cancelled read".to_vec()]
+        );
+        let _connection = script.await.expect("the scripted server ran its script");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_lost_connection_ends_the_subscription_after_what_it_delivered() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let subscription = connection.expect_subscription().await;
+            // The source flushes once it subscribed, so the subscription exists once that ping is
+            // answered.
+            connection.answer_ping().await;
+            connection
+                .deliver(&subscription, b"delivered before the loss")
+                .await;
+            // The server goes down: it ends the connection and refuses the client's own attempt
+            // to reconnect.
+            connection.end().await;
+        });
+        let plan = NatsSourcePlan::new(
+            vec![entry("addr", &addr)],
+            NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
+            NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
+        );
+        let request = SourceBatchRequest {
+            max_messages: NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let mut source = NatsSource::open(&plan, 0)
+            .await
+            .expect("opening a NATS source does not connect");
+        assert!(
+            source.needs_resume(),
+            "an opened source has not subscribed yet"
+        );
+        let resumed = source
+            .resume()
+            .await
+            .expect("the source subscribes through the stand-in server");
+        assert_eq!(resumed, SourceResume::Ready);
+
+        let batch = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the delivered message reaches the source")
+        .expect("the delivered message is read");
+        let SourceBatch::Messages(messages) = batch else {
+            panic!("the source reads the delivered message as a batch");
+        };
+        let payloads = messages
+            .iter()
+            .map(|message| message.payload().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(payloads, vec![b"delivered before the loss".to_vec()]);
+        script.await.expect("the scripted server ran its script");
+
+        let ended = timeout(
+            OBSERVATION_BOUND,
+            source.next_batch(request, &SourceReadCancellation::new()),
+        )
+        .await
+        .expect("the lost connection ends the wait for the next message");
+        let Err(error) = ended else {
+            panic!("a lost connection ends the subscription with an error");
+        };
+        assert!(matches!(
+            error.current_context(),
+            SourceError::Read { connector: NATS }
+        ));
+        assert!(matches!(
+            error.downcast_ref::<NatsSourceError>(),
+            Some(NatsSourceError::ConnectionLost)
+        ));
+        assert!(
+            source.needs_resume(),
+            "the host reconnects a source whose subscription ended through its resume"
+        );
+
+        let error = source
+            .resume()
+            .await
+            .expect_err("the server is down, so the next resume cannot connect");
+        assert!(matches!(
+            error.downcast_ref::<NatsSourceError>(),
+            Some(NatsSourceError::Connect)
+        ));
+    }
+
+    /// The instance ends its subscription on the first loss, so a loss signalled while another is
+    /// pending, or after the instance stopped listening, is dropped.
+    #[test]
+    fn a_lost_connection_is_signalled_once_and_not_after_the_instance_stopped_listening() {
+        let (lost, mut connection_lost) = mpsc::channel(1);
+        NatsSourcePlan::signal_connection_lost(&lost);
+        NatsSourcePlan::signal_connection_lost(&lost);
+        assert!(
+            connection_lost.try_recv().is_ok(),
+            "the first loss is signalled"
+        );
+        assert!(
+            connection_lost.try_recv().is_err(),
+            "a loss signalled while one is pending is not signalled again"
+        );
+        drop(connection_lost);
+        NatsSourcePlan::signal_connection_lost(&lost);
+        assert!(
+            lost.is_closed(),
+            "the instance no longer listens for its end"
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
-        let error = NatsSourcePlan::client_from_config(&[])
+        let (lost, _connection_lost) = mpsc::channel(1);
+        let error = NatsSourcePlan::client_from_config(&[], lost.clone())
             .await
             .expect_err("a missing NATS address must fail");
         assert!(matches!(
@@ -281,10 +551,13 @@ mod tests {
             NatsSourceError::ClientConfig
         ));
 
-        let error = NatsSourcePlan::client_from_config(&[
-            entry("addr", "tls://127.0.0.1:1"),
-            entry("tls_cert_file", "client.pem"),
-        ])
+        let error = NatsSourcePlan::client_from_config(
+            &[
+                entry("addr", "tls://127.0.0.1:1"),
+                entry("tls_cert_file", "client.pem"),
+            ],
+            lost,
+        )
         .await
         .expect_err("a client certificate without a key must fail");
         assert!(matches!(

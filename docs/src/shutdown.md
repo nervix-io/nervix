@@ -184,6 +184,15 @@ that owner was already excluded as a destination. Its live incarnation remains a
 so a restart or loss of that owner still invalidates the captured plan. Changes to other eligible
 destinations and to the committed topology retain their own fences.
 
+The terminating incarnation also enforces its exclusion itself. A leader plans from its own gossip
+view, and gossip can still show a peer as eligible after that peer advertised terminating, as when
+peers stop in the same moment. A terminating incarnation therefore refuses to prepare a planned
+handoff for which it is the destination, before it validates the request: the preparation fails with
+`destination node '<node_id>' is terminating`, the leader releases the unit's gate and records the
+unit as failed as it does for any unit that cannot prepare, and the unit's work stays with its
+owner. A handoff the incarnation prepared before it began terminating is already in progress and
+can still complete.
+
 ### Cordon Preservation
 
 A graceful shutdown that moves work away cordons the node so its own work does not come back to it
@@ -274,6 +283,12 @@ generators stop producing. Intake never reopens: there is no resume path out of 
 If a broker-style source is still resuming, the host cancels that pending resume when shutdown
 arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
 change also cancels an in-progress resume so the next loop turn observes the new intake state.
+A broker read in flight when intake stops is cancelled, never dropped: the source returns what it
+already took from its transport, the host takes that in as a payload already received, which still
+dispatches, and only then suspends the source. A read the ingestor's final stop meets is taken in
+the same way before the source closes. See
+[Interrupted reads](./connector-contract.md#interrupted-reads) for how each source ends a cancelled
+read.
 
 Source-instance readiness retirement is final and names the ending host's exact handle. Shutdown
 retires installed readiness before withdrawing the registry. Terminal domain execution teardown
@@ -291,6 +306,19 @@ its binding. HTTP requests and WebSocket sessions that retained a route then see
 later admission; a replacement source does not reopen that retained lifetime. A request already
 holding an intake lease may finish within the existing shutdown deadline. Endpoint definitions and
 intake leases are volatile publications and are reconstructed from the installed revision on startup.
+
+The HTTP and HTTPS listeners stop accepting connections and ask their existing connections to
+finish active responses. The admission token also wakes held endpoint ACK waits, before graph
+drain starts. Connection joining remains bounded by the existing node shutdown deadline; an
+uncompleted request body never extends that deadline. A TLS connection whose handshake has not
+completed is cancelled at admission stop.
+
+For endpoint `MODE ACK`, intake stopping also resolves held replies as unavailable immediately,
+using the existing client `outcome_unknown` / `interrupted` outcome and the configured retry delay.
+The waiter observes the quiesce publication before source close and also observes exact lifetime
+ending. This ends the response wait, not admitted graph effects: downstream work may still finish
+during drain. A sender that retries must allow duplicate effects. Unacknowledged endpoint requests
+retain their admission-only response boundary.
 
 Payloads already admitted continue through their routes.
 Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
@@ -525,7 +553,9 @@ Frozen owners retain state until capture and activation finish. Preparation reta
 deadline, distinct from the activation lease. A pending-drain timeout reports its node and counts,
 releases every attempted hold, and leaves independent schedule units available for later moves.
 Repeated engagement requests use the same identity and scope; a bounded reply timeout creates
-no additional flush and restarts no lease.
+no additional flush and restarts no lease. A request whose interconnect stream broke is retried the
+same way within the preparation deadline, so one lost connection to any participant does not fail
+the unit while preparation time remains.
 
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated
@@ -537,10 +567,20 @@ scope.
 Gate leases are deadline-bound and release themselves if the coordinator disappears. The default
 lease is sixty seconds and a planned handoff budgets two of them, one for preparation and one for
 activation. Both are longer than the default shutdown timeout, so a gate a terminating node engaged
-can outlive that node's own process; the lease deadline, not the node, is what reopens it.
+on its peers can outlive that node's own process; the lease deadline, not the node, is what reopens
+them.
 
 When activation fails after the schedule is committed, the gate stays shut until its lease expires
 rather than opening before the destination is ready.
+
+The gate a node holds on itself ends with that node instead. Its lease is volatile state of the
+node's runtime, and runtime teardown ends every lease the node holds once the node's domain tasks
+have stopped, including a lease left held because a destination did not activate, then waits for
+the tasks that complete engagements and expire leases. A lease therefore keeps neither its relay
+gates nor the ingestors it quiesced, nor anything those retain, such as the node's metrics and the
+consensus observations they read, past the node's stop, and terminal teardown releases the node's
+storage as it does after any other drain. An engagement a peer requests after the node's runtime
+stopped fails.
 
 ### Interrupted Handoffs
 
@@ -620,7 +660,7 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first; the cluster elects a new leader after it stops. |
 | Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
-| Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
+| Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A leader that has not yet observed a peer's advertisement can still choose that peer for a move; the peer refuses the preparation as a terminating destination, and the work completes in place on its owner. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
 | Leader unreachable, or no quorum | The node waits for a leader only until its drain budget runs out, reports the drain-support phase abandoned, and still completes its local drain. Nothing is cordoned. |
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
@@ -656,6 +696,12 @@ reaches its completion point before the process ends.
 
 ### Sources
 
+An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
+Removing or changing the declared input retires its external state separately, after its exact
+source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
+[MQTT session retirement](./connector-contract.md#mqtt-session-retirement) for cleanup budgets,
+best-effort failures and replacement preparation. Node shutdown does not retire an unchanged input.
+
 An outbound WebSocket source ending during shutdown or an ownership move sends a Close frame and
 waits for the peer's Close within a one-second send-and-reply budget. A failed or unanswered close
 is reported and the socket is released; the shutdown deadline still bounds the surrounding
@@ -666,10 +712,15 @@ acknowledged through the graph stays outstanding admitted work until its source 
 batch's positions on its transport, so the drain waits for that confirmation as it waits for any
 other acknowledgement root, within the drain timeout. What a source's confirmation means is the
 acknowledgement confirmation its entity declares; see
-[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion
-is answered by the broker and a RabbitMQ acknowledgement is written to the connection before the
-drain moves on, while a Kafka consumer-group commit, a Pulsar acknowledgement and an MQTT `PUBACK`
-are only queued by their clients, so the drain does not wait for their brokers to answer them.
+[Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
+a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
+acknowledgement is written to the connection, before the drain moves on, while an MQTT `PUBACK` is
+only queued by its client, so the drain does not wait for its broker to answer it. A Pulsar
+acknowledgement the broker does not answer within the client's 30-second operation timeout fails,
+and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer group
+in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
+driver delivered since the driver's last commit, and waits for the answer before the consumer
+leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the source's own redelivery contract applies. A source instance that stops while it still waits
@@ -683,13 +734,13 @@ What that contract is depends on the source, and three groups differ sharply:
 | --- | --- | --- |
 | Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
 | HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
-| NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, HTTP endpoints, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| HTTP and WebSocket endpoints | `MODE NO ACK` confirms admission; `MODE ACK` holds its reply through the graph root | Held ACK replies report unavailable on intake stop; only the sender can retry, and admitted effects may duplicate |
 | Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
-The last row is the one to plan around. Those sources have no acknowledged delivery mode at all, so
-a record admitted from them and not yet emitted is lost both by a drain that runs out of time and by
-every forced ending. An endpoint rejects new requests as soon as intake stops, so a client that
-handles the rejection can retry; a payload it already accepted is not redelivered by anything.
+Sources without an acknowledged mode lose a record admitted but not yet emitted when drain runs
+out of time or the process is forced to end. Endpoints never redeliver input themselves: an
+application handles a refusal, interrupted reply or broken transport and decides whether to retry.
 
 A general failure handled by `ON GENERAL ERROR IGNORE` acknowledges the record, while
 `ON GENERAL ERROR LOG` negatively acknowledges it. During a drain that choice decides whether an
@@ -723,11 +774,23 @@ Once the graph drain budget ends, terminal teardown cancels an emitter task wait
 attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
 a record-specific success or rejection.
 
-Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
-batches are published, the emitter host calls the sink contract's finish hook with the remaining
-stop deadline. Kafka implements that hook by flushing the producer's local queue within the same
-deadline. Other sinks hold no such queue, so their default finish hook completes immediately and
-the publish itself is the completion point.
+A `NO_ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
+takes a record, so the drain can end while the client still holds records it has not sent. Every
+emitter therefore finishes its sink when it stops: the host calls the sink contract's finish hook
+once the emitter will publish nothing more, and records what the hook did. An emitter that the
+drain moves to another node finishes as part of that stop, by the stop's deadline. An emitter that
+stops in place finishes at terminal teardown, which ends the emitter task wherever it is and gives
+the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flushes its
+producer's local queue within that time, ignoring `linger.ms`; records still awaiting their delivery
+report when it ends are lost, and the emitter logs at `warn` how many, counting records alone and
+not the events waiting in librdkafka's queue, and reports them as its transient error and an error
+event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
+that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
+expired deadline reports their count, without claiming the broker did not receive them. MQTT
+QoS 0 discards what its client still holds, which the emitter logs at `warn`. Every other sink
+holds nothing once a publish returns, so the publish itself is the
+completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
+holds and does.
 
 A sink that stages what it accepts and publishes it later reaches its completion point at its
 commit instead. After the buffered batches are written into such a sink, the drain calls the sink
@@ -769,7 +832,10 @@ sessions and commands started until the shutdown deadline and cancels whatever s
 stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
 releases the node's storage.
 
-Runtime teardown stops one domain at a time. It publishes the domain's stop to its processors,
+Runtime teardown stops one domain at a time. Before it publishes the domain's stop, it gives every
+emitter the deadline by which the emitter finishes its sink once the stop ends its task: the domain
+drain timeout from the start of runtime teardown, cut short by the shutdown deadline, and the same for
+every domain. It then publishes the domain's stop to its processors,
 emitters, generators, reingestors, and placement tasks at once, and then waits for the domain's
 tasks kind by kind: relay owners and materialized relay state, each of which is told to stop when
 its turn comes, then processors, emitters, generators, reingestors, and the placement tasks that
@@ -799,6 +865,14 @@ bulk workers, so its write waits for those workers like any other job. The node 
 this wait; a write that fails is logged at `warn` as
 `failed to flush branch state snapshot during shutdown`, and a restart then finds the checkpoint
 written before it.
+
+Once those writes are done, runtime teardown ends every entity-gate lease the node holds, as
+[Ownership Handoff During Shutdown](#ownership-handoff-during-shutdown) describes, and waits for
+the tasks that finish engagements, releases and lease expiry. Each of them retains what its hold
+fences, which by then nothing dispatches through, so ending them only lifts that hold and lets the
+runtime's own storage and metrics go when the node's services are dropped. The wait has no grace
+of its own: an engagement still waiting for its relays stops waiting, and a lease stops waiting for
+its deadline.
 
 Runtime teardown ends each resolved replication route before clearing its state registry. A
 retained route cannot attach to replacement state; a request already admitted through a borrowed
@@ -916,7 +990,7 @@ retains its durable activation gate across restart. A normal `START` creates a n
 rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
-[Backup And Restore](backup-and-restore.md#publishing-the-state-generation). A deduplicator or
+[Generation Storage](backup-and-restore-architecture.md#generation-storage). A deduplicator or
 window backup likewise captures what each branch task publishes when the cut's lifecycle
 checkpoint asks it to, independently of the periodic interval, and a restore rebuilds each branch's
 native checkpoint from its archived Arrow groups and streams it through the same publisher, one
@@ -1117,8 +1191,10 @@ The same owner reclaims selected-namespace chunks made unreachable by ordinary o
 checkpoint replacement, ownership recovery or purge, including after restart. It keeps the
 selected publication and every currently referenced segmented revision.
 Reclamation preserves snapshot readers and never completes an installation or opens its `START`
-gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
-for quotas, metrics and physical storage limits.
+gate. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the sweep and [restore
+checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for quotas,
+metrics and physical storage limits.
 
 ### Domain Time
 
@@ -1167,6 +1243,16 @@ A source instance that stops before its transport confirmed positions it read re
 `source instance stopped before its transport confirmed positions it read; the transport presents
 them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
 `positions`.
+
+An emitter records what finishing its sink did when it stopped, with the `domain`, the `emitter`,
+the `sink` and the `ending`: `stop` for a stop that drained it, `teardown` for terminal teardown,
+and `interaction_stopped` when its relay interaction ended without either:
+`emitter sent the records its transport client held` at `info`,
+`emitter closed a transport client that may still hold records it delivered` at `warn` for a
+MQTT QoS 0 client, and
+`emitter stopped before its transport client sent every record it held` at `warn` with the
+`error`, which counts the records the client still held. That failure is also the emitter's
+transient error and an error event.
 
 Runtime teardown records every domain task it had to abort, at `warn`:
 `shutdown task exceeded grace period; aborting` carries the `domain`, the task's entity as

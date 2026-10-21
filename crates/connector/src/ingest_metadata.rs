@@ -80,7 +80,9 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
 /// One message's ingest metadata, read from its source message.
 ///
 /// The variant must match the metadata scope the ingestor started with; the fields borrow the
-/// source message so appending a row copies bytes into Arrow buffers and nothing else.
+/// source message so appending a row copies bytes into Arrow buffers and nothing else, and copying a
+/// row copies only those borrows.
+#[derive(Clone, Copy)]
 pub enum IngestMetadataRow<'a> {
     Kafka {
         topic: &'a str,

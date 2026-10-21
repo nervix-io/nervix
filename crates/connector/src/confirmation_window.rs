@@ -31,7 +31,10 @@ use std::{
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
-use nervix_primitives::time::{Instant, timeout_at};
+use nervix_primitives::{
+    task::unconstrained,
+    time::{Instant, timeout_at},
+};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 
@@ -88,7 +91,8 @@ pub enum ConfirmationWindowError {
 /// record with that future, oldest first. A record's deadline is `ACK TIMEOUT` after its own
 /// hand-over. While the window holds `MAX` records it waits for the oldest answer, until the
 /// oldest's deadline and no longer, before the sink hands over another record, so at most `MAX`
-/// records await their answers at once. `ACK SEQUENTIAL` is a window of one.
+/// records await their answers at once. `ACK SEQUENTIAL` is a window of one. A driver whose queue
+/// fills below `MAX` can request the oldest answer through [`ConfirmationWindow::settle_next`].
 ///
 /// A publish ends in one of two ways. Both consume the window, which holds the publish's outcome,
 /// so the outcome cannot be reported without them:
@@ -100,11 +104,11 @@ pub enum ConfirmationWindowError {
 ///   deadline, or a deadline is past the clock's range.
 ///
 /// A failure ends the publish at once but never discards an answer the broker already gave. Every
-/// given answer still in the window is settled first, the oldest's included: a confirmed record is
-/// delivered and a refused one rejected, so the host's retry never sends either again. A record
-/// whose answer has not arrived, or whose answer itself failed, stays unresolved: its outcome is
-/// unknown, and the host's retry sends it again, which is the at-least-once delivery `MODE ACK`
-/// promises.
+/// given answer still in the window is settled first, the oldest's included, however many there
+/// are: a confirmed record is delivered and a refused one rejected, so the host's retry never
+/// sends either again. A record whose answer has not arrived, or whose answer itself failed, stays
+/// unresolved: its outcome is unknown, and the host's retry sends it again, which is the
+/// at-least-once delivery `MODE ACK` promises.
 #[must_use = "a confirmed publish reports its outcome only through `finish` or `fail`"]
 pub struct ConfirmationWindow<A> {
     /// The sink a failure of the window is reported for.
@@ -129,6 +133,13 @@ where
     A: Future<Output = BrokerAnswer> + Unpin,
 {
     /// The answer the broker already gave for this record, read without waiting for one.
+    ///
+    /// The read is made outside the runtime's cooperative budget. A driver answers through runtime
+    /// channels, and once a task has spent its budget such a channel reads as empty though its
+    /// answer has arrived: a failure that settles more answers than one budget allows would leave
+    /// the rest unresolved, and the host's retry would resend records the broker confirmed. The
+    /// read waits for nothing, and a failure reads each record in the window once, so it makes at
+    /// most `MAX` reads.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -138,7 +149,8 @@ where
     )]
     fn given_answer(&mut self) -> Option<BrokerAnswer> {
         let mut context = Context::from_waker(Waker::noop());
-        match Pin::new(&mut self.answer).poll(&mut context) {
+        let mut read = unconstrained(&mut self.answer);
+        match Pin::new(&mut read).poll(&mut context) {
             Poll::Ready(answer) => Some(answer),
             Poll::Pending => None,
         }
@@ -210,6 +222,20 @@ where
             return Ok(());
         }
         self.settle_oldest().await
+    }
+
+    /// Waits for and settles the oldest answer when the driver's queue fills below `MAX`.
+    ///
+    /// Returns the settled record's identity, or `None` when no answer is awaited. The wait keeps
+    /// the record's original confirmation deadline. An error ends the publish through
+    /// [`ConfirmationWindow::fail`], just as an admission or finish error does.
+    pub async fn settle_next(&mut self) -> SinkPublishResult<Option<SinkRecordId>> {
+        let Some(oldest) = self.in_flight.front() else {
+            return Ok(None);
+        };
+        let record = oldest.record;
+        self.settle_oldest().await?;
+        Ok(Some(record))
     }
 
     /// Ends a publish that handed every record over: waits for each answer still awaited, oldest

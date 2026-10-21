@@ -22,6 +22,8 @@ pub mod client;
 #[cfg(feature = "client")]
 pub mod client_statement;
 pub mod codec;
+#[cfg(test)]
+mod conformance_support;
 pub mod correlator;
 pub mod create_resource;
 pub mod deduplicator;

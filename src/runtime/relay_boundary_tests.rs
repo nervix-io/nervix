@@ -44,6 +44,55 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_owner: bool) {
+    let owner = named::<ClusterNodeName>("node-1");
+    let consumers = vec![RemoteRuntimeConsumer {
+        node_id: named("node-3"),
+        relay: named("events"),
+        mode: AckMode::Attached,
+    }];
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        0,
+        0,
+        consumers.clone(),
+        None,
+        Arc::new(BranchPresence::new()),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    services.replace_owner_node(Some(owner.clone()));
+    let retained = services.ingress_slot(&None);
+    services.fence_routing_change(Some(&owner), &consumers);
+    assert!(!retained.cancellation().is_cancelled());
+
+    let destination = if move_owner { named("node-2") } else { owner };
+    let destinations = if move_owner { consumers } else { Vec::new() };
+    services.fence_routing_change(Some(&destination), &destinations);
+    assert!(retained.cancellation().is_cancelled());
+    assert!(services.ingress_slot(&None).cancellation().is_cancelled());
+    let appearing = string_branch_key("tenant", "beta");
+    assert!(
+        services
+            .ingress_slot(&appearing)
+            .cancellation()
+            .is_cancelled()
+    );
+
+    services.replace_owner_node(Some(destination));
+    services.replace_remote_runtime_consumers(destinations);
+    assert!(!services.ingress_slot(&None).cancellation().is_cancelled());
+    assert!(
+        !services
+            .ingress_slot(&appearing)
+            .cancellation()
+            .is_cancelled()
+    );
+    assert!(retained.cancellation().is_cancelled());
+}
+
 #[nervix_primitives::test(start_paused = true)]
 async fn runtime_report_chain_detached_relay_delivery_log() {
     use crate::runtime::report_observer::ReportLogObserver;
@@ -186,6 +235,84 @@ fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
     assert_eq!(second.sequence, 1);
     assert_ne!(first.channel_incarnation, reopened.channel_incarnation);
     assert_eq!(reopened.sequence, 0);
+}
+
+/// A receiver may forget a channel opened after this one and refuse every unseen channel at or
+/// below it, so a channel that opened and carried nothing for the idle rotation opens a fresh
+/// incarnation for its first batch.
+#[test]
+fn a_channel_left_unused_since_it_opened_reopens_before_its_first_delivery() {
+    let slot = RelayOutboundSlot::new();
+    let after_opening = Instant::now();
+    let opened_later = uuid::Uuid::now_v7().into_bytes();
+
+    let first = slot.next_delivery_at(
+        after_opening
+            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
+            .expect("the fixed relay idle duration should fit the monotonic clock"),
+    );
+
+    assert!(
+        first.channel_incarnation > opened_later,
+        "the first delivery used the incarnation the slot opened {RELAY_CHANNEL_IDLE_ROTATION:?} \
+         before it"
+    );
+    assert_eq!(first.sequence, 0);
+}
+
+#[test]
+fn a_channel_left_unused_since_it_reopened_reopens_before_its_next_delivery() {
+    let slot = RelayOutboundSlot::new();
+    let unresolved = slot.next_delivery();
+    slot.reopen_delivery_channel();
+    let after_reopening = Instant::now();
+    let reopened_later = uuid::Uuid::now_v7().into_bytes();
+
+    let next = slot.next_delivery_at(
+        after_reopening
+            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
+            .expect("the fixed relay idle duration should fit the monotonic clock"),
+    );
+
+    assert!(unresolved.channel_incarnation < reopened_later);
+    assert!(
+        next.channel_incarnation > reopened_later,
+        "the next delivery used the incarnation reopened {RELAY_CHANNEL_IDLE_ROTATION:?} before it"
+    );
+    assert_eq!(next.sequence, 0);
+}
+
+#[test]
+fn a_channel_used_within_the_idle_rotation_of_its_opening_keeps_its_incarnation() {
+    let slot = RelayOutboundSlot::new();
+    let opened_later = uuid::Uuid::now_v7().into_bytes();
+    let after_opening = Instant::now();
+
+    let first = slot.next_delivery_at(after_opening);
+
+    assert!(first.channel_incarnation < opened_later);
+    assert_eq!(first.sequence, 0);
+}
+
+/// A receiver refuses a channel at or below the greatest one it forgot, so every channel this
+/// process opens, at a slot's creation and at each reopening, sorts after every channel it opened
+/// before.
+#[test]
+fn every_channel_this_process_opens_sorts_after_the_channels_it_opened_before() {
+    let slots = [RelayOutboundSlot::new(), RelayOutboundSlot::new()];
+    let mut previous = slots[0].next_delivery().channel_incarnation;
+    let mut latest = slots[1].next_delivery().channel_incarnation;
+    assert!(latest > previous);
+    for round in 0..1_000 {
+        previous = latest;
+        let slot = &slots[round % 2];
+        slot.reopen_delivery_channel();
+        latest = slot.next_delivery().channel_incarnation;
+        assert!(
+            latest > previous,
+            "reopening {round} opened {latest:?} after {previous:?}"
+        );
+    }
 }
 
 #[test]
@@ -1128,7 +1255,10 @@ async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_
         .stop(Duration::from_secs(1))
         .await
         .expect("relay owner should drain");
-    owner.runtime.shutdown().await;
+    owner
+        .runtime
+        .shutdown(owner.runtime.domain_drain_timeout())
+        .await;
 }
 
 /// Watches the whole relay budget could never hold are refused before the rows are decoded, and
@@ -1174,7 +1304,10 @@ async fn acknowledgement_watches_larger_than_the_relay_budget_keep_their_typed_c
              {requested} bytes exceeds the whole relay memory budget of {capacity} bytes"
         )
     );
-    owner.runtime.shutdown().await;
+    owner
+        .runtime
+        .shutdown(owner.runtime.domain_drain_timeout())
+        .await;
 }
 
 /// A batch for `schema` with one row, acknowledged through `acks`.
@@ -1612,6 +1745,152 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         .expect("relay owner should stop");
 }
 
+/// The relays of one domain a relay owner's expiry test publishes: the relay whose owner ends a
+/// branch, and another relay that holds a branch with the same key.
+struct BranchKeySiblingRelays {
+    ending: RelayName,
+    ending_services: Arc<RelayBoundaryServices>,
+    sibling_services: Arc<RelayBoundaryServices>,
+}
+
+impl BranchKeySiblingRelays {
+    fn publish(runtime: &Runtime, domain: &DomainName) -> Self {
+        let ending = named::<RelayName>("unique_orders");
+        let ending_services = test_relay_boundary_services();
+        let sibling_services = test_relay_boundary_services();
+        publish_test_relay_routing(
+            runtime,
+            domain,
+            [
+                (ending.clone(), ending_services.clone()),
+                (named("orders"), sibling_services.clone()),
+            ],
+        );
+        Self {
+            ending,
+            ending_services,
+            sibling_services,
+        }
+    }
+
+    /// The channel the ending relay's owner routes `key` to a consumer on another node through.
+    fn ending_route(&self, key: &Option<BranchKey>) -> StdArc<RelayOutboundSlot> {
+        self.ending_services.outbound_slot(
+            &named("node-2"),
+            &self.ending,
+            RelayPayloadKind::Routed,
+            key,
+        )
+    }
+
+    async fn enqueue_owner_batch(&self, key: &Option<BranchKey>) {
+        let batch = RelayRecordBatch::single(
+            test_schema(&[]),
+            key.clone(),
+            test_runtime_row([]),
+            AckSet::empty(),
+        )
+        .expect("relay batch should build");
+        self.ending_services
+            .enqueue_owner_batch(&batch)
+            .await
+            .expect("owner should admit the batch");
+    }
+}
+
+/// A relay owner that expires an idle branch retires the channels it holds for that branch, and
+/// only those. Another relay of the domain keeps its own branch for the same key, together with
+/// the delivery its producer has in flight on that branch's channel.
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn relay_owner_expiry_retires_only_its_own_channels_for_the_branch_key() {
+    let fault_injection = ConfiguredFaultInjection::default();
+    fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
+    let runtime = Runtime::with_persistence_and_temp_dir(
+        nervix_execution::Executor::default(),
+        None,
+        None,
+        Duration::from_secs(60),
+        fault_injection,
+        PathBuf::from(DEFAULT_TEMP_DIR),
+        DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("runtime should build");
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relays = BranchKeySiblingRelays::publish(&runtime, &domain);
+    let key = string_branch_key("tenant", "acme");
+    let ending_route = relays.ending_route(&key);
+    let sibling_ingress = relays.sibling_services.ingress_slot(&key);
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relays.ending,
+        relays.ending_services.clone(),
+        RelayRetention {
+            branch_ttl: Some(Duration::from_millis(20)),
+            branch_capacity: None,
+        },
+    );
+    relays.enqueue_owner_batch(&key).await;
+
+    timeout(
+        Duration::from_secs(10),
+        ending_route.cancellation().cancelled(),
+    )
+    .await
+    .expect("the relay owner should retire its own channel when the branch expires");
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+
+    assert!(
+        !sibling_ingress.cancellation().is_cancelled(),
+        "another relay's channel for the expired branch key must stay open"
+    );
+}
+
+/// A relay owner that evicts its least recently used branch retires the channels it holds for that
+/// branch, and only those.
+#[nervix_primitives::test]
+async fn relay_owner_lru_eviction_retires_only_its_own_channels_for_the_branch_key() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relays = BranchKeySiblingRelays::publish(&runtime, &domain);
+    let evicted = string_branch_key("tenant", "acme");
+    let admitted = string_branch_key("tenant", "globex");
+    let ending_route = relays.ending_route(&evicted);
+    let sibling_ingress = relays.sibling_services.ingress_slot(&evicted);
+    let owner_task = runtime.spawn_relay_owner_task(
+        &domain,
+        &relays.ending,
+        relays.ending_services.clone(),
+        RelayRetention {
+            branch_ttl: None,
+            branch_capacity: Some(nonzero!(1usize)),
+        },
+    );
+    relays.enqueue_owner_batch(&evicted).await;
+    relays.enqueue_owner_batch(&admitted).await;
+
+    timeout(
+        Duration::from_secs(10),
+        ending_route.cancellation().cancelled(),
+    )
+    .await
+    .expect("the relay owner should retire its own channel when it evicts the branch");
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
+
+    assert!(
+        !sibling_ingress.cancellation().is_cancelled(),
+        "another relay's channel for the evicted branch key must stay open"
+    );
+}
+
 #[nervix_primitives::test]
 async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
     let runtime = Runtime::default();
@@ -1654,6 +1933,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
+            runtime.emitter_finish_deadline(),
         )
         .await;
 

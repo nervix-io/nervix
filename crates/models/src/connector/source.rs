@@ -7,7 +7,7 @@
 //!   of a source statement fulfils, the union of the alterations an `ALTER … INGESTOR` statement
 //!   holds, and the quiesce, delivery and acknowledgement vocabulary those bodies share.
 //! - **Depends on.** The connector modules' entity Models and alterations, the metadata
-//!   namespaces, and the names a body references.
+//!   namespaces, the shapes a declaration is written in, and the names a body references.
 //! - **Must not know.** How a source is opened, polled, quiesced or acknowledged at run time.
 //!
 //! The head of an ingestor statement names the pair it reads, so an alteration holds the
@@ -20,24 +20,25 @@
 
 use std::{
     fmt::{Display, Formatter},
-    num::NonZeroU64,
+    num::{NonZeroU16, NonZeroU64},
 };
 
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::AsRefStr;
+use strum::{AsRefStr, EnumIter};
 
 use super::{
-    ClientIngestorAlteration, ClientSourceEntity, HttpIngestorAlteration, HttpSource,
-    HttpSourceEntity, KafkaIngestorAlteration, KafkaSource, KafkaSourceEntity,
-    MqttIngestorAlteration, MqttSource, MqttSourceEntity, NatsIngestorAlteration, NatsSource,
-    NatsSourceEntity, PrometheusIngestorAlteration, PrometheusSource, PrometheusSourceEntity,
+    ChoiceRequirement, ClientIngestorAlteration, ClientSourceEntity, DeclaredBounds,
+    HttpIngestorAlteration, HttpSource, HttpSourceEntity, KafkaIngestorAlteration, KafkaSource,
+    KafkaSourceEntity, LocatorDeclaration, MqttIngestorAlteration, MqttSource, MqttSourceEntity,
+    NatsIngestorAlteration, NatsSource, NatsSourceEntity, OptionDeclaration,
+    PrometheusIngestorAlteration, PrometheusSource, PrometheusSourceEntity,
     PulsarIngestorAlteration, PulsarSource, PulsarSourceEntity, RabbitMqIngestorAlteration,
     RabbitMqSource, RabbitMqSourceEntity, RedisIngestorAlteration, RedisSource, RedisSourceEntity,
-    SqsIngestorAlteration, SqsSource, SqsSourceEntity, SyslogIngestorAlteration, SyslogSource,
-    SyslogSourceEntity, WebsocketsIngestorAlteration, WebsocketsSource, WebsocketsSourceEntity,
-    ZeroMqIngestorAlteration, ZeroMqSource, ZeroMqSourceEntity,
+    RuntimeCapability, SqsIngestorAlteration, SqsSource, SqsSourceEntity, SyslogIngestorAlteration,
+    SyslogSource, SyslogSourceEntity, WebsocketsIngestorAlteration, WebsocketsSource,
+    WebsocketsSourceEntity, ZeroMqIngestorAlteration, ZeroMqSource, ZeroMqSourceEntity,
     entity_union::{entity_union, ingestor_alteration_union},
 };
 use crate::{
@@ -82,12 +83,160 @@ pub enum IngestQuiesceMode {
 
 impl IngestQuiesceMode {
     pub const fn kind_label(&self) -> &'static str {
+        self.kind().keyword()
+    }
+
+    /// Which of the quiesce modes this one is, whatever sizes and durations it writes.
+    pub const fn kind(&self) -> IngestQuiesceKind {
+        match self {
+            Self::Suspend => IngestQuiesceKind::Suspend,
+            Self::Buffer { .. } => IngestQuiesceKind::Buffer,
+            Self::Drop => IngestQuiesceKind::Drop,
+            Self::Reject { .. } => IngestQuiesceKind::Reject,
+            Self::EndpointBuffer { .. } => IngestQuiesceKind::EndpointBuffer,
+        }
+    }
+}
+
+/// The quiesce modes an `ON QUIESCE` clause names, whatever sizes and durations it writes.
+///
+/// An endpoint buffers what it admits without an overflow choice, so its buffer is a kind of its
+/// own, which only an endpoint can honor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum IngestQuiesceKind {
+    Suspend,
+    Buffer,
+    Drop,
+    Reject,
+    EndpointBuffer,
+}
+
+impl IngestQuiesceKind {
+    /// The keyword that opens the mode after `ON QUIESCE`.
+    pub const fn keyword(self) -> &'static str {
         match self {
             Self::Suspend => "SUSPEND",
-            Self::Buffer { .. } | Self::EndpointBuffer { .. } => "BUFFER",
+            Self::Buffer | Self::EndpointBuffer => "BUFFER",
             Self::Drop => "DROP",
-            Self::Reject { .. } => "REJECT",
+            Self::Reject => "REJECT",
         }
+    }
+
+    /// The mode written in full after `ON QUIESCE`, as documentation and generated statements
+    /// write it.
+    pub const fn example(self) -> &'static str {
+        match self {
+            Self::Suspend => "SUSPEND",
+            Self::Buffer => "BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST",
+            Self::Drop => "DROP",
+            Self::Reject => "REJECT RETRY AFTER 5s",
+            Self::EndpointBuffer => "BUFFER MAX SIZE 64MiB",
+        }
+    }
+}
+
+/// One quiesce mode an entity's transport can honor, and the option choices it needs written
+/// beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredQuiesce {
+    pub kind: IngestQuiesceKind,
+    /// The choices of the entity's options a statement must make for its source to honor this
+    /// mode, such as the persistent session at QoS 1 an MQTT broker keeps messages for.
+    pub requires: &'static [ChoiceRequirement],
+}
+
+impl DeclaredQuiesce {
+    pub const SUSPEND: Self = Self::honoring(IngestQuiesceKind::Suspend);
+    pub const BUFFER: Self = Self::honoring(IngestQuiesceKind::Buffer);
+    pub const DROP: Self = Self::honoring(IngestQuiesceKind::Drop);
+    pub const REJECT: Self = Self::honoring(IngestQuiesceKind::Reject);
+    pub const ENDPOINT_BUFFER: Self = Self::honoring(IngestQuiesceKind::EndpointBuffer);
+
+    /// A quiesce mode every statement of the entity can name.
+    const fn honoring(kind: IngestQuiesceKind) -> Self {
+        Self {
+            kind,
+            requires: &[],
+        }
+    }
+
+    /// This mode, honored only where a statement makes the `requires` choices.
+    pub const fn requiring(self, requires: &'static [ChoiceRequirement]) -> Self {
+        Self { requires, ..self }
+    }
+}
+
+/// The acknowledgement an ingestor's `MODE` clause names, whatever window and durations it
+/// writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum IngestDeliveryKind {
+    NoAck,
+    /// Each endpoint request waits independently, within its declared request window.
+    AckRequest,
+    AckSequential,
+    AckParallel,
+}
+
+impl IngestDeliveryKind {
+    /// How a `MODE` clause names it.
+    pub const fn phrase(self) -> &'static str {
+        match self {
+            Self::NoAck => "NO ACK",
+            Self::AckRequest => "ACK",
+            Self::AckSequential => "ACK SEQUENTIAL",
+            Self::AckParallel => "ACK PARALLEL",
+        }
+    }
+
+    /// A sender must retry an acknowledged request itself; quiesce cannot retain it after the
+    /// endpoint has answered it.
+    pub const fn allows_quiesce(self, quiesce: IngestQuiesceKind) -> bool {
+        match self {
+            Self::AckRequest => matches!(quiesce, IngestQuiesceKind::Reject),
+            Self::NoAck | Self::AckSequential | Self::AckParallel => true,
+        }
+    }
+}
+
+/// One delivery mode an entity's ingestors may name, and the option choices it needs written
+/// beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredDelivery {
+    pub kind: IngestDeliveryKind,
+    /// The mode written in full after `MODE`, as documentation and generated statements write it.
+    pub example: &'static str,
+    /// The choices of the entity's options a statement must make to name this mode.
+    pub requires: &'static [ChoiceRequirement],
+}
+
+impl DeclaredDelivery {
+    pub const ACK_REQUEST: Self = Self {
+        kind: IngestDeliveryKind::AckRequest,
+        example: "ACK MAX 8 ACK TIMEOUT 5s",
+        requires: &[],
+    };
+    pub const NO_ACK: Self = Self {
+        kind: IngestDeliveryKind::NoAck,
+        example: "NO ACK",
+        requires: &[],
+    };
+    pub const ACK_SEQUENTIAL: Self = Self {
+        kind: IngestDeliveryKind::AckSequential,
+        example: "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+        requires: &[],
+    };
+    /// A parallel window that collects acknowledgements for up to its batch timeout before it
+    /// confirms them together.
+    pub const ACK_PARALLEL: Self = Self {
+        kind: IngestDeliveryKind::AckParallel,
+        example: "ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s \
+                  MAX 30s",
+        requires: &[],
+    };
+
+    /// This mode, named only where a statement makes the `requires` choices.
+    pub const fn requiring(self, requires: &'static [ChoiceRequirement]) -> Self {
+        Self { requires, ..self }
     }
 }
 
@@ -99,6 +248,8 @@ impl IngestQuiesceMode {
 pub enum IngestAcknowledgement<'a> {
     /// No message waits on an acknowledgement.
     Unacknowledged,
+    /// An endpoint's independent requests, whose senders own retry.
+    Request { max: NonZeroU16, timeout: &'a str },
     /// One message at a time waits on its acknowledgement.
     Sequential {
         timeout: &'a str,
@@ -168,30 +319,32 @@ impl SourceReferenceKind {
     }
 }
 
-/// How an endpoint's requests or messages are delivered. The endpoint answers each one when its
-/// ingestor admits it, so none waits on an acknowledgement.
+impl IngestAcknowledgement<'_> {
+    /// Which delivery mode declares this acknowledgement.
+    pub const fn kind(&self) -> IngestDeliveryKind {
+        match self {
+            Self::Unacknowledged => IngestDeliveryKind::NoAck,
+            Self::Request { .. } => IngestDeliveryKind::AckRequest,
+            Self::Sequential { .. } => IngestDeliveryKind::AckSequential,
+            Self::Parallel { .. } => IngestDeliveryKind::AckParallel,
+        }
+    }
+}
+
+/// Whether an endpoint answers on admission or after its request's downstream acknowledgement.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EndpointIngestMode {
     NoAck,
+    Ack { max: NonZeroU16, timeout: String },
 }
 
 impl EndpointIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
             Self::NoAck => IngestAcknowledgement::Unacknowledged,
-        }
-    }
-
-    /// Whether an endpoint delivering in this mode can honor `quiesce`: it holds what arrives in a
-    /// bounded buffer, or refuses it with a time to retry after.
-    pub const fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        match self {
-            Self::NoAck => matches!(
-                quiesce,
-                IngestQuiesceMode::EndpointBuffer { .. } | IngestQuiesceMode::Reject { .. }
-            ),
+            Self::Ack { max, timeout } => IngestAcknowledgement::Request { max: *max, timeout },
         }
     }
 }
@@ -240,23 +393,25 @@ pub enum PositionClass {
 #[strum(serialize_all = "snake_case")]
 pub enum AcknowledgementConfirmation {
     /// The transport answers every acknowledgement or commit, and acknowledging returns once the
-    /// answer arrived, such as an SQS `DeleteMessage` response.
+    /// answer arrived, such as an SQS `DeleteMessage` response, a Kafka consumer-group commit or a
+    /// Pulsar `CommandAckResponse`.
     Answered,
     /// The protocol does not answer an acknowledgement, and acknowledging returns once it is
     /// written to the connection, such as a RabbitMQ `basic.ack`.
     Written,
     /// Acknowledging returns once the client queued the acknowledgement, before the transport
-    /// answered it and possibly before it reached the connection, such as a Kafka consumer-group
-    /// commit that is never awaited.
+    /// answered it and possibly before it reached the connection, such as an MQTT `PUBACK`.
     Queued,
     /// The source acknowledges nothing on its transport.
     None,
 }
 
-/// What every source of one entity declares, whatever its statement says.
+/// What every source of one entity declares, whatever its statement says: everything a statement
+/// can say about it, and what it does with what a statement says.
 ///
 /// This lives in the vocabulary so the registry can validate an ingestor, and a host can prepare
-/// one, without naming the connector crate that implements its source.
+/// one, without naming the connector crate that implements its source. The grammar, completion,
+/// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestSourceCapabilities {
     /// Whether its messages carry transport headers that `read_header` and `read_headers` can
@@ -272,11 +427,84 @@ pub struct IngestSourceCapabilities {
     pub position_class: PositionClass,
     /// How far its transport has confirmed its positions once acknowledging them returns.
     pub acknowledgement_confirmation: AcknowledgementConfirmation,
+    /// The delivery modes its ingestors may name, each kind at most once.
+    pub delivery: &'static [DeclaredDelivery],
+    /// The quiesce modes its transport can honor, each kind at most once.
+    pub quiesce: &'static [DeclaredQuiesce],
+    /// The name that locates what it reads, for an entity whose body names one.
+    pub locator: Option<LocatorDeclaration>,
+    /// The options its body writes after the locator, in the order a statement writes them.
+    pub options: &'static [OptionDeclaration],
+    /// What its connector holds and how long it waits.
+    pub bounds: DeclaredBounds,
+}
+
+impl IngestSourceCapabilities {
+    /// The declaration of the delivery mode `kind`, where the entity declares it.
+    ///
+    /// An entity declares at most one entry per kind, of the three kinds there are.
+    pub fn declared_delivery(&self, kind: IngestDeliveryKind) -> Option<&'static DeclaredDelivery> {
+        self.delivery.iter().find(|delivery| delivery.kind == kind)
+    }
+
+    /// The declaration of the quiesce mode `kind`, where the entity's transport can honor it.
+    ///
+    /// An entity declares at most one entry per kind, of the five kinds there are.
+    pub fn declared_quiesce(&self, kind: IngestQuiesceKind) -> Option<&'static DeclaredQuiesce> {
+        self.quiesce.iter().find(|quiesce| quiesce.kind == kind)
+    }
+
+    /// The option its body opens with `keywords`, where it declares one.
+    ///
+    /// An entity declares a handful of options in one constant, so scanning them is bounded by
+    /// the declaration.
+    pub fn option(&self, keywords: &str) -> Option<&'static OptionDeclaration> {
+        self.options
+            .iter()
+            .find(|option| option.keywords == keywords)
+    }
+
+    /// What a statement can make every source of the entity do at run time: deliver in each
+    /// declared mode, write each option or choice, read each typed metadata field, and report a
+    /// stalled peer within each deadline key its waits name.
+    pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
+        let mut capabilities = Vec::new();
+        for delivery in self.delivery {
+            capabilities.push(RuntimeCapability::Delivery(delivery.kind));
+        }
+        capabilities.extend(RuntimeCapability::of_options(self.options));
+        for field in self.metadata.declared_fields() {
+            capabilities.push(RuntimeCapability::Metadata { field: field.name });
+        }
+        capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
+        capabilities
+    }
+
+    /// Whether a source of this entity whose body is `body` can honor `quiesce`: the entity
+    /// declares the mode, and the body makes every option choice the declaration requires for
+    /// it.
+    pub fn honors_quiesce(&self, quiesce: &IngestQuiesceMode, body: &dyn SourceBody) -> bool {
+        if !body.acknowledgement().kind().allows_quiesce(quiesce.kind()) {
+            return false;
+        }
+        let Some(declared) = self.declared_quiesce(quiesce.kind()) else {
+            return false;
+        };
+        ChoiceRequirement::all_met_by(declared.requires, body)
+    }
 }
 
 /// The declaration one source entity's Model makes for every statement of that entity.
 pub trait SourceEntity {
     const CAPABILITIES: IngestSourceCapabilities;
+
+    /// Whether this source can honor `quiesce`, as its entity declares.
+    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool
+    where
+        Self: SourceBody + Sized,
+    {
+        Self::CAPABILITIES.honors_quiesce(quiesce, self)
+    }
 }
 
 /// What the body of one transport source statement states: what it reads through, how it behaves
@@ -289,13 +517,30 @@ pub trait SourceBody {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode;
 
-    /// Whether a source with this body can honor `quiesce`. A body's own delivery mode can
-    /// decide, as an MQTT session does.
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool;
-
     /// The acknowledgement this body's delivery mode declares. A body that declares no delivery
     /// mode acknowledges nothing.
     fn acknowledgement(&self) -> IngestAcknowledgement<'_>;
+
+    /// The name of the choice this body makes, or holds by default, for the declared option its
+    /// entity opens with `option`. A body answers for the options a declared requirement names;
+    /// its entity's declaration states which those are.
+    fn chosen(&self, _option: &str) -> Option<&'static str> {
+        None
+    }
+}
+
+impl ChoiceRequirement {
+    /// Whether `body` makes the choice this requirement needs.
+    fn met_by(&self, body: &dyn SourceBody) -> bool {
+        body.chosen(self.option) == Some(self.choice)
+    }
+
+    /// Whether `body` makes every choice `requirements` need.
+    pub(crate) fn all_met_by(requirements: &[Self], body: &dyn SourceBody) -> bool {
+        requirements
+            .iter()
+            .all(|requirement| requirement.met_by(body))
+    }
 }
 
 /// The pair one entity Model is a source of, which the head of its ingestor's statements names.
@@ -470,8 +715,18 @@ impl IngestSource {
         self.body().quiesce()
     }
 
+    /// Whether this source can honor `quiesce`: its entity declares the mode, and this source's
+    /// statement makes every option choice the declaration requires for it.
     pub fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        self.body().supports_quiesce(quiesce)
+        self.kind()
+            .capabilities()
+            .honors_quiesce(quiesce, self.body())
+    }
+
+    /// The choice this source's statement makes, or holds by default, for the declared option
+    /// opened by `option`.
+    pub fn chosen(&self, option: &str) -> Option<&'static str> {
+        self.body().chosen(option)
     }
 
     pub fn set_quiesce(

@@ -444,6 +444,23 @@ pub(super) fn install_unpaced_test_domain(runtime: &super::Runtime, domain: &Dom
     );
 }
 
+/// Publish the routing of `domain` with the boundary services of `relays`, as a schedule that runs
+/// those relays on this node does.
+pub(super) fn publish_test_relay_routing(
+    runtime: &super::Runtime,
+    domain: &DomainName,
+    relays: impl IntoIterator<Item = (RelayName, Arc<super::RelayBoundaryServices>)>,
+) {
+    let relay_services = relays.into_iter().collect();
+    runtime.inner.domain_routings.insert(
+        domain.clone(),
+        StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot {
+            relay_services,
+            ..DomainRoutingSnapshot::default()
+        })),
+    );
+}
+
 /// Publish the runtime-state identity of the `kind` node `identifier` in `domain`, as a committed
 /// schedule carrying that node does, so its schema-bound state can be placed. A WASM processor also
 /// gets the first guest-state generation of every branch.

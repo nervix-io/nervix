@@ -96,6 +96,11 @@ Feature: Branch activity sampling
 
       CREATE SUBSCRIPTION correlated_events_subscription TO correlated_events;
       """
+    And these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "correlator" "match_users" is saved as placeholder "correlator_owner"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
       """
       {"user_id":42,"event_seq":1}
@@ -104,9 +109,29 @@ Feature: Branch activity sampling
       """
       DESCRIBE RELAY left_events WHERE (user_id = 42);
       """
+    And within "30s" node "{{correlator_owner}}" observability metric "nervix_messages_total" with labels eventually equals 1
+      """
+      domain="{{domain}}"
+      target_kind="CORRELATOR"
+      target="match_users"
+      direction="received"
+      relay="left_events"
+      """
     And within "30s" node "node-1" eventually reports describe relay as "not exists"
       """
       DESCRIBE RELAY left_events WHERE (user_id = 42);
+      """
+    And within "30s" node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="node-1"
+      """
+    And within "30s" node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="{{correlator_owner}}"
       """
     # Stagger the initial arrivals across a scan: one branch's expiration cannot establish the
     # other branch's lifetime. Both initial records must expire before the fresh records arrive.
@@ -118,39 +143,49 @@ Feature: Branch activity sampling
       """
       DESCRIBE RELAY left_events WHERE (user_id = 7);
       """
+    And within "30s" node "{{correlator_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
+      """
+      domain="{{domain}}"
+      target_kind="CORRELATOR"
+      target="match_users"
+      direction="received"
+      relay="left_events"
+      """
     And within "30s" node "node-1" eventually reports describe relay as "not exists"
       """
       DESCRIBE RELAY left_events WHERE (user_id = 7);
       """
-    # Retention is enforced by a physical maintenance scan whose latency is separate from the
-    # logical expiration boundary. The observed expiration therefore marks a scan boundary, and
-    # idling towards the next one leaves the supervisors waiting for input across it.
+    And within "30s" node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="node-1"
+      """
+    And within "30s" node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="{{correlator_owner}}"
+      """
+    # All initial branch owners have retired before either fresh left record is posted.
+    # Logical retention and physical scan latency remain separate from input readiness.
     When physical time passes for "4500ms"
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
+    And http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/left"
       """
       {"user_id":42,"event_seq":11}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
-      """
       {"user_id":7,"event_seq":13}
       """
-    # A record accepted after a long wait must be recorded at its own arrival, so both interleaved
-    # branches keep their pending correlation state across the scan that follows it.
+    # Both branches receive their matching input before waiting for either subscription result.
+    # A delayed result for one branch must not consume the other branch's retention interval.
     And physical time passes for "3s"
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
+    And http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/right"
       """
       {"user_id":42,"event_seq":12}
-      """
-    Then the relay subscription receives a payload
-      """
-      "left_seq":11,"right_seq":12,"user_id":42
-      """
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
-      """
       {"user_id":7,"event_seq":14}
       """
-    Then the relay subscription receives a payload
+    Then within "10s" the relay subscription receives exactly one payload for each fragment set
       """
+      "left_seq":11,"right_seq":12,"user_id":42
       "left_seq":13,"right_seq":14,"user_id":7
       """
 

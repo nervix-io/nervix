@@ -68,10 +68,13 @@ Consensus startup, proposal, and membership operations carry contextual error re
 Database open failures retain their I/O cause; Raft configuration, startup, and handler
 registration failures retain the failure beneath the startup context. A rejected proposal keeps
 its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
-storage, and other Raft write failures separately. A state-machine refusal remains a typed
-conflict, distinct from a storage or leadership failure. These classifications determine whether
-the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
-message to decide.
+storage, and other Raft write failures separately. A leader whose lease lapsed, because no quorum
+acknowledged a heartbeat or append it sent within the maximum election timeout, refuses a proposal
+before appending it with a redirect that names no leader. That refusal is leadership loss as well,
+although the node can still lead, and nothing of the refused proposal reached the log. A
+state-machine refusal remains a typed conflict, distinct from a storage or leadership failure.
+These classifications determine whether the control plane redirects, retries, or reports an
+uncertain failure; it does not parse the error message to decide.
 
 Transaction mutation checks also create local reports. Raft's applied response retains its
 existing serialized `TransactionMutationError` outcome, so report frames are local to the state
@@ -121,9 +124,13 @@ revision; segmented or inline replacement, header purge and incomplete unpublish
 permit bounded chunk deletion. Snapshot retention
 preserves preexisting readers, while the installation barrier serializes ordinary, replica and
 ownership writes with cleanup. This adds no consensus record or log
-mutation and never removes a replicated incomplete-installation gate. See
-[Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
-quota, metrics and node-local cleanup boundary.
+mutation and never removes a replicated incomplete-installation gate. Because the sweep holds that
+read guard for its whole duration, as staging and publication jobs do, the node publishes its next
+applied revision only after the job finishes. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the node-local
+cleanup boundary, and [Backup And
+Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the quota and its
+metrics.
 
 ### Coordinated WASM Reset Publications
 
@@ -405,7 +412,8 @@ nothing else, so a record no family owns is refused as well. Recovered resource 
 most one upload for each resource version, and an expired command execution's reference carries
 the issue time its expiry is ordered by. A transaction is in a state its transitions reach: an
 open or committing transaction queues exactly the statements and source bytes it accepted, a
-finished one queues none, a commit's results apply consecutive statements from the first and its
+finished one queues none and keeps the identity and admission of exactly as many statements as it
+accepted, a commit's results apply consecutive statements from the first and its
 progress stays inside the queue, and a failure names a statement the transaction accepted. Every
 log read checks that a log record is stored under its own entry's index.
 

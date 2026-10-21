@@ -21,7 +21,7 @@
     )
 )]
 
-use super::*;
+use super::{ingestor_start::RetiringIngestorInput, *};
 
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
@@ -73,16 +73,23 @@ pub(crate) enum IngestorStartError {
     },
 }
 
-/// Why an ingestor's source could not be composed or opened on this node. It is the cause beneath
-/// [`IngestorStartError::Initialize`].
+/// Why an ingestor's client configuration could not resolve or its source could not be composed
+/// or opened on this node. Startup wraps it in [`IngestorStartError::Initialize`]; retirement
+/// wraps it in [`RuntimeError::RetireIngestorSource`].
 #[derive(Debug, Error)]
 pub(crate) enum SourceStartError {
+    #[error("failed to resolve the source's client configuration")]
+    ClientConfiguration,
     #[error("the node DNS resolver is not installed")]
     NodeDnsUnavailable,
     #[error("missing signaling protocol '{protocol}'")]
     SignalingProtocolMissing { protocol: SignalingProtocolName },
     #[error("endpoint '{endpoint}' is not instantiated")]
     EndpointNotInstantiated { endpoint: EndpointName },
+    #[error("endpoint '{endpoint}' requires a signaling protocol for MODE ACK")]
+    EndpointAcknowledgementProtocolMissing { endpoint: EndpointName },
+    #[error("endpoint '{endpoint}' cannot encode its acknowledgement in the signaling wire format")]
+    EndpointAcknowledgementEncoding { endpoint: EndpointName },
     #[error("Kafka DOMAIN offsets are not authoritative on this node")]
     KafkaDomainOffsetsNotAuthoritative,
     #[error("invalid {setting} '{value}'")]
@@ -108,6 +115,70 @@ pub(crate) enum DeliverySetting {
 }
 
 impl Runtime {
+    /// Applies external retirement after the previous execution stopped. Cleanup is best-effort;
+    /// a replacement prepares its own changed sessions before its new input can become ready.
+    pub(super) async fn retire_ingestor_input(
+        &self,
+        retirement: RetiringIngestorInput,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let IngestorInputPlan::Transport(input) = &retirement.previous.input else {
+            return Ok(());
+        };
+        match &input.source {
+            SourceStartPlan::Mqtt(source) => {
+                let replacement = match retirement.replacement.as_deref() {
+                    Some(IngestorStartPlan {
+                        input: IngestorInputPlan::Transport(input),
+                        ..
+                    }) => {
+                        if let SourceStartPlan::Mqtt(source) = &input.source {
+                            Some(source)
+                        } else {
+                            None
+                        }
+                    }
+                    Some(_) | None => None,
+                };
+                source
+                    .retire_before(self, &retirement.previous.ingestor, replacement)
+                    .await
+            }
+            SourceStartPlan::Pulsar(source) => {
+                let replacement = match retirement.replacement.as_deref() {
+                    Some(IngestorStartPlan {
+                        input: IngestorInputPlan::Transport(input),
+                        ..
+                    }) => {
+                        if let SourceStartPlan::Pulsar(source) = &input.source {
+                            Some(source)
+                        } else {
+                            None
+                        }
+                    }
+                    Some(_) | None => None,
+                };
+                if let Err(error) = source
+                    .retire_before(self, &retirement.previous.ingestor, replacement)
+                    .await
+                {
+                    self.events().report_error(format!("{error:#}"));
+                }
+                Ok(())
+            }
+            SourceStartPlan::Http(_)
+            | SourceStartPlan::Kafka(_)
+            | SourceStartPlan::Nats(_)
+            | SourceStartPlan::RabbitMq(_)
+            | SourceStartPlan::RedisPubSub(_)
+            | SourceStartPlan::Prometheus(_)
+            | SourceStartPlan::ZeroMq(_)
+            | SourceStartPlan::Sqs(_)
+            | SourceStartPlan::Endpoint(_)
+            | SourceStartPlan::Websockets(_)
+            | SourceStartPlan::Syslog(_) => Ok(()),
+        }
+    }
+
     /// Starts one ingestor. Every source takes this path.
     ///
     /// Everything that can fail comes first: the ingestor's dependencies compile and its source
