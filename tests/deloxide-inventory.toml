@@ -187,8 +187,10 @@ target = "test:scenarios"
 # Together with the paced-driver scenarios below and `stress-restore-scenarios`, the stressed
 # scenarios are every scenario of the active-only selection but the report tool's triage, which
 # drives no lifecycle path.
+# Run 39569675589 spent 19m49s here. A 45-minute invocation leaves 39 minutes of execution after
+# its six-minute teardown reserve, covering 1.5 times that measurement with nine minutes left.
 [[invocation]]
-bound_seconds = 1800
+bound_seconds = 2700
 concurrency = 1
 evidence = true
 features = ["testing"]
