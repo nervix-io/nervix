@@ -1560,6 +1560,15 @@ A refused resume updates the coordinator's current quiescence diagnostics; it do
 definitive application failure merely because the coordinator temporarily lost its authority. An existing
 definitive effect failure is retained when cleanup succeeds in that same completion attempt.
 
+An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
+its coordinator's observation of the command's internal transaction. Before the session maps such a
+report to the command's `Failed` disposition, the coordinator reads that transaction again. A
+refusal reached against a transaction that another coordinator has since opened or advanced, such
+as `TransactionPlanningError::DomainPaused` caused by the same command's own pause, is not that
+command's failure:
+the coordinator recovers the recorded progress under the same execution reference instead. A
+refusal against an unchanged transaction keeps its report, message, and disposition.
+
 ### Domain Clock Attachment
 
 A domain clock attachment answers with its own typed disposition rather than a command disposition.
