@@ -1213,3 +1213,167 @@ Feature: Iceberg emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  @iceberg_refused_append
+  Scenario Outline: An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them
+    Given Iceberg dependencies are running
+    And temporary files use a custom temp directory
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "refused_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/refused_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the Iceberg REST catalog is reached through a gate that holds every commit to table "refused_notifications_{{test_id}}"
+    # Each row is a branch of its own, which the emitter collects apart and publishes one branch at a
+    # time. Every published batch reaches its flush and commit boundaries at once, so a refused
+    # commit is retried by the emitter's retry wake, which first stages what was collected meanwhile.
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE SCHEMA user_key (user_id I64);
+      CREATE BRANCH by_user SCHEMA user_key TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_user;
+      CREATE CLIENT PRODUCER INGESTOR notifications_in
+        FROM SCHEMA notification
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 10m RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_user SET user_id = message.user_id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT s3_main
+        TYPE S3
+        CONFIG {
+          'endpoint' = '{{rustfs_addr}}',
+          'region' = 'us-east-1',
+          'access_key_id' = 'rustfsadmin',
+          'secret_access_key' = 'rustfsadmin',
+          'path_style_access' = true
+        };
+      CREATE CLIENT iceberg_catalog
+        TYPE ICEBERG_REST
+        CONFIG {
+          'uri' = '{{iceberg_catalog_gate}}',
+          'warehouse' = 's3://nervix-iceberg/warehouse'
+        };
+      CREATE EMITTER iceberg_refused FROM notifications
+        COLLECT FOR 5s
+        TO ICEBERG ON S3 s3_main TABLE refused_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/refused_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 10s MAX 10s
+        FLUSH EACH 1h MAX BATCH SIZE 1B
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "app" is connected to node "node-1"
+    When client "app" opens producer "input" on ingestor "notifications_in" expecting fields "user_id I64, action STRING"
+    And producer "input" submits batch "rows" with rows
+      | user_id | action |
+      | 71      | first  |
+      | 72      | second |
+    Then within "60s" the Iceberg catalog gate holds a commit
+    When the Iceberg catalog gate refuses the commit it holds
+    Then within "30s" DESCRIBE EMITTER "iceberg_refused" on the leader node contains
+      """
+      transient error: failed to commit Iceberg staged batches
+      """
+    And the last command output contains
+      """
+      reconnect backoff: 10s
+      """
+    # The retry comes no sooner than its backoff, and it staged the other branch's row before it
+    # commits again: the file the refused commit began with and the newer one are both staged.
+    And within "120s" the Iceberg catalog gate holds a commit no sooner than "10s" after it refused one
+    And the temp directory holds 2 Iceberg Arrow IPC staged batches
+    And batch "rows" remains pending for "1s"
+    # The retried commit appends only what it began with. The newer row waits for a commit of its
+    # own, and the batch that carries it stays unacknowledged until the catalog holds that row too.
+    When the Iceberg catalog gate passes the commit it holds
+    Then within "60s" the Iceberg catalog gate holds a commit
+    And the Iceberg table "refused_notifications_{{test_id}}" holds 1 rows
+    And batch "rows" remains pending for "1s"
+    When the Iceberg catalog gate passes every commit
+    Then batch "rows" completes
+    And within "60s" the Iceberg table "refused_notifications_{{test_id}}" holds exactly these rows
+      """
+      {"user_id":71,"action":"first"}
+      {"user_id":72,"action":"second"}
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_refused" on the leader node reports "messages_total" "sent" relay "notifications" totalling "2"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @iceberg_commit_whole_class
+  Scenario Outline: An Iceberg staged file larger than the bulk memory class commits only once the whole class is free
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "oversized_messages_{{test_id}}" exists at "s3://nervix-iceberg/tables/oversized_messages_{{test_id}}" with columns
+      """
+      value I64
+      message STRING
+      """
+    # Each payload reaches the emitter as a relay batch of its own, below the 32 MiB a relay frame
+    # carries between nodes. The emitter collects both on its own node into one input batch, which
+    # it stages as one file larger than the 32 MiB bulk memory class.
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA large_message (value I64, message STRING);
+      CREATE WIRE JSON SCHEMA large_message_wire MODE STRICT (value integer, message string);
+      CREATE CODEC large_message_codec FROM WIRE JSON SCHEMA large_message_wire TO SCHEMA large_message;
+      CREATE RELAY large_messages SCHEMA large_message UNBRANCHED;
+      CREATE VHOST edge iceberg-oversized-{{test_id}}.example.com;
+      CREATE ENDPOINT large_messages_endpoint ON edge PATH '/messages' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_large_messages
+        FROM large_messages_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 64MiB DECODE USING large_message_codec
+        TO large_messages INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT s3_main
+        TYPE S3
+        CONFIG {
+          'endpoint' = '{{rustfs_addr}}',
+          'region' = 'us-east-1',
+          'access_key_id' = 'rustfsadmin',
+          'secret_access_key' = 'rustfsadmin',
+          'path_style_access' = true
+        };
+      CREATE CLIENT iceberg_catalog
+        TYPE ICEBERG_REST
+        CONFIG {
+          'uri' = '{{iceberg_rest_addr}}',
+          'warehouse' = 's3://nervix-iceberg/warehouse'
+        };
+      CREATE EMITTER iceberg_oversized FROM large_messages
+        COLLECT FOR 1h MAX BATCH SIZE 33MiB
+        TO ICEBERG ON S3 s3_main TABLE oversized_messages_{{test_id}} VALUES { 'value' = input.value, 'message' = input.message } LOCATION 's3://nervix-iceberg/tables/oversized_messages_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        FLUSH EACH 100ms MAX BATCH SIZE 64MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    # The scenario holds half of every node's bulk memory class before any row arrives, so the
+    # commit can read the staged file only once the scenario gives that half back.
+    When bulk memory on every node keeps only "16777216" bytes free
+    And http payload with value 81 and a 17825792 byte message is posted to host "iceberg-oversized-{{test_id}}.example.com" path "/messages"
+    And http payload with value 82 and a 17825792 byte message is posted to host "iceberg-oversized-{{test_id}}.example.com" path "/messages"
+    Then within "120s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports an Iceberg commit waiting for the whole bulk memory class, whose staged file bytes are saved as placeholder "staged_bytes"
+    And the Iceberg table "oversized_messages_{{test_id}}" holds 0 rows
+    When bulk memory on every node is released
+    Then within "120s" the Iceberg table "oversized_messages_{{test_id}}" holds 2 rows
+    And within "30s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports "bytes_total" "sent" relay "large_messages" totalling "{{staged_bytes}}"
+    And within "30s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

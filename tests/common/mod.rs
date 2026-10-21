@@ -8,6 +8,7 @@ pub(crate) mod command_recovery;
 pub(crate) mod dependencies;
 pub(crate) mod grpc_receiver;
 pub(crate) mod http_receiver;
+pub(crate) mod iceberg_catalog_gate;
 pub(crate) mod injected_hold;
 pub(crate) mod kafka_group_member;
 pub(crate) mod kafka_mock_broker;
