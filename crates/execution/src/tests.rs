@@ -7,8 +7,9 @@ use meticulous::OptionExt as _;
 use ubyte::ByteUnit;
 
 use crate::{
-    AdmissionError, BudgetedBuffer, ExecutionConfig, ExecutionConfigError, Executor, MemoryBudgets,
-    MemoryClass, OperationLimits, WorkerCounts,
+    AdmissionError, BudgetedBuffer, ExecutionConfig, ExecutionConfigError, ExecutionError,
+    Executor, MemoryBudgets, MemoryClass, OperationLimits, QueueAdmission, StorageClass,
+    WorkerCounts,
 };
 
 fn one() -> NonZeroUsize {
@@ -285,6 +286,95 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
             capacity,
         }
     );
+}
+
+/// A storage job that waits for a place is not refused by a full wait queue, unlike one refused
+/// when full, and runs once the occupying job frees a place.
+#[nervix_primitives::test]
+async fn a_storage_job_waiting_for_a_place_runs_once_the_full_queue_frees_one() {
+    let executor = small_executor();
+    let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+    let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
+    let occupying = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .expect("the untouched bulk class has room");
+    let occupied = executor.clone();
+    let running = nervix_primitives::task::spawn(async move {
+        occupied
+            .run_storage(StorageClass::Filesystem, occupying, move |_charge, _| {
+                started
+                    .send(())
+                    .expect("the test waits for the occupying job");
+                released
+                    .blocking_recv()
+                    .expect("the test releases the occupying job before it exits");
+            })
+            .await
+            .expect("the occupying job runs");
+    });
+    has_started
+        .await
+        .expect("the occupying job reports once it holds the one worker");
+    let queued_charge = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .expect("the bulk class has room for the queued job");
+    let queue_holder = executor.clone();
+    let queued = nervix_primitives::task::spawn(async move {
+        queue_holder
+            .run_storage(StorageClass::Filesystem, queued_charge, |_charge, _| ())
+            .await
+    });
+    while executor.snapshot().filesystem_storage.pending < 1 {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::task::yield_now().await;
+    }
+
+    let refused = executor
+        .run_storage(
+            StorageClass::Filesystem,
+            executor
+                .try_reserve(MemoryClass::Bulk, 1)
+                .expect("the bulk class has room for the refused job"),
+            |_charge, _| (),
+        )
+        .await
+        .expect_err("a full wait queue refuses a job that answers a request");
+    assert!(
+        matches!(refused.current_context(), ExecutionError::QueueFull { .. }),
+        "a job refused when full is refused for the full queue, got {refused}"
+    );
+    let waiting_charge = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .expect("the bulk class has room for the waiting job");
+    let waiter = executor.clone();
+    let waiting = nervix_primitives::task::spawn(async move {
+        waiter
+            .run_storage_with(
+                StorageClass::Filesystem,
+                QueueAdmission::WaitForPlace,
+                waiting_charge,
+                |_charge, _| "waited",
+            )
+            .await
+    });
+    release
+        .send(())
+        .expect("the occupying job holds its worker until the test releases it");
+
+    running.await.expect("the occupying job is joined");
+    queued
+        .await
+        .expect("the queued job is joined")
+        .expect("the queued job runs once the worker frees");
+    let waited = waiting
+        .await
+        .expect("the waiting job is joined")
+        .expect("a job waiting for a place is never refused");
+    assert_eq!(waited, "waited");
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.filesystem_storage.refused, 1);
+    assert_eq!(snapshot.filesystem_storage.completed, 3);
+    assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
 }
 
 #[cfg(feature = "shuttle")]

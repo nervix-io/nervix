@@ -267,6 +267,10 @@ relay. Do not use them to scan across branches.
   shortening or lengthening a real retry wait.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
+- Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
+  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
+  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  transient error while the emitter retries.
 - Provision Iceberg table columns with names and nested types matching the emitter's `VALUES`.
   Opening the emitter rejects an incompatible mapped schema before staging records. UTC
   `DATETIME` values, including values inside lists and nested structures, use the containing
