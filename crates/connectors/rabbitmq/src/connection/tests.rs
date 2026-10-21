@@ -16,6 +16,7 @@ use nervix_dns::{DnsConfiguration, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, DeadlineKey};
 use nervix_primitives::{
     net::{TcpListener, TcpSocket, TcpStream},
+    sync::oneshot,
     task::JoinHandle,
     time::Instant,
 };
@@ -134,6 +135,36 @@ fn stand_in_broker(listener: TcpListener) -> JoinHandle<[u8; 8]> {
         timeout(CLOSE_DEADLINE, stream.read_to_end(&mut rest))
             .await
             .assured("a failed handshake closes the client's socket")
+            .assured("reading until the client closes cannot fail on loopback");
+        header
+    })
+}
+
+/// A listener standing in for a broker that never answers: it reads the AMQP protocol header,
+/// tells `header_read` it did, answers nothing, and then waits for the client to close the
+/// connection.
+fn silent_broker(
+    listener: TcpListener,
+    header_read: oneshot::Sender<()>,
+    closes: &'static str,
+) -> JoinHandle<[u8; 8]> {
+    nervix_primitives::task::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .assured("the client under test dials this listener");
+        let mut header = [0_u8; 8];
+        stream
+            .read_exact(&mut header)
+            .await
+            .assured("Lapin sends its protocol header before anything else");
+        header_read
+            .send(())
+            .assured("the check waits for the header until the broker has read it");
+        let mut rest = Vec::new();
+        timeout(CLOSE_DEADLINE, stream.read_to_end(&mut rest))
+            .await
+            .assured(closes)
             .assured("reading until the client closes cannot fail on loopback");
         header
     })
@@ -329,6 +360,207 @@ async fn no_answer_that_accepts_ends_within_the_budget() {
         );
     }
     assert!(started.elapsed() < GENEROUS_BUDGET);
+}
+
+#[nervix_primitives::test]
+async fn an_amqp_handshake_the_broker_never_answers_ends_within_the_budget_and_closes_its_socket() {
+    let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
+    let listener = loopback_listener(loopback(13)).await;
+    let port = listener
+        .local_addr()
+        .assured("a bound listener has an address")
+        .port();
+    fixture.answer(vec![loopback(13)]);
+    let (header_read, _header_was_read) = oneshot::channel();
+    let broker_side = silent_broker(
+        listener,
+        header_read,
+        "a handshake that runs out of its budget closes the client's socket",
+    );
+
+    let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
+    let budget = Duration::from_millis(500);
+    let attempt = timeout(
+        GENEROUS_BUDGET,
+        broker.connect_within(connect_deadline(budget)),
+    )
+    .await
+    .assured("a handshake the broker never answers ends within its budget");
+    let Err(report) = attempt else {
+        panic!("a broker that never answers cannot complete the handshake");
+    };
+
+    assert!(matches!(
+        report.current_context(),
+        RabbitMqConnectError::AmqpHandshake { host } if host == BROKER
+    ));
+    let elapsed = report.downcast_ref::<DeadlineElapsed>().copied();
+    assert_eq!(
+        elapsed.map(|elapsed| (elapsed.key, elapsed.bound)),
+        Some((DeadlineKey::ConnectTimeout, budget)),
+        "the handshake ran the connection out of its deadline: {report:?}"
+    );
+    let header = broker_side
+        .await
+        .assured("the silent broker does not panic");
+    assert_eq!(header, AMQP_PROTOCOL_HEADER);
+}
+
+#[nervix_primitives::test]
+async fn a_connection_its_caller_stops_waiting_for_closes_its_socket() {
+    let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
+    let listener = loopback_listener(loopback(14)).await;
+    let port = listener
+        .local_addr()
+        .assured("a bound listener has an address")
+        .port();
+    fixture.answer(vec![loopback(14)]);
+    let (header_read, header_was_read) = oneshot::channel();
+    let broker_side = silent_broker(
+        listener,
+        header_read,
+        "a connection whose caller stopped waiting closes its socket",
+    );
+
+    let broker = fixture.broker(&format!("amqp://guest:guest@{BROKER}:{port}/%2f"));
+    let connecting = broker.connect_within(connect_deadline(GENEROUS_BUDGET));
+    nervix_primitives::select! {
+        _ = connecting => panic!("a broker that never answers cannot complete the handshake"),
+        read = header_was_read => read.assured("the silent broker reads the header it is sent"),
+    }
+
+    // The connection is dropped in the middle of its AMQP handshake.
+    let header = broker_side
+        .await
+        .assured("the silent broker does not panic");
+    assert_eq!(header, AMQP_PROTOCOL_HEADER);
+}
+
+#[nervix_primitives::test]
+async fn opening_steps_end_within_what_remains_of_the_budget() {
+    let budget = Duration::from_millis(50);
+    let opening = OpeningBudget {
+        deadline: OperationBudget::start(budget, LookupShare::Whole),
+        connect_timeout: connect_deadline(budget),
+    };
+
+    let answered = opening
+        .within("answering at once", async { Ok::<_, lapin::Error>(7_u8) })
+        .await;
+    assert!(matches!(answered, Ok(7)));
+    let refused = opening
+        .within("refusing at once", async {
+            Err::<(), _>(lapin::Error::from(io::Error::other(
+                "the broker closed the connection",
+            )))
+        })
+        .await;
+    assert!(matches!(refused, Err(OpeningStepFailure::Failed(_))));
+    let stalled = opening
+        .within(
+            "opening the test channel",
+            std::future::pending::<lapin::Result<()>>(),
+        )
+        .await;
+    let Err(OpeningStepFailure::Elapsed(elapsed)) = stalled else {
+        panic!("a step the broker never answers runs out of the budget");
+    };
+    assert_eq!(
+        (elapsed.operation, elapsed.key, elapsed.bound),
+        (
+            "opening the test channel",
+            DeadlineKey::ConnectTimeout,
+            budget
+        )
+    );
+}
+
+#[test]
+fn an_opening_step_failure_leads_its_report_beneath_its_owners_context() {
+    let context = || RabbitMqConnectError::AmqpHandshake {
+        host: BROKER.to_string(),
+    };
+    let elapsed = connect_deadline(Duration::from_secs(1)).elapsed("opening the test channel");
+    let overdue = OpeningStepFailure::Elapsed(elapsed).beneath(context());
+    assert!(matches!(
+        overdue.current_context(),
+        RabbitMqConnectError::AmqpHandshake { host } if host == BROKER
+    ));
+    assert_eq!(
+        overdue.downcast_ref::<DeadlineElapsed>().copied(),
+        Some(elapsed)
+    );
+    let leading = overdue
+        .frames()
+        .find_map(|frame| frame.downcast_ref::<String>());
+    assert_eq!(
+        leading.map(String::as_str),
+        Some("opening the test channel did not finish within connect_timeout_ms 1s")
+    );
+
+    let refused = OpeningStepFailure::Failed(lapin::Error::from(io::Error::other(
+        "the broker closed the connection",
+    )))
+    .beneath(context());
+    assert!(refused.downcast_ref::<DeadlineElapsed>().is_none());
+    let leading = refused
+        .frames()
+        .find_map(|frame| frame.downcast_ref::<String>());
+    let Some(leading) = leading else {
+        panic!("Lapin's failure leads the report: {refused:?}");
+    };
+    assert!(
+        leading.contains("the broker closed the connection"),
+        "{refused:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_opening_socket_shuts_its_socket_down_unless_its_connection_opened() {
+    for opened in [false, true] {
+        let listener = loopback_listener(loopback(15)).await;
+        let address = listener
+            .local_addr()
+            .assured("a bound listener has an address");
+        let runtime = lapin::runtime::default_runtime().assured("a test runs inside Tokio");
+        let mut client = runtime
+            .tcp_connect_addr(address)
+            .await
+            .assured("the loopback listener accepts a connection");
+        let (mut accepted, _) = listener
+            .accept()
+            .await
+            .assured("the client dialled this listener");
+        let socket =
+            OpeningSocket::hold(&client, BROKER).assured("a connected socket has a second handle");
+
+        if opened {
+            socket.release();
+            client
+                .get_mut()
+                .write_all(b"x")
+                .await
+                .assured("a released handle leaves the connection open");
+            let mut byte = [0_u8; 1];
+            accepted
+                .read_exact(&mut byte)
+                .await
+                .assured("the byte the client wrote arrives");
+            assert_eq!(&byte, b"x");
+        } else {
+            drop(socket);
+            let mut rest = Vec::new();
+            timeout(CLOSE_DEADLINE, accepted.read_to_end(&mut rest))
+                .await
+                .assured("a dropped handle shuts the socket down")
+                .assured("reading until the client closes cannot fail on loopback");
+            assert!(rest.is_empty());
+            assert!(
+                client.get_mut().write_all(b"x").await.is_err(),
+                "a socket that was shut down takes no more writes"
+            );
+        }
+    }
 }
 
 #[nervix_primitives::test]
