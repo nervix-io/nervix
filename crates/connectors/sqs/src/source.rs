@@ -641,12 +641,12 @@ mod tests {
         );
         let prepared = crate::PreparedSqsRecord::new(record)
             .expect("four writes of three valid names make a valid message");
-        // The service takes the attributes as the request carries them, a map of name to value.
-        let sent: std::collections::HashMap<_, _> = prepared.attributes.into_iter().collect();
-        let message = SqsMessage::builder()
-            .body("{}")
-            .set_message_attributes(Some(sent))
-            .build();
+        // The message carries the attributes the request sent, one entry per name.
+        let mut message = SqsMessage::builder().body("{}");
+        for (name, attribute) in prepared.attributes {
+            message = message.message_attributes(name, attribute);
+        }
+        let message = message.build();
         let headers = SqsMessageAttributes { message };
         let mut visited = std::collections::BTreeMap::new();
         headers.visit(&mut |name, value| {

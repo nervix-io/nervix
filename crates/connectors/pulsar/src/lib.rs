@@ -1374,11 +1374,12 @@ mod tests {
         let mut record = record(0, b"{}".to_vec());
         record.headers = headers;
         let message = PulsarSink::message(record);
-        let expected = std::collections::HashMap::from([
-            ("trace".to_string(), "b".to_string()),
+        let properties: std::collections::BTreeMap<_, _> = message.properties.into_iter().collect();
+        let expected = std::collections::BTreeMap::from([
             ("Tenant".to_string(), "x".to_string()),
             ("tenant".to_string(), "y".to_string()),
+            ("trace".to_string(), "b".to_string()),
         ]);
-        assert_eq!(message.properties, expected);
+        assert_eq!(properties, expected);
     }
 }
