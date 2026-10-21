@@ -503,6 +503,11 @@ error the route's policy receives.
 [Failure and observation](./connector-contract.md#failure-and-observation) owns the contract, and
 the paragraphs below record what each integration keeps beneath it.
 
+An Iceberg object-store failure retains its OpenDAL cause beneath the external Iceberg error.
+When the storage client sets `timeout_ms`, that error also names the configured millisecond bound
+as configuration context. The host reports the failed commit and its declared reconnect backoff; one
+storage failure consumes one host attempt. Catalog requests keep their separate failure path.
+
 The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MySQL and ClickHouse
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
 host ownership transition; it does not recreate the top-level error from its formatted text.

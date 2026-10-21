@@ -374,6 +374,12 @@ memory-ordering implementation.
 Emitter confirmation guards retain one counter resolved at startup, and task teardown removes its
 registry interest.
 
+An Iceberg emitter retains the first table's `FileIO` while replacing catalog metadata. Its storage
+factory initializes one operator for the configured object-store root; data, manifest and metadata
+files use that same initialized storage after refreshes, successful commits and ambiguous-result
+reconciliation. This reuses the library's existing storage lifetime and adds no synchronization
+protocol or shared map. The emitter task remains the sole owner of commit retry pacing.
+
 Every pooled Redis or SQL sink registers a wait slot once. The connector serializes its connection
 borrows. A ready borrow writes nothing; the first Pending poll publishes its wait and owns a guard
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
