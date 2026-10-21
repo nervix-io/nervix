@@ -16,7 +16,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::time::timeout;
 
 use crate::{
-    http_receiver::{HttpReceiver, ReceiverResponse, ReceiverTransport},
+    http_receiver::{HttpReceiver, LengthPolicy, ReceiverResponse, ReceiverTransport},
     iceberg_catalog_gate::IcebergCatalogGate,
 };
 
@@ -38,6 +38,7 @@ async fn catalog() -> HttpReceiver {
     let catalog = HttpReceiver::start(
         SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         ReceiverTransport::Plain,
+        LengthPolicy::Lenient,
     )
     .await
     .assured("a loopback receiver binds an ephemeral port");

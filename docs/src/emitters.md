@@ -261,7 +261,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | a request: name resolution, connection, TLS, writing it and its final response headers: `timeout_ms`; required |
+| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |
 | Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -384,11 +384,16 @@ The HTTP sink speaks HTTP/1.1. It creates a connection for each attempt and clos
 headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
 connection acquisition, TLS negotiation, the complete request send, interim responses and
 complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
-request and host retry backoff do not consume the next attempt's timeout. HTTPS validates trust and
+request and host retry backoff do not consume the next attempt's timeout. Resolving the endpoint's
+host takes at most half of `timeout_ms`, whatever the name servers do, and each address it resolves
+to is tried in turn within an equal share of what is left, so an address that never answers leaves
+the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
 the destination hostname and uses the client's pinned CA and optional client certificate mounts.
 Starting the sink reads local configuration and sends no probe.
 
-The transport writes `Host`, `Connection: close`, and `Content-Length` when a body exists. It adds
+The transport writes `Host`, `Connection: close`, and `Content-Length`: the body's length when a
+body exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
+a length expect; any other method declared `WITHOUT BODY` carries no `Content-Length`. It adds
 `Accept: */*` only when the application did not write `Accept`. It adds no `Accept-Encoding` or
 `Content-Type`. The application may write `Accept`, `Content-Type`, `Authorization`, and `Cookie`
 with `write_header`. Response cookies are

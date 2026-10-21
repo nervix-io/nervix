@@ -114,6 +114,17 @@ impl DomainSchedule {
             node,
         })
     }
+
+    /// The entities this schedule names `node` the primary of, in the order it places them.
+    pub fn primary_entities_on(&self, node: &ClusterNodeName) -> Vec<NodeRef> {
+        let mut entities = Vec::new();
+        for (entity, scheduled) in &self.nodes {
+            if scheduled.primary_node() == Some(node) {
+                entities.push(entity.clone());
+            }
+        }
+        entities
+    }
 }
 
 /// One scheduled node with its configuration already narrowed to the shape its kind names.
@@ -165,6 +176,22 @@ pub enum OwnershipStateComponent {
     MaterializedRelay,
     WasmProcessor,
     WindowProcessor,
+}
+
+impl OwnershipStateComponent {
+    /// Whether a backup archive carries this component's state. Branch-aggregated metrics are
+    /// never archived: a restored entity starts its metrics afresh.
+    pub fn is_archived(self) -> bool {
+        match self {
+            Self::BranchAggregated => false,
+            Self::BranchLifecycle
+            | Self::Deduplicator
+            | Self::KafkaOffsets
+            | Self::MaterializedRelay
+            | Self::WasmProcessor
+            | Self::WindowProcessor => true,
+        }
+    }
 }
 
 #[derive(

@@ -78,9 +78,9 @@ table by its method and path, holds it until a step refuses it with the `409 Con
 answers a commit whose requirements no longer hold, or passes it to the catalog, and forwards every
 other request unchanged. It records when it refused a commit and when the next one arrived, so the
 scenario requires the retried commit to follow its refusal by at least the emitter's backoff
-instead of observing a silent window. A held commit cannot happen, so while the gate holds one the
-scenario reads the staging directory, the table and the producer's batch outcomes as states that
-cannot move.
+instead of observing a silent window. While the gate holds a commit, that commit cannot complete, so
+the scenario reads the staging directory, the table and the producer's batch outcomes as states
+that cannot move.
 
 Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
 path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
@@ -102,7 +102,9 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Deadlock diagnostics | In a scenario binary built for the `deloxide` mode only: one deadlock detector for the whole process, installed by the binary's `main`, and a diagnostic run for each server child, each recording evidence in a directory of its own | `tests/scenarios.rs`; the `@deadlock_diagnostics` steps, `tests/deadlock_diagnostics` |
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
+| Endpoint response observations | One abort-on-drop task per named POST, owning the request through response-body collection. The HTTP client bounds it at 60 seconds; the collection step also bounds the join. Response arrival uses a monotonic instant, compared with a boundary recorded before a consumer ACK/NACK, so an early answer cannot pass an ordering assertion | `tests/endpoint_intake/requests.rs` and the endpoint ACK scenarios |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
@@ -125,6 +127,13 @@ description on standard error. A server child started with the fixture's deadloc
 records its own evidence under its root, and is a diagnostic node only when the binary beside the
 scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
 scenarios out by default: their steps assert a detector an ordinary build does not have.
+
+The stressed endpoint ACK lifecycle examples use `@deloxide_stress_endpoint_ack` in their own
+bounded diagnostic invocation. They run serially as the other stressed lifecycle examples do,
+with a 900-second process bound and the existing 360-second teardown reserve. The baseline
+lifecycle invocation keeps its 1,800-second bound; all phases share the unchanged 4,800-second
+selection workload budget. Inventory discovery checks both groups completely, and the ordinary
+suite continues to admit these examples beside its other scenarios.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
 `@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
