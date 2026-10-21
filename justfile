@@ -491,6 +491,11 @@ coverage-consensus output *args:
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure one connector crate's unit tests, for a patch confined to it, through the configured
+# compiler cache.
+coverage-connector package output *args:
+    cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

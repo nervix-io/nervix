@@ -453,7 +453,7 @@ is assumed to be covered:
 | MySQL pools, `mysql_async` 0.36.2 | The driver connects with Tokio's `TcpStream::connect((host, port))` | Its `resolved_ips` option fixes one address list for the life of the pool, which would pin a name to one answer |
 | Pulsar sources, their subscription removal, and sinks, `pulsar` 6.9.0 | The driver resolves broker and proxy URLs with `Url::socket_addrs` on a blocking worker, then dials the addresses. A subscription removal's lookup falls within its ten-second removal budget, which ends the removal but not a lookup the blocking worker already runs | No resolver hook |
 | Kafka sources and sinks, `rdkafka` 0.39.0 with librdkafka 2.12.1 | librdkafka resolves bootstrap and broker hosts in its own native threads | librdkafka's resolver callback is not exposed by the Rust binding |
-| ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))` | No socket hook |
+| ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))`. A connect-mode sink's connection, its lookups included, ends at its client's `connect_timeout_ms`, which ends the connection but not a lookup the blocking pool already runs | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
 Postgres observation clients in the test harness use that same SQLx resolution path. Their suite

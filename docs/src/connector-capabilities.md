@@ -497,9 +497,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | bytes queued for a peer: unbounded |  |
-| Network waits | connecting and the ZMTP handshake: unbounded<br>a send: unbounded |  |
+| Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |  |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### SQS QUEUE emit
 

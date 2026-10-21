@@ -945,6 +945,21 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer never answers its handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer stops reading is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "MODE ACK"
 entity = "HTTP ENDPOINT INGESTOR"
 scenarios = [
