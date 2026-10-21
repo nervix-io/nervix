@@ -123,12 +123,20 @@ sink resolves each request's target host itself, as its [request transport](#sin
 describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
 resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
-OpenDAL's credential providers through its accessor info. That client takes no `timeout_ms`, CA file
-or client identity from the client's configuration; OpenDAL's own timeout layer bounds each storage
-operation. The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
+OpenDAL's credential providers through its accessor info. The object-store client's optional
+`timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
+OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
+the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
+That HTTP client takes no CA file or client identity from the client's configuration. The
+Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
 trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
-S3, GCS, and Azure property mappings, URL-derived bucket or container, timeout and retry layers, and
-commit boundary. The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
+S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
+emitter's location and the initial table's effective storage properties. Table metadata refreshes
+retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
+an object URL for a different storage root is refused. OpenDAL's credential providers keep their
+own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
+neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
 
@@ -139,7 +147,7 @@ startup, while a lookup failure reaches the existing source or sink failure path
 authority, proxy behavior, TLS verification, custom trust and identity, and connection pools remain
 with the HTTP client. A client's `timeout_ms` includes DNS resolution, connection setup, TLS and
 response handling; the resolver's own 30 second ceiling only bounds clients without a shorter
-request timeout, which includes both Iceberg clients. DNS failures use the host's existing retry
+request timeout, which includes the Iceberg REST client. DNS failures use the host's existing retry
 policy and do not create application-level probes or acknowledgements.
 
 ### DNS for RabbitMQ

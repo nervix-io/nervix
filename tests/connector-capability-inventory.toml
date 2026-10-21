@@ -130,6 +130,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_storage_deadlines.feature", scenario = "A paused Iceberg object store reports timeout_ms and recovers on the emitter retry policy" },
+]
+
+[[capability]]
 capability = "CATALOG"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
