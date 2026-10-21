@@ -1163,9 +1163,14 @@ See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
 Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
-records decoded from it have been acknowledged through the graph. A delivery whose acknowledgement
-fails, or whose payload cannot be decoded, is negatively acknowledged with requeue, so RabbitMQ
-delivers it again and the ingestor retries it on its declared `RETRY POLICY` cadence.
+records decoded from it have been acknowledged through the graph. A failed or timed-out graph
+acknowledgement, or a failed transport acknowledgement, makes the instance try to negatively
+acknowledge the delivery with requeue. When that requeue succeeds, RabbitMQ can deliver the message
+again and the instance waits on its declared `RETRY POLICY` cadence before reading again. If the
+requeue fails, the instance suspends and reconnects as described below.
+
+A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
+`ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
 Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
@@ -1175,7 +1180,8 @@ re-provisions it; Nervix never creates it.
 A connection that closes while a delivery is still unacknowledged, because the broker restarted,
 closed it, or the network dropped it, also makes RabbitMQ requeue that delivery. The acknowledgement
 or the requeue the ingestor still owes it can only be sent on the connection it arrived on, so the
-instance reconnects on its `RETRY POLICY` cadence, discards what it owed, counts it in
+instance reconnects on its `RETRY POLICY` cadence. Once that reconnect succeeds, it discards the
+pending positions instead of retrying them on the new connection, counts them once in
 `nervix_ingestor_transport_redeliveries_total`, which `DESCRIBE INGESTOR` also prints, and consumes
 again. RabbitMQ then delivers the message again: a delivery that failed in the graph is retried,
 and one the graph had already acknowledged is ingested a second time, so delivery across a
