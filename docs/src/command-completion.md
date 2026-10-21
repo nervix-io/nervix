@@ -63,6 +63,16 @@ captured planning inputs change before the effect is recorded, the command retai
 attempt and starts a revision-derived attempt under the same execution reference. An explicit
 transaction remains frozen after `COMMIT` admission and reports the conflict instead of replanning.
 
+More than one coordinator can act on the same attempt: the leader that admitted the command and,
+after a leadership change, each leader whose reconciliation resumes the applying execution. A
+coordinator decides each preflight, queue, and commit-planning refusal against its own observation
+of the attempt, and another coordinator may have opened, committed, or paused the domain for that
+same attempt since then. Before a refusal becomes the command's outcome, its coordinator reads the
+attempt again. When the attempt moved since the observation the refusal was decided against, the
+coordinator recovers that progress under the same execution reference, joining the commit or
+returning its recorded outcome. Only a refusal decided against the attempt as it still stands
+becomes the command's outcome. A command's own domain pause therefore never fails that command.
+
 Resource uploads follow the same replay rule with an upload identity instead. It is scoped to the
 user, domain, and resource, bound to the verified archive digest, and retained without expiry; see
 [Resource Versions And Bindings](./resource-versions.md#assignment). Transaction appends

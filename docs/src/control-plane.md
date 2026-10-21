@@ -155,6 +155,15 @@ identity while the transaction remains `OPEN`; no gate or external effect has be
 each step uses the stored decisions and captured inputs. A restart or new leader does not replan it
 from newer configuration.
 
+An eligible statement sent outside `BEGIN`/`COMMIT` applies through an internal transaction of its
+own under the command's execution reference, with the same preflight, queue admission, and commit
+admission. Each of those decisions is made against the coordinator's own observation of that
+transaction, and a leader that resumes the applying command after a leadership change can open and
+advance the same transaction meanwhile. A refusal therefore becomes the command's outcome only
+while the transaction still stands where it was observed; otherwise the coordinator continues from
+the recorded progress, as [Command Completion](./command-completion.md#lifecycle-and-ownership)
+describes.
+
 A `COMMIT` request may name the preview it expects to apply. The expected identity covers the
 transaction id, its accepted queue position, and the whole planning basis, whether the client read
 that identity from an accepted append or from an inspection. When the preview no longer describes
