@@ -989,13 +989,15 @@ TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name 
 address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
 milliseconds.
 
-`HTTP`, `SENTRY`, `OTEL`, `SQS` and `CLICKHOUSE` clients read `timeout_ms`; an `HTTP` request
-emitter's client requires it. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and
-allow 30 seconds when it is left out; a `REDIS` command pool also waits no longer than that to check
-out a connection. A `RABBITMQ` client's deadline covers resolving the broker, the address attempts
-and TLS; the AMQP handshake that follows has no deadline. A request or connection that runs out of
-its deadline becomes the emitter's transient status, and the emitter retries on its policy; a
-connection that runs out of `connect_timeout_ms` is reported naming the key and its bound.
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE` and `ZEROMQ` clients read `timeout_ms`; an `HTTP`
+request emitter's client requires it. `RABBITMQ`, `REDIS`, `SYSLOG` and `ZEROMQ` clients read
+`connect_timeout_ms`, and allow 30 seconds when it is left out; a `REDIS` command pool also waits no
+longer than that to check out a connection. A `RABBITMQ` client's deadline covers resolving the
+broker, the address attempts and TLS; the AMQP handshake that follows has no deadline. A `ZEROMQ`
+client's `connect_timeout_ms` covers a connect-mode socket's connection and its ZMTP handshake, and
+its `timeout_ms` bounds each send. A request, send or connection that runs out of its deadline
+becomes the emitter's transient status, and the emitter retries on its policy; a connection that
+runs out of `connect_timeout_ms` is reported naming the key and its bound.
 [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
 bounds each one, including the waits nothing bounds yet.
 
@@ -1394,15 +1396,25 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | bytes queued for a peer: unbounded |
-| Network waits | connecting and the ZMTP handshake: unbounded<br>a send: unbounded |
+| Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |
 | Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
 
 See the [ZEROMQ PUSH capability and mirror reference](connector-capabilities.md#zeromq-push-emit).
 <!-- connector-matrix:emit-zeromq-push:end -->
 
 ZeroMQ has no delivery acknowledgment; success is socket acceptance. Transient socket failures are
 paced by the declared retry policy.
+
+A client that connects rather than binds connects when the emitter starts. The driver retries a
+refused connection on its own and waits for the peer's ZMTP handshake, so the client's
+`connect_timeout_ms`, 30 seconds when it is left out, is what ends the attempt of a peer that never
+accepts: the start fails naming the key and its bound, and the emitter opens the socket again on its
+retry policy. The driver has no high-water mark, so a send to a peer that stops reading waits until
+the connection's buffers drain. The client's `timeout_ms` bounds that wait for each send; a send that
+runs out of it fails the publish, and the emitter opens a new socket and sends the message again,
+since the one it left partly written on the old connection is never completed. Without `timeout_ms`
+a send waits for as long as the peer reads nothing.
 
 ### Syslog
 

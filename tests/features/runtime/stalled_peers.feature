@@ -524,3 +524,107 @@ Feature: Stalled peers
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A ZeroMQ emitter whose peer never answers its handshake is reported within connect_timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "zeromq_peer" is listening
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+        'addr' = 'tcp://{{zeromq_peer}}',
+        'connect_timeout_ms' = '1000'
+      };
+      CREATE EMITTER zeromq_out FROM notifications
+        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the silent endpoint "zeromq_peer" eventually accepts a connection
+    And within "20s" DESCRIBE EMITTER "zeromq_out" on the leader node contains
+      """
+      within connect_timeout_ms 1s
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A ZeroMQ emitter whose peer stops reading is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    And a stallable endpoint "zeromq_peer" stands in front of the ZeroMQ emission endpoint
+    # One message larger than the TCP buffers between the emitter and a peer that reads nothing
+    # keeps the emitter's send waiting.
+    And a repeated text placeholder "bulk_message" of 8000000 bytes is prepared
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64, message STRING);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, message string);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge stalled-zeromq-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_peer}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE EMITTER zeromq_out FROM notifications
+        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 2s
+        ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-zeromq-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":1,"message":"ready"}
+      """
+    Then the observed broker receives a payload
+      """
+      {"message":"ready","user_id":1}
+      """
+    When the stallable endpoint "zeromq_peer" is paused
+    And http payload is posted to host "stalled-zeromq-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":2,"message":"{{bulk_message}}"}
+      """
+    Then within "30s" DESCRIBE EMITTER "zeromq_out" on the leader node contains
+      """
+      sending a message to the ZeroMQ peer did not finish within timeout_ms 1s
+      """
+    # The emitter opens a new connection after the failed send and sends the message again once
+    # the peer reads, and the connection the failed send left part of the message on ends unread.
+    When the stallable endpoint "zeromq_peer" is resumed
+    Then the observed broker receives a payload
+      """
+      "user_id":2
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

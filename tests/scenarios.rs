@@ -432,6 +432,9 @@ struct ScenarioWorld {
     test_id: String,
     zeromq_ingest_addr: String,
     zeromq_emit_addr: String,
+    /// The socket holding the ZeroMQ emission port without listening, so connections there are
+    /// refused until a peer starts listening on it.
+    zeromq_emit_refusal: Option<nervix_primitives::net::TcpSocket>,
     syslog_ingest_addr: String,
     syslog_emit_addr: String,
     /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
@@ -23202,6 +23205,86 @@ async fn observe_zeromq_emission_endpoint(world: &mut ScenarioWorld, addr: Strin
         "failed to observe a generated ZeroMQ endpoint after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
          fresh port allocations"
     );
+}
+
+/// Holds the scenario's ZeroMQ emission port with a socket that is bound to it and never listens,
+/// so the kernel refuses every connection there and no other process takes the port before a peer
+/// starts listening on it. The address can be taken between its allocation and this bind, so a
+/// fresh port then replaces it, as it does for the observing socket.
+#[given("the ZeroMQ emission endpoint refuses connections")]
+async fn given_zeromq_emission_endpoint_refuses_connections(world: &mut ScenarioWorld) {
+    for _ in 0..ZEROMQ_OBSERVER_BIND_ATTEMPTS {
+        nervix_primitives::task::consume_budget().await;
+        let address = zeromq_tcp_address(&world.zeromq_emit_addr);
+        let socket = nervix_primitives::net::TcpSocket::new_v4()
+            .unwrap_or_else(|error| panic!("failed to create a TCP socket: {error}"));
+        if socket.bind(address).is_ok() {
+            world.zeromq_emit_refusal = Some(socket);
+            return;
+        }
+        world.zeromq_emit_addr = format!(
+            "tcp://127.0.0.1:{}",
+            draw_scenario_port(world, "replacement ZeroMQ emit")
+        );
+    }
+
+    panic!(
+        "failed to hold a generated ZeroMQ emission port after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
+         fresh port allocations"
+    );
+}
+
+/// A peer starts listening where the scenario's ZeroMQ emission endpoint refused connections: the
+/// socket holding the port lets it go and the observing pull socket binds the same address.
+#[when("a ZeroMQ peer starts listening on the emission endpoint")]
+async fn when_zeromq_peer_starts_listening_on_emission_endpoint(world: &mut ScenarioWorld) {
+    let refusal = world
+        .zeromq_emit_refusal
+        .take()
+        .expect("the ZeroMQ emission endpoint must refuse connections before a peer listens there");
+    drop(refusal);
+    let addr = world.zeromq_emit_addr.clone();
+    let observer = world
+        .cluster()
+        .observe_zeromq(&addr)
+        .await
+        .unwrap_or_else(|error| panic!("failed to observe zeromq endpoint '{addr}': {error}"));
+    world.broker_observer = Some(observer);
+}
+
+/// Stand a stallable endpoint in front of the scenario's observed ZeroMQ emission endpoint, and
+/// record in placeholder `name` the ZeroMQ address a client connects to through it.
+#[given(expr = "a stallable endpoint {string} stands in front of the ZeroMQ emission endpoint")]
+async fn given_stallable_endpoint_in_front_of_zeromq_emission_endpoint(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let target = zeromq_tcp_address(&world.zeromq_emit_addr);
+    let proxy = StallableTcpProxy::start(target.ip().to_string(), target.port())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the stallable endpoint '{name}' could not listen: {error}")
+        });
+    world
+        .placeholders
+        .insert(name.clone(), format!("tcp://{}", proxy.local_addr()));
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// The socket address of the ZeroMQ TCP endpoint `addr`, such as `tcp://127.0.0.1:5555`.
+fn zeromq_tcp_address(addr: &str) -> SocketAddr {
+    let endpoint = url::Url::parse(addr)
+        .unwrap_or_else(|error| panic!("'{addr}' is not a ZeroMQ endpoint: {error}"));
+    let host = endpoint
+        .host_str()
+        .unwrap_or_else(|| panic!("ZeroMQ endpoint '{addr}' has no host"));
+    let ip: IpAddr = host
+        .parse()
+        .unwrap_or_else(|error| panic!("ZeroMQ endpoint '{addr}' has no IP host: {error}"));
+    let port = endpoint
+        .port()
+        .unwrap_or_else(|| panic!("ZeroMQ endpoint '{addr}' names no port"));
+    SocketAddr::new(ip, port)
 }
 
 /// A broker or message destination that one scenario outline publishes to for every transport.
