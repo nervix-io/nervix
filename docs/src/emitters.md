@@ -994,11 +994,12 @@ TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name 
 address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
 milliseconds.
 
-`HTTP`, `SENTRY`, `OTEL`, `SQS` and `CLICKHOUSE` clients read `timeout_ms`; an `HTTP` request
-emitter's client requires it. A `RABBITMQ` client's `timeout_ms` bounds the round trip that ends a
-`NO_ACK` write. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and allow 30
-seconds when it is left out; a `REDIS` command pool also waits no longer than that to check out a
-connection. A `RABBITMQ` client's `connect_timeout_ms` covers resolving the broker, the address
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE` and the Iceberg emitter's object-store clients read
+`timeout_ms`; an `HTTP` request emitter's client requires it. A `RABBITMQ` client's `timeout_ms`
+bounds the round trip that ends a `NO_ACK` write. `RABBITMQ`, `REDIS` and `SYSLOG` clients read
+`connect_timeout_ms`, and allow 30 seconds when it is left out; a `REDIS` command pool also waits no
+longer than that to check out a connection. A `RABBITMQ` client's `connect_timeout_ms` covers
+resolving the broker, the address
 attempts, TLS, the AMQP handshake, opening the emitter's channel, selecting publisher confirms under
 `ACK` and checking its queue. A request, connection or round trip that runs out of its deadline
 becomes the emitter's transient status, and the emitter retries on its policy; a deadline that runs
@@ -2322,9 +2323,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |
-| Network waits | catalog requests: unbounded<br>object-store operations: driver default, 60 s per operation and 10 s per read or write, retried 3 times |
+| Network waits | catalog requests: unbounded<br>object-store metadata and delete operations: `timeout_ms`; 1m when omitted<br>object-store reads and writes: `timeout_ms`; 10s when omitted |
 | Driver limits | None declared. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [ICEBERG TABLE capability and mirror reference](connector-capabilities.md#iceberg-table-emit).
 <!-- connector-matrix:emit-iceberg-table:end -->
@@ -2374,6 +2375,13 @@ The catalog and object-store HTTP clients resolve endpoint names through the nod
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
 initialization or commit retry path; they do not advance the commit or ACK boundary.
+
+Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
+operation, including DNS, connection, TLS and credential requests. It also bounds each read or
+write call of a streaming object. If omitted, metadata and delete operations allow 60 seconds and
+reads and writes allow 10 seconds. A failed storage call returns to the emitter's declared retry
+policy after one attempt. The operator and the initial table's effective storage settings are
+retained across table metadata refreshes; changing those settings requires reopening the emitter.
 
 GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
 
