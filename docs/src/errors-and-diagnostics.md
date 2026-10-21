@@ -529,7 +529,8 @@ errors keep those reports as typed fields while preserving their startup message
 An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
 authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
-response-header failure, or the socket or TLS error as the context beneath it, and attaches the
+response-header failure, the socket or TLS error, or the `AddressShareElapsed` of an address that
+accepted no connection within its share of `timeout_ms` as the context beneath it, and attaches the
 description of the whole chain, such as
 `HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`, to its publish failure. The
 emitter reports that description as its transient error and runtime event for as long as the

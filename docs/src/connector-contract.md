@@ -440,9 +440,10 @@ its bound.
 
 A connector that dials for itself spends one `OperationBudget` from `nervix-dns` on an operation. The
 caller declares how much of it the name lookup may take: whatever is left for an operation that is
-only a connection, or at most a fixed share for one that sends a request after connecting. Each
-answer is then tried in resolution order within an equal share of what is left when its attempt
-starts, and what remains bounds the handshake and the request that follow.
+only a connection, or at most a fixed share for one that sends a request after connecting, as the
+HTTP request sink gives its lookup at most half of `timeout_ms`. Each answer is then tried in
+resolution order within an equal share of what is left when its attempt starts, and what remains
+bounds the handshake and the request that follow.
 
 #### Stalled peers
 
@@ -1403,14 +1404,22 @@ may already hold. One connector publish call awaits at most one request across t
 execution's served sources and branches. It sends them in their handed-over order, each on a
 fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
 configuration. The connection closes after final headers; no unread body can be reused. Its one
-physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers.
-The connector resolves the target's host through the node resolver within that timeout and tries
-the answers in order without dividing it among them. The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
-authentication challenge with another request, and has no independent retry policy. The host
-alone schedules another application attempt.
+physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers,
+and one `OperationBudget` divides it: resolving the target's host through the node resolver takes
+at most half of it, each answer is then dialled in resolution order within an equal share of what
+is left when its attempt starts, so an answer whose handshake never completes leaves the next one
+time to connect, and what remains bounds TLS, the send and the final headers. A lookup that runs out
+of its half fails the attempt as a DNS timeout, and an answer that runs out of its share fails it as
+a connection that was not accepted in time when no later answer connects. The connector sends no
+startup probe, follows no redirect, stores no response cookie, answers no authentication challenge
+with another request, and has no independent retry policy. The host alone schedules another
+application attempt.
 
-The transport generates `Host`, `Connection: close` and, for a present body,
-`Content-Length`. It does not add `Accept-Encoding` or `Content-Type`. Application header writes
+The transport generates `Host`, `Connection: close` and `Content-Length`: the length of a present
+body, and `0` for a bodyless request whose method defines request content, `POST`, `PUT` or
+`PATCH` in any ASCII case, as RFC 9110 asks of a client so that a server requiring a length accepts
+it. Another bodyless request declares no length. It does not add `Accept-Encoding` or
+`Content-Type`. Application header writes
 can supply `Accept`, content type, authorization and cookie values. Without an application
 `Accept`, the transport adds `Accept: */*`.
 
