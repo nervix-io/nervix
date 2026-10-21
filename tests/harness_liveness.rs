@@ -3,15 +3,17 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, readiness-history, node-startup,
-//!   node-stop, phase-deadline, status-request, port-pool, process-cluster convergence,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable, process-observation and process-report regressions with Rust's test
-//!   runner, and the stand-in nodes, clients, images and processes those regressions talk to.
+//!   node-stop, phase-deadline, status-request, port-pool, node-bound address, process-cluster
+//!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
+//!   Iceberg-catalog-gate, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
+//!   runner-offload, server-executable, stallable-TCP-proxy, unaccepted-address,
+//!   process-observation and process-report regressions with Rust's test runner, and the stand-in
+//!   nodes, clients, images and processes those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
-//!   port-pool, process-cluster convergence, cluster-teardown, scenario-phase, suite-watchdog,
-//!   Redis-client, HTTP-receiver, gRPC-receiver, NATS-observer, runner-lag, runner-offload,
-//!   server-executable, process-observation, process-report and materialized-state diagnostic
+//!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
+//!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, gRPC-receiver,
+//!   NATS-observer, runner-lag, runner-offload, server-executable, stallable-TCP-proxy,
+//!   unaccepted-address, process-observation, process-report and materialized-state diagnostic
 //!   harness modules, the product's shutdown coordinator a stopping node is read through, and the
 //!   client wire session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
@@ -22,6 +24,10 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/iceberg_catalog_gate.rs"]
+mod iceberg_catalog_gate;
+#[path = "common/iceberg_catalog_gate_tests.rs"]
+mod iceberg_catalog_gate_tests;
 #[path = "common/injected_hold.rs"]
 mod injected_hold;
 #[path = "common/injected_hold_tests.rs"]
@@ -34,6 +40,10 @@ mod materialized_state_diagnostics_tests;
 mod nats_observer;
 #[path = "common/nats_observer_tests.rs"]
 mod nats_observer_tests;
+#[path = "common/node_bound_address.rs"]
+mod node_bound_address;
+#[path = "common/node_bound_address_tests.rs"]
+mod node_bound_address_tests;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]
@@ -62,6 +72,10 @@ mod redis_client;
 mod runner_lag;
 #[path = "common/runner_lag_tests.rs"]
 mod runner_lag_tests;
+#[path = "common/runner_observation.rs"]
+mod runner_observation;
+#[path = "common/runner_observation_tests.rs"]
+mod runner_observation_tests;
 #[path = "common/runner_offload.rs"]
 mod runner_offload;
 #[path = "common/runner_offload_tests.rs"]
@@ -82,10 +96,18 @@ mod scenario_schedule;
 mod server_executable;
 #[path = "common/server_executable_tests.rs"]
 mod server_executable_tests;
+#[path = "common/stallable_tcp_proxy.rs"]
+mod stallable_tcp_proxy;
+#[path = "common/stallable_tcp_proxy_tests.rs"]
+mod stallable_tcp_proxy_tests;
 #[path = "common/status_request.rs"]
 mod status_request;
 #[path = "common/suite_watchdog.rs"]
 mod suite_watchdog;
+#[path = "common/unaccepted_address.rs"]
+mod unaccepted_address;
+#[path = "common/unaccepted_address_tests.rs"]
+mod unaccepted_address_tests;
 
 mod tests {
     use std::{
@@ -5223,8 +5245,9 @@ mod http_receiver_tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::http_receiver::{
-        ClientCertificatePolicy, HttpReceiver, RECEIVER_CONNECTION_STOP_BUDGET, ReceiverFault,
-        ReceiverResponse, ReceiverScriptError, ReceiverTlsOptions, ReceiverTransport,
+        ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_CONNECTION_STOP_BUDGET,
+        ReceiverFault, ReceiverResponse, ReceiverScriptError, ReceiverTlsOptions,
+        ReceiverTransport,
     };
 
     /// How long a regression waits for something the receiver does promptly on an idle machine.
@@ -5245,7 +5268,7 @@ mod http_receiver_tests {
     }
 
     async fn start(transport: ReceiverTransport) -> HttpReceiver {
-        HttpReceiver::start(loopback(), transport)
+        HttpReceiver::start(loopback(), transport, LengthPolicy::Lenient)
             .await
             .assured("a loopback receiver binds an ephemeral port")
     }
@@ -5265,6 +5288,78 @@ mod http_receiver_tests {
             .assured("the receiver closes a connection its script ends")
             .assured("reading from a loopback connection succeeds");
         response
+    }
+
+    #[nervix_primitives::test]
+    async fn a_strict_receiver_refuses_a_content_method_that_declares_no_length() {
+        let receiver = HttpReceiver::start(
+            loopback(),
+            ReceiverTransport::Plain,
+            LengthPolicy::RequiredForContent,
+        )
+        .await
+        .assured("a loopback receiver binds an ephemeral port");
+
+        let undeclared = exchange(
+            &receiver,
+            b"POST /events/1 HTTP/1.1\r\nhost: receiver\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let declared = exchange(
+            &receiver,
+            b"PUT /events/2 HTTP/1.1\r\nhost: receiver\r\nconnection: close\r\n\
+              content-length: 0\r\n\r\n",
+        )
+        .await;
+        let chunked = exchange(
+            &receiver,
+            b"PATCH /events/3 HTTP/1.1\r\nhost: receiver\r\nconnection: close\r\n\
+              transfer-encoding: chunked\r\n\r\n0\r\n\r\n",
+        )
+        .await;
+        let without_content = exchange(
+            &receiver,
+            b"DELETE /events/4 HTTP/1.1\r\nhost: receiver\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(
+            undeclared.starts_with(b"HTTP/1.1 411 Length Required\r\n"),
+            "{}",
+            String::from_utf8_lossy(&undeclared)
+        );
+        for answer in [&declared, &chunked, &without_content] {
+            assert!(
+                answer.starts_with(b"HTTP/1.1 200 "),
+                "{}",
+                String::from_utf8_lossy(answer)
+            );
+        }
+        receiver
+            .wait_for_fault(
+                "refused length",
+                |fault| {
+                    matches!(
+                        fault,
+                        ReceiverFault::LengthRequired { method, .. } if method == "POST"
+                    )
+                },
+                WITHIN,
+            )
+            .await
+            .assured("the POST above declared no length");
+        let captured = receiver
+            .wait_for_requests(3, WITHIN)
+            .await
+            .assured("every request that a strict receiver accepts was answered");
+        let mut lines = Vec::new();
+        for request in &captured {
+            lines.push(request.request_line());
+        }
+        assert_eq!(
+            lines,
+            ["PUT /events/2", "PATCH /events/3", "DELETE /events/4"]
+        );
     }
 
     #[nervix_primitives::test]

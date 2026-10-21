@@ -72,6 +72,16 @@ released and its session disconnected; the scenario's cleanup releases remaining
 cluster shutdown, including when an assertion fails. These are external database locks, outside
 Deloxide's tracked thread-blocking locks.
 
+The Iceberg refused-append scenario stands a gate in front of the REST catalog the run shares and
+points only its own emitter's catalog client at it. The gate recognizes a commit to the scenario's
+table by its method and path, holds it until a step refuses it with the `409 Conflict` a catalog
+answers a commit whose requirements no longer hold, or passes it to the catalog, and forwards every
+other request unchanged. It records when it refused a commit and when the next one arrived, so the
+scenario requires the retried commit to follow its refusal by at least the emitter's backoff
+instead of observing a silent window. While the gate holds a commit, that commit cannot complete, so
+the scenario reads the staging directory, the table and the producer's batch outcomes as states
+that cannot move.
+
 Before starting ordinary CI producers, Check verifies its exact tested merge and every changed
 path. A verified documentation-only selection excludes `scenarios` with the other ordinary suites;
 validation and title checks remain enabled. This exclusion records a source decision rather than
@@ -92,14 +102,17 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Deadlock diagnostics | In a scenario binary built for the `deloxide` mode only: one deadlock detector for the whole process, installed by the binary's `main`, and a diagnostic run for each server child, each recording evidence in a directory of its own | `tests/scenarios.rs`; the `@deadlock_diagnostics` steps, `tests/deadlock_diagnostics` |
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
+| Endpoint response observations | One abort-on-drop task per named POST, owning the request through response-body collection. The HTTP client bounds it at 60 seconds; the collection step also bounds the join. Response arrival uses a monotonic instant, compared with a boundary recorded before a consumer ACK/NACK, so an early answer cannot pass an ordering assertion | `tests/endpoint_intake/requests.rs` and the endpoint ACK scenarios |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
-| Command outcome recovery | On the task of the step, or of its background execution, whose raw wire command left its outcome to the current leader: one session at a time, opened to each node in turn and dropped once that node answers | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
-| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
+| Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
+| Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
-| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, and the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes |
+| Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
@@ -114,6 +127,13 @@ description on standard error. A server child started with the fixture's deadloc
 records its own evidence under its root, and is a diagnostic node only when the binary beside the
 scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
 scenarios out by default: their steps assert a detector an ordinary build does not have.
+
+The stressed endpoint ACK lifecycle examples use `@deloxide_stress_endpoint_ack` in their own
+bounded diagnostic invocation. They run serially as the other stressed lifecycle examples do,
+with a 900-second process bound and the existing 360-second teardown reserve. The baseline
+lifecycle invocation keeps its 1,800-second bound; all phases share the unchanged 4,800-second
+selection workload budget. Inventory discovery checks both groups completely, and the ordinary
+suite continues to admit these examples beside its other scenarios.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
 `@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
@@ -500,6 +520,19 @@ the step that injects the holds only awaits that task. A stalled runner delays w
 of a release, never the release itself. The step still watches the controlled operation, and a
 command that ends before its gates were held fails the step with the command's own outcome.
 
+The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
+into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
+do not establish a single sorting window. The one-node and three-node examples retain their exact
+ordered payloads, tenant keys, and existing flush and receive deadlines.
+
+The combined message/duration window outline publishes each message-threshold group as one
+decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
+observing both outputs, it publishes one row per branch and measures each duration output from
+that publication, keeping the three-second lower bound and ten-second subscription deadlines.
+A late subscription read can lengthen the observed delay. The production-owner regression checks
+two retained rows immediately before and at the duration boundary, and three rows meeting the
+message threshold before that deadline.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
@@ -548,6 +581,12 @@ The boundary between them is kept in four places.
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second
   client policy.
+- **Controlled command recovery.** Standalone preparation barriers retain a coordinator's
+  transaction observation and its preflight result while the scenario transfers leadership.
+  Node- and domain-scoped resume barriers then hold the applying command's pause until the
+  scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
+  released observations. The scenario asserts the original execution reference's outcome and a
+  dependent command through the public session protocol; it adds no setup delay or request retry.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product
@@ -812,6 +851,12 @@ test identifier, and the last command output. A collector timeout alone does not
 emitter lost a record or failed to export it; retained diagnostics and a new attempt remain separate
 evidence.
 
+The log/trace DNS recovery outline gives both emitters a 250ms initial retry delay and a one-second
+ceiling. That ceiling keeps the next automatic attempt inside the ten-second Collector observation
+after the unavailable-client and DNS phases have lasted several attempts. The outline retains its
+five-second RPC timeout, both exact signal payloads, failure and DNS-question observations, and
+one- and three-node examples. Production retry policies continue to use their declared ceiling.
+
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
@@ -1011,6 +1056,11 @@ Browser assertions that wait for an acknowledged subscription tab to disappear p
 seconds. This bounds the server reply and browser update together; on expiry, the step reports the
 tab text that remains visible.
 
+A continuous browser assertion begins after its readiness predicate holds. The console reconnect
+scenario first waits for the restored clock's `PACED` state, then observes the complete stability
+period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
+the bounded selector predicate establishes clock readiness before the stability observation starts.
+
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
 visible while it waits. Its entry holds:
@@ -1145,8 +1195,9 @@ until that node has ended.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
-  observers have ended. The scenario publishes `finished` and then releases its feature permit and
-  run slot, so admission includes all teardown work.
+  observers have ended, the sockets a scenario bound to take one of them close first, and the holds
+  on the ingest addresses close with their return. The scenario publishes `finished` and then
+  releases its feature permit and run slot, so admission includes all teardown work.
 
 ### Scenario-Driven Stops
 
@@ -1207,7 +1258,7 @@ process startup both relaunch a lost bind on fresh ports.
 | Holder | Ports | Returned |
 | --- | --- | --- |
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
-| Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
+| Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit, and 1 more for each port an ingest address moved off | At the end of cleanup, when the holds on the ingest addresses close |
 | HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
@@ -1228,6 +1279,37 @@ draw that lands on reserved ports 65,536 times in a row fails with the pool exha
 many ports the process holds, and gives back the ports it had already reserved. A pool with one free
 port among seven thousand still yields it within that many draws almost every time, and a pool with
 none ends the draw in about a second.
+
+### Addresses A Node Binds
+
+A scenario draws its ZeroMQ ingest address, `{{zeromq_ingest_addr}}`, and its syslog ingest address,
+`{{syslog_ingest_addr}}`, with its identity, but a node binds them only once the ingestor that uses
+them starts after `START`, seconds later: a ZeroMQ PULL socket whose client declares
+`'bind' = 'true'`, and a syslog listener, which every node binds on its own loopback address. Until
+then the port is free at the operating system, and a socket that took it would fail every bind the
+ingestor retries, while the ingestor's reconnect delay doubles from 250 milliseconds to 30 seconds
+and soon outgrows the step that waits for it. Two measures keep these addresses bindable.
+
+- **The hold.** From the draw until cleanup, a TCP socket bound to the port on the wildcard address
+  with `SO_REUSEADDR`, which never listens, holds it. Linux picks no held port for a socket bound to
+  port zero or for an outgoing connection, and refuses an explicit bind of it without
+  `SO_REUSEADDR`, so neither the harness's own listeners on port zero nor any client socket on the
+  host can take it. A node's listener sets `SO_REUSEADDR`, as every Tokio listener does, and binds
+  beside the hold on its loopback address, after a restart as well. UDP has no hold: a syslog UDP
+  listener binds without `SO_REUSEADDR`, and any UDP socket on the port would refuse it.
+- **The check at first use.** The first time a scenario names the address, in the statement that
+  creates the client its node binds, the harness binds the port once as that node will, TCP with
+  `SO_REUSEADDR` on the wildcard address and, for a syslog address, UDP as well, and closes it
+  again. A bind refused with `AddrInUse` means another socket took the port, as Docker's proxy does
+  for a port it publishes and as any UDP socket can: the address moves to a freshly drawn and held
+  port before the statement names it, at most eight ports in all, and `cucumber.log` and the
+  standard error record each move with the refusal and what the kernel's socket tables list on the
+  taken port, each socket with its table, address, state, user and inode and whether this process
+  holds it. Any other refusal fails the scenario. Once named, the address never moves, because a
+  model carries it.
+
+A port an address moved off stays reserved with it until cleanup, since the socket that took it may
+still hold it.
 
 ## Server Processes
 
@@ -2016,6 +2098,36 @@ the fixture's large values. Query failure or timeout stays a diagnostic observat
 exact-row assertion still fails. This observation budget starts after the row deadline and grants
 no additional time for a missing row to satisfy the assertion.
 
+`just test-diagnostic-lib <selection> <test>` runs one exact library owner test in `deloxide`,
+`deloxide-order` or `deloxide-stress`. The owner starts its diagnostic process before
+creating runtime workers or acquiring tracked locks; isolated children inherit the attempt's
+evidence directory and retain their own process records. Each attempt keeps its output under
+`target/deloxide/focused/<selection>/library.*`. The command requires completed, non-ignored tests
+and a fresh evidence directory, and qualifies every retained record. Each invocation selects one
+owner, since the detector installs once per process. Ordinary library selections use `just
+test-runtime`. This focused observation does not replace the complete lane's workload inventory
+and accounting.
+
+Each registered `owner-tests` workload uses the fresh process the canonical lane launches and
+records one process observation. The ONNX queue-recovery body runs directly in that process; its
+ordinary test uses a supervised child to establish native-library isolation within the full unit
+suite.
+
+`just test-onnx-owner-binary <binary> <library> <filter>` replays a compiled inspection owner
+against an explicit runtime library. Retain the binary's source and execution mode, the library
+digest, the selected test and the process evidence with the replay.
+
+`just build-diagnostic-scenarios <selection>` prepares library, scenario and server executables for
+a supervised replay. Capture their source, mode and artifact identities before replaying the
+selected workloads.
+
+ONNX fixture preparation hands native-library loading, directory creation and model copies to
+`off_the_runner`; a replacement model copy uses the same owner. The scenario publishes its fixture
+placeholder after directory preparation completes and awaits any replacement before its next step.
+The runner continues polling other scenarios and the suite watchdog during that work. This is
+harness preparation: the node's subsequent metadata inspection retains its own thirty-second
+deadline, bulk admission and native-session ownership.
+
 `just test-diagnostic-harness <selection> <filter>` runs focused harness regressions in the chosen
 diagnostic build. `just coverage-harness-liveness <filter>` measures ordinary harness regressions
 in a separate target directory and retains its log and `lcov.info`, including the harness source,
@@ -2168,6 +2280,10 @@ The harness guarantees:
 - A server process launch that another socket kept from binding a drawn listener is launched again
   on fresh ports for that listener within its startup's deadline, at most three times, and every
   other ending of a launch fails its startup at once.
+- No socket bound to port zero and no outgoing connection takes the port of a ZeroMQ or syslog
+  address a scenario's nodes bind, from its draw until cleanup, and the first statement that names
+  the address names a port no other socket listened on, or held over UDP, when the harness checked
+  it.
 - The run ends within its budget, the cleanup window, and the bounded teardown, with a status that
   tells a timeout from a failure.
 
@@ -2210,6 +2326,10 @@ Its limits:
   renders. Until the process binds its gRPC port, a readiness probe dials whatever holds that port:
   a socket that took it can hold the probe until its request deadline, and another node that took
   it answers the probe in the process's place.
+- A socket that binds a node-bound address's port explicitly with `SO_REUSEADDR`, or over UDP,
+  after a statement named the address still fails the node's bind, because the address can no
+  longer move. Outside Linux the move names no holder, because the kernel's socket tables cannot be
+  read.
 
 ## Qualification Evidence
 
@@ -2231,6 +2351,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
+| An address a node binds keeps its drawn port off every ephemeral pick and out of its node's way, moves off a port another socket took at its first use and only then, names what held that port, and gives back every port it drew | `a_held_port_is_no_ephemeral_pick`, `a_node_listener_binds_beside_the_hold_on_any_loopback_address_and_after_a_restart`, `naming_a_free_address_binds_its_port_once_and_keeps_it`, `naming_moves_an_address_off_a_port_another_listener_took`, `naming_moves_a_syslog_address_off_a_port_a_udp_socket_took`, `a_zeromq_address_keeps_a_port_only_a_udp_socket_holds`, `a_refusal_other_than_a_taken_port_fails_and_leaves_the_address_unnamed`, `an_address_whose_every_port_is_taken_ends_at_the_draw_limit`, `release_gives_back_every_port_the_address_drew`, `the_listing_names_a_listener_on_the_port_and_its_process`, `a_socket_table_row_reads_its_address_state_owner_and_inode` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_awaiting_a_response_are_counted_until_their_final_head_begins`, `a_client_that_leaves_an_unfinished_response_abandons_it`, `a_wait_for_a_request_line_ends_once_that_request_is_captured`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
 | A real-process cluster converges only once every node answers and reaches every other node, a relaunched voter through a target newer than the one its killed process had and on the port its new process answers on, and a wait that cannot converge names why | `a_relaunched_member_converges_only_once_every_peer_reaches_its_new_process`, `a_member_that_had_stopped_observing_the_exited_process_converges_on_its_first_target`, `a_started_cluster_converges_once_every_member_reaches_every_peer`, `a_one_member_cluster_converges_without_peers`, `a_member_that_stops_answering_keeps_the_cluster_from_converging`, `a_status_line_convergence_cannot_read_ends_the_wait_with_its_member_and_line`, `an_expired_wait_names_the_condition_a_member_did_not_meet`, `convergence_ends_at_its_budget_with_what_had_not_converged_and_what_each_member_said`, `a_relaunch_relaunches_nothing_while_a_running_member_has_not_reported_its_targets`, `a_failed_relaunch_keeps_its_cause_beneath_the_member_it_relaunched`, `a_relaunched_member_is_asked_where_its_new_process_answers` |
@@ -2248,6 +2369,13 @@ member, for its gRPC listener. Each asserts that the startup relaunched exactly 
 that listener, and binds another port for it. A last scenario starts a process whose startup ends
 with another report, a web console certificate without its key, and asserts that the startup fails
 with the process's own exit after one launch.
+
+The scenarios tagged `@node_bound_port_taken`, in `tests/features/runtime/zeromq_ingestion.feature`
+and `tests/features/runtime/syslog_support.feature`, have another socket take the port a scenario
+drew for its ingest address before any statement names it: a listener with `SO_REUSEADDR` on every
+address for the ZeroMQ address, and a UDP socket on every address for the syslog address, on one-
+and three-node clusters. Each asserts that the ingestor becomes ready within 30 seconds and that a
+message sent to the address the scenario names reaches its relay.
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
 `cec5f764`, at the CI concurrency factor of two scenarios per CPU with Cucumber's two retries unless

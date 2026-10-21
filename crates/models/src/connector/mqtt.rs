@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
@@ -99,6 +103,58 @@ pub struct MqttTopicSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
+const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "SUBSCRIBE and PUBACK requests for the connection",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("1024 requests"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP, TLS and CONNECT",
+            bound: WaitBound::Driver("5 s"),
+        },
+        DeclaredWait {
+            wait: "SUBACK",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: WaitBound::Driver("keep-alive of 60 s, or the broker's"),
+        },
+    ],
+    driver_limits: &["An incoming packet above 10 KiB ends the connection."],
+};
+
+/// What the connector of a MQTT TOPIC emitter holds and how long it waits.
+const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "publishes queued for the driver",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2"),
+            overflow: BufferOverflow::FailPublish,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP, TLS and CONNECT",
+            bound: WaitBound::Driver("5 s"),
+        },
+        DeclaredWait {
+            wait: "answers to QOS 1 and 2 publishes",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "writes to the connection",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["Packets above the broker's maximum packet size are rejected."],
+};
+
 impl SourceEntity for MqttTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: false,
@@ -160,6 +216,7 @@ impl SourceEntity for MqttTopicSource {
                 ]),
             },
         ],
+        bounds: MQTT_SOURCE_BOUNDS,
     };
 }
 
@@ -363,6 +420,7 @@ impl SinkEntity for MqttTopicSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: MQTT_SINK_BOUNDS,
     };
 }
 

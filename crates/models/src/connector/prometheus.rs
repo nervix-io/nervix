@@ -22,10 +22,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use super::{configured_client::configured_client, entity_union::connector_sources};
+use super::{
+    bounds::{
+        BufferBound, DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sources,
+};
 use crate::{
-    AcknowledgementConfirmation, ClientConfigEntry, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, DomainClockPeriod, HttpRequestTimeout, HttpRequestTimeoutError,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientDeadline, ClientDeadlineError,
+    ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod,
     IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PositionClass, SourceBody, SourceEntity,
     SourceMetadataScope, SourceReference, SourceReferenceKind,
@@ -55,7 +62,7 @@ configured_client!(Prometheus: unpooled, config Nervix, CreateClientPrometheus =
 pub enum PrometheusClientKey {
     /// The [`PrometheusApiRoot`] every query is sent beneath. Required.
     Addr,
-    /// The [`HttpRequestTimeout`] that bounds each query. Required.
+    /// The [`ClientDeadline`] that bounds each query. Required.
     TimeoutMs,
     /// A PEM certificate authority that HTTPS trusts in addition to the client's own roots.
     TlsCaFile,
@@ -82,7 +89,7 @@ pub enum PrometheusClientConfigError {
         "'{}' is not a usable request timeout: {issue}",
         PrometheusClientKey::TimeoutMs
     )]
-    InvalidTimeout { issue: HttpRequestTimeoutError },
+    InvalidTimeout { issue: ClientDeadlineError },
     #[error(
         "'{}' and '{}' must be set together",
         PrometheusClientKey::TlsCertFile,
@@ -173,7 +180,7 @@ impl PrometheusApiRoot {
                 key: PrometheusClientKey::TimeoutMs,
             }));
         };
-        if let Err(report) = HttpRequestTimeout::parse(timeout) {
+        if let Err(report) = ClientDeadline::parse(timeout) {
             let issue = *report.current_context();
             return Err(
                 report.change_context(PrometheusClientConfigError::InvalidTimeout { issue })
@@ -208,6 +215,22 @@ pub struct PrometheusQuerySource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a PROMETHEUS QUERY holds and how long it waits.
+const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "the query response",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[DeclaredWait {
+        wait: "a query: name resolution, connection, TLS and the response",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Required,
+        },
+    }],
+    driver_limits: &["Response heads above 100 headers or 417,792 bytes are refused."],
+};
+
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers
 /// of its own, so a query source reads none.
 impl SourceEntity for PrometheusQuerySource {
@@ -239,6 +262,7 @@ impl SourceEntity for PrometheusQuerySource {
                 },
             },
         ],
+        bounds: PROMETHEUS_SOURCE_BOUNDS,
     };
 }
 
@@ -463,12 +487,12 @@ mod tests {
         assert_eq!(
             timeout.current_context(),
             &PrometheusClientConfigError::InvalidTimeout {
-                issue: HttpRequestTimeoutError::NotPositiveWholeMilliseconds,
+                issue: ClientDeadlineError::NotPositiveWholeMilliseconds,
             }
         );
         assert_eq!(
-            timeout.downcast_ref::<HttpRequestTimeoutError>(),
-            Some(&HttpRequestTimeoutError::NotPositiveWholeMilliseconds)
+            timeout.downcast_ref::<ClientDeadlineError>(),
+            Some(&ClientDeadlineError::NotPositiveWholeMilliseconds)
         );
     }
 

@@ -21,6 +21,7 @@ shuttle = [
 testing = []
 
 [dependencies]
+arch-into = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }

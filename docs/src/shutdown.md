@@ -307,6 +307,19 @@ later admission; a replacement source does not reopen that retained lifetime. A 
 holding an intake lease may finish within the existing shutdown deadline. Endpoint definitions and
 intake leases are volatile publications and are reconstructed from the installed revision on startup.
 
+The HTTP and HTTPS listeners stop accepting connections and ask their existing connections to
+finish active responses. The admission token also wakes held endpoint ACK waits, before graph
+drain starts. Connection joining remains bounded by the existing node shutdown deadline; an
+uncompleted request body never extends that deadline. A TLS connection whose handshake has not
+completed is cancelled at admission stop.
+
+For endpoint `MODE ACK`, intake stopping also resolves held replies as unavailable immediately,
+using the existing client `outcome_unknown` / `interrupted` outcome and the configured retry delay.
+The waiter observes the quiesce publication before source close and also observes exact lifetime
+ending. This ends the response wait, not admitted graph effects: downstream work may still finish
+during drain. A sender that retries must allow duplicate effects. Unacknowledged endpoint requests
+retain their admission-only response boundary.
+
 Payloads already admitted continue through their routes.
 Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
 change wait compares against that publication after registering the waiter, so a shutdown or
@@ -721,13 +734,13 @@ What that contract is depends on the source, and three groups differ sharply:
 | --- | --- | --- |
 | Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
 | HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
-| NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, HTTP endpoints, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| HTTP and WebSocket endpoints | `MODE NO ACK` confirms admission; `MODE ACK` holds its reply through the graph root | Held ACK replies report unavailable on intake stop; only the sender can retry, and admitted effects may duplicate |
 | Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
-The last row is the one to plan around. Those sources have no acknowledged delivery mode at all, so
-a record admitted from them and not yet emitted is lost both by a drain that runs out of time and by
-every forced ending. An endpoint rejects new requests as soon as intake stops, so a client that
-handles the rejection can retry; a payload it already accepted is not redelivered by anything.
+Sources without an acknowledged mode lose a record admitted but not yet emitted when drain runs
+out of time or the process is forced to end. Endpoints never redeliver input themselves: an
+application handles a refusal, interrupted reply or broken transport and decides whether to retry.
 
 A general failure handled by `ON GENERAL ERROR IGNORE` acknowledges the record, while
 `ON GENERAL ERROR LOG` negatively acknowledges it. During a drain that choice decides whether an
@@ -977,7 +990,7 @@ retains its durable activation gate across restart. A normal `START` creates a n
 rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
-[Backup And Restore](backup-and-restore.md#publishing-the-state-generation). A deduplicator or
+[Generation Storage](backup-and-restore-architecture.md#generation-storage). A deduplicator or
 window backup likewise captures what each branch task publishes when the cut's lifecycle
 checkpoint asks it to, independently of the periodic interval, and a restore rebuilds each branch's
 native checkpoint from its archived Arrow groups and streams it through the same publisher, one
@@ -1178,8 +1191,10 @@ The same owner reclaims selected-namespace chunks made unreachable by ordinary o
 checkpoint replacement, ownership recovery or purge, including after restart. It keeps the
 selected publication and every currently referenced segmented revision.
 Reclamation preserves snapshot readers and never completes an installation or opens its `START`
-gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
-for quotas, metrics and physical storage limits.
+gate. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the sweep and [restore
+checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for quotas,
+metrics and physical storage limits.
 
 ### Domain Time
 

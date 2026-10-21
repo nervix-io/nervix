@@ -5,8 +5,9 @@
 //! - **Owns.** The AMQP connection and channel a client configures, queue declaration,
 //!   the consumer and prefetch window a source reads through, AMQP headers in both
 //!   directions, per-delivery acknowledgement and requeue, publisher confirms, the channel round
-//!   trip that completes a `NO_ACK` write, returned-message classification, and the broker's
-//!   refusal of a message above its `max_message_size`.
+//!   trip that completes a `NO_ACK` write and the client `timeout_ms` that bounds it,
+//!   returned-message classification, and the broker's refusal of a message above its
+//!   `max_message_size`.
 //! - **Depends on.** The connector contract, vocabulary values, the node resolver, `error-stack`,
 //!   Tokio and `lapin`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -60,13 +61,14 @@ use lapin::{
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    AckConfirmation, BrokerPublishingMode, ClientConfigError, ConfiguredDeadline, DeadlineElapsed,
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
+    SinkStartResult,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, QueueName};
-use nervix_primitives::time::{Instant, sleep};
+use nervix_primitives::time::{Instant, sleep, timeout};
 pub use source::{
     RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError, RabbitMqSourceMessage,
     RabbitMqSourcePlan, RabbitMqSourcePosition,
@@ -94,6 +96,9 @@ pub struct RabbitMqSink {
     channel: lapin::Channel,
     queue: QueueName,
     mode: BrokerPublishingMode,
+    /// The client's `timeout_ms`, which bounds the round trip that ends a `NO_ACK` write when the
+    /// client sets it.
+    round_trip: Option<ConfiguredDeadline>,
 }
 
 /// Why the broker refused one message the sink wrote.
@@ -129,6 +134,16 @@ enum ConfirmedAnswer {
     Failed(Report<SinkPublishError>),
 }
 
+/// Why a `NO_ACK` write stopped before the broker answered its round trip.
+enum UnconfirmedStop {
+    /// The channel is gone, as the failure the sink saw shows. The messages written on it stay
+    /// unresolved until the loss is settled.
+    ChannelLost(lapin::Error),
+    /// The broker did not answer the round trip within the client's `timeout_ms`. The messages the
+    /// write put on the channel stay unresolved, for the host's retry.
+    RoundTripElapsed(DeadlineElapsed),
+}
+
 /// Why a confirmed write stopped writing on its channel.
 enum ConfirmedStop {
     /// The write failed for a reason other than a lost channel: a nack, a return that does not
@@ -140,32 +155,44 @@ enum ConfirmedStop {
 }
 
 impl RabbitMqSink {
+    /// Connects, opens the channel the sink publishes through and checks that its queue exists,
+    /// every step within the client's `connect_timeout_ms`.
     pub async fn new(config: RabbitMqSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let mode = config.mode;
+        let round_trip =
+            ConfiguredDeadline::timeout(&config.config).map_err(Self::configuration_error)?;
         let broker =
             RabbitMqBroker::from_config(&config.config, config.dns).map_err(Self::connect_error)?;
-        let connection = broker.connect().await.map_err(Self::connect_error)?;
-        let closures = ChannelClosures::listen(&connection);
-        let channel = Self::open_channel(&connection, mode)
-            .await
-            .map_err(Self::start_error)?;
-        channel
-            .queue_declare(
-                config.queue.as_str().into(),
-                QueueDeclareOptions {
-                    passive: true,
-                    ..Default::default()
-                },
-                FieldTable::default(),
+        let opening = broker.connect().await.map_err(Self::connect_error)?;
+        let closures = ChannelClosures::listen(opening.connection());
+        let channel = opening
+            .within_budget(
+                "opening the RabbitMQ publishing channel",
+                Self::open_channel(opening.connection(), mode),
             )
             .await
-            .map_err(Self::start_error)?;
+            .map_err(|failure| failure.beneath(SinkStartError::Initialize { sink: RABBITMQ }))?;
+        opening
+            .within_budget(
+                "checking the RabbitMQ queue",
+                channel.queue_declare(
+                    config.queue.as_str().into(),
+                    QueueDeclareOptions {
+                        passive: true,
+                        ..Default::default()
+                    },
+                    FieldTable::default(),
+                ),
+            )
+            .await
+            .map_err(|failure| failure.beneath(SinkStartError::Initialize { sink: RABBITMQ }))?;
         Ok(Self {
-            connection,
+            connection: opening.opened(),
             closures,
             channel,
             queue: config.queue,
             mode,
+            round_trip,
         })
     }
 
@@ -226,7 +253,9 @@ impl RabbitMqSink {
     /// own. Once the messages are written, the sink asks the channel for one round trip, which the
     /// broker answers only after it has taken every message written before the request, and that
     /// answer delivers them. A write therefore costs one round trip, however many messages it
-    /// carries. A channel lost on the way is settled by [`Self::settle_unconfirmed_loss`].
+    /// carries. A channel lost on the way is settled by [`Self::settle_unconfirmed_loss`], and a
+    /// round trip that runs out of the client's `timeout_ms` fails the write, leaving what it
+    /// wrote to the host's retry.
     async fn publish_unconfirmed(
         &mut self,
         mut unsent: VecDeque<SinkRecord>,
@@ -242,7 +271,11 @@ impl RabbitMqSink {
                     }
                     return;
                 }
-                Err(observed) => observed,
+                Err(UnconfirmedStop::RoundTripElapsed(elapsed)) => {
+                    outcome.fail(Self::round_trip_error(elapsed));
+                    return;
+                }
+                Err(UnconfirmedStop::ChannelLost(observed)) => observed,
             };
             let closure = self
                 .closures
@@ -268,7 +301,7 @@ impl RabbitMqSink {
         &mut self,
         unsent: &mut VecDeque<SinkRecord>,
         written: &mut Vec<SinkRecord>,
-    ) -> lapin::Result<()> {
+    ) -> Result<(), UnconfirmedStop> {
         while let Some(record) = unsent.pop_front() {
             nervix_primitives::task::consume_budget().await;
             match self.publish_message(&record).await {
@@ -276,14 +309,38 @@ impl RabbitMqSink {
                 Ok(_not_requested) => written.push(record),
                 Err(error) => {
                     unsent.push_front(record);
-                    return Err(error);
+                    return Err(UnconfirmedStop::ChannelLost(error));
                 }
             }
         }
         if written.is_empty() {
             return Ok(());
         }
-        self.channel.basic_qos(0, BasicQosOptions::default()).await
+        self.round_trip().await
+    }
+
+    /// The channel's round trip that ends a `NO_ACK` write, within the client's `timeout_ms` when
+    /// it sets one.
+    async fn round_trip(&mut self) -> Result<(), UnconfirmedStop> {
+        let answered = self.channel.basic_qos(0, BasicQosOptions::default());
+        Self::answered_within(self.round_trip, answered).await
+    }
+
+    /// The broker's answer to a round trip, `answered`, within `deadline` when the client sets
+    /// one; a failed answer is the channel's.
+    async fn answered_within(
+        deadline: Option<ConfiguredDeadline>,
+        answered: impl Future<Output = lapin::Result<()>>,
+    ) -> Result<(), UnconfirmedStop> {
+        let Some(deadline) = deadline else {
+            return answered.await.map_err(UnconfirmedStop::ChannelLost);
+        };
+        match timeout(deadline.bound(), answered).await {
+            Ok(answer) => answer.map_err(UnconfirmedStop::ChannelLost),
+            Err(_) => Err(UnconfirmedStop::RoundTripElapsed(
+                deadline.elapsed("the round trip that ends a RabbitMQ NO ACK write"),
+            )),
+        }
     }
 
     /// Settles the messages a `NO_ACK` write had on a channel it lost.
@@ -660,22 +717,36 @@ impl RabbitMqSink {
         ))
     }
 
+    /// A round trip that ran out of the client's `timeout_ms` as the write's failure, which the
+    /// host retries: the deadline stays its typed cause, and its text leads the report.
+    fn round_trip_error(elapsed: DeadlineElapsed) -> Report<SinkPublishError> {
+        let message = elapsed.to_string();
+        Report::new(elapsed)
+            .change_context(SinkPublishError::Publish { sink: RABBITMQ })
+            .attach_printable(message)
+    }
+
+    /// A client configuration key the sink cannot read as a configuration failure, with its chain
+    /// leading the report.
+    fn configuration_error(report: Report<ClientConfigError>) -> Report<SinkStartError> {
+        let message = format!("{report:#}");
+        report
+            .change_context(SinkStartError::InvalidConfiguration { sink: RABBITMQ })
+            .attach_printable(message)
+    }
+
     /// A failed connection as a start failure: the client's configuration when it is at fault,
     /// otherwise the sink's initialization, which the host retries. The connection failure is kept
-    /// as the typed cause and its message leads the report.
+    /// as the typed cause, and its chain, down to a `connect_timeout_ms` it ran out of, leads the
+    /// report.
     fn connect_error(report: Report<RabbitMqConnectError>) -> Report<SinkStartError> {
         let context = if report.current_context().is_configuration() {
             SinkStartError::InvalidConfiguration { sink: RABBITMQ }
         } else {
             SinkStartError::Initialize { sink: RABBITMQ }
         };
-        let message = report.current_context().to_string();
+        let message = format!("{report:#}");
         report.change_context(context).attach_printable(message)
-    }
-
-    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::Initialize { sink: RABBITMQ })
-            .attach_printable(error.to_string())
     }
 
     #[cfg_attr(
@@ -726,7 +797,7 @@ mod tests {
     use lapin::{ChannelState, ErrorKind, message::Delivery};
     use meticulous::ResultExt as _;
     use nervix_dns::DnsLookupFailure;
-    use nervix_models::Timestamp;
+    use nervix_models::{DeadlineKey, Timestamp};
 
     use super::*;
 
@@ -964,6 +1035,96 @@ mod tests {
             Some("resolving RabbitMQ host 'rabbitmq.nervix.test' failed: the name does not exist")
         );
         assert!(unresolved.downcast_ref::<RabbitMqConnectError>().is_some());
+
+        let connect_timeout = nervix_connector::ConfiguredDeadline::connect(&[])
+            .expect("a client without the key takes the default");
+        let stalled = RabbitMqSink::connect_error(
+            Report::new(connect_timeout.elapsed("the TLS handshake with the RabbitMQ broker"))
+                .change_context(RabbitMqConnectError::TlsHandshake {
+                    host: "rabbitmq.nervix.test".to_string(),
+                }),
+        );
+        let leading = stalled
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            leading.map(String::as_str),
+            Some(
+                "the TLS handshake with RabbitMQ host 'rabbitmq.nervix.test' failed: the TLS \
+                 handshake with the RabbitMQ broker did not finish within connect_timeout_ms 30s"
+            )
+        );
+    }
+
+    fn timeout_ms(value: &str) -> Vec<ClientConfigEntry> {
+        vec![ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: value.to_string(),
+        }]
+    }
+
+    #[nervix_primitives::test]
+    async fn a_no_ack_round_trip_the_broker_does_not_answer_ends_within_timeout_ms() {
+        let deadline = ConfiguredDeadline::timeout(&timeout_ms("50"))
+            .assured("50 ms is a valid deadline")
+            .assured("the entries set timeout_ms");
+
+        let stalled = RabbitMqSink::answered_within(Some(deadline), std::future::pending()).await;
+        let Err(UnconfirmedStop::RoundTripElapsed(elapsed)) = stalled else {
+            panic!("a round trip the broker never answers runs out of timeout_ms");
+        };
+        assert_eq!(
+            (elapsed.key, elapsed.bound),
+            (DeadlineKey::Timeout, Duration::from_millis(50))
+        );
+        let report = RabbitMqSink::round_trip_error(elapsed);
+        assert!(matches!(
+            report.current_context(),
+            SinkPublishError::Publish { sink: RABBITMQ }
+        ));
+        assert_eq!(
+            report.downcast_ref::<DeadlineElapsed>().copied(),
+            Some(elapsed)
+        );
+        let leading = report
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            leading.map(String::as_str),
+            Some(
+                "the round trip that ends a RabbitMQ NO ACK write did not finish within \
+                 timeout_ms 50ms"
+            )
+        );
+
+        for deadline in [Some(deadline), None] {
+            let answered = RabbitMqSink::answered_within(deadline, async { Ok(()) }).await;
+            assert!(matches!(answered, Ok(())));
+            let lost = RabbitMqSink::answered_within(deadline, async { Err(lost_channel()) }).await;
+            assert!(matches!(lost, Err(UnconfirmedStop::ChannelLost(_))));
+        }
+    }
+
+    #[test]
+    fn a_timeout_ms_that_breaks_the_deadline_rule_is_a_configuration_failure() {
+        let Err(invalid) = ConfiguredDeadline::timeout(&timeout_ms("0")) else {
+            panic!("zero milliseconds is not a deadline");
+        };
+        let report = RabbitMqSink::configuration_error(invalid);
+        assert!(matches!(
+            report.current_context(),
+            SinkStartError::InvalidConfiguration { sink: RABBITMQ }
+        ));
+        let leading = report
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            leading.map(String::as_str),
+            Some(
+                "invalid client config key 'timeout_ms': not a positive whole number of \
+                 milliseconds"
+            )
+        );
     }
 
     fn returned_message(reply_code: u16, reply_text: &str) -> BasicReturnMessage {

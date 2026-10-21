@@ -17,7 +17,14 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
@@ -184,6 +191,22 @@ const METRIC: OptionDeclaration = OptionDeclaration {
     ]),
 };
 
+/// What the connector of a OTEL holds and how long it waits.
+const OTEL_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "the export request of a publish without BATCH",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[DeclaredWait {
+        wait: "an export: name resolution, connection, TLS and the response",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Unbounded,
+        },
+    }],
+    driver_limits: &["gRPC responses above 4 MiB are refused."],
+};
+
 /// What every OTEL sink declares: an export is one request the collector answers, and its fields
 /// are mapped directly rather than encoded by a codec.
 const OTEL_SINK_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
@@ -197,6 +220,7 @@ const OTEL_SINK_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
     options: &[ATTRIBUTES, RESOURCE, SCOPE],
     envelope: &[],
     properties: &[],
+    bounds: OTEL_BOUNDS,
 };
 
 /// What a metrics sink declares beside every OTEL sink's declaration: the metric it exports.

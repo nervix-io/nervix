@@ -1014,6 +1014,24 @@ impl IngestorQuiesceControl {
         }
     }
 
+    /// Held endpoint responses end when intake stops for shutdown or ownership handoff. A
+    /// resumable pause still lets an admitted request finish through its existing ACK root.
+    pub(in crate::runtime) async fn wait_until_intake_stops(&self) {
+        let mut observation = self.observation();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if observation
+                .publication
+                .decision
+                .cause()
+                .is_some_and(IngestorQuiesceCause::stops_intake_regardless_of_mode)
+            {
+                return;
+            }
+            self.wait_for_change_since(&mut observation).await;
+        }
+    }
+
     /// Runs `delivery`, the work that brings a live payload to its ingest group, until it
     /// completes, `stop` turns true, or a publication newer than `decided` replaces the decision
     /// the payload was taken in under. A new decision leaves `decided` observing it, and ends
@@ -2181,6 +2199,7 @@ mod tests {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],
+                domain_offsets: None,
             },
         );
         runtime.inner.ingestor_quiescence.insert(

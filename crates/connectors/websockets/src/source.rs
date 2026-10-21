@@ -2,8 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume, signaling
-//!   before readiness, accepted-frame storage, payload delivery, and suspend and close operations.
+//! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume within the
+//!   client's `connect_timeout_ms`, signaling before readiness, accepted-frame storage, payload
+//!   delivery, and suspend and close operations.
 //! - **Depends on.** The source contract, typed plans and host services, compiled signaling engine,
 //!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
 //! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
@@ -31,11 +32,12 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::{SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, RetainedIngestHeaders,
-    RustlsClientConfigSource, SourceBatch, SourceBatchRequest, SourceConnector, SourceError,
-    SourceMessage, SourceReadCancellation, SourceResult, SourceResume,
+    BrokerSourceConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
+    RetainedIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest,
+    SourceConnector, SourceError, SourceMessage, SourceReadCancellation, SourceResult,
+    SourceResume,
 };
-use nervix_dns::{ConnectionBudget, DnsResolver};
+use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{ClientConfigEntry, WebsocketsClientConfig, WebsocketsUpgradeHeaders};
 use nervix_primitives::{
     net::TcpStream,
@@ -84,8 +86,10 @@ pub struct WebsocketSourcePlan {
     entries: Vec<ClientConfigEntry>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
     headers: WebsocketsUpgradeHeaders,
-    connect_timeout: Duration,
     ping_interval: Option<Duration>,
+    /// How long opening one connection may take: name resolution, the address attempts, TLS and
+    /// the upgrade handshake.
+    connect_timeout: ConfiguredDeadline,
 }
 
 /// The configured request authority and the socket target it names. The request itself always
@@ -107,6 +111,8 @@ impl WebsocketSourcePlan {
     ) -> Result<Self, Report<WebsocketSourcePlanError>> {
         let config = WebsocketsClientConfig::parse(&entries)
             .change_context(WebsocketSourcePlanError::Configuration)?;
+        let connect_timeout = ConfiguredDeadline::connect(&entries)
+            .change_context(WebsocketSourcePlanError::Configuration)?;
         let parsed = config.endpoint();
         let endpoint_requires_tls = parsed.scheme() == "wss";
         let host = parsed
@@ -126,7 +132,7 @@ impl WebsocketSourcePlan {
             entries,
             signaling_protocol,
             headers,
-            connect_timeout: config.connect_timeout(),
+            connect_timeout,
             ping_interval: config.ping_interval(),
         })
     }
@@ -179,12 +185,12 @@ impl SourceMessage for WebsocketSourceMessage {
 pub struct WebsocketSource {
     endpoint: WebsocketEndpoint,
     dns: DnsResolver,
+    connect_timeout: ConfiguredDeadline,
     tls_connector: Option<Connector>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
     connection: Option<WebsocketConnection>,
     pending: VecDeque<WebsocketSourceMessage>,
     headers: WebsocketsUpgradeHeaders,
-    connect_timeout: Duration,
     ping_interval: Option<Duration>,
 }
 
@@ -231,6 +237,27 @@ impl WebsocketSource {
                     }))
             }
         }
+    }
+
+    /// Why a resume opened no connection: when the attempts ran out of the client's
+    /// `connect_timeout_ms`, the failure names it beneath the resume's.
+    fn unconnected(&self, budget: &OperationBudget, failures: Vec<String>) -> Report<SourceError> {
+        let resume = SourceError::Resume {
+            connector: WEBSOCKETS,
+        };
+        let mut report = if budget.remaining().is_zero() {
+            Report::new(
+                self.connect_timeout
+                    .elapsed("opening the WebSocket connection"),
+            )
+            .change_context(resume)
+        } else {
+            Report::new(resume)
+        };
+        for failure in failures {
+            report = report.attach_printable(failure);
+        }
+        report
     }
 
     async fn close_transport(&mut self) -> error_stack::Result<(), WebsocketSourceFailure> {
@@ -288,12 +315,12 @@ impl SourceConnector for WebsocketSource {
         Ok(Self {
             endpoint: plan.endpoint.clone(),
             dns: plan.dns.clone(),
+            connect_timeout: plan.connect_timeout,
             tls_connector,
             signaling_protocol: plan.signaling_protocol.clone(),
             connection: None,
             pending: VecDeque::new(),
             headers: plan.headers.clone(),
-            connect_timeout: plan.connect_timeout,
             ping_interval: plan.ping_interval,
         })
     }
@@ -314,7 +341,7 @@ impl SourceConnector for WebsocketSource {
         if self.connection.is_some() {
             return Ok(SourceResume::Ready);
         }
-        let budget = ConnectionBudget::start(self.connect_timeout);
+        let budget = OperationBudget::start(self.connect_timeout.bound(), LookupShare::Whole);
         let mut request = self
             .endpoint
             .raw
@@ -326,14 +353,12 @@ impl SourceConnector for WebsocketSource {
         WebsocketConnection::install_request_headers(&mut request, &self.headers);
         let addresses = self
             .dns
-            .resolve(&self.endpoint.host, self.endpoint.port, budget.remaining())
+            .resolve(&self.endpoint.host, self.endpoint.port, budget.lookup())
             .await
             .change_context(SourceError::Resume {
                 connector: WEBSOCKETS,
             })?;
-        let mut report = Report::new(SourceError::Resume {
-            connector: WEBSOCKETS,
-        });
+        let mut failures = Vec::new();
         let mut connected = None;
         for attempt in budget.attempts(&addresses) {
             nervix_primitives::task::consume_budget().await;
@@ -355,19 +380,15 @@ impl SourceConnector for WebsocketSource {
                     connected = Some(connection);
                     break;
                 }
-                Ok(Err(error)) => {
-                    report = report.attach_printable(format!("{}: {error}", attempt.address));
-                }
-                Err(_) => {
-                    report = report.attach_printable(format!(
-                        "{}: no WebSocket connection within {:?}",
-                        attempt.address, attempt.budget
-                    ));
-                }
+                Ok(Err(error)) => failures.push(format!("{}: {error}", attempt.address)),
+                Err(_) => failures.push(format!(
+                    "{}: no WebSocket connection within {:?}",
+                    attempt.address, attempt.budget
+                )),
             }
         }
         let Some((mut relay, response)) = connected else {
-            return Err(report);
+            return Err(self.unconnected(&budget, failures));
         };
         let headers = WebsocketConnection::capture_headers(response.headers());
         if let Some(protocol) = self.signaling_protocol.as_ref() {
@@ -550,6 +571,71 @@ mod tests {
     use tokio_tungstenite::{WebSocketStream, tungstenite::handshake::derive_accept_key};
 
     use super::*;
+
+    #[nervix_primitives::test]
+    async fn a_server_that_never_answers_the_upgrade_is_reported_within_connect_timeout() {
+        let fixture = DnsFixture::start().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        // Accepts the connection and never answers the upgrade request.
+        let silent = nervix_primitives::task::spawn(async move {
+            let (held, _) = listener.accept().await.assured("the source connects");
+            std::future::pending::<()>().await;
+            drop(held);
+        });
+        let mut entries = endpoint(format!("ws://{address}/socket"));
+        entries.push(ClientConfigEntry {
+            key: "connect_timeout_ms".to_string(),
+            value: "200".to_string(),
+        });
+        let plan = WebsocketSourcePlan::new(
+            entries,
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver,
+        )
+        .assured("the endpoint and deadline are valid");
+        let mut source = WebsocketSource::open(&plan, 0)
+            .await
+            .assured("the source opens");
+        let failure = timeout(Duration::from_secs(10), source.resume())
+            .await
+            .assured("connect_timeout_ms bounds the resume")
+            .err()
+            .assured("a server that never answers cannot be connected");
+        let elapsed = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<nervix_connector::DeadlineElapsed>())
+            .assured("the elapsed deadline is the innermost cause");
+        assert_eq!(elapsed.key, nervix_models::DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+        assert!(format!("{failure:#}").contains("within connect_timeout_ms 200ms"));
+        silent.abort();
+    }
+
+    #[nervix_primitives::test]
+    async fn an_invalid_connect_timeout_refuses_the_plan() {
+        let fixture = DnsFixture::start().await;
+        let mut entries = endpoint("ws://127.0.0.1:9/socket".to_string());
+        entries.push(ClientConfigEntry {
+            key: "connect_timeout_ms".to_string(),
+            value: "0".to_string(),
+        });
+        let error = WebsocketSourcePlan::new(
+            entries,
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver,
+        )
+        .err()
+        .assured("a zero deadline cannot plan a connection");
+        assert!(matches!(
+            error.current_context(),
+            WebsocketSourcePlanError::Configuration
+        ));
+    }
 
     async fn connected_pair() -> (WebsocketSource, WebSocketStream<TcpStream>) {
         connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await

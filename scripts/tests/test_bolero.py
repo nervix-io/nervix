@@ -147,6 +147,7 @@ class InventoryTests(unittest.TestCase):
             "task-status-transitions",
             "entity-freeze-transitions",
             "endpoint-route-table",
+            "endpoint-acknowledgement-body",
             "relay-channel-lifetimes",
             "interconnect-slot-lifetimes",
             "runtime-checkpoint-description-wire",
@@ -297,6 +298,7 @@ class InventoryTests(unittest.TestCase):
             "codec-json-non-finite-floats",
             "codec-transforming-numbers",
             "jaq-native-numbers",
+            "jaq-yaml-string-values",
             "remote-relay-rows",
             "remote-relay-rows-malformed",
             "relay-wire-messages",
@@ -332,9 +334,11 @@ class InventoryTests(unittest.TestCase):
             "sqs-batch-requests",
             "iceberg-nested-datetime-staging",
             "sentry-prepared-envelopes",
+            "http-request-heads",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "websocket-signaling-protobuf-values",
+            "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",
             "otel-hex-ids",
             "console-pending-backups",
@@ -343,6 +347,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "ingestor-describe-envelope",
+            "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-core",
@@ -382,7 +387,9 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-websockets",
             "nervix-connector-otel",
             "nervix-connector-sentry",
+            "nervix-connector-http",
             "nervix-web-console",
+            "nervix-dns",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

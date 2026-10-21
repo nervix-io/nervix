@@ -15,7 +15,14 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
     ClientName, CollectionName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality,
     EmitterBodyForm, EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice,
@@ -46,6 +53,32 @@ pub enum MongoDbConflictAction {
     DoNothing { target: Vec<String> },
     DoUpdate { target: Vec<String> },
 }
+
+/// What the connector of a MONGODB COLLECTION holds and how long it waits.
+const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("connectTimeoutMS, 10 s"),
+        },
+        DeclaredWait {
+            wait: "server selection",
+            bound: WaitBound::Driver("30 s"),
+        },
+        DeclaredWait {
+            wait: "the handshake, a pool wait and a write",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A document above 16 MiB is rejected."],
+};
 
 impl SinkEntity for MongoDbCollectionSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
@@ -79,6 +112,7 @@ impl SinkEntity for MongoDbCollectionSink {
         }],
         envelope: &[],
         properties: &[],
+        bounds: MONGODB_BOUNDS,
     };
 }
 

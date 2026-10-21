@@ -48,7 +48,9 @@ names it. The contracts its scenarios verify stay with the chapters that own the
 - guest checkpoints: [WASM State And Recovery](./wasm-state.md)
 - scheduling, the voter observation grace and planned handoffs:
   [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover)
-- archives: [Backup And Restore](./backup-and-restore.md)
+- backup cuts, archives and restore installation:
+  [Backup And Restore Architecture](./backup-and-restore-architecture.md), and the statements and
+  their reports: [Backup And Restore](./backup-and-restore.md)
 - source and sink acknowledgement:
   [Connector Crates And The Connector Contract](./connector-contract.md)
 - the deadlock detector:
@@ -77,7 +79,7 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/run-baseline.sh` | The controller of every scenario. It owns the arguments and their bounds, preflight, image and tool identity, TLS, the Compose deployment, graph installation, traffic, the final ledger, findings, diagnostics and the exit trap |
 | `scripts/chaos/run-*.sh` | Scenario entry points that set each scenario's default fixture size and whole-run bound |
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
-| `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
+| `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
 | `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed and diagnostic evidence |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
@@ -171,6 +173,8 @@ amd64 workers.
 | `fixtures/stateful.nspl`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
 | `fixtures/paced.nspl`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
 | `fixtures/wasm/processors/branch-counter.wat` | The stateful scenario's prebuilt WASM guest, in WebAssembly text |
+| `fixtures/restore-state.nspl` | The restore scenarios' padded guest: a Kafka ingestor with domain-owned offsets and a detached, branched WASM processor |
+| `fixtures/wasm/padded-state-wat.sh` | Writes the padded guest in WebAssembly text for a save size: each branch saves exactly that many pseudo-random bytes, restores only a save of that size, and emits nothing |
 | `fixtures/mixed-burst-loss-leader-peer.json` | An explicit one-step mixed-instability plan the soak suite runs |
 
 The baseline graph has three parts:
@@ -215,12 +219,12 @@ A run needs a Linux Docker host with the following.
 - **Suite tools.** A suite also needs `setsid` from util-linux and a `tee` that takes `-p`, as GNU
   coreutils' does. Suite cleanup reads process state from `/proc` and `ps`.
 - **The local Docker socket.** `/var/run/docker.sock` must exist. Every scenario except
-  `baseline`, `backup`, `backup-cycles` and `restore-fresh-cluster` mounts it into Pumba's
-  container, after checking Pumba's version and its access with a dry run.
-- **Network fault support.** The partition, degraded-link, former-owner and backup-fault scenarios,
-  the `owner-partition` and `voter-partition` faults and mixed instability need a kernel that offers
-  the `prio`, `sfq` and `netem` queueing disciplines and `iptables` inside container network
-  namespaces. Each run proves this on the worker before it starts; see
+  `baseline`, `backup`, `backup-cycles`, `restore-fresh-cluster` and `restore-volume` mounts it into
+  Pumba's container, after checking Pumba's version and its access with a dry run.
+- **Network fault support.** The partition, degraded-link, former-owner, backup-fault and
+  restore-fault scenarios, the `owner-partition` and `voter-partition` faults and mixed instability
+  need a kernel that offers the `prio`, `sfq` and `netem` queueing disciplines and `iptables`
+  inside container network namespaces. Each run proves this on the worker before it starts; see
   [Network Preflight](#network-preflight).
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
     `sch_netem`.
@@ -286,7 +290,8 @@ inspection where a verdict depends on them:
 | Raft heartbeat and election window | 250 ms; 1.5 to 3 seconds | 250 ms; 10 to 12 seconds for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
 | Node unavailability timeout | 10 seconds | 15 seconds for the same pause deployments |
 | Raft snapshot entry threshold, covered log entries retained | 10,000; 1,000 | 64; 16 for `stale-follower` |
-| State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful` |
+| State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful`; one replica for `restore-fault` and `restore-volume` |
+| Command retry validity | 15 minutes | 3 minutes for `restore-fault --fault reclamation-owner-crash` |
 
 ### Interconnect TLS
 
@@ -336,10 +341,10 @@ take.
 | `--artifacts DIR` | Every scenario | Default `target/chaos` |
 | `--run-id ID` | Every scenario | 1 to 96 letters, digits, dots, underscores or hyphens, starting with a letter or digit. Generated when omitted. A run ID whose directory already exists is refused |
 | `--keep` | Every scenario | Keeps the run's resources after diagnostics and prints their cleanup command |
-| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `domain-time` and `backup-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation |
+| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
 | `--case CASE`, `--partition-seconds N` | `partition-recovery` | `all`, `follower`, `asymmetric`, `leader` or `quorum-loss`, default `all`; 20 to 600, default 45 |
 | `--isolation-seconds N` | `former-owner-restart` | 20 to 600, default 45 |
-| `--fault FAULT` | `stateful`, `domain-time`, `backup-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart` |
+| `--fault FAULT` | `stateful`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
 | `--profile NAME` | `degraded-links` | `all`, `delay`, `jitter`, `random-loss`, `burst-loss`, `rate-limit` or `combined`, default `all` |
 | `--load-interval-ms N` | `degraded-links` | 100 to 5,000, default 750 |
 | `--baseline-seconds N`, `--degrade-seconds N`, `--drain-seconds N` | `degraded-links` | 10 to 120, default 15; 10 to 120, default 20; 10 to 180, default 90 |
@@ -361,6 +366,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-startup-status` | Bounded startup status publication |
 | `just test-chaos-backup-fixture` | Derivation of the backup graph from the baseline fixture |
 | `just test-chaos-backup-fault` | The option rules of `backup-fault`, `restore-fresh-cluster` and `backup-cycles`. It also checks the [fault backup verdict](#backup-faults) against synthetic reports: a clean refusal; a refusal that left the destination or a `.nervix-backup-` staging file; a failure without a JSON report or without a backup failure reason; an uncertain failure that keeps its execution reference; a success without an archive; leader-crash archives whose cut was engaged before and after the crash; and an archive whose cut released while the acknowledgement gate held |
+| `just test-chaos-restore` | The option rules of `restore-fault` and `restore-volume`; the padded guest generator's bounds and layout; the node sampler's records, the staging verdicts read from them, including a pair of samples across a restart; and the [restore verdict](#restore-faults) against synthetic reports: a completed restore, one without every step applied, an incomplete one with and without its one failed step, a refusal before and after its target exists, an uncertain failure and an end without a JSON report |
 | `just test-chaos-backup-state` | The [deduplicator and window verdict](#backup-cycles) over an exact set of outputs and one with replayed copies. It also checks the outputs that a restore which lost deduplicator keys, lost or doubled a window's retained rows, changed a record or dropped an output would produce, and malformed and missing inputs |
 | `just test-chaos-stateful-verifiers` | The state, clock and window verdicts |
 | `just verify-chaos-clock ARGS` | The clock verifier over retained observer transcripts |
@@ -462,8 +468,8 @@ itself. A producer's own report is never the ledger: an ambiguous producer outco
 the broker decides what was accepted. The runner then checks two things:
 
 - that the ingestor's consumer group has committed through the source boundary, within 120 seconds.
-  The four backup scenarios have no consumer group to check: their ingestor keeps domain-owned
-  offsets, which their archives record
+  The backup and restore scenarios have no consumer group to check: their ingestor keeps
+  domain-owned offsets, which their archives record
 - that the output topic holds at least the accepted input
 
 `verify-ledger.sh` compares the outputs with the accepted inputs by event ID, exact content and
@@ -594,11 +600,16 @@ imply exactly the planned links. The plan takes one of three forms:
 - **Quorum loss.** Each node gets one netem configuration that covers both of its peers.
 
 A partition plan targets only node-to-node links. The broker, load, observer, CLI and probe
-containers keep their routes. The one exception is [Backup Faults](#backup-faults), which installs
-two netem rules of its own. Neither rule is a partition plan, and each sits on its own interface:
+containers keep their routes. Two scenarios install rules that are not a partition plan:
 
-- an acknowledgement gate on the broker's egress to one node
-- a rate limit on the leader's egress to the CLI's container
+- [Backup Faults](#backup-faults) installs two netem rules, each on its own interface: an
+  acknowledgement gate on the broker's egress to one node, and a rate limit on the leader's egress
+  to the CLI's container.
+- [Restore Faults](#restore-faults) delays the leader's egress toward both followers with one netem
+  rule. Its `leader-partition` fault then installs an ordinary isolation of the leader beside that
+  delay, and an INPUT rule on the leader that drops what the CLI's container sends it. That is the
+  one installation that keeps another fault on an interface, so the run checks the leader's
+  interface itself: exactly the delay and the client rule.
 
 Installation follows a fixed sequence:
 
@@ -792,6 +803,8 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `backup-cycles` | 1 or 3 | Eight quiesced backups under load, each verified offline, restored as a stopped domain and compared, with exact deduplicator and window verdicts | 500 ms | 1,000, 2,400 s |
 | `backup-fault` | 3 | One fault against a quiesced backup: a SIGKILL of the state owner or the leader, or an isolation of the state owner, while an acknowledgement gate holds the cut; or a rolling restart while the archive streams | 1 s | 1,000, 2,400 s |
 | `restore-fresh-cluster` | 3 | None; a quiesced backup restored with `RESUME` into a second three-node cluster | 1 s | 1,000, 2,400 s |
+| `restore-fault` | 3 | One fault against a restore that a delay on the leader's links holds in staging: a SIGKILL of the leader, an isolation of the leader from its peers and the client, a SIGKILL of a state owner, or a SIGKILL of a state owner while a failed restore awaits reclamation | 1 s | 1,000, 2,400 s |
+| `restore-volume` | 3 | None; three concurrent restores of an archive whose guest saves exceed the bulk budget, with every node's staging, storage and memory sampled | 1 s | 1,000, 2,400 s |
 | `rolling-restart` | 1 or 3 | A graceful stop and restart of every node, leader first | 500 ms | 1,000, 1,200 s |
 | `leader-crash` | 1 or 3 | SIGKILL of the leader | 500 ms | 1,000, 1,200 s |
 | `follower-crash`, `ingestor-owner-crash`, `emitter-owner-crash` | 3 | SIGKILL of the role | 500 ms | 1,000, 1,200 s |
@@ -1038,6 +1051,183 @@ verdicts follow:
 `restore-fresh/` keeps the restore's own evidence. On a [diagnostic image](#diagnostic-images), the
 fresh nodes record and qualify their deadlock evidence like the original nodes. The exit trap
 captures the fresh project's Compose logs beside the original project's.
+
+### Restore Faults
+
+```bash
+just chaos run restore-fault --image nervix:debian --fault leader-crash
+just chaos run restore-fault --image nervix:debian --fault leader-partition
+just chaos run restore-fault --image nervix:debian --fault owner-crash
+just chaos run restore-fault --image nervix:debian --fault reclamation-owner-crash
+```
+
+This scenario injects one fault into a restore while the restore stages runtime state, and judges
+the outcome against the restore contract of
+[Backup And Restore Architecture](./backup-and-restore-architecture.md#failure-semantics-at-every-boundary).
+The domain
+carries the graph of [Backup Cycles](#backup-cycles) and `fixtures/restore-state.nspl`:
+
+- a Kafka ingestor with domain-owned offsets, which reads `chaos_padded_input`
+- the detached WASM processor `chaos_padded`, branched like the baseline relay, whose guest
+  `fixtures/wasm/padded-state-wat.sh` writes for the run. The guest saves exactly 2 MiB of
+  pseudo-random bytes for every branch and emits nothing
+
+The deployment keeps one state replica, so every guest save stages on an owner and a replica.
+
+The run prepares the restore in order:
+
+1. It starts the load, publishes one record for each of the three branches to
+   `chaos_padded_input`, and waits until `DESCRIBE WASM PROCESSOR` reports a committed checkpoint
+   of every branch that its replica confirmed.
+2. It takes a quiesced backup under the load and verifies it offline, as in
+   [Backup Under Load](#backup-under-load). The archive must also hold a 2 MiB guest save of every
+   branch.
+3. It starts the node sampler of [Restore Staging Volume](#restore-staging-volume) and reads the
+   settled leader and followers.
+4. It holds staging open with a delay. Pumba netem on the leader's egress toward both followers
+   delays every packet by 100 ms, and the runner reads the leader's qdisc until it shows exactly
+   that delay. The coordinator sends a checkpoint to a remote owner in ordered 64 KiB chunks, each
+   awaited, so a guest save takes more than ten seconds to stage on a follower.
+5. It starts the restore through the packaged CLI in the background, as the stopped domain
+   `chaos_restored`. It injects the fault only once a follower's `nervix_restore_staging_bytes`
+   reports staged bytes. A restore that ends first fails the run as an injection failure.
+
+The faults:
+
+- **`leader-crash`** restores through a follower and SIGKILLs the leader, the restore's coordinator,
+  while it stages. The hold lived in the killed container's network namespace, so its injector is
+  killed. The leader starts again after the outage. The CLI sends the archive again to the next
+  leader under the same execution reference, and the next leader resumes the restore from its first
+  step not recorded.
+- **`owner-crash`** restores through the leader and SIGKILLs a follower that holds the restore's
+  unpublished staging, then starts it again. The hold is lifted while the follower is down. The
+  coordinator does not stage again on a node it lost, so a loss that interrupts a staging request
+  fails the restore; when the follower's staging was already complete, the restore can publish once
+  the follower is back. The verdicts below accept either end.
+- **`reclamation-owner-crash`** reaches reclamation without a hook:
+  - It cordons the leader, so both targets of every checkpoint are followers, and the deployment
+    gives execution references a three-minute retry validity.
+  - Once the restore stages on both followers, the run kills the CLI's container and then
+    SIGKILLs the leader. No client sends the archive to the next leader, so the restore stays
+    applying, and its staging retained, until the retry validity of its execution reference ends.
+    The next leader then ends it as failed.
+  - Before then, the run SIGKILLs the follower that did not become leader. It starts that follower
+    again only once the new leader has reclaimed its own staging through a completed sweep. The
+    restarted follower therefore learns of the failure as it catches up, and reclaims its staging
+    after its restart.
+- **`leader-partition`** stops the source domain and waits for its output to settle, cordons the
+  leader and restores with `RESUME` through a follower. While the restore stages, the run isolates
+  the leader:
+  - The peers carry the rules of an ordinary [isolation](#network-faults).
+  - An INPUT rule on the leader drops what the CLI's container sends it. Without that cut, the CLI
+    would keep waiting on the isolated leader until the heal.
+  - The leader keeps the hold beside them, which a plain partition would refuse as an overlapping
+    fault, so the run checks this installation itself and then proves the effect matrix.
+
+  The isolation holds until the CLI ends, at most 360 seconds. The CLI's reply wait ends after two
+  minutes; it reconnects, is redirected to the next leader and sends the archive again under the
+  same execution reference. The run then heals every rule, the hold included, and verifies each
+  interface's default state and the open matrix.
+
+The restore must end in an outcome the restore contract allows:
+
+- **Completed.** The CLI exits 0 with a report that names the target and every step applied. After
+  a leader crash or an isolation, the report is the resumed restore's. That proves the CLI sent the
+  archive again under the same execution reference, since a new reference would be refused because
+  the target already exists.
+- **Failed.** The CLI reports `RESTORE_INCOMPLETE` with the one step that failed. `START` of the
+  target must then be refused because its restore state installation is incomplete, and a restore of
+  the same archive with the same options under a new name, `chaos_restored_2`, must complete.
+- **Lost.** In `reclamation-owner-crash` no client waits for the outcome. `START` of the target must
+  be refused in the same way, and a restore under a new name must complete.
+
+Any other end is a recovery finding: a report without every step applied, a failure without exactly
+one failed step, a refusal of a restore that created its target, or an end without a JSON report.
+The run then judges what the fault left:
+
+- **The restored domain equals the archive.** A completed, stopped restored domain is backed up
+  again and described offline. Its checkpoint identities, revisions, branch counts and Kafka
+  positions must equal the archive's, as in [Backup Cycles](#backup-cycles), and every guest save
+  must have the archived length and BLAKE3 digest.
+- **A resumed domain keeps running.** After `leader-partition` the restored domain runs, so its
+  traffic is the verdict instead of a second archive. After the heal it must emit, consume past
+  where the source domain stopped, and close two more windows of every branch. Its first record must
+  be the source record at the archived offset, and it must emit exactly the source records from that
+  offset onward. The stale coordinator's delayed staging or publication therefore neither replaced
+  the generation the next leader completed nor cleared its runtime handles. The image exposes no
+  publication generation and no count of refused requests, so the traffic is the only public
+  evidence of that refusal.
+- **Staging returns to zero.** On every node, two consecutive samples taken after the restores ended
+  must report zero staging bytes and keys, with the count of completed sweeps rising between them.
+  A restart restarts that count, so a pair across a restart does not qualify.
+- **The source domain is unaffected.** After a crash, the cluster must settle and the source and sink
+  must move past the boundaries recorded at the fault. Every fault ends with the exact ledger.
+- **Deduplicator and window outputs.** After `leader-partition`, which crashes no node, the
+  deduplicator and window verdict of [Backup Cycles](#backup-cycles) judges the outputs of both
+  domains together. The crash faults do not judge them. When a crash loses the source domain's
+  window owner, the replica's snapshot of the detached window can predate rows that relay fan-out
+  already acknowledged upstream, and those rows are not delivered again; see
+  [Shutdown And Recovery](./shutdown.md#when-the-former-owner-is-gone).
+
+A fault during publication itself is not reachable without a hook: publication is one short request
+to each node once staging completes. The Cucumber scenarios that pause a restore before state
+publication carry that boundary: `A stale restore coordinator cannot republish after a new leader
+resumes the archived lifecycle`, `A delayed coordinator cannot replace resumed deduplicator keys and
+windows` and `A delayed coordinator cannot replace a resumed materialized generation larger than the
+bulk budget`.
+
+`results/restore-fault-progress.json` records:
+
+- the placement, the fault's target and the hold
+- each restore's outcome, execution reference and command time
+- the restored domain and its comparison with the archive
+- the times of the restore's start, the observed staging, the fault, the heal, the other target's
+  reclamation and the settled staging
+
+`restore-fault/` keeps the restore reports, the CLI's standard error, the staging observed at the
+fault, the samples and the fault's own evidence.
+
+The run's own bounds: 180 seconds for a follower to report staging, 900 seconds for each restore's
+CLI to end, 300 seconds for staging to return to zero after the restores, and in
+`reclamation-owner-crash` 420 seconds from the restore's start for the new leader to reclaim its
+staging. None of them changes a product deadline.
+
+### Restore Staging Volume
+
+```bash
+just chaos run restore-volume --image nervix:debian
+```
+
+This measurement entry runs three restores of one archive at once and samples every node while they
+stage and publish. Its graph is the one of [Restore Faults](#restore-faults), with guest saves of
+40 MiB for every branch, above the node's 32 MiB bulk budget, and one state replica. After the
+quiesced backup, the archive holds three such saves. The run then:
+
+1. Starts the node sampler. One probe container reads every node's `/metrics` every two seconds and
+   records, stamped with its own clock:
+   - `nervix_restore_staging_bytes`, `_keys` and `_limit_bytes`
+   - `nervix_restore_staging_sweeps_total` and `nervix_restore_staging_reclaimed_bytes_total`
+   - `nervix_restore_keyspaces_disk_bytes`
+   - the `filesystem_storage` class of `nervix_execution_jobs_running` and
+     `nervix_execution_jobs_pending`
+   - the `bulk` and `restore_metadata` classes of `nervix_execution_memory_reserved_bytes`
+   - `nervix_jemalloc_resident_bytes`
+
+   A node that does not answer within the interval is recorded as unavailable for that sample.
+2. Waits for two answered samples of every node, then starts three restores at once through the
+   three nodes in turn, as the stopped domains `chaos_volume_1` to `chaos_volume_3`.
+3. Requires every restore to complete, records each command's time, and waits until staging returns
+   to zero on every node through completed sweeps, as in [Restore Faults](#restore-faults).
+4. Takes two more samples of every node, stops the sampler and compares every restored domain with
+   the archive.
+
+Restored domains cannot be dropped, so the run measures the return of staging after the restores
+complete, rather than after their targets are removed. `results/restore-volume-progress.json`
+records the image's reference, ID and digest; the archive's size, guest save size, branches and
+replicas; each restore's outcome, execution reference and command time; the time staging took to
+return to zero; and for each node the peak and last value of every series before, during and after
+the restores. `restore-volume/samples/samples.ndjson` keeps every sample. The values are
+measurements of the worker the run used, not product limits.
 
 ### Rolling Restart
 
@@ -1985,7 +2175,7 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
 | `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json` |
 | `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output |
-| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
+| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
 | `tls/` | The run's certificates. The private keys are removed when the run ends |
 
@@ -2145,8 +2335,8 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 7 | `domain-time-1` 7; `domain-time-1-cluster-restart` 8; `domain-time-3` 7; `domain-time-3-cluster-restart` 10; `domain-time-3-voter-crash` 12; `domain-time-3-voter-pause` 20; `domain-time-3-voter-stop` 15 |
 | 8 | `stateful-1` 20; `stateful-1-cluster-restart` 22; `stateful-3` 20; `stateful-3-owner-crash` 20 |
 | 9 | `stateful-3-owner-pause` 20; `stateful-3-owner-partition` 25; `stateful-3-cluster-restart` 22; `domain-time-3-voter-partition` 25 |
-| 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14 |
-| 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20 |
+| 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14; `restore-under-leader-crash` 12; `restore-under-owner-crash` 11; `restore-staging-volume` 11 |
+| 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20; `restore-under-leader-partition` 20; `restore-reclamation-under-owner-crash` 19 |
 
 A few soak entries need explanation:
 
@@ -2253,7 +2443,7 @@ records the process of its controller and of every run it starts, and cleanup wo
   wait, plus the summary and the uploads.
 
 The smoke shard therefore runs 30 minutes of entries in a 45-minute step and a 66-minute job. The
-soak's eleven shards hold 873 minutes of entries.
+soak's eleven shards hold 946 minutes of entries.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.
@@ -2418,6 +2608,13 @@ Its limits:
   or partitioned. [Backup Faults](#backup-faults) adds two rules off those links: an
   acknowledgement gate on the broker's egress, and a rate limit on the leader's egress to the CLI.
   Each only holds a cut or a download open; no verdict judges the broker or the CLI under them.
+  [Restore Faults](#restore-faults) cuts the CLI off the isolated leader only so the CLI reaches the
+  next leader before the heal.
+- **Restore faults.** The faults land while a restore stages, which a delay makes last. A fault
+  during state publication needs a hook, so the Cucumber scenarios that pause a restore before
+  publication carry that boundary. The release image exposes no publication generation and no count
+  of refused stale requests, so the refusal of a stale coordinator is judged only by the resumed
+  domain's traffic.
 - **Pause.** A pause is Docker's freeze of a container's processes; it is not a signal the process
   observes.
 - **State publication.** A stateful run's durability verdicts for the deduplicator, window and
@@ -2474,6 +2671,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Cluster Chaos 09](https://app.clickup.com/t/86bc85vzz) | Seeded mixed-instability experiments and their replay |
 | [Cluster Chaos 10](https://app.clickup.com/t/86bc85w01) | The smoke and soak suites in CI, against both images |
 | [Backup 07](https://app.clickup.com/t/86bc8dbxv) | Backup cycles with exact deduplicator and window verdicts; quiesced backups under an owner crash, a leader crash, an owner partition and a rolling restart of the download; a restore into a fresh three-node cluster; and soak shards 10 and 11, which run them |
+| [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:
@@ -2498,6 +2696,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 52](https://app.clickup.com/t/86bcdkcf1) and [60](https://app.clickup.com/t/86bcdwr9y) | A stopping node's drain was abandoned, through its one-second cordon release and through a Kafka ingestor held quiesced until the drain timeout |
 | [Cluster Chaos 56](https://app.clickup.com/t/86bcdk4tn) | A restarting voter required a bootstrap host that no longer resolved, instead of using its recovered Raft members |
 | [Cluster Chaos 67](https://app.clickup.com/t/86bcghajy) | The destination of a forced failover held its graph installation, and every later revision, for the deliveries in flight to a paused former owner, up to the 60-second entity gate deadline |
+| [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | When forced recovery moved the replica of a Kafka ingestor's domain offsets while the ingestor kept running, the schedule rebound the offsets but left the ingestor committing through the originator of the superseded binding. Every commit was refused, and the source replayed from its last commit for as long as it ran. A reassignment now hands the kept ingestor the originator its offsets' new binding issued |
 
 **Harness corrections.** These tasks corrected the suite itself:
 
@@ -2541,6 +2740,19 @@ GitHub-hosted worker. They ran against the release and diagnostic images of test
 [38933658072](https://github.com/nervix-io/nervix/actions/runs/38933658072). All 14 runs passed.
 On the diagnostic image, every process start left qualifying evidence with no active, potential or
 lost finding. The task records each entry's ledger, outcome and timings.
+
+**The restore entries.** [Backup: Qualify restores through a leader crash, a partitioned
+coordinator, an owner restart and concurrent staging
+volume](https://app.clickup.com/t/86bckvq84) ran the five restore entries, one per GitHub-hosted
+worker, against the release and diagnostic images of tested merge `4a37b26e`, in runs
+[39388139905](https://github.com/nervix-io/nervix/actions/runs/39388139905) and
+[39387247054](https://github.com/nervix-io/nervix/actions/runs/39387247054). All 10 runs passed with
+no missing record, in 4.3 to 7.9 minutes each, and the soak budgets are about two and a half times
+those durations. The owner crash ended the restore it interrupted as incomplete on one image and
+completed it on the other, so both ends the contract allows were judged. Before that campaign, the
+owner crash found the defect in which a Kafka ingestor kept through a replica move stopped
+committing its domain offsets. The task records each entry's ledger, outcome and timings, and the
+staging volume's samples.
 
 **The current suites.** The current suites run nightly against both images of `main`:
 

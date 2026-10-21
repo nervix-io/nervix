@@ -26,7 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
@@ -36,26 +36,34 @@ use nervix_primitives::{
     collections::DashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        blocking::{Mutex, RwLock},
+        atomic::{AtomicBool, Ordering},
+        blocking::RwLock,
         broadcast, mpsc, oneshot, watch,
     },
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _};
+use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod backup_cut;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod execution;
 mod pause;
+mod relocation_commit;
 mod restarted_voter;
 mod shutdown_handoff;
+mod standalone_transaction;
 
+pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
+use execution::NodeExecution;
 use pause::TestPause;
+use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::StartupVoterGossip;
+pub use standalone_transaction::StandaloneTransactionBoundary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
@@ -119,6 +127,9 @@ struct FaultInjectionState {
     /// scenario proves the failure happened instead of assuming it.
     handoff_engagement_transport_failures:
         DashMap<DomainName, HandoffEngagementTransportFailure, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
+    /// it was delivered.
+    refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -281,13 +292,6 @@ enum RelayMemoryFill {
     },
 }
 
-#[derive(Debug)]
-struct NodeExecution {
-    executor: Executor,
-    /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
@@ -338,6 +342,11 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    StandaloneTransaction {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: StandaloneTransactionBoundary,
+    },
     DomainResume {
         node: ClusterNodeName,
         domain: DomainName,
@@ -357,7 +366,10 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
-    BackupCut(DomainName),
+    BackupCut {
+        domain: DomainName,
+        boundary: BackupCutBoundary,
+    },
     BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
@@ -420,6 +432,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
+                refused_relocation_commits: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
@@ -1176,93 +1189,6 @@ impl FaultInjection {
             .insert(node_id, ());
     }
 
-    /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
-    pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        let node = match self.inner.executions.get(node_id) {
-            Some(node) => node,
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        let executor = node.executor.clone();
-        let holders = node.holders.clone();
-        drop(node);
-        let workers = executor.snapshot().cpu_class(class).workers;
-        let started = Arc::new(AtomicUsize::new(0));
-        for _ in 0..workers {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
-            holders.lock().push(holder);
-            let executor = executor.clone();
-            let started = started.clone();
-            nervix_primitives::task::spawn(async move {
-                executor
-                    .run_cpu(class, reservation, move |_charge, _cancellation| {
-                        started.fetch_add(1, Ordering::AcqRel);
-                        // Park until the scenario drops the holder so occupancy consumes no
-                        // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
-                        // than a failure.
-                        held.recv().discarded(
-                            "dropping the holder is how the scenario releases this worker",
-                        );
-                    })
-                    .await
-                    .discarded(
-                        "this job exists to hold a worker until the scenario releases it; its \
-                         outcome is not what the scenario reads",
-                    );
-            });
-        }
-        while started.load(Ordering::Acquire) < workers {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
-    /// once the class refuses the next job it is handed.
-    pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        self.occupy_execution(node_id, class).await;
-        let executor = match self.inner.executions.get(node_id) {
-            Some(node) => node.executor.clone(),
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        let capacity = executor.snapshot().cpu_class(class).queue_capacity;
-        for _ in 0..capacity {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let waiter = executor.clone();
-            nervix_primitives::task::spawn(async move {
-                waiter
-                    .run_cpu(class, reservation, |_charge, _cancellation| ())
-                    .await
-                    .discarded(
-                        "this job exists to hold a place in the wait queue; once the scenario \
-                         releases the workers it runs empty",
-                    );
-            });
-        }
-        while executor.snapshot().cpu_class(class).pending < capacity {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
-    /// behind them then run empty.
-    pub fn release_execution(&self, node_id: &ClusterNodeName) {
-        let node = match self.inner.executions.get(node_id) {
-            Some(node) => node,
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        node.holders.lock().clear();
-    }
-
     pub fn arm_health_response_pause(
         &self,
         probing_node: ClusterNodeName,
@@ -1542,20 +1468,6 @@ impl FaultInjection {
             node_id: node_id.clone(),
             step: step.clone(),
         });
-    }
-
-    /// Holds a backup after its domain drain and before any owner captures state.
-    pub fn pause_backup_cut_on(&self, domain: DomainName) {
-        self.arm_command_pause(CommandPausePoint::BackupCut(domain));
-    }
-
-    pub async fn wait_for_backup_cut_pause(&self, domain: &DomainName) {
-        self.wait_for_command_pause(&CommandPausePoint::BackupCut(domain.clone()))
-            .await;
-    }
-
-    pub fn release_backup_cut_pause(&self, domain: &DomainName) {
-        self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
     }
 
     /// Holds the next backup archive download on `node_id`, once, after the node opened the
@@ -2255,17 +2167,6 @@ impl FaultInjection {
         Some(*delay)
     }
 
-    /// Record the executor whose workers a scenario may fill.
-    pub(crate) fn register_executor(&self, node_id: ClusterNodeName, executor: Executor) {
-        self.inner.executions.insert(
-            node_id,
-            NodeExecution {
-                executor,
-                holders: Arc::default(),
-            },
-        );
-    }
-
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
         &self,
         node_id: &ClusterNodeName,
@@ -2342,11 +2243,6 @@ impl FaultInjection {
 
     pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::BackupDownload(node_id.clone()))
-            .await;
-    }
-
-    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
-        self.pause_command_if_armed(CommandPausePoint::BackupCut(domain.clone()))
             .await;
     }
 

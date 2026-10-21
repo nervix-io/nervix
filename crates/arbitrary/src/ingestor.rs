@@ -1,6 +1,6 @@
 //! Ingestors: the transport or client source they read, and the routes that build their records.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -150,7 +150,7 @@ impl Arbitrary<'_> {
     pub fn http_endpoint_source(&mut self) -> HttpEndpointSource {
         let source = HttpEndpointSource {
             endpoint: self.name(),
-            mode: EndpointIngestMode::NoAck,
+            mode: self.endpoint_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -306,7 +306,7 @@ impl Arbitrary<'_> {
     pub fn websockets_endpoint_source(&mut self) -> WebsocketsEndpointSource {
         let source = WebsocketsEndpointSource {
             endpoint: self.name(),
-            mode: EndpointIngestMode::NoAck,
+            mode: self.endpoint_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -377,6 +377,18 @@ impl Arbitrary<'_> {
                 max_size: self.positive_byte_size(),
             },
         ]
+    }
+
+    fn endpoint_mode(&mut self) -> EndpointIngestMode {
+        if self.entropy.flag() {
+            let count = self.entropy.pick([1u16, 8, 256, u16::MAX]);
+            EndpointIngestMode::Ack {
+                max: NonZeroU16::new(count).assured("every declared window boundary is positive"),
+                timeout: self.duration(),
+            }
+        } else {
+            EndpointIngestMode::NoAck
+        }
     }
 
     fn kafka_mode(&mut self) -> KafkaIngestMode {

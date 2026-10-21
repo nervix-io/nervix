@@ -17,7 +17,7 @@ use error_stack::{Report, ResultExt as _};
 use thiserror::Error;
 use url::Url;
 
-use crate::{ClientConfigEntry, HttpRequestTimeout};
+use crate::{ClientConfigEntry, ClientDeadline, DEFAULT_CONNECT_TIMEOUT};
 
 /// Nervix-owned CONFIG keys, matched without regard to ASCII case.
 #[derive(
@@ -76,7 +76,7 @@ pub struct WebsocketsClientConfig {
 
 impl WebsocketsClientConfig {
     /// The existing physical DNS, TCP and upgrade budget where no value is written.
-    pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    pub const CONNECT_TIMEOUT: Duration = DEFAULT_CONNECT_TIMEOUT;
 
     pub fn parse(
         config: &[ClientConfigEntry],
@@ -143,7 +143,7 @@ impl WebsocketsClientConfig {
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
-        let duration = HttpRequestTimeout::parse(value)
+        let duration = ClientDeadline::parse(value)
             .change_context(WebsocketsClientConfigError::InvalidDuration { key })?;
         Ok(Some(duration.duration()))
     }

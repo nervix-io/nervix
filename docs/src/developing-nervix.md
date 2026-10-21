@@ -284,15 +284,18 @@ The `[parallel]` groups map package lists onto that recipe, including the packag
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
-`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
-so each configuration has its own build directory lock. `just cargo-clippy-package <package>
-[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
-builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
-reads a build directory after its lint and the runner's disk cannot hold every configuration's at
-once, a target that passed deletes its own; a failed target keeps its directory, and a local run
-keeps them all for the next one.
+Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
+package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
+configuration returns to the directory that holds its artifacts. The configurations in a directory
+share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
+different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+there. Configurations in the same directory take turns on its build directory lock, so two of them
+selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
+four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe. The compiler driver builds keep their
+separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
+compiler job limit applies separately within each invocation.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
