@@ -426,7 +426,7 @@ class InventoryTests(unittest.TestCase):
         assert endpoint is not None
         baseline = inventory.invocations["stress-scenarios"]
         self.assertEqual(inventory.bounds.budget_seconds, 4800)
-        self.assertEqual(baseline.bound_seconds, 1800)
+        self.assertEqual(baseline.bound_seconds, 2700)
         self.assertEqual(endpoint.bound_seconds, 900)
         groups = [
             deloxide_lane.discover_scenarios(REPOSITORY, invocation.inputs, invocation.tags)
