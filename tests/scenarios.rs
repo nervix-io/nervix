@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     fs::{OpenOptions, create_dir_all},
@@ -127,6 +128,7 @@ use crate::common::{
     kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
+    node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
     node_startup::StartupPorts,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
@@ -433,13 +435,18 @@ struct ScenarioWorld {
     mongodb_tls: bool,
     domain: String,
     test_id: String,
-    zeromq_ingest_addr: String,
+    /// The address this scenario's nodes bind a ZeroMQ PULL socket to.
+    zeromq_ingest: NodeBoundSlot,
     zeromq_emit_addr: String,
-    syslog_ingest_addr: String,
+    /// The address this scenario's nodes bind a syslog listener to.
+    syslog_ingest: NodeBoundSlot,
     syslog_emit_addr: String,
-    /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
-    /// nodes and its observers bind. Given back once cleanup has stopped both.
+    /// Every other port this scenario drew for fixtures of its own: the ZeroMQ and syslog
+    /// addresses its observers bind. Given back once cleanup has stopped them.
     scenario_ports: Vec<u16>,
+    /// Sockets a scenario bound to a port it drew for its own nodes, standing in for whatever else
+    /// on the host takes such a port. Closed at cleanup.
+    port_takers: Vec<PortTaker>,
     syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
     /// A Syslog stream connection holding back the end of a frame it began, until a step writes
     /// the rest.
@@ -828,15 +835,12 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     }
     world.domain = format!("d{}", Uuid::now_v7().as_simple());
     world.test_id = format!("t{}", Uuid::now_v7().as_simple());
-    world.zeromq_ingest_addr = format!(
-        "tcp://127.0.0.1:{}",
-        draw_scenario_port(world, "ZeroMQ ingest")
-    );
+    world.zeromq_ingest.draw(NodeBoundListener::ZeroMqPull);
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
         draw_scenario_port(world, "ZeroMQ emit")
     );
-    world.syslog_ingest_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog ingest"));
+    world.syslog_ingest.draw(NodeBoundListener::Syslog);
     world.syslog_emit_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog emit"));
 }
 
@@ -849,6 +853,90 @@ fn draw_scenario_port(world: &mut ScenarioWorld, purpose: &str) -> u16 {
     };
     world.scenario_ports.push(port);
     port
+}
+
+/// An address a scenario's own nodes bind, held from the scenario's identity until its cleanup.
+///
+/// Expansion reads the world through a shared reference, and naming the address the first time
+/// may move it to a fresh port, so the address sits behind a cell. The slot is empty before the
+/// scenario's identity draws the address and after cleanup gives its ports back.
+#[derive(Default)]
+struct NodeBoundSlot {
+    address: RefCell<Option<NodeBoundAddress>>,
+}
+
+impl NodeBoundSlot {
+    fn draw(&mut self, listener: NodeBoundListener) {
+        let address = match NodeBoundAddress::draw(listener) {
+            Ok(address) => address,
+            Err(error) => panic!("failed to allocate the scenario's {listener} port: {error:#}"),
+        };
+        if let Some(replaced) = self.address.get_mut().replace(address) {
+            replaced.release();
+        }
+    }
+
+    /// The port the scenario drew for the address, read without naming the address.
+    fn drawn_port(&self, listener: NodeBoundListener) -> u16 {
+        let address = self.address.borrow();
+        let Some(address) = address.as_ref() else {
+            panic!("the scenario reads its {listener} port before its identity drew it");
+        };
+        address.port()
+    }
+
+    /// Lets the address's hold go and gives every port it drew back to the pool.
+    fn release(&mut self) {
+        if let Some(address) = self.address.get_mut().take() {
+            address.release();
+        }
+    }
+}
+
+/// A socket a scenario binds to a port it drew for its own nodes. Its only work is to hold the port
+/// until cleanup closes it.
+enum PortTaker {
+    Listener {
+        _socket: nervix_primitives::net::TcpListener,
+    },
+    Datagram {
+        _socket: nervix_primitives::net::UdpSocket,
+    },
+}
+
+impl ScenarioWorld {
+    /// The ZeroMQ ingest address as a statement or a sender names it.
+    fn zeromq_ingest_addr(&self) -> String {
+        self.name_node_bound_address(&self.zeromq_ingest, NodeBoundListener::ZeroMqPull)
+    }
+
+    /// The syslog ingest address as a statement or a sender names it.
+    fn syslog_ingest_addr(&self) -> String {
+        self.name_node_bound_address(&self.syslog_ingest, NodeBoundListener::Syslog)
+    }
+
+    /// Names an address the scenario's nodes bind. The first time, its port is bound once as its
+    /// node will bind it, and an address whose port another socket took moves to a fresh port
+    /// before anything names it, which the scenario's log records with what held the port.
+    fn name_node_bound_address(&self, slot: &NodeBoundSlot, listener: NodeBoundListener) -> String {
+        let mut address = slot.address.borrow_mut();
+        let Some(address) = address.as_mut() else {
+            panic!("the scenario names its {listener} address before its identity drew it");
+        };
+        let named = match address.name(bind_as_its_node) {
+            Ok(named) => named,
+            Err(error) => panic!("the scenario's {listener} address cannot be bound: {error:#}"),
+        };
+        for moved in &named.moves {
+            let line = format!(
+                "scenario domain={} test_id={}: the {listener} address {moved}",
+                self.domain, self.test_id
+            );
+            eprintln!("{line}");
+            append_cucumber_log_line(&line);
+        }
+        named.address
+    }
 }
 
 fn refresh_dependency_configuration(world: &mut ScenarioWorld) {
@@ -5392,7 +5480,7 @@ impl IngestorLogicTransportFixture {
             Self::ZeroMq => {
                 world
                     .cluster()
-                    .publish_zeromq(&world.zeromq_ingest_addr, payload)
+                    .publish_zeromq(&world.zeromq_ingest_addr(), payload)
                     .await
                     .expect("failed to publish ingestor logic zeromq payload");
             }
@@ -13181,10 +13269,17 @@ fn docstring(step: &Step) -> &str {
 fn expand_placeholders(world: &ScenarioWorld, input: &str) -> String {
     let mut output = input
         .replace("{{test_id}}", &world.test_id)
-        .replace("{{domain}}", &world.domain)
-        .replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr)
-        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr)
-        .replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr)
+        .replace("{{domain}}", &world.domain);
+    // The scenario's nodes bind these two addresses themselves, so the first text that names one
+    // checks its port and may move it. Text that names neither leaves them unchecked.
+    if output.contains("{{zeromq_ingest_addr}}") {
+        output = output.replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr());
+    }
+    output = output.replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr);
+    if output.contains("{{syslog_ingest_addr}}") {
+        output = output.replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr());
+    }
+    output = output
         .replace("{{syslog_emit_addr}}", &world.syslog_emit_addr)
         .replace("{{syslog_pri}}", "<34>");
     for (key, value) in &world.placeholders {
@@ -17441,7 +17536,7 @@ impl UnacknowledgedSourceFixture {
                     .await
                     .expect("failed to bind the unacknowledged Syslog sender");
                 socket
-                    .send_to(payload.as_bytes(), &world.syslog_ingest_addr)
+                    .send_to(payload.as_bytes(), world.syslog_ingest_addr())
                     .await
                     .expect("failed to send the unacknowledged Syslog datagram");
             }
@@ -17450,7 +17545,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::ZeroMq => world
                 .cluster()
-                .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+                .publish_zeromq(&world.zeromq_ingest_addr(), &payload)
                 .await
                 .expect("failed to publish the unacknowledged ZeroMQ payload"),
         }
@@ -23355,6 +23450,40 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
     );
 }
 
+/// Another socket listens on the port the scenario drew for its ZeroMQ ingest address before any
+/// statement names it, as a port Docker publishes for a container, or a server bound to that port
+/// explicitly, would: a listener with `SO_REUSEADDR` on every address, which the port's hold does
+/// not keep out.
+#[given("another socket listens on the port the scenario drew for its ZeroMQ ingest address")]
+async fn given_another_socket_listens_on_the_zeromq_ingest_port(world: &mut ScenarioWorld) {
+    let port = world
+        .zeromq_ingest
+        .drawn_port(NodeBoundListener::ZeroMqPull);
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let socket = match nervix_primitives::net::TcpListener::bind(address).await {
+        Ok(socket) => socket,
+        Err(error) => panic!("another listener could not take {address}: {error}"),
+    };
+    world
+        .port_takers
+        .push(PortTaker::Listener { _socket: socket });
+}
+
+/// Another UDP socket binds the port the scenario drew for its syslog ingest address on every
+/// address before any statement names it. No hold keeps a UDP socket out.
+#[given("another socket binds UDP on the port the scenario drew for its syslog ingest address")]
+async fn given_another_socket_binds_udp_on_the_syslog_ingest_port(world: &mut ScenarioWorld) {
+    let port = world.syslog_ingest.drawn_port(NodeBoundListener::Syslog);
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let socket = match nervix_primitives::net::UdpSocket::bind(address).await {
+        Ok(socket) => socket,
+        Err(error) => panic!("another UDP socket could not take {address}: {error}"),
+    };
+    world
+        .port_takers
+        .push(PortTaker::Datagram { _socket: socket });
+}
+
 #[given(expr = "ZeroMQ emission endpoint {string} is observed")]
 async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     let addr = expand_placeholders(world, &addr);
@@ -24589,7 +24718,7 @@ async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] ste
     let payload = expand_placeholders(world, docstring(step));
     world
         .cluster()
-        .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+        .publish_zeromq(&world.zeromq_ingest_addr(), &payload)
         .await
         .expect("failed to publish zeromq message");
 }
@@ -31164,9 +31293,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
+                world.port_takers.clear();
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
-                // and its observers, and both are gone by now, so the ports go back to the pool
-                // the next scenario draws from.
+                // and its observers, and both are gone by now, so the holds on the addresses its
+                // nodes bound let go, and the ports go back to the pool the next scenario draws
+                // from.
+                world.zeromq_ingest.release();
+                world.syslog_ingest.release();
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 
