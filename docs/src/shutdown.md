@@ -749,9 +749,13 @@ acknowledged source redelivers the record after the restart.
 ### Sinks
 
 An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
-emitter that cannot finish reports `emitter '<name>' did not drain before its configured deadline`
-and holds the drain until the timeout. A batching emitter's drain also writes every batch payload an
-earlier attempt left unanswered, with the bytes and members it was first written with, as an OTEL
+emitter whose buffer cannot drain by its configured deadline reports
+`emitter '<name>' did not drain before its configured deadline`. When a sink's finish answers that
+it still holds records at that deadline, an emitter swap reports the sink's own outcome and count;
+a finish that does not answer within half the supervisor's response grace reports the stop deadline.
+The sink receives the original deadline, and a failed swap keeps the emitter task running. A
+batching emitter's drain also writes every batch payload an earlier attempt left unanswered, with
+the bytes and members it was first written with, as an OTEL
 emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 

@@ -15088,6 +15088,7 @@ async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: Strin
 }
 
 #[when(expr = "client {string} executes these NSPL commands")]
+#[when(expr = "client {string} executes these Plexus statements")]
 async fn when_named_client_executes_commands(
     world: &mut ScenarioWorld,
     name: String,
