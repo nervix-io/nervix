@@ -48,7 +48,7 @@ Feature: Declared endpoint surfaces
       | 1            |
       | 3            |
 
-  Scenario Outline: Endpoint ingestors refuse unavailable acknowledgement and transport clauses
+  Scenario Outline: Endpoint ingestors refuse unsupported window and transport clauses
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus statements
@@ -60,10 +60,15 @@ Feature: Declared endpoint surfaces
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge refusals-{{test_id}}.example.com;
       CREATE ENDPOINT intake ON edge PATH '/events' TYPE <protocol>;
+      CREATE <protocol> ENDPOINT INGESTOR rejected
+        FROM intake MODE NO ACK ON QUIESCE REJECT RETRY AFTER 1s
+        DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus statements fail
       """
-      CREATE <protocol> ENDPOINT INGESTOR rejected
+      <operation> <protocol> ENDPOINT INGESTOR rejected
         FROM intake <clauses>
         DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -75,16 +80,28 @@ Feature: Declared endpoint surfaces
       """
 
     Examples:
-      | cluster_size | protocol   | clauses                                                                                                 |
-      | 1            | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
-      | 3            | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
-      | 1            | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
-      | 3            | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
-      | 1            | HTTP       | MODE ACK ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                                 |
-      | 3            | HTTP       | MODE ACK ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                                 |
-      | 1            | WEBSOCKETS | MODE ACK ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                                 |
-      | 3            | WEBSOCKETS | MODE ACK ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                                 |
-      | 1            | HTTP       | MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s                            |
-      | 3            | HTTP       | MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s                            |
-      | 1            | WEBSOCKETS | MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s                            |
-      | 3            | WEBSOCKETS | MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s                            |
+      | cluster_size | operation | protocol   | clauses                                                                                                 |
+      | 1            | CREATE    | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 3            | CREATE    | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 1            | CREATE    | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 3            | CREATE    | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 1            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 3            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 1            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 3            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 1            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 3            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 1            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 3            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 1            | ALTER     | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 3            | ALTER     | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 1            | ALTER     | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 3            | ALTER     | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
+      | 1            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 3            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 1            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 3            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
+      | 1            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 3            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 1            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
+      | 3            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |

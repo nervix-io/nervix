@@ -324,6 +324,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    endpoint_requests: endpoint_intake::requests::EndpointRequests,
     websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
