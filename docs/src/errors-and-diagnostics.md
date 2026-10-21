@@ -522,7 +522,9 @@ The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MyS
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
 host ownership transition; it does not recreate the top-level error from its formatted text.
 Syslog TLS material reports keep the file, certificate or rustls cause, and stream frame reports
-remain beneath the connection failure. WebSocket signaling compilation and execution retain jaq,
+remain beneath the connection failure. Its configured accept capability maps socket failures into
+`SyslogListenerError::StreamAccept` before the listener returns them to the source owner; the test
+injector follows the same typed path. WebSocket signaling compilation and execution retain jaq,
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 

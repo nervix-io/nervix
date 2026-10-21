@@ -33,8 +33,10 @@ use nervix_connector::{
     SourceResult, SourceResume,
 };
 use nervix_models::ClientConfigEntry;
+#[cfg(not(feature = "testing"))]
+use nervix_primitives::net::TcpStream;
 #[cfg(feature = "testing")]
-use nervix_primitives::{net::TcpStream, sync::broadcast};
+use nervix_primitives::sync::broadcast;
 use nervix_primitives::{
     net::{TcpListener, UdpSocket},
     sync::{mpsc, watch},
@@ -47,6 +49,45 @@ use tracing::debug;
 
 use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, SyslogProtocol};
 
+#[cfg(feature = "testing")]
+#[path = "source/listener_faults.rs"]
+mod listener_faults;
+#[cfg(feature = "testing")]
+use listener_faults::{ConfiguredListenerFaults, ConfiguredStreamAccept};
+
+/// The listener fault capability has a stable slot in plans and sources. Ordinary builds keep
+/// only this zero-sized marker; testing builds own the injector in the testing module.
+#[cfg(not(feature = "testing"))]
+#[derive(Clone, Default)]
+struct ConfiguredListenerFaults {
+    _marker: (),
+}
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredListenerFaults {
+    fn stream_accept(&self, _bind_addr: &str) -> ConfiguredStreamAccept {
+        ConfiguredStreamAccept { _marker: () }
+    }
+}
+
+#[cfg(not(feature = "testing"))]
+struct ConfiguredStreamAccept {
+    _marker: (),
+}
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredStreamAccept {
+    async fn accept(
+        &mut self,
+        listener: &TcpListener,
+    ) -> error_stack::Result<(TcpStream, SocketAddr), SyslogListenerError> {
+        listener
+            .accept()
+            .await
+            .map_err(|source| Report::new(SyslogListenerError::StreamAccept { source }))
+    }
+}
+
 const SYSLOG: &str = "syslog";
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
@@ -58,8 +99,7 @@ const STREAM_READ_CHUNK: usize = 8_192;
 pub struct SyslogSourcePlan {
     config: SyslogClientConfig,
     bind_addr: String,
-    #[cfg(feature = "testing")]
-    listener_faults: Option<broadcast::Sender<(String, watch::Sender<bool>)>>,
+    listener_faults: ConfiguredListenerFaults,
 }
 
 impl SyslogSourcePlan {
@@ -72,8 +112,7 @@ impl SyslogSourcePlan {
         Ok(Self {
             config,
             bind_addr,
-            #[cfg(feature = "testing")]
-            listener_faults: None,
+            listener_faults: ConfiguredListenerFaults::default(),
         })
     }
 
@@ -82,7 +121,7 @@ impl SyslogSourcePlan {
         mut self,
         faults: broadcast::Sender<(String, watch::Sender<bool>)>,
     ) -> Self {
-        self.listener_faults = Some(faults);
+        self.listener_faults = ConfiguredListenerFaults::new(faults);
         self
     }
 }
@@ -150,10 +189,7 @@ struct SyslogStreamListener {
     frame_rx: mpsc::Receiver<ReceivedSyslogFrame>,
     connections: JoinSet<error_stack::Result<(), SyslogConnectionError>>,
     paused: watch::Sender<bool>,
-    #[cfg(feature = "testing")]
-    listener_faults: Option<broadcast::Receiver<(String, watch::Sender<bool>)>>,
-    #[cfg(feature = "testing")]
-    bind_addr: String,
+    accept: ConfiguredStreamAccept,
 }
 
 pub struct SyslogSource {
@@ -161,8 +197,7 @@ pub struct SyslogSource {
     bind_addr: String,
     tls_acceptor: Option<TlsAcceptor>,
     listener: Option<SyslogListener>,
-    #[cfg(feature = "testing")]
-    listener_faults: Option<broadcast::Sender<(String, watch::Sender<bool>)>>,
+    listener_faults: ConfiguredListenerFaults,
 }
 
 #[derive(Debug, Error)]
@@ -248,7 +283,6 @@ impl SourceConnector for SyslogSource {
             bind_addr: plan.bind_addr.clone(),
             tls_acceptor,
             listener: None,
-            #[cfg(feature = "testing")]
             listener_faults: plan.listener_faults.clone(),
         })
     }
@@ -391,13 +425,7 @@ impl SyslogSource {
                     frame_rx,
                     connections: JoinSet::new(),
                     paused,
-                    #[cfg(feature = "testing")]
-                    listener_faults: self
-                        .listener_faults
-                        .as_ref()
-                        .map(|faults| faults.subscribe()),
-                    #[cfg(feature = "testing")]
-                    bind_addr: self.bind_addr.clone(),
+                    accept: self.listener_faults.stream_accept(&self.bind_addr),
                 }))
             }
         }
@@ -448,25 +476,14 @@ impl SyslogStreamListener {
     ) -> error_stack::Result<SyslogSourceMessage, SyslogListenerError> {
         loop {
             nervix_primitives::task::consume_budget().await;
-            #[cfg(feature = "testing")]
-            let accept = accept_stream(
+            let accept = self.accept.accept(
                 self.listener
                     .as_ref()
                     .assured("receive is called only with a bound listener"),
-                &self.bind_addr,
-                &mut self.listener_faults,
             );
-            #[cfg(not(feature = "testing"))]
-            let accept = self
-                .listener
-                .as_ref()
-                .assured("receive is called only with a bound listener")
-                .accept();
             nervix_primitives::select! {
                 accepted = accept => {
-                    let (stream, peer_addr) = accepted.map_err(|source| {
-                        Report::new(SyslogListenerError::StreamAccept { source })
-                    })?;
+                    let (stream, peer_addr) = accepted?;
                     if let Err(error) = stream.set_nodelay(true) {
                         debug!(
                             peer_addr = %peer_addr,
@@ -523,30 +540,6 @@ impl SyslogStreamListener {
                         Some(Ok(Ok(()))) | Some(Err(_)) | None => {}
                     }
                 }
-            }
-        }
-    }
-}
-
-#[cfg(feature = "testing")]
-async fn accept_stream(
-    listener: &TcpListener,
-    bind_addr: &str,
-    listener_faults: &mut Option<broadcast::Receiver<(String, watch::Sender<bool>)>>,
-) -> std::io::Result<(TcpStream, SocketAddr)> {
-    let Some(listener_faults) = listener_faults.as_mut() else {
-        return listener.accept().await;
-    };
-    loop {
-        nervix_primitives::select! {
-            accepted = listener.accept() => return accepted,
-            fault = listener_faults.recv() => match fault {
-                Ok((address, fired)) if address == bind_addr => {
-                    fired.send_replace(true);
-                    return Err(std::io::Error::other("injected Syslog stream accept failure"));
-                }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return listener.accept().await,
             }
         }
     }

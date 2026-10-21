@@ -1556,8 +1556,9 @@ sequenceDiagram
   in-progress frames and its intake queue, reports the typed read failure through the host, and
   rebinds the socket on resume. A later bind failure keeps those tasks and queued frames while the
   host retries. Closing the source ends the retained connection tasks and queue together.
-  The test-only source plan accepts a fault channel from the server harness. It can fail one accept
-  for a selected bound address; the one- and three-node Cucumber checks hold a connection open
+  Plans, sources and stream listeners retain a configured accept capability. Ordinary builds keep
+  zero-sized fault markers; the testing module owns the harness channel and selected bound address.
+  It can fail one accept for that address; the one- and three-node Cucumber checks hold a connection open
   across that failure, observe the fault, and send through both the retained connection and a
   freshly accepted connection after rebind.
 - **Syslog decoding, SQS bodies and OTEL identifiers.** The SYSLOG codec checks header fields and
