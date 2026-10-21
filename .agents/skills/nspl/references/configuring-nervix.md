@@ -267,10 +267,17 @@ relay. Do not use them to scan across branches.
   shortening or lengthening a real retry wait.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
-- Provision Iceberg table columns with names and nested types matching the emitter's `VALUES`.
-  Opening the emitter rejects an incompatible mapped schema before staging records. UTC
-  `DATETIME` values, including values inside lists and nested structures, use the containing
-  microsecond in Iceberg; a table changed after open can still fail a later commit.
+- Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
+  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
+  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  transient error while the emitter retries.
+- Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
+  `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
+  microsecond and needs a `timestamptz` column, not `timestamptz_ns`. Opening the emitter refuses
+  a mapped column the table lacks or types differently, before staging records, but a commit
+  writes the mapped columns by position in the table's column order: map every table column, in
+  that order, and map only values that are never null into required columns. A table changed
+  after open can still fail a later commit.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO_ACK`.
@@ -290,6 +297,10 @@ relay. Do not use them to scan across branches.
   Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
+- For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
+  And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
+  shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
+  declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
@@ -306,7 +317,9 @@ relay. Do not use them to scan across branches.
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
   the operator must create before the ingestor reads. Consumers register as
   `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
-  failures and what `ALTER` keeps.
+  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
+  topic or subscription name retires the preceding owned subscription best-effort.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The
@@ -430,9 +443,12 @@ Choose checks relevant to the configured graph:
   sent alone from `nervix-cli`, a native client, or the web console, which saves it as a verified
   browser download. A normal backup quiesces each running domain
   before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
-  materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
-  PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
-  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
+  materialized relay generations, deduplicator keys and the rows windows retain. A backup is
+  refused while a node that owns the domain's state is down or no node can host part of it, and a
+  normal backup also while a node that runs its work is; send it again once the node is back,
+  failover has moved its work, or a node is uncordoned.
+  `WITHOUT PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures
+  only configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
   its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
   branch lifecycle sections stream within the 32 MiB bulk budget up to the 64 MiB record limit;
   their conversion is charged to the node's `restore_metadata` grant, sized below.
@@ -465,8 +481,10 @@ Choose checks relevant to the configured graph:
   separate from archive-file staging and does not bound snapshot retention or filesystem
   overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
-  logical usage from SST allocation. Recover an uncertain applying restore with its exact
-  execution reference; after a terminal failed restore, restore into a fresh target name.
+  logical usage from SST allocation. Recover an uncertain applying restore by sending it again
+  under its exact execution reference, as the Rust client's `restore_with_reference` does;
+  `nervix-cli restore` starts every run under a fresh reference. After a terminal failed restore,
+  restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
   to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
   window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk

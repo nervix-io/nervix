@@ -370,6 +370,62 @@ fn shuttle_answers_racing_a_full_window_settle_each_record_exactly_once() {
     check_interleavings(answers_racing_a_full_window_settle_each_record_exactly_once);
 }
 
+fn driver_backpressure_settles_below_max_in_flight() {
+    shuttle::future::block_on(async {
+        let mut publish = CheckedPublish::new(8, 5);
+        assert!(
+            publish
+                .window
+                .settle_next()
+                .await
+                .assured("an empty window waits for nothing")
+                .is_none()
+        );
+        for verdict in [
+            ScriptedVerdict::Confirmed,
+            ScriptedVerdict::Rejected,
+            ScriptedVerdict::Confirmed,
+            ScriptedVerdict::Rejected,
+            ScriptedVerdict::Confirmed,
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            if publish.held() >= 2 {
+                let settled = publish.window.settle_next().await.assured(
+                    "every answer is a verdict and only an explicit trigger expires a deadline",
+                );
+                assert!(settled.is_some());
+                assert_eq!(publish.held(), 1);
+            }
+            publish
+                .hand_over(verdict)
+                .await
+                .assured("MAX is larger than the driver's queue");
+            assert!(publish.held() <= 2);
+        }
+        let settled = publish.finish().await;
+        assert!(settled.outcome.infrastructure_error.is_none());
+        let mut delivered = settled.outcome.delivered.clone();
+        delivered.sort();
+        assert_eq!(delivered, [0, 2, 4].map(SinkRecordId::new));
+        let mut rejected: Vec<_> = settled
+            .outcome
+            .rejected
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        rejected.sort();
+        assert_eq!(rejected, [1, 3].map(SinkRecordId::new));
+        settled.assert_given_answers_settled();
+    });
+}
+
+/// A driver's capacity below MAX requests an oldest answer without ending the publish or
+/// settling any record twice, including answers that race the request.
+#[test]
+fn shuttle_driver_backpressure_settles_below_max_in_flight() {
+    check_interleavings(driver_backpressure_settles_below_max_in_flight);
+}
+
 /// Marks the publishing task, whose window deadlines a check's clock expires.
 #[derive(Debug, Clone, Copy)]
 struct PublishDeadlines;

@@ -31,7 +31,8 @@ use nervix_interconnect::{PeerResolver, PeerTarget, TransportEntropy};
 use nervix_models::NodeEndpoint;
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
-    time::{Instant, sleep},
+    sync::watch,
+    time::{Instant, sleep, timeout},
 };
 use runner::{
     ClockSkew, HostSupervisor, NetworkParameters, SchedulerPhase, SemanticTrace, SimulatedEntropy,
@@ -104,17 +105,25 @@ fn peer_resolution_uses_simulated_dns() {
 /// client resolves each through the product's resolver seam, dials it over the boundary's sockets,
 /// learns that a name the simulation does not hold does not exist, and waits on its own clock.
 ///
+/// The client dials only after both hosts report that they listen. The seed orders hosts within a
+/// simulation step, and under seed 7053 a dial that did not wait reached `alpha` before `alpha` had
+/// bound its port.
+///
 /// The run's simulated duration is shorter than the client's wait plus any time a real clock could
 /// lend it, so the run completes only because the wait follows the simulated clock.
 #[test]
 fn simulated_hosts_keep_their_own_names_sockets_and_clocks() {
     const PORT: u16 = 7443;
+    const HOSTS: [&str; 2] = ["alpha", "beta"];
     const WAIT: Duration = Duration::from_secs(10);
+    // Each host binds as soon as its software starts, so a second of simulated time is ample.
+    const LISTEN_DEADLINE: Duration = Duration::from_secs(1);
     let scenario = Scenario {
         name: "host isolation",
-        fault_plan: "none; two hosts listen on one port, and one client resolves and dials each, \
-                     asks for a name no host holds, and waits on its own clock",
-        seeds: &[43],
+        fault_plan: "none; two hosts listen on one port, and one client waits until both listen, \
+                     resolves and dials each, asks for a name no host holds, and waits on its own \
+                     clock",
+        seeds: &[43, 7053],
     };
     scenario.check(
         |seed| {
@@ -129,15 +138,24 @@ fn simulated_hosts_keep_their_own_names_sockets_and_clocks() {
         },
         |run| {
             let trace = run.trace();
+            let (listening_tx, listening_rx) = watch::channel(0_usize);
             run.simulate(move |simulation| {
-                for host in ["alpha", "beta"] {
+                for host in HOSTS {
                     let trace = trace.clone();
+                    let listening = listening_tx.clone();
                     simulation.host(host, move || {
                         let trace = trace.clone();
+                        let listening = listening.clone();
                         async move {
                             HostSupervisor::run(async move {
                                 let listener =
                                     TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
+                                trace.record(host, "listening on the shared port");
+                                listening.send_modify(|count| {
+                                    *count = count
+                                        .checked_add(1)
+                                        .assured("only the two hosts report that they listen");
+                                });
                                 let (_connection, peer) = listener.accept().await?;
                                 assert_eq!(peer.ip(), turmoil::lookup("observer"));
                                 trace.record(host, "accepted the observer on the shared port");
@@ -148,13 +166,22 @@ fn simulated_hosts_keep_their_own_names_sockets_and_clocks() {
                     });
                 }
                 simulation.client("observer", async move {
+                    let mut listening = listening_rx;
+                    timeout(
+                        LISTEN_DEADLINE,
+                        listening.wait_for(|count| *count == HOSTS.len()),
+                    )
+                    .await
+                    .assured("both hosts listen within the simulated deadline")
+                    .assured("each host's software keeps a readiness sender for the whole run");
                     let resolver = PeerResolver::simulated();
-                    for host in ["alpha", "beta"] {
+                    for host in HOSTS {
                         let endpoint = NodeEndpoint::new(host, PORT);
                         let targets = PeerTarget::resolve(&resolver, &endpoint, Duration::ZERO)
                             .await
                             .assured("the simulated DNS table holds every host");
                         assert_eq!(targets.len(), 1);
+                        trace.record("observer", format!("dialling {host}"));
                         let stream = TcpStream::connect(targets[0].addr).await?;
                         assert_eq!(stream.peer_addr()?.ip(), turmoil::lookup(host));
                         assert_eq!(stream.local_addr()?.ip(), turmoil::lookup("observer"));

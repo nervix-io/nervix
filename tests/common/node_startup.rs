@@ -4,11 +4,13 @@
 //!
 //! - **Owns.** The absolute per-node startup budget, the attempt limit spent inside it, the cleanup
 //!   of each failed attempt within that budget, the pause before the next launch, the classification
-//!   that decides whether an attempt may be retried and which listeners it moves, and the exhaustion
-//!   diagnostic that carries every attempt.
+//!   that decides whether an attempt may be retried and which listeners it moves, which application
+//!   errors report a listener another process bound first, whether returned by an in-process node
+//!   or named in the report a server process writes, and the exhaustion diagnostic that carries
+//!   every attempt.
 //! - **Depends on.** The startup failure, task state and terminal outcomes of the node-liveness
-//!   owner, the phase deadline, the harness status timing policy, and the application error an
-//!   in-process node returns.
+//!   owner, the phase deadline, the harness status timing policy, and the application error a node
+//!   returns and how it renders, which is all a node running as a process of its own reports.
 //! - **Must not know.** How a node is configured, launched or torn down, scenario state, or the
 //!   product's shutdown deadline.
 //!
@@ -43,7 +45,7 @@
 //! one [`ATTEMPT_READINESS_BUDGET`] across its launches, cleanup and pauses. Only a typed occupied
 //! early listener permits another launch; a running node may already have consumed the fault.
 
-use std::{fmt, io, time::Duration};
+use std::{fmt, io, mem, time::Duration};
 
 use error_stack::Report;
 use nervix_models::ClusterNodeName;
@@ -164,15 +166,97 @@ pub(crate) trait StartableNode {
 }
 
 /// The listening addresses a failed startup needs to allocate again.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString)]
 pub(crate) enum StartupPorts {
+    #[strum(serialize = "all")]
     All,
+    #[strum(serialize = "gRPC")]
     Grpc,
+    #[strum(serialize = "HTTP")]
     Http,
+    #[strum(serialize = "HTTPS")]
     Https,
+    #[strum(serialize = "observability")]
     Observability,
+    #[strum(serialize = "web console")]
     WebConsole,
+    #[strum(serialize = "interconnect")]
     Interconnect,
+}
+
+impl StartupPorts {
+    /// The listener family `error` reports another process bound first, if it reports one.
+    pub(crate) fn lost_by(error: &AppError) -> Option<Self> {
+        let reported = mem::discriminant(error);
+        // One entry per listener a node binds while it starts, so that set bounds the scan.
+        for lost in LostListenerBind::all() {
+            if mem::discriminant(&lost.error) == reported {
+                return Some(lost.ports);
+            }
+        }
+        None
+    }
+
+    /// The listener family a node's startup report names as bound by another process first,
+    /// given the report's outermost context. A node running as a process of its own says why its
+    /// startup ended only as that text, so the context is compared with the rendering of each
+    /// application error [`Self::lost_by`] decides from, never with a spelling of its own.
+    pub(crate) fn lost_in_report(context: &str) -> Option<Self> {
+        // One entry per listener a node binds while it starts, so that set bounds the scan.
+        for lost in LostListenerBind::all() {
+            if lost.error.to_string() == context {
+                return Some(lost.ports);
+            }
+        }
+        None
+    }
+}
+
+/// One application error a node ends its startup with when another process bound one of its
+/// listener addresses first, and the listener family a fresh allocation moves.
+struct LostListenerBind {
+    error: AppError,
+    ports: StartupPorts,
+}
+
+impl LostListenerBind {
+    /// Every listener address a node binds while it starts, by the application error that reports
+    /// another process bound it first. The harness allocates ports from a pool it shares with every
+    /// concurrent scenario and with sibling worktrees running the same suite, so an address another
+    /// process took first is the one application error a fresh allocation resolves.
+    fn all() -> [Self; 7] {
+        [
+            Self {
+                error: AppError::BindGrpcListenAddress,
+                ports: StartupPorts::Grpc,
+            },
+            Self {
+                error: AppError::BindHttpListenAddress,
+                ports: StartupPorts::Http,
+            },
+            Self {
+                error: AppError::BindHttpsListenAddress,
+                ports: StartupPorts::Https,
+            },
+            Self {
+                error: AppError::BindObservabilityListenAddress,
+                ports: StartupPorts::Observability,
+            },
+            Self {
+                error: AppError::BindWebConsoleListenAddress,
+                ports: StartupPorts::WebConsole,
+            },
+            Self {
+                error: AppError::BindWebConsoleHttpsListenAddress,
+                ports: StartupPorts::WebConsole,
+            },
+            // The interconnect transport binds its own listener while it starts.
+            Self {
+                error: AppError::StartInterconnect,
+                ports: StartupPorts::Interconnect,
+            },
+        ]
+    }
 }
 
 /// Whether the harness may launch a node again after an attempt failed.
@@ -280,22 +364,10 @@ impl AttemptFailure {
     }
 
     fn application_retry(error: &Report<AppError>, policy: StartupRetryPolicy) -> StartupRetry {
-        let ports = match error.current_context() {
-            // The harness allocates ports from a pool it shares with every concurrent scenario and
-            // with sibling worktrees running the same suite, so an address another process took
-            // first is the one application error a fresh allocation resolves.
-            AppError::BindGrpcListenAddress => StartupPorts::Grpc,
-            AppError::BindHttpListenAddress => StartupPorts::Http,
-            AppError::BindHttpsListenAddress => StartupPorts::Https,
-            AppError::BindObservabilityListenAddress => StartupPorts::Observability,
-            AppError::BindWebConsoleListenAddress | AppError::BindWebConsoleHttpsListenAddress => {
-                StartupPorts::WebConsole
-            }
-            // The interconnect transport binds its own listener while it starts.
-            AppError::StartInterconnect => StartupPorts::Interconnect,
+        let Some(ports) = StartupPorts::lost_by(error.current_context()) else {
             // Every other application error is the node's decision about its configuration, its
             // stored state or its peers, and it holds for the next launch too.
-            _ => return StartupRetry::Terminal,
+            return StartupRetry::Terminal;
         };
         if let StartupRetryPolicy::BindBeforeRuntime = policy {
             // Early server listeners bind before the application opens its stores or applies

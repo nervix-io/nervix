@@ -126,6 +126,35 @@ pub struct KafkaOffsetStateOriginator {
     assignment: StateAssignmentToken,
 }
 
+/// The originator one running Kafka ingestor commits through. A reassignment that keeps the
+/// ingestor running on its node, such as one that replaces a replica of its offsets, rebinds the
+/// offsets to a new assignment generation; schedule application then hands the ingestor the
+/// originator that binding issued. An ingestor instance the schedule stopped keeps the originator
+/// it last held, which every later binding refuses.
+#[derive(Debug)]
+pub(super) struct KafkaOffsetOriginatorSlot {
+    /// Replaced only by schedule application, for as long as the ingestor instance runs.
+    originator: ArcSwap<KafkaOffsetStateOriginator>,
+}
+
+impl KafkaOffsetOriginatorSlot {
+    pub(super) fn new(originator: KafkaOffsetStateOriginator) -> Self {
+        Self {
+            originator: ArcSwap::from_pointee(originator),
+        }
+    }
+
+    /// The originator the ingestor's next operation acts under.
+    pub(super) fn current(&self) -> StdArc<KafkaOffsetStateOriginator> {
+        self.originator.load_full()
+    }
+
+    /// Hands the running ingestor the originator a reassignment's binding issued.
+    pub(super) fn replace(&self, originator: KafkaOffsetStateOriginator) {
+        self.originator.store(StdArc::new(originator));
+    }
+}
+
 /// Replica installation access held by one synchronization task for one assignment generation.
 #[derive(Debug, Clone)]
 pub struct KafkaOffsetSnapshotInstaller {
@@ -1349,6 +1378,53 @@ mod tests {
             .record(&replica, repeated_report);
         assert!(originator.read().replica_quorum_holds(revision));
         assert_eq!(installer.read().next_offset("events", 0), Some(9));
+    }
+
+    #[test]
+    fn a_reissued_originator_commits_after_a_replica_change_that_fences_the_one_it_replaced() {
+        let owner = ClusterNodeName::parse("node-1").assured("the owner name is valid");
+        let lost = ClusterNodeName::parse("node-2").assured("the lost replica name is valid");
+        let promoted = ClusterNodeName::parse("node-3").assured("the new replica name is valid");
+        let position = |offset| KafkaOffsetPosition {
+            topic: "events".into(),
+            partition: 0,
+            offset,
+        };
+        let state = Arc::new(
+            ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                .assured("an empty primary initializes"),
+        );
+        let started = ReplicatedKafkaOffsetState::bind(
+            &state,
+            StateReplicationRoles::new(Some(owner.clone()), vec![lost], 0),
+            Some(&owner),
+        )
+        .originator
+        .assured("the primary may commit offsets");
+        let slot = KafkaOffsetOriginatorSlot::new(started.clone());
+        slot.current()
+            .apply_committed_offset(&position(4))
+            .assured("the ingestor commits under the binding it started with");
+
+        let reassigned = ReplicatedKafkaOffsetState::bind(
+            &state,
+            StateReplicationRoles::new(Some(owner.clone()), vec![promoted], 0),
+            Some(&owner),
+        )
+        .originator
+        .assured("the primary still originates its offsets");
+        assert!(
+            started.apply_committed_offset(&position(5)).is_err(),
+            "the replica change superseded the binding the ingestor started with"
+        );
+        slot.replace(reassigned);
+        slot.current()
+            .apply_committed_offset(&position(6))
+            .assured("the kept ingestor commits under the binding the reassignment issued");
+        assert_eq!(
+            ReplicatedKafkaOffsetState::read(&state).next_offset("events", 0),
+            Some(6)
+        );
     }
 
     #[test]

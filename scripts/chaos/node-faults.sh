@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Sourced by the stateful, domain-time and mixed-instability scenarios. Owns the node faults they
-# compose with their fixtures: an abrupt kill with an explicit restart, a graceful stop and restart,
-# a finite pause, a peer-side network isolation, and a kill of every node. Each fault proves its own
-# effect through Docker inspection, Pumba's own report and the run's live Docker event recording.
+# Sourced by the stateful, domain-time, mixed-instability and backup-fault scenarios. Owns the node
+# faults they compose with their fixtures: an abrupt kill with an explicit restart, a graceful stop
+# and restart, a finite pause, a peer-side network isolation, a kill of every node, and one netem
+# effect on a container's egress toward chosen addresses. Each fault proves its own effect through
+# Docker inspection, Pumba's own report and the run's live Docker event recording.
 # Every fault that a mixed-instability step can hold together with another one comes as an inject
 # half and a heal half; the whole faults the other scenarios hold compose those halves, run the
 # caller's BEFORE hook immediately before they inject anything and its DURING hook while they hold,
@@ -455,4 +456,107 @@ node_fault_check_events() {
     "${script_dir}/verify-docker-events.sh" lifecycle --events "${case_dir}/node-events.ndjson" \
         ${node_fault_expected_events[@]+"${node_fault_expected_events[@]}"} \
         || recovery_finding "${case_dir}" 'node lifecycle events differ from the planned fault'
+}
+
+# True when the run's SERVICE container carries exactly one Pumba netem topology whose netem stage
+# applies EXPECTED, and nothing else, as inspected into OUTPUT.
+node_fault_netem_installed() {
+    local service="$1"
+    local expected_effect="$2"
+    local output="$3"
+    inspect_node_rules "${service}" "${output}" || return 1
+    local qdiscs
+    qdiscs="$(awk '/^# qdisc$/ {in_section=1;next} /^# / {in_section=0} in_section && NF' "${output}")"
+    [[ "$(wc -l <<<"${qdiscs}")" -eq 4 ]] || return 1
+    grep -Eq '^qdisc prio 504d: root ' <<<"${qdiscs}" || return 1
+    grep -Eq "^qdisc netem 5050: parent 504d:3 .*${expected_effect}" <<<"${qdiscs}"
+}
+
+# True when the run's SERVICE container carries its default interface state, as inspected into
+# OUTPUT.
+node_fault_netem_removed() {
+    local service="$1"
+    local output="$2"
+    inspect_node_rules "${service}" "${output}" || return 1
+    local container_id
+    container_id="$(owned_service_container "${service}")" || return 1
+    "${script_dir}/verify-degraded-evidence.sh" rules default "${output}" "$(container_address "${container_id}")" \
+        >/dev/null 2>&1
+}
+
+# Starts the detached Pumba injector NAME that applies EFFECT... to the egress of the run's SERVICE
+# container, whose chaos role is ROLE, toward ADDRESSES, a space-separated list, for at most
+# LIFETIME seconds, after a dry run selecting exactly that container, and requires the installed
+# netem to show EXPECTED.
+node_fault_netem_start() {
+    local case_dir="$1"
+    local name="$2"
+    local service="$3"
+    local role="$4"
+    local addresses="$5"
+    local lifetime="$6"
+    local expected_effect="$7"
+    shift 7
+    failure_category=injection
+    node_fault_netem_removed "${service}" "${case_dir}/${name}-rules-before.txt" \
+        || node_fault_fail injection "${service} already carries a qdisc, filter or INPUT rule; refusing to overlap faults"
+    local container_id container_name
+    container_id="$(owned_service_container "${service}")" || return 1
+    container_name="$(run_bounded 20 docker inspect --format '{{.Name}}' "${container_id}")"
+    container_name="${container_name#/}"
+    local common=(--interface eth0 --tc-image "${CHAOS_NETTOOLS_IMAGE}" --pull-image=false)
+    local address
+    for address in ${addresses}; do
+        common+=(--target "${address}")
+    done
+    node_fault_dry_run "${case_dir}/${name}-dry-run.txt" "${container_id}" "${role}" 'running netem on container' \
+        netem --duration 1s "${common[@]}" "$@" "${container_name}"
+    local arguments=(netem --duration "${lifetime}s" "${common[@]}" "$@")
+    printf '%s\n' "${arguments[@]}" | jq -R . | jq -s . >"${case_dir}/${name}-arguments.json"
+    local injector_id
+    injector_id="$(run_bounded 30 docker run --detach \
+        --name "${name}" \
+        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=fault \
+        --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+        "${pumba_image_id}" --log-level info \
+        --label "io.nervix.chaos.run=${run_id}" --label "io.nervix.chaos.role=${role}" \
+        "${arguments[@]}" "${container_name}")"
+    printf '%s\n' "${injector_id}" >"${case_dir}/${name}-injector-id.txt"
+    wait_for "${name} netem on ${service}" 30 \
+        node_fault_netem_installed "${service}" "${expected_effect}" "${case_dir}/${name}-rules-installed.txt" \
+        || node_fault_fail injection "the ${name} netem on ${service} never matched ${expected_effect}"
+    failure_category=product
+}
+
+# Stops the injector NAME with SIGTERM, and requires its exit code zero and the default interface
+# state back on the run's SERVICE container.
+node_fault_netem_heal() {
+    local case_dir="$1"
+    local name="$2"
+    local service="$3"
+    local injector_id
+    injector_id="$(<"${case_dir}/${name}-injector-id.txt")"
+    run_bounded 60 docker stop -t 40 "${injector_id}" >"${case_dir}/${name}-stop.txt" 2>&1
+    local exit_code
+    exit_code="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${injector_id}")"
+    run_bounded 20 docker logs "${injector_id}" >"${case_dir}/${name}-pumba.log" 2>&1
+    run_bounded 20 docker container rm "${injector_id}" >/dev/null
+    [[ "${exit_code}" == 0 ]] || node_fault_fail injection "the ${name} injector exited ${exit_code} after SIGTERM"
+    wait_for "${name} netem removed from ${service}" 30 \
+        node_fault_netem_removed "${service}" "${case_dir}/${name}-rules-healed.txt" \
+        || node_fault_fail injection "${service} kept a qdisc after the ${name} injector stopped"
+}
+
+# Ends the injector NAME whose target container stopped. Its netem lived in the network namespace
+# the stopped container released, so nothing remains for the injector to remove: it is killed
+# rather than asked to delete rules from a namespace that no longer exists, and the caller checks
+# the restarted container's interface instead.
+node_fault_netem_discard() {
+    local case_dir="$1"
+    local name="$2"
+    local injector_id
+    injector_id="$(<"${case_dir}/${name}-injector-id.txt")"
+    run_bounded 30 docker kill "${injector_id}" >"${case_dir}/${name}-kill.txt" 2>&1
+    run_bounded 20 docker logs "${injector_id}" >"${case_dir}/${name}-pumba.log" 2>&1
+    run_bounded 20 docker container rm "${injector_id}" >/dev/null
 }

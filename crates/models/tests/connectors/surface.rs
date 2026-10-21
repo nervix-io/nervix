@@ -85,9 +85,14 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             unlocated(NO_ACK, POLLING, &[("EVERY", true)])
         }
         IngestSourceKind::Http(HttpSourceEntity::Endpoint)
-        | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
-            unlocated(NO_ACK, ENDPOINT, &[])
-        }
+        | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => unlocated(
+            &[
+                (IngestDeliveryKind::NoAck, false),
+                (IngestDeliveryKind::AckRequest, false),
+            ],
+            ENDPOINT,
+            &[],
+        ),
         IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => SourceSurface {
             delivery: EVERY_DELIVERY,
             quiesce: SUSPEND,
@@ -534,7 +539,7 @@ fn every_client_declares_its_pooling_and_the_owner_of_its_configuration_keys() {
 }
 
 #[test]
-fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_and_batching() {
+fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_and_stalled_peers() {
     let named = |capabilities: Vec<RuntimeCapability>| {
         capabilities
             .into_iter()
@@ -571,6 +576,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_and_batchin
             "FIFO GROUP <expression>",
             "FIFO GROUP FROM BRANCH",
             "BATCH",
+            "STALLED PEER timeout_ms",
         ]
     );
     assert_eq!(
@@ -579,7 +585,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_and_batchin
                 .capabilities()
                 .runtime_capabilities()
         ),
-        ["MODE ACK", "METHOD", "PATH"]
+        ["MODE ACK", "METHOD", "PATH", "STALLED PEER timeout_ms"]
     );
 }
 

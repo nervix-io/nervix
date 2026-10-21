@@ -1472,6 +1472,52 @@ Feature: Relocating runtime nodes onto a named cluster node
       relocated 1 of 1 runtime node(s) onto node 'node-2'
       """
 
+  Scenario: A relocation whose commit a leader with a lapsed lease refuses completes under its execution reference
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these Plexus statements are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA lease_event ( id I64 );
+      CREATE RELAY lease_input SCHEMA lease_event UNBRANCHED;
+      CREATE RELAY lease_output SCHEMA lease_event UNBRANCHED;
+      CREATE JUNCTION lease_route FROM lease_input UNBRANCHED
+        TO lease_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus statements are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given the leader refuses the next relocation commit in domain "{{domain}}" as a leader whose lease lapsed
+    When these Plexus statements are executed on the leader node
+      """
+      RELOCATE JUNCTION lease_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the refusal of the relocation commit in domain "{{domain}}" was delivered
+    And the last command output contains
+      """
+      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=lease_route owner=node-2
+      """
+
   @planned-handoff-timeout
   Scenario: A unit that cannot drain aborts whole and succeeds after the stall clears
     Given the production sticky scheduler is configured

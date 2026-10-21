@@ -38,11 +38,13 @@ impl fmt::Display for BackupCutGate {
 
 impl HeldGate for BackupCutGate {
     fn reached(&self) -> impl Future<Output = ()> + Send {
-        self.fault_injection.wait_for_backup_cut_pause(&self.domain)
+        self.fault_injection
+            .wait_for_backup_cut_pause(&self.domain, BackupCutBoundary::Capture)
     }
 
     fn release(&self) {
-        self.fault_injection.release_backup_cut_pause(&self.domain);
+        self.fault_injection
+            .release_backup_cut_pause(&self.domain, BackupCutBoundary::Capture);
     }
 }
 
@@ -279,7 +281,9 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
         result = &mut task => panic!("the native wait ended before the second cut: {result:?}"),
         reached = nervix_primitives::time::timeout(
             CUT_ARRIVAL_TIMEOUT,
-            world.fault_injection.wait_for_backup_cut_pause(&second),
+            world
+                .fault_injection
+                .wait_for_backup_cut_pause(&second, BackupCutBoundary::Capture),
         ) => reached.assured("the native backup reaches the controlled cut"),
     }
     let result = nervix_primitives::time::timeout(Duration::from_secs(12), task)
@@ -308,7 +312,9 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
     let recovery = recovery_client
         .prepare_backup_with_reference(&backup, &reference)
         .await;
-    world.fault_injection.release_backup_cut_pause(&second);
+    world
+        .fault_injection
+        .release_backup_cut_pause(&second, BackupCutBoundary::Capture);
     let outcome = recovery_client
         .execute_prepared(&recovery)
         .await
@@ -383,7 +389,8 @@ async fn then_archive_contains_delayed_cuts(world: &mut ScenarioWorld, file: Str
             .assured("the cut release follows its engagement");
         assert!(
             elapsed >= Duration::from_secs(seconds),
-            "the archive records the injected cut delay"
+            "the archive records the injected cut delay for {domain}: required at least \
+             {seconds}s, recorded {elapsed:?} between {engaged_at:?} and {released_at:?}"
         );
     }
 }

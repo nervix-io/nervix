@@ -79,104 +79,6 @@ backup_fault_place() {
         >"${case_dir}/placement.json"
 }
 
-# True when the run's SERVICE container carries exactly one Pumba netem topology whose netem stage
-# applies EXPECTED, and nothing else, as inspected into OUTPUT.
-backup_fault_netem_installed() {
-    local service="$1"
-    local expected_effect="$2"
-    local output="$3"
-    inspect_node_rules "${service}" "${output}" || return 1
-    local qdiscs
-    qdiscs="$(awk '/^# qdisc$/ {in_section=1;next} /^# / {in_section=0} in_section && NF' "${output}")"
-    [[ "$(wc -l <<<"${qdiscs}")" -eq 4 ]] || return 1
-    grep -Eq '^qdisc prio 504d: root ' <<<"${qdiscs}" || return 1
-    grep -Eq "^qdisc netem 5050: parent 504d:3 .*${expected_effect}" <<<"${qdiscs}"
-}
-
-# True when the run's SERVICE container carries its default interface state, as inspected into
-# OUTPUT.
-backup_fault_netem_removed() {
-    local service="$1"
-    local output="$2"
-    inspect_node_rules "${service}" "${output}" || return 1
-    local container_id
-    container_id="$(owned_service_container "${service}")" || return 1
-    "${script_dir}/verify-degraded-evidence.sh" rules default "${output}" "$(container_address "${container_id}")" \
-        >/dev/null 2>&1
-}
-
-# Starts the detached Pumba injector NAME that applies EFFECT... to the egress of the run's SERVICE
-# container, whose chaos role is ROLE, toward ADDRESS for at most LIFETIME seconds, after a dry run
-# selecting exactly that container, and requires the installed netem to show EXPECTED.
-backup_fault_netem_start() {
-    local case_dir="$1"
-    local name="$2"
-    local service="$3"
-    local role="$4"
-    local address="$5"
-    local lifetime="$6"
-    local expected_effect="$7"
-    shift 7
-    failure_category=injection
-    backup_fault_netem_removed "${service}" "${case_dir}/${name}-rules-before.txt" \
-        || backup_fault_fail injection "${service} already carries a qdisc, filter or INPUT rule; refusing to overlap faults"
-    local container_id container_name
-    container_id="$(owned_service_container "${service}")" || return 1
-    container_name="$(run_bounded 20 docker inspect --format '{{.Name}}' "${container_id}")"
-    container_name="${container_name#/}"
-    local common=(--interface eth0 --tc-image "${CHAOS_NETTOOLS_IMAGE}" --pull-image=false --target "${address}")
-    node_fault_dry_run "${case_dir}/${name}-dry-run.txt" "${container_id}" "${role}" 'running netem on container' \
-        netem --duration 1s "${common[@]}" "$@" "${container_name}"
-    local arguments=(netem --duration "${lifetime}s" "${common[@]}" "$@")
-    printf '%s\n' "${arguments[@]}" | jq -R . | jq -s . >"${case_dir}/${name}-arguments.json"
-    local injector_id
-    injector_id="$(run_bounded 30 docker run --detach \
-        --name "${name}" \
-        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=fault \
-        --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-        "${pumba_image_id}" --log-level info \
-        --label "io.nervix.chaos.run=${run_id}" --label "io.nervix.chaos.role=${role}" \
-        "${arguments[@]}" "${container_name}")"
-    printf '%s\n' "${injector_id}" >"${case_dir}/${name}-injector-id.txt"
-    wait_for "${name} netem on ${service}" 30 \
-        backup_fault_netem_installed "${service}" "${expected_effect}" "${case_dir}/${name}-rules-installed.txt" \
-        || backup_fault_fail injection "the ${name} netem on ${service} never matched ${expected_effect}"
-    failure_category=product
-}
-
-# Stops the injector NAME with SIGTERM, and requires its exit code zero and the default interface
-# state back on the run's SERVICE container.
-backup_fault_netem_heal() {
-    local case_dir="$1"
-    local name="$2"
-    local service="$3"
-    local injector_id
-    injector_id="$(<"${case_dir}/${name}-injector-id.txt")"
-    run_bounded 60 docker stop -t 40 "${injector_id}" >"${case_dir}/${name}-stop.txt" 2>&1
-    local exit_code
-    exit_code="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${injector_id}")"
-    run_bounded 20 docker logs "${injector_id}" >"${case_dir}/${name}-pumba.log" 2>&1
-    run_bounded 20 docker container rm "${injector_id}" >/dev/null
-    [[ "${exit_code}" == 0 ]] || backup_fault_fail injection "the ${name} injector exited ${exit_code} after SIGTERM"
-    wait_for "${name} netem removed from ${service}" 30 \
-        backup_fault_netem_removed "${service}" "${case_dir}/${name}-rules-healed.txt" \
-        || backup_fault_fail injection "${service} kept a qdisc after the ${name} injector stopped"
-}
-
-# Ends the injector NAME whose target container stopped. Its netem lived in the network namespace
-# the stopped container released, so nothing remains for the injector to remove: it is killed
-# rather than asked to delete rules from a namespace that no longer exists, and the caller checks
-# the restarted container's interface instead.
-backup_fault_netem_discard() {
-    local case_dir="$1"
-    local name="$2"
-    local injector_id
-    injector_id="$(<"${case_dir}/${name}-injector-id.txt")"
-    run_bounded 30 docker kill "${injector_id}" >"${case_dir}/${name}-kill.txt" 2>&1
-    run_bounded 20 docker logs "${injector_id}" >"${case_dir}/${name}-pumba.log" 2>&1
-    run_bounded 20 docker container rm "${injector_id}" >/dev/null
-}
-
 backup_fault_gate_name() {
     printf '%s-acknowledgement-gate\n' "${run_id}"
 }
@@ -189,7 +91,7 @@ backup_fault_close_gate() {
     sink_address="$(container_address "${sink_id}")"
     [[ "${sink_address}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || backup_fault_fail controller 'the emitter node has no address on the run network'
-    backup_fault_netem_start "${case_dir}" "$(backup_fault_gate_name)" broker broker "${sink_address}" 600 \
+    node_fault_netem_start "${case_dir}" "$(backup_fault_gate_name)" broker broker "${sink_address}" 600 \
         'loss 100%' loss --percent 100
     backup_fault_gated_output=""
 }
@@ -198,7 +100,7 @@ backup_fault_close_gate() {
 # the injector stops bounds every acknowledgement the gate withheld from below.
 backup_fault_open_gate() {
     backup_fault_gate_opened_ms="$(epoch_ms)"
-    backup_fault_netem_heal "${backup_fault_case_dir}" "$(backup_fault_gate_name)" broker
+    node_fault_netem_heal "${backup_fault_case_dir}" "$(backup_fault_gate_name)" broker
 }
 
 # True once the output stays unchanged across two observations while the source runs at least two
@@ -521,7 +423,7 @@ backup_fault_stream_continues() {
 # The rolling restart's DURING hook for the archive holder: its rate limit ended with the network
 # namespace of its stopped container.
 backup_fault_discard_stream_rate() {
-    backup_fault_netem_discard "${backup_fault_case_dir}" "${run_id}-stream-rate"
+    node_fault_netem_discard "${backup_fault_case_dir}" "${run_id}-stream-rate"
 }
 
 # Restarts every node in turn, the followers first, while the archive streams to the client at a
@@ -557,7 +459,7 @@ backup_fault_rolling_restart() {
     client_address="$(container_address "${client_name}")"
     [[ "${client_address}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || backup_fault_fail controller 'the download client has no address on the run network'
-    backup_fault_netem_start "${case_dir}" "${run_id}-stream-rate" "${leader_host}" node \
+    node_fault_netem_start "${case_dir}" "${run_id}-stream-rate" "${leader_host}" node \
         "${client_address}" 900 'rate 512Kbit' rate --rate "${backup_fault_stream_rate}"
     touch "${archive_dir}/.start"
     backup_fault_backup_started_ms="$(epoch_ms)"
@@ -583,7 +485,7 @@ backup_fault_rolling_restart() {
         backup_fault_discard_stream_rate
     local fault_ms="${node_fault_started_ms}"
     wait_for "the default interface state on the restarted ${leader_host}" 30 \
-        backup_fault_netem_removed "${leader_host}" "${case_dir}/${run_id}-stream-rate-rules-restarted.txt" \
+        node_fault_netem_removed "${leader_host}" "${case_dir}/${run_id}-stream-rate-rules-restarted.txt" \
         || backup_fault_fail injection "the restarted ${leader_host} carries a qdisc, filter or INPUT rule"
     node_fault_check_events "${case_dir}/${leader_host}"
     wait_for 'the interrupted download ended' 120 test -s "${archive_dir}/stream-exit.txt" \

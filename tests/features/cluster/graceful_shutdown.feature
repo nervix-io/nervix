@@ -1018,6 +1018,169 @@ Feature: Graceful shutdown
       """
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_everyone_{{test_id}}" next offset for topic "shutdown_everyone_{{test_id}}" partition 0 is "at least 2"
 
+  @shutdown_terminating_destination @deloxide_stress
+  Scenario: A leader stopping with peers it has not seen terminate keeps its ingestor when the chosen peer refuses it
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And Kafka topic "terminating_peer_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA peer_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA peer_wire MODE STRICT ( event_id integer );
+      CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
+      CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
+      CREATE CLIENT peer_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR peer_source
+        FROM peer_kafka TOPIC 'terminating_peer_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING peer_codec
+        TO peer_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION peer_seen TO peer_records;
+      """
+    And Kafka message is published to topic "terminating_peer_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":1}
+      """
+    Given the graceful drain of node "node-2" pauses before it moves its work
+    And the graceful drain of node "node-3" pauses before it moves its work
+    When gossip exchanges involving node "node-2" are blocked with a "0s" send delay
+    And consensus connectivity for node "node-3" is blocked
+    And node "node-2" begins stopping
+    And node "node-3" begins stopping
+    Then node "node-2" reaches its graceful drain pause
+    And node "node-3" reaches its graceful drain pause
+    When node "node-1" is stopped
+    And the graceful drain pause of node "node-2" is released
+    And the graceful drain pause of node "node-3" is released
+    And node "node-2" is stopped
+    And node "node-3" is stopped
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-3" is restored
+    And the cluster is restarted
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=peer_source owner=node-1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_peer_seen TO peer_records;
+      """
+    And Kafka message is published to topic "terminating_peer_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":2}
+      """
+
+  @shutdown_unactivated_handoff @deloxide_stress
+  Scenario: A node whose relocated ingestor never activated on its restarted destination releases its storage when it stops
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And Kafka topic "unactivated_handoff_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA unactivated_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA unactivated_wire MODE STRICT ( event_id integer );
+      CREATE CODEC unactivated_codec
+        FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
+      CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
+      CREATE CLIENT unactivated_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR unactivated_source
+        FROM unactivated_kafka TOPIC 'unactivated_handoff_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING unactivated_codec
+        TO unactivated_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION unactivated_seen TO unactivated_records;
+      """
+    And Kafka message is published to topic "unactivated_handoff_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":1}
+      """
+    Given ownership handoff for domain "{{domain}}" pauses before activation
+    When these NSPL commands begin executing in the background
+      """
+      RELOCATE INGESTOR unactivated_source ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff activation pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And node "node-2" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    When the ownership handoff activation pause for domain "{{domain}}" is released
+    Then the background NSPL execution fails with "ownership state activation did not complete"
+    When node "node-1" is stopped
+    And node "node-1" is started
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=unactivated_source owner=node-2
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_unactivated_seen TO unactivated_records;
+      """
+    And Kafka message is published to topic "unactivated_handoff_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":2}
+      """
+
   @long_running
   Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"

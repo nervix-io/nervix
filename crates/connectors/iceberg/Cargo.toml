@@ -37,7 +37,6 @@ nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 opendal = { workspace = true, features = [
-  "layers-retry",
   "layers-timeout",
   "services-azdls",
   "services-gcs",
@@ -59,6 +58,7 @@ webpki-roots = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 http = { workspace = true }
+nervix-primitives = { workspace = true, features = ["test-util"] }
 nervix-test-environment = { workspace = true }
 reqsign-core = { workspace = true }
 serde_json = { workspace = true }
@@ -68,3 +68,4 @@ tokio = { workspace = true, features = [
   "net",
   "rt-multi-thread",
 ] }
+ubyte = { workspace = true }

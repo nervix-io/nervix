@@ -3,9 +3,10 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Starting, killing and restarting every persisted voter, signalling, freezing and
-//!   restarting one of them, the budget its members have to converge before a scenario sends
-//!   commands, and, in a diagnostic build, retaining the members' deadlock evidence and logs,
-//!   whether the cluster started or its start failed.
+//!   restarting one of them, the address joining members dial the bootstrap member on, having
+//!   another socket hold a member's ports, the budget its members have to converge before a
+//!   scenario sends commands, and, in a diagnostic build, retaining the members' deadlock evidence
+//!   and logs, whether the cluster started or its start failed.
 //! - **Depends on.** The single-process fixture, its test certificate authority, bounded public
 //!   cluster-status requests, and the convergence its members report.
 //! - **Must not know.** Server state beyond the command and status surfaces each process exposes.
@@ -21,12 +22,17 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "deloxide")]
+use arch_into::ArchInto as _;
 use error_stack::Report;
+#[cfg(feature = "deloxide")]
+use meticulous::OptionExt as _;
 use nix::sys::signal::Signal;
 use tempfile::TempDir;
 
 use super::{
     cluster::{InterconnectTestCa, TestSession},
+    node_startup::StartupPorts,
     phase_deadline::PhaseDeadline,
     process_cluster_convergence::{ClusterConvergence, ConvergenceError},
     server_process::{ServerProcess, ServerProcessLaunch, ServerProcessOption, describe_exit},
@@ -117,7 +123,10 @@ impl ServerProcessCluster {
             std::fs::copy(entry.path(), destination.join(entry.file_name()))?;
         }
         for (node, process) in &self.nodes {
-            std::fs::write(destination.join(format!("{node}.log")), process.log()?)?;
+            std::fs::write(
+                destination.join(format!("{node}.log")),
+                process.whole_log()?,
+            )?;
         }
         Ok(Some(destination))
     }
@@ -144,16 +153,52 @@ impl ServerProcessCluster {
         }
     }
 
-    /// What one member logged since its current launch.
+    /// What every launch of one member logged, a launch it relaunched after a lost bind included.
     #[cfg(feature = "deloxide")]
     pub(crate) fn log(&self, node_id: &str) -> io::Result<String> {
-        self.member(node_id)?.log()
+        self.member(node_id)?.whole_log()
+    }
+
+    /// How many processes the members' current startups launched, a relaunch after a lost bind
+    /// included. A diagnostic process records its evidence as it starts, so a cluster no step
+    /// restarted holds one evidence file for each of them.
+    #[cfg(feature = "deloxide")]
+    pub(crate) fn launched_processes(&self) -> usize {
+        let mut launched = 0_usize;
+        for process in self.nodes.values() {
+            let launches: usize = process.launches().arch_into();
+            launched = launched.checked_add(launches).assured(
+                "a cluster has at most three members, each launching at most three processes",
+            );
+        }
+        launched
+    }
+
+    /// Starts a three-node cluster whose bootstrap member finds the ports of the listeners `held`
+    /// names held by another socket from the moment they are drawn, before it can bind them.
+    pub(crate) async fn start_holding_bootstrap_ports(
+        options: &[ServerProcessOption],
+        held: StartupPorts,
+    ) -> io::Result<Self> {
+        let root = tempfile::Builder::new()
+            .prefix("nervix-server-process-cluster-")
+            .tempdir()?;
+        Self::start_in_holding(root, NODE_COUNT, options, Some(held)).await
     }
 
     async fn start_in(
         root: TempDir,
         node_count: usize,
         options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
+        Self::start_in_holding(root, node_count, options, None).await
+    }
+
+    async fn start_in_holding(
+        root: TempDir,
+        node_count: usize,
+        options: &[ServerProcessOption],
+        bootstrap_held: Option<StartupPorts>,
     ) -> io::Result<Self> {
         assert!(matches!(node_count, 1 | NODE_COUNT));
         let certificate_authority = InterconnectTestCa::new(&root)?;
@@ -163,7 +208,7 @@ impl ServerProcessCluster {
             _root: root,
         };
         let started = cluster
-            .start_members(&certificate_authority, node_count, options)
+            .start_members(&certificate_authority, node_count, options, bootstrap_held)
             .await;
         match started {
             Ok(()) => Ok(cluster),
@@ -182,6 +227,7 @@ impl ServerProcessCluster {
         certificate_authority: &InterconnectTestCa,
         node_count: usize,
         options: &[ServerProcessOption],
+        bootstrap_held: Option<StartupPorts>,
     ) -> io::Result<()> {
         let bootstrap_root = tempfile::Builder::new()
             .prefix("node-1-")
@@ -193,11 +239,15 @@ impl ServerProcessCluster {
             None,
             ServerProcessLaunch::Direct,
             options,
+            bootstrap_held,
         )
         .await?;
-        let bootstrap_host = bootstrap.interconnect_endpoint();
         self.nodes.insert("node-1".to_string(), bootstrap);
-        self.member_mut("node-1")?.wait_until_ready().await?;
+        let bootstrap = self.member_mut("node-1")?;
+        bootstrap.wait_until_ready().await?;
+        // A relaunch after a lost bind can move the interconnect listener, so joining members
+        // dial the address the bootstrap member listens on once it accepts commands.
+        let bootstrap_host = bootstrap.interconnect_endpoint();
         for index in 2..=node_count {
             nervix_primitives::task::consume_budget().await;
             let node_id = format!("node-{index}");
@@ -211,6 +261,7 @@ impl ServerProcessCluster {
                 Some(&bootstrap_host),
                 ServerProcessLaunch::Direct,
                 options,
+                None,
             )
             .await?;
             self.nodes.insert(node_id.clone(), process);
@@ -249,14 +300,40 @@ impl ServerProcessCluster {
     }
 
     /// Starts an exited member again from its own database and ports, then waits until every
-    /// member has converged on the new process.
+    /// member has converged on the new process. A relaunch after a lost bind moves the listener it
+    /// lost, so the members are asked where the new process answers.
     pub(crate) async fn restart(&mut self, node_id: &str) -> io::Result<()> {
         let convergence = self.convergence();
         let member = self.member_mut(node_id)?;
+        let relaunch = async {
+            member.restart().await?;
+            Ok(member.status_endpoint())
+        };
         convergence
-            .relaunch(node_id, member.restart())
+            .relaunch(node_id, relaunch)
             .await
             .map_err(convergence_failure)
+    }
+
+    /// Has another socket hold the ports of the listeners `selection` names on member `node_id`,
+    /// whose process has exited, until the cluster is dropped.
+    pub(crate) async fn hold_member_ports(
+        &mut self,
+        node_id: &str,
+        selection: StartupPorts,
+    ) -> io::Result<()> {
+        self.member_mut(node_id)?.hold_ports(selection).await
+    }
+
+    /// Checks that member `node_id`'s current startup ended exactly one launch because another
+    /// socket held the ports of the listeners `selection` names, and moved them off those ports.
+    pub(crate) fn verify_member_relaunched_off_held_ports(
+        &mut self,
+        node_id: &str,
+        selection: StartupPorts,
+    ) -> io::Result<()> {
+        self.member_mut(node_id)?
+            .verify_one_relaunch_off_held_ports(selection)
     }
 
     /// The node the running members report as leader.

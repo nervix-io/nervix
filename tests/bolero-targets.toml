@@ -162,10 +162,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "nspl-model"
-invariant = "Canonical NSPL of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
+invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-nspl"
@@ -177,7 +177,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 10
+domain_version = 11
 features = []
 id = "nspl-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -372,10 +372,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "nspl-statement"
-invariant = "Canonical NSPL of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
+invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-nspl"
@@ -402,10 +402,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "nspl-statement-text"
-invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical NSPL reparses to them."
+invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-nspl"
@@ -417,7 +417,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "nspl-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -507,7 +507,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits and a client of a declared connector."
@@ -702,7 +702,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1047,7 +1047,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -1124,10 +1124,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__task_status__tests__bolero_status_sequences_publish_complete_transitions/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "task-status-transitions"
-invariant = "Every status transition publishes the complete failure and retry, and retained observations remain immutable."
+invariant = "Each writer retains its own failure and retry, clearing one preserves the other, pending retries stay visible, and retained observations remain immutable."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-server"
@@ -1735,7 +1735,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_archive__tests__bolero_window_archive_groups_rebuild_the_published_window/corpus"
-domain_version = 3
+domain_version = 4
 features = ["testing"]
 id = "backup-window-groups"
 invariant = "Resident and bounded readers of the same current native window produce byte-identical complete input and argument groups with identical revision, incarnation, sequences, watermarks, boundaries and delayed removals; restoring the bounded reader's archive preserves every live row, bit-exact branch key and argument and answers every aggregate as before."
@@ -2756,10 +2756,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connector/src/__fuzz__/confirmation_window__tests__bolero_a_publish_settles_every_answer_given_before_it_ends/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "connector-confirmation-window"
-invariant = "Under any MAX and ACK TIMEOUT, records refused at hand-over, answers confirmed, refused or failed within, at, past or never by each record's deadline, pauses between hand-overs and a driver failure, the window ends the publish exactly when the documented rule does, holds fewer than MAX answers after each hand-over, delivers exactly the records the broker confirmed before the end and rejects exactly those refused at hand-over or before the end, so no confirmed record is ever returned as unresolved, and reports the driver's failure, the oldest's failed answer or its missed deadline as the rule names."
+invariant = "Under any MAX, driver queue capacity and ACK TIMEOUT, records refused at hand-over, answers confirmed, refused or failed within, at, past or never by each record's deadline, pauses between hand-overs and a driver failure, the window ends the publish exactly when the documented rule does, holds fewer than MAX answers after each hand-over and no more than the driver queue capacity by settling the oldest answer on demand, delivers exactly the records the broker confirmed before the end and rejects exactly those refused at hand-over or before the end, so no confirmed record is ever returned as unresolved, and reports the driver's failure, the oldest's failed answer or its missed deadline as the rule names."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector"
@@ -3010,6 +3010,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/http/src/sink/__fuzz__/sink__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
+domain_version = 1
+features = []
+id = "http-request-heads"
+invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the sink writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-http"
+random_iterations = 256
+source = "crates/connectors/http/src/sink/request_head_tests.rs"
+test = "sink::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
 domain_version = 2
 features = []
@@ -3021,4 +3036,64 @@ package = "nervix-server"
 random_iterations = 256
 source = "src/application/describe_output_properties.rs"
 test = "application::describe_output::properties::bolero_ingestor_describe_reports_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/dns/src/__fuzz__/dial__tests__bolero_operation_budget_shares_never_outgrow_what_is_left/corpus"
+domain_version = 1
+features = []
+id = "dns-operation-budget"
+invariant = "An operation budget never grows back as time passes, what is left of it is the total less the elapsed time and never less than nothing, the lookup's share never outlives what is left or its own bound, and the equal shares each address attempt takes of what is left together never outlast the budget or waste a nanosecond per answer."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-dns"
+random_iterations = 256
+source = "crates/dns/src/dial_tests.rs"
+test = "dial::tests::bolero_operation_budget_shares_never_outgrow_what_is_left"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__endpoint_acknowledgement__tests__bolero_endpoint_bodies_preserve_the_complete_client_outcome_object/corpus"
+domain_version = 1
+features = []
+id = "endpoint-acknowledgement-body"
+invariant = "The one-way endpoint reply projection encodes exactly the complete existing client outcome class and cause object, with fixed labels, bounded bytes and no payload or diagnostics; local refusal and downstream rejection share the same cause."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/endpoint_acknowledgement_tests.rs"
+test = "runtime::endpoint_acknowledgement::tests::bolero_endpoint_bodies_preserve_the_complete_client_outcome_object"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_acknowledgement_frames_preserve_the_complete_outcome_value/corpus"
+domain_version = 1
+features = []
+id = "websocket-acknowledgement-values"
+invariant = "Every complete bounded outcome/cause string object survives the production acknowledgement encoder and decoder in JSON, YAML, CBOR and protobuf; RAW carries an exact JSON representation."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-websockets"
+random_iterations = 256
+source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
+test = "signaling::representation_tests::bolero_acknowledgement_frames_preserve_the_complete_outcome_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/jaq/src/__fuzz__/string_properties__bolero_yaml_objects_preserve_complete_string_values/corpus"
+domain_version = 1
+features = []
+id = "jaq-yaml-string-values"
+invariant = "Complete bounded current objects preserve every string key and value, whitespace, nested member order, array element, null and scalar through the production YAML writer and reader."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-jaq"
+random_iterations = 256
+source = "crates/jaq/src/string_properties.rs"
+test = "string_properties::bolero_yaml_objects_preserve_complete_string_values"
 test_target = "lib"

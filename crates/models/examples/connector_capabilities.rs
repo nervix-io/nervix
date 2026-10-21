@@ -14,10 +14,11 @@
 )]
 
 use nervix_models::{
-    ChoiceRequirement, ClientConfigOwner, ClientDeclaration, ClientPooling, ConnectorKind,
-    EmitSinkCapabilities, EmitSinkKind, EmitterBatchLegality, EmitterBodyForm,
-    IngestSourceCapabilities, IngestSourceKind, LocatorDeclaration, LocatorName, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, SinkReferenceKind, SourceReferenceKind,
+    BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigOwner,
+    ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds, EmitSinkCapabilities,
+    EmitSinkKind, EmitterBatchLegality, EmitterBodyForm, IngestSourceCapabilities,
+    IngestSourceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, SinkReferenceKind, SourceReferenceKind, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -114,6 +115,7 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         quiesce,
         locator: declared_locator,
         options: declared_options,
+        bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match source_reference {
         SourceReferenceKind::Client(connector) => format!("{connector} client"),
@@ -162,8 +164,78 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": reads_headers, "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
-        "confirmation": acknowledgement_confirmation.as_ref(), "template": template,
+        "confirmation": acknowledgement_confirmation.as_ref(),
+        "bounds": bounds(declared_bounds), "template": template,
     })
+}
+
+/// What an entity's connector holds and how long it waits, each bound written as the matrix
+/// states it.
+fn bounds(declared: DeclaredBounds) -> Value {
+    let DeclaredBounds {
+        buffers,
+        waits,
+        driver_limits,
+    } = declared;
+    let buffers: Vec<_> = buffers
+        .iter()
+        .map(|buffer| json!({ "holds": buffer.holds, "bound": buffer_bound(buffer.bound) }))
+        .collect();
+    let waits: Vec<_> = waits
+        .iter()
+        .map(|wait| json!({ "wait": wait.wait, "bound": wait_bound(wait.bound) }))
+        .collect();
+    let deadline_keys: Vec<_> = declared
+        .deadline_keys()
+        .into_iter()
+        .map(|key| key.key())
+        .collect();
+    json!({
+        "buffers": buffers, "waits": waits, "driver_limits": driver_limits,
+        "deadline_keys": deadline_keys,
+    })
+}
+
+fn buffer_bound(bound: BufferBound) -> String {
+    let (capacity, overflow) = match bound {
+        BufferBound::Bounded { capacity, overflow } => (capacity, overflow),
+        BufferBound::Unbounded => return "unbounded".to_owned(),
+    };
+    let capacity = match capacity {
+        BufferCapacity::Items { count, unit } => format!("at most {count} {unit}"),
+        BufferCapacity::Bytes(bytes) => format!("at most {bytes} bytes"),
+        BufferCapacity::Setting(setting) => format!("set by {setting}"),
+        BufferCapacity::Driver(default) => format!("driver default, {default}"),
+    };
+    let overflow = match overflow {
+        BufferOverflow::Backpressure => "when full, holds back what fills it",
+        BufferOverflow::DropAndCount => "when full, drops and counts what does not fit",
+        BufferOverflow::DropUncounted => "when full, drops what does not fit without counting it",
+        BufferOverflow::FailPublish => "when full, fails the publish for the host to retry",
+        BufferOverflow::RefuseRequest => {
+            "when full, immediately refuses the request for its sender to retry"
+        }
+    };
+    format!("{capacity}; {overflow}")
+}
+
+fn wait_bound(bound: WaitBound) -> String {
+    match bound {
+        WaitBound::Key { key, omitted } => {
+            let omitted = match omitted {
+                OmittedDeadline::Required => "required".to_owned(),
+                OmittedDeadline::Default(default) => {
+                    format!("{} when omitted", humantime::format_duration(default))
+                }
+                OmittedDeadline::Unbounded => "unbounded when omitted".to_owned(),
+            };
+            format!("`{}`; {omitted}", key.key())
+        }
+        WaitBound::Clause(clause) => format!("`{clause}`"),
+        WaitBound::Fixed(bound) => format!("fixed {}", humantime::format_duration(bound)),
+        WaitBound::Driver(default) => format!("driver default, {default}"),
+        WaitBound::Unbounded => "unbounded".to_owned(),
+    }
 }
 
 fn option_template(options: &[OptionDeclaration]) -> String {
@@ -191,6 +263,7 @@ fn emitter(kind: EmitSinkKind) -> Value {
         options,
         envelope,
         properties,
+        bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match reference {
         SinkReferenceKind::Client(connector) => format!("{connector} client"),
@@ -226,7 +299,7 @@ fn emitter(kind: EmitSinkKind) -> Value {
         "batch": batch, "batch_maximum": maximum, "body": body,
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,
-        "template": emitter_template(kind, body),
+        "bounds": bounds(declared_bounds), "template": emitter_template(kind, body),
     })
 }
 

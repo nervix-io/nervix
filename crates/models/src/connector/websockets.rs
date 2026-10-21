@@ -14,10 +14,18 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::entity_union::connector_sources;
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
+    entity_union::connector_sources,
+};
 use crate::{
     AcknowledgementConfirmation, ClientConfigEntry, ClientConfigOwner, ClientDeclaration,
     ClientName, ClientPooling, ClientResourceMount, ConnectorKind, DeclaredDelivery,
@@ -68,6 +76,62 @@ pub struct WebsocketsConnectionSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a WEBSOCKETS CONNECTION holds and how long it waits.
+const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "frames that arrive while the signaling handshake runs",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts, TLS and the opening upgrade",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "the signaling handshake",
+            bound: WaitBound::Clause("the signaling protocol's TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "reading the next frame",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "close",
+            bound: WaitBound::Fixed(Duration::from_secs(1)),
+        },
+    ],
+    driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the connection."],
+};
+
+/// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.
+const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "unresolved data frames under MODE ACK, per node and ingestor",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("MODE ACK MAX"),
+            overflow: BufferOverflow::RefuseRequest,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "graph acknowledgement under MODE ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+        },
+        DeclaredWait {
+            wait: "the signaling handshake",
+            bound: WaitBound::Clause("the signaling protocol's TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "reading the next frame",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the session."],
+};
+
 impl SourceEntity for WebsocketsConnectionSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: false,
@@ -80,6 +144,7 @@ impl SourceEntity for WebsocketsConnectionSource {
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
         locator: None,
         options: &[],
+        bounds: WEBSOCKETS_CONNECTION_BOUNDS,
     };
 }
 
@@ -135,10 +200,11 @@ impl SourceEntity for WebsocketsEndpointSource {
         reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
-        delivery: &[DeclaredDelivery::NO_ACK],
+        delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
         locator: None,
         options: &[],
+        bounds: WEBSOCKETS_ENDPOINT_BOUNDS,
     };
 }
 

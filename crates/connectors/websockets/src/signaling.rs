@@ -17,7 +17,7 @@
 
 use std::{future::Future, time::Duration};
 
-use error_stack::{AttachmentKind, FrameKind, Report};
+use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use futures_util::{SinkExt, StreamExt};
 use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
 use nervix_models::{
@@ -43,7 +43,7 @@ const MAX_REJECTION_REASON_BYTES: usize = 512;
 type SignalingFrameEncodeResult<T> = Result<T, Report<SignalingFrameEncodeError>>;
 
 #[derive(Debug, Error)]
-enum SignalingFrameEncodeError {
+pub enum SignalingFrameEncodeError {
     #[error("failed to encode {format} signaling frame")]
     Native { format: &'static str },
     #[error("failed to encode {format} signaling frame as UTF-8 text")]
@@ -177,15 +177,28 @@ fn protobuf_message_to_json(
 }
 
 fn signaling_frame_encode_error_message(error: &Report<SignalingFrameEncodeError>) -> String {
-    error
+    let printable = error.frames().find_map(|frame| match frame.kind() {
+        FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
+            Some(attachment.to_string())
+        }
+        FrameKind::Context(_) | FrameKind::Attachment(_) => None,
+    });
+    if let Some(detail) = printable {
+        return detail;
+    }
+    let causes = error
         .frames()
-        .find_map(|frame| match frame.kind() {
-            FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
-                Some(attachment.to_string())
-            }
-            FrameKind::Context(_) | FrameKind::Attachment(_) => None,
+        .filter_map(|frame| match frame.kind() {
+            FrameKind::Context(context) => Some(context.to_string()),
+            FrameKind::Attachment(_) => None,
         })
-        .unwrap_or_else(|| error.current_context().to_string())
+        .skip(1)
+        .collect::<Vec<_>>();
+    if causes.is_empty() {
+        error.current_context().to_string()
+    } else {
+        causes.join(": ")
+    }
 }
 
 #[derive(Debug, Error)]
@@ -298,6 +311,24 @@ pub struct CompiledSignalingProtocol {
 }
 
 impl CompiledSignalingProtocol {
+    /// Encodes the host's acknowledgement value in this protocol's outbound format. RAW carries
+    /// the acknowledgement's JSON text; other formats encode the value directly.
+    pub fn encode_acknowledgement(
+        &self,
+        value: JsonValue,
+    ) -> error_stack::Result<Message, SignalingFrameEncodeError> {
+        let value = match &self.wire {
+            CompiledSignalingWire::Native(JaqNativeFormat::Raw) => {
+                use meticulous::ResultExt as _;
+                let text = serde_json::to_string(&value)
+                    .assured("serde_json::Value contains only JSON-representable values");
+                JsonValue::String(text)
+            }
+            CompiledSignalingWire::Native(_) | CompiledSignalingWire::Protobuf { .. } => value,
+        };
+        self.encode_frame(value)
+    }
+
     /// Compile a signaling contract after the decision layer has resolved its endpoint binding.
     pub fn compile_parts(
         protocol_name: &SignalingProtocolName,
@@ -411,12 +442,11 @@ impl CompiledSignalingProtocol {
     fn encode_frame(&self, value: JsonValue) -> SignalingFrameEncodeResult<Message> {
         match &self.wire {
             CompiledSignalingWire::Native(format) => {
-                let encoded = format.write_value(value).map_err(|source| {
-                    Report::new(SignalingFrameEncodeError::Native {
+                let encoded = format.write_value(value).change_context(
+                    SignalingFrameEncodeError::Native {
                         format: format.name(),
-                    })
-                    .attach_printable(source.to_string())
-                })?;
+                    },
+                )?;
                 if format.is_binary() {
                     return Ok(Message::Binary(encoded));
                 }
@@ -424,10 +454,11 @@ impl CompiledSignalingProtocol {
                     let mapping_input = String::from_utf8(encoded).map(Message::Text);
                     match mapping_input {
                         Ok(mapped_value) => Ok(mapped_value),
-                        Err(source) => Err(Report::new(SignalingFrameEncodeError::Text {
-                            format: format.name(),
-                        })
-                        .attach_printable(source.to_string())),
+                        Err(source) => Err(Report::new(source).change_context(
+                            SignalingFrameEncodeError::Text {
+                                format: format.name(),
+                            },
+                        )),
                     }
                 }
             }
@@ -437,10 +468,11 @@ impl CompiledSignalingProtocol {
                 let mapping_input = encode_protobuf_payload(send, &value).map(Message::Binary);
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
-                    Err(source) => Err(Report::new(SignalingFrameEncodeError::Protobuf {
-                        message: send.full_name().to_string(),
-                    })
-                    .attach_printable(format!("{source:#}"))),
+                    Err(source) => {
+                        Err(source.change_context(SignalingFrameEncodeError::Protobuf {
+                            message: send.full_name().to_string(),
+                        }))
+                    }
                 }
             }
         }
@@ -479,10 +511,25 @@ struct SessionState {
 
 impl SessionState {
     /// Stream one payload frame, or drop it if the relay is not open yet.
-    async fn stream<D: SignalingDataSink>(&self, frame: Vec<u8>, sink: &D) {
-        if self.accepting {
-            sink.accept(frame).await;
+    async fn stream<S, D>(
+        &self,
+        frame: Vec<u8>,
+        sink: &D,
+        websocket: &mut WebSocketStream<S>,
+    ) -> error_stack::Result<(), WebsocketSignalingError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        D: SignalingDataSink,
+    {
+        if self.accepting
+            && let Some(reply) = sink.accept_and_reply(frame).await
+        {
+            websocket
+                .send(reply)
+                .await
+                .map_err(|error| Report::new(WebsocketSignalingError::Send(Box::new(error))))?;
         }
+        Ok(())
     }
 }
 
@@ -499,6 +546,16 @@ impl SessionState {
 )]
 pub trait SignalingDataSink {
     fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
+
+    /// A request-scoped intake can answer an accepted data frame during signaling. Other sinks
+    /// keep their ordinary one-way delivery.
+    fn accept_and_reply(&self, payload: Vec<u8>) -> impl Future<Output = Option<Message>> + Send {
+        let accepted = self.accept(payload);
+        async move {
+            accepted.await;
+            None
+        }
+    }
 }
 
 pub struct WebsocketSignalingSession {
@@ -648,7 +705,7 @@ impl WebsocketSignalingSession {
             };
 
             let Some(value) = self.protocol.decode_frame(&frame, is_text) else {
-                session.stream(frame, sink).await;
+                session.stream(frame, sink, websocket).await?;
                 continue;
             };
 
@@ -665,7 +722,7 @@ impl WebsocketSignalingSession {
                 .iter()
                 .position(|matcher| matcher_is_satisfied(matcher, &value, &session.state))
             else {
-                session.stream(frame, sink).await;
+                session.stream(frame, sink, websocket).await?;
                 continue;
             };
 

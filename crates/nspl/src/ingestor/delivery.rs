@@ -203,6 +203,11 @@ pub(super) fn endpoint_quiesce_clause<'src>()
     )))
 }
 
+pub(super) fn endpoint_ack_quiesce_clause<'src>()
+-> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
+    quiesce_clause(quiesce_reject_parser())
+}
+
 /// The quiesce body `SET QUIESCE` writes. Every form parses here, and the stored source decides
 /// which of them it honors.
 pub(super) fn alter_quiesce_body<'src>()

@@ -1,4 +1,64 @@
 Feature: Kafka emission
+  @kafka_producer_queue_backpressure
+  Scenario Outline: A confirmed Kafka emitter delivers its whole window once through a smaller producer queue
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "small_queue_{{test_id}}" exists with 1 partitions
+    And Kafka topic "small_queue_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA queue_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA queue_wire MODE STRICT ( sequence integer );
+      CREATE CODEC queue_codec FROM WIRE JSON SCHEMA queue_wire TO SCHEMA queue_event;
+      CREATE CODEC queue_ingest_codec FROM JSON TO SCHEMA queue_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY queue_events SCHEMA queue_event UNBRANCHED;
+      CREATE VHOST edge small-queue-{{test_id}}.example.com;
+      CREATE ENDPOINT queue_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR queue_source
+        FROM queue_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
+        TO queue_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLIENT small_queue TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'queue.buffering.max.messages' = '2',
+        'linger.ms' = '200'
+      };
+      CREATE EMITTER queue_output FROM queue_events
+        TO KAFKA small_queue TOPIC small_queue_{{test_id}}
+          MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING queue_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "small-queue-{{test_id}}.example.com" path "/events"
+      """
+      [{"sequence":1},{"sequence":2},{"sequence":3},{"sequence":4},{"sequence":5},{"sequence":6},{"sequence":7},{"sequence":8}]
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"sequence":1}
+      {"sequence":2}
+      {"sequence":3}
+      {"sequence":4}
+      {"sequence":5}
+      {"sequence":6}
+      {"sequence":7}
+      {"sequence":8}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @json_columnar_emission
   Scenario Outline: Kafka JSON emission preserves exact bytes for escaped and clean columns
     Given Kafka is running

@@ -80,7 +80,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `backup-materialized-columns` | `nervix-server` exact-schema Arrow/native generation fidelity and stored checkpoint re-export | nullable, sensitive, nested and byte columns; complete headers, ordered identities and original stored Arrow bytes, v2 | 128 | 4096 bytes |
 | `backup-branch-state-descriptors` | `nervix-backup` complete deduplicator and window descriptor equality | empty, unbranched and branched keyspaces and windows, model digests, row sequences and watermarks, group counts and delayed histogram removals, v1 | 256 | 4096 bytes |
 | `backup-deduplicator-keys` | `nervix-server` typed Arrow key group and restored keyspace fidelity, and the streamed checkpoint byte-identical to the runtime's encoding of the same keys | every `DEDUPLICATE ON` key type with nulls, narrow integers, arbitrary float bit patterns, text, bytes, datetimes and list keys, repeated keys and bounded groups, v1 | 128 | 2048 bytes |
-| `backup-window-groups` | `nervix-server` window input and argument group and native checkpoint fidelity with equal aggregates | up to 192 admissions and interleaved steps over nullable integer, string and boolean arguments, concrete multi-type keys with bit-exact finite floats and fixed-offset datetimes, every exact aggregate family and a delayed histogram percentile, bounded groups sealed whole or split under generated identity limits, v3 | 64 | 1024 bytes |
+| `backup-window-groups` | `nervix-server` window input and argument group and native checkpoint fidelity with equal aggregates | up to 192 admissions and interleaved steps over nullable integer, string and boolean arguments, concrete multi-type keys with bit-exact finite floats and fixed-offset datetimes, every exact aggregate family and a delayed histogram percentile, bounded groups sealed whole or split under generated identity limits, one-row groups over windows of up to 48 rows, v4 | 64 | 1024 bytes |
 | `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, deduplicator key groups and window row and argument groups, synthetic raw payloads at tar block boundaries and long paths, v3 | 256 | 4096 bytes |
 | `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all eleven kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v3 | 256 | 4096 bytes |
 | `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records, materialized, deduplicator and window group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v3 | 256 | 4096 bytes |
@@ -174,6 +174,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `emitter-retained-payloads` | `nervix-server` retained payloads written unchanged in packing order and answered member by member | packing and write steps with delivered, rejected and unanswered records and failed writes over three buffered batches, v1 | 256 | 512 bytes |
 | `sqs-batch-requests` | `nervix-connector-sqs` measured record sizes, refusals above 256 KiB, and batch requests within every limit, ended only by a limit | small and near-limit bodies of one- to four-byte characters, attributes and FIFO groups, v1 | 256 | 1024 bytes |
 | `iceberg-nested-datetime-staging` | `nervix-connector-iceberg` staged nested-list schema and values against containing-microsecond division while preserving list boundaries | up to 16 generated UTC nanosecond timestamps in two list levels, including negative and boundary values, v1 | 256 | 160 bytes |
+| `http-request-heads` | `nervix-connector-http` written request heads read back by an HTTP/1.1 parser against every prepared field and the declared framing | methods that define request content, methods that define none, their ASCII case variants and extension methods, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without `Accept`, bodies up to 64 bytes, v1 | 256 | 512 bytes |
 | `mqtt-publish-packets` | `nervix-connector-mqtt` measured PUBLISH sizes against the packet the client writes, the protocol's largest packet and the broker maximum | topics up to 128 bytes, every quality of service, payloads beside every Remaining Length width and the protocol limit, v1 | 256 | 512 bytes |
 | `postgres-insert-measures` | `nervix-connector-postgres` measured inserts against the statement and the arrays the driver encodes, and the Bind message bound | up to four text columns of up to eight rows with NULLs, quotes and multi-byte characters, every run of rows, v1 | 256 | 1024 bytes |
 | `websocket-signaling-protobuf-values` | `nervix-connector-websockets` complete signaling JSON through the production protobuf conversions, with double and float bit equality | explicit scalar presence, absent defaults, full-width integers, booleans, UTF-8 strings and up to eight repeated doubles and floats, v1 | 256 | 256 bytes |
@@ -488,7 +489,10 @@ that run in parallel, each in a job of its own:
   select every registered target once. The job then writes the combined record and the merged Rust
   source report.
 
-Each shard job allows 180 minutes. `bolero-gate` requires the randomized job, every shard and the
+Each shard job allows 240 minutes. The 205-target inventory's three-shard plan estimates at most
+114 minutes per shard before discovery, failure qualification and uploads. Funding 1.5 times that
+estimate leaves 69 minutes for those surrounding operations and cold-build variation, including
+the separately bounded server preparation. `bolero-gate` requires the randomized job, every shard and the
 combined proof when the PR carries `fuzz`, and requires all of the sanitizer jobs to be skipped
 otherwise. `tests/release-evidence.toml` holds a qualifying revision to the same checks, every shard
 of the matrix included.
@@ -517,8 +521,10 @@ Ordinary execution prepares each selected package, harness and exact feature set
 the union of a package's features; its binary does not prepare a target with a different declared
 feature set. Each property still has a 240-second execution bound and must complete its exact
 randomized iteration count and replay every checked-in corpus input. A failed preparation ends
-the run before that harness executes any property. The ordinary CI job reserves 60 minutes for
-discovery, the declared feature builds and every registered target.
+the run before that harness executes any property. The ordinary CI job reserves 90 minutes for
+discovery, the declared feature builds and every registered target. Run 39649567371 took 47m10s;
+1.5 times that measurement is 70m45s, leaving more than 19 minutes for publication and further
+runner variation.
 
 Install the dated sanitizer nightly named in the inventory and the pinned CLI. Server properties
 also require the native server build dependencies, including `protoc` for the Pulsar driver;

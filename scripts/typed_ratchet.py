@@ -20,6 +20,8 @@ import tomllib
 import uuid
 from typing import Any
 
+from scripts import analysis_admission
+from scripts.analysis_admission import GIB, target_kind
 from scripts.rust_source import RustFile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -54,13 +56,6 @@ class Configuration:
         if self.target:
             args.extend(["--target", self.target])
         return args
-
-
-def target_kind(kinds: list[str]) -> str:
-    """Cargo's target kinds as the analysis names them: every library form is one `lib`."""
-    if set(kinds) & {"lib", "rlib", "cdylib", "staticlib", "proc-macro"}:
-        return "lib"
-    return kinds[0]
 
 
 def digest(path: pathlib.Path) -> str:
@@ -102,9 +97,13 @@ def source_inputs(root: pathlib.Path) -> dict[str, str]:
     return inputs
 
 
-def load_configurations(root: pathlib.Path) -> list[Configuration]:
+def load_declarations(root: pathlib.Path) -> dict[str, Any]:
     with (root / TOOLING / "configurations.toml").open("rb") as stream:
-        data = tomllib.load(stream)
+        return tomllib.load(stream)
+
+
+def load_configurations(root: pathlib.Path) -> list[Configuration]:
+    data = load_declarations(root)
     configurations = []
     names = set()
     for item in data["configuration"]:
@@ -133,6 +132,43 @@ def load_configurations(root: pathlib.Path) -> list[Configuration]:
     return configurations
 
 
+def whole_number(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def load_admission(root: pathlib.Path) -> analysis_admission.Policy:
+    """The declared host memory admission policy, in the queue this host's user shares."""
+    declared = TOOLING / "configurations.toml"
+    declaration = load_declarations(root).get("admission")
+    if not isinstance(declaration, dict) or set(declaration) != {"threshold_gib", "wait_limit_minutes", "reservation"}:
+        raise AnalysisError(f"{declared}: the admission declaration needs exactly threshold_gib, wait_limit_minutes and reservation")
+    threshold = declaration["threshold_gib"]
+    wait_limit = declaration["wait_limit_minutes"]
+    if not whole_number(threshold) or not whole_number(wait_limit):
+        raise AnalysisError(f"{declared}: the admission threshold and wait limit are positive whole numbers")
+    if not isinstance(declaration["reservation"], list):
+        raise AnalysisError(f"{declared}: admission reservations are a list")
+    reservations = {}
+    for item in declaration["reservation"]:
+        if not isinstance(item, dict) or set(item) != {"crate", "kind", "gib"}:
+            raise AnalysisError(f"{declared}: an admission reservation needs exactly a crate, a kind and its gib")
+        if not isinstance(item["crate"], str) or not item["crate"] or item["kind"] not in {"lib", "bin"}:
+            raise AnalysisError(f"{declared}: an admission reservation names a crate and a lib or bin kind")
+        compiled = analysis_admission.Compiled(item["crate"], item["kind"])
+        if compiled in reservations:
+            raise AnalysisError(f"{declared}: duplicate admission reservation for {compiled.crate_name} ({compiled.kind})")
+        # A compilation at or below the threshold needs no admission, so neither does its reservation.
+        if not whole_number(item["gib"]) or item["gib"] <= threshold:
+            raise AnalysisError(f"{declared}: the admission reservation of {compiled.crate_name} ({compiled.kind}) is a whole number of GiB above the {threshold} GiB threshold")
+        reservations[compiled] = item["gib"] * GIB
+    return analysis_admission.Policy(
+        directory=analysis_admission.host_directory(),
+        threshold_bytes=threshold * GIB,
+        wait_limit_seconds=float(wait_limit * 60),
+        reservations=reservations,
+    )
+
+
 class Runner:
     def __init__(self, root: pathlib.Path, target: pathlib.Path, *, inventory: bool = False) -> None:
         self.root = root.resolve()
@@ -141,6 +177,7 @@ class Runner:
         self.wrapper = self.root / "scripts/typed_lint_wrapper.py"
         if not self.driver.is_file():
             raise AnalysisError("missing compiler driver; run just typed-ratchet-build")
+        self.admission = load_admission(self.root)
         self.compiler = compiler_identity(self.root)
         self.inputs = source_inputs(self.root)
         self.environment = dict(os.environ)
@@ -216,12 +253,13 @@ class Runner:
             "NERVIX_LINT_IDENTITY": self.identity,
             "NERVIX_LINT_CONFIGURATION": configuration.name,
             "NERVIX_LINT_REPORTS": str(reports),
+            "NERVIX_LINT_ADMISSION": self.admission.encode(),
             "KACHE_KEY_SALT": salt,
         })
         reports.mkdir(parents=True, exist_ok=True)
-        # A termination record describes the run that wrote it; a reused report directory starts
+        # A compilation record describes the run that wrote it; a reused report directory starts
         # without the ones an earlier run left.
-        for previous in reports.glob("*.termination.json"):
+        for previous in (reports / "compilations").glob("*.json"):
             previous.unlink()
         args = ["cargo", f"+{TOOLCHAIN}", "check", *configuration.cargo_arguments(), "--message-format=json"]
         log = reports.parent / "cargo.jsonl"
@@ -318,6 +356,57 @@ class Runner:
             raise AnalysisError(f"{configuration.name}: incomplete declared target coverage: {sorted(required - covered)}")
         return {"configuration": json.loads(encode(dataclasses.asdict(configuration))), "expected": expected, "reports": accepted, "files": files, "complete": True}
 
+    def measure_compilations(self, configuration: Configuration, expected: dict[str, Any], messages: list[dict[str, Any]], reports: pathlib.Path) -> dict[str, Any]:
+        """Hold every compilation this run made through the workspace wrapper to the admission policy.
+
+        A compilation that peaks above the threshold must declare a reservation, and a reservation
+        must cover the peak its compilation measures, so the admission reserves what the
+        compilations use. Every expected target Cargo compiled has its record, and so does every
+        other workspace target it compiled, such as a library a binary configuration depends on.
+        A target Cargo found fresh was not compiled and has no record.
+        """
+        records = reports / "compilations"
+        declaration = TOOLING / "configurations.toml"
+        measured = {}
+        for message in messages:
+            if message.get("reason") != "compiler-artifact" or message.get("fresh") is not False:
+                continue
+            target = message["target"]
+            kind = target_kind(target["kind"])
+            key = message["package_id"] + "::" + target["name"] + "::" + kind
+            name = target["name"].replace("-", "_")
+            candidates = set()
+            for artifact in message["filenames"]:
+                stem = pathlib.Path(artifact).name.split(".", 1)[0].removeprefix("lib")
+                if stem.startswith(name + "-") and (records / (stem + ".json")).is_file():
+                    candidates.add(records / (stem + ".json"))
+            if len(candidates) > 1:
+                raise AnalysisError(f"{configuration.name}: {key}: ambiguous compilation records")
+            if not candidates:
+                if key in expected:
+                    raise AnalysisError(f"{configuration.name}: {key}: missing compilation record")
+                # Cargo compiles a dependency from outside the workspace without the workspace
+                # wrapper, so it has no record.
+                continue
+            record = json.loads(candidates.pop().read_text())
+            if record["ending"] != {"kind": "exit", "status": 0}:
+                raise AnalysisError(f"{configuration.name}: {key}: Cargo compiled a target whose compilation record names a failure")
+            peak = record["peak_resident_bytes"]
+            reservation = self.admission.reservation(analysis_admission.Compiled(name, kind))
+            if reservation is not None and peak > reservation:
+                raise AnalysisError(f"{configuration.name}: {name} ({kind}) peaked at {peak / GIB:.1f} GiB, above its {reservation / GIB:.0f} GiB admission reservation; raise the reservation in {declaration}")
+            if reservation is None and peak > self.admission.threshold_bytes:
+                raise AnalysisError(f"{configuration.name}: {name} ({kind}) peaked at {peak / GIB:.1f} GiB, above the {self.admission.threshold_bytes / GIB:.0f} GiB admission threshold, without an admission reservation; declare one in {declaration}")
+            measured[key] = {
+                "crate_name": name,
+                "kind": kind,
+                "peak_resident_bytes": peak,
+                "started_unix_ns": record["started_unix_ns"],
+                "seconds": record["seconds"],
+                "admission": record["admission"],
+            }
+        return measured
+
     def clean_authored_artifacts(self, configuration: Configuration, expected: dict[str, Any], build: pathlib.Path) -> None:
         packages = sorted({target["package"] for target in expected.values()})
         args = ["cargo", f"+{TOOLCHAIN}", "clean", "--manifest-path", configuration.manifest, "--target-dir", str(build)]
@@ -368,15 +457,41 @@ class Runner:
             salt += ":" + attempt
             messages = self.cargo(configuration, build, reports, salt)
             evidence = self.validate_reports(configuration, expected, messages, reports)
+        try:
+            compilations = self.measure_compilations(configuration, expected, messages, reports)
+        except AnalysisError:
+            # Cargo finds what it just compiled fresh, so the next run would compile and measure
+            # nothing; discard it, so the next run measures the compilations again.
+            self.clean_authored_artifacts(configuration, expected, build)
+            raise
         if source_inputs(self.root) != self.inputs:
             raise AnalysisError("source/configuration/dependency inputs changed during compiler analysis")
         log = reports.parent / "cargo.jsonl"
-        evidence.update({"build_directory": str(build), "report_directory": str(reports), "cache_namespace": salt, "cargo_log": str(log)})
+        evidence.update({"build_directory": str(build), "report_directory": str(reports), "cache_namespace": salt, "cargo_log": str(log), "compilations": compilations})
         evidence["files"][str(log)] = digest(log)
         atomic_json(completion, evidence)
         required = sum(target.get("required", True) for target in expected.values())
         print(f"typed ratchet: {configuration.name}: {required} required targets and {len(evidence['reports'])} observed workspace targets complete", flush=True)
+        for line in measurement_lines(configuration, compilations):
+            print(line, flush=True)
         return evidence
+
+
+def measurement_lines(configuration: Configuration, compilations: dict[str, Any]) -> list[str]:
+    """The largest compilation a configuration's run made, and every admission that waited or did
+    not fit."""
+    if not compilations:
+        return []
+    largest = max(compilations.values(), key=lambda measured: measured["peak_resident_bytes"])
+    lines = [f"typed ratchet: {configuration.name}: the largest analysis compilation, {largest['crate_name']} ({largest['kind']}), peaked at {largest['peak_resident_bytes'] / GIB:.1f} GiB in {largest['seconds']:.0f} s"]
+    for measured in sorted(compilations.values(), key=lambda item: item["started_unix_ns"]):
+        admission = measured["admission"]
+        if admission is None:
+            continue
+        if admission["outcome"] == "fit" and admission["waited_seconds"] < 1:
+            continue
+        lines.append(f"typed ratchet: {configuration.name}: {measured['crate_name']} ({measured['kind']}) waited {admission['waited_seconds']:.0f} s for host memory admission ({admission['outcome']}) of its {admission['reservation_bytes'] / GIB:.0f} GiB reservation and peaked at {measured['peak_resident_bytes'] / GIB:.1f} GiB")
+    return lines
 
 
 def summarize(runner: Runner, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -406,8 +521,10 @@ def failed_compilations(messages: list[dict[str, Any]], reports: pathlib.Path) -
         compiled = (target["name"].replace("-", "_"), target_kind(target["kind"]))
         errors[compiled] = errors.get(compiled, 0) + 1
     failures = []
-    for path in sorted(reports.glob("*.termination.json")):
+    for path in sorted((reports / "compilations").glob("*.json")):
         record = json.loads(path.read_text())
+        if record["ending"] == {"kind": "exit", "status": 0}:
+            continue
         kind = "unknown"
         if record["crate_types"]:
             kind = target_kind(record["crate_types"])

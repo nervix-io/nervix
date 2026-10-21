@@ -39,7 +39,7 @@ use h2::{Ping, PingPong, Reason, RecvStream, client, server};
 use http::{Method, Request, StatusCode, Version};
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_dns::ConnectionBudget;
+use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
@@ -1440,7 +1440,8 @@ impl TransportState {
         slot_cancel: &CancellationToken,
     ) -> Result<StdArc<ClientConnection>, Report<TransportError>> {
         let binding_sequence = self.allocate_binding_sequence();
-        let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
+        let budget =
+            OperationBudget::start(self.options.connection_setup_timeout, LookupShare::Whole);
         let setup = async {
             let DialedStream {
                 stream: tcp,

@@ -83,6 +83,13 @@ backup_verify_archive() {
         || backup_fail 'the archive omitted acknowledged Kafka domain offsets'
 }
 
+# A restored domain has its own name, so its archive has different section paths and encoded record
+# digests. Two archives of the same state compare by this projection of their descriptions: the
+# public checkpoint identities, revisions, branch counts and exact source positions.
+backup_state_projection='[.domains[0].runtime_state[] |
+    {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
+    sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
+
 # Restores ARCHIVE, described in DESCRIPTION, as the stopped domain TARGET, backs TARGET up again and
 # requires its public checkpoint identities, revisions, branch counts and exact source positions to
 # equal the archive's. The restore report, the re-export's archive, report and description, and
@@ -119,13 +126,8 @@ backup_verify_restore() {
         "DESCRIBE BACKUP '/chaos-backup/${restored_archive##*/}' FORMAT JSON;" \
         >"${restored_description}" \
         || backup_fail 'the restored generation could not be verified offline'
-    # The renamed domain has different section paths and encoded record digests. Compare its
-    # public checkpoint identities, revisions, branch counts and exact source positions.
-    local state_projection='[.domains[0].runtime_state[] |
-        {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
-        sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
-    jq -S "${state_projection}" "${description}" >"${expected_state}"
-    jq -S "${state_projection}" "${restored_description}" >"${restored_state}"
+    jq -S "${backup_state_projection}" "${description}" >"${expected_state}"
+    jq -S "${backup_state_projection}" "${restored_description}" >"${restored_state}"
     cmp "${expected_state}" "${restored_state}" \
         || backup_fail 'restored lifecycle or source checkpoints differ from the complete cut'
 }
@@ -141,6 +143,29 @@ backup_cut_window() {
     backup_released_ms="$(date -u -d "${backup_released_at}" +%s%3N)" \
         || backup_fail 'the cut release time cannot be parsed'
     ((backup_released_ms >= backup_engaged_ms)) || backup_fail 'the cut release precedes engagement'
+}
+
+# True when the original domain's ingestor reports stopped on the original cluster.
+backup_original_stopped() {
+    local case_dir="$1"
+    domain_cli_command 'DESCRIBE INGESTOR chaos_ingestor;' >"${case_dir}/original-ingestor.attempt.txt" 2>&1 \
+        || return 1
+    grep -Fxq 'status: stopped' "${case_dir}/original-ingestor.attempt.txt"
+}
+
+# True once the output topic has not moved for five seconds; records the boundary it stopped at
+# in backup_output_boundary.
+backup_output_settled() {
+    local end
+    end="$(topic_end_offset chaos_output)" || return 1
+    local now
+    now="$(epoch_ms)"
+    if [[ "${end}" != "${backup_output_boundary:-}" ]]; then
+        backup_output_boundary="${end}"
+        backup_output_since_ms="${now}"
+        return 1
+    fi
+    ((now - backup_output_since_ms >= 5000))
 }
 
 # Generates the run's baseline fixture, starts the load and the listener observer, and waits until
