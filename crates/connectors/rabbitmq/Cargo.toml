@@ -24,6 +24,8 @@ nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
+socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 url = { workspace = true }

@@ -154,8 +154,11 @@ completes the TLS handshake within what is left. The handshake verifies the brok
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
-handshake over it. The AMQP handshake still has no deadline of its own, and the URI's
-`connection_timeout` query parameter has no effect.
+handshake over it, within what remains of the same budget. The source then opens its channel, sets
+its prefetch window and starts its consumer, and the sink opens its channel, selects publisher
+confirms under `ACK` and checks its queue, within the rest. `connect_timeout_ms` therefore bounds
+every step before the entity is ready, and a step that runs out of it is reported naming the key
+and its bound. The URI's `connection_timeout` query parameter has no effect.
 
 Lapin's `hickory-dns` feature is deliberately not selected. It resolves through one process-wide
 async-rs resolver built on first use from the host's `/etc/resolv.conf`, which ignores the node's
@@ -166,15 +169,25 @@ the feature off in the isolated RabbitMQ connector and in the server, and checks
 stays on AWS-LC.
 
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
-unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their own
-variants, as is a Lapin runtime that could not be created. A source reports the failure as a resume
-failure and retries on its declared `RETRY POLICY`. A sink reports an invalid address or CA file as
-a configuration failure and every other connection failure as an initialization failure, and the
-emitter host reopens it on its backoff. Neither path acknowledges undelivered data: a source that
-cannot connect holds no delivery, and a sink that cannot connect confirms nothing, so the input
-stays unacknowledged until a later connection delivers it. A connection that fails before its AMQP
-handshake has started no Lapin thread, and a failed handshake ends that thread and closes the
-socket. An established connection is not closed because its host's answer changed or expired; the
+unreachable addresses, a failed or overdue TLS handshake, and a failed or overdue AMQP handshake are
+their own variants, as are a Lapin runtime that could not be created and a socket the node could not
+hold a second handle on. A channel step that fails or runs out of the budget is reported beneath the
+source's or sink's own context for that step, with the elapsed deadline as its typed cause. A source
+reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A sink reports
+an invalid address, CA file or deadline key as a configuration failure and every other connection
+failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
+acknowledges undelivered data: a source that cannot connect holds no delivery, and a sink that
+cannot connect confirms nothing, so the input stays unacknowledged until a later connection
+delivers it.
+
+Lapin runs a connection's IO on a thread of its own from the start of the AMQP handshake, and that
+thread ends only once its socket fails or the broker closes the connection. Before it hands the
+transport over, the connector therefore takes a second handle on the connection's TCP socket. Until
+the entity's channel is open, dropping that handle shuts the socket down, whether the budget ran
+out, a step failed or the caller stopped waiting, as a stopped resume or sink start does; Lapin's
+loop then fails every read and write, ends with its thread, and closes the socket. A connection that
+opened lets the handle go. A connection that fails before its AMQP handshake has started no Lapin
+thread. An established connection is not closed because its host's answer changed or expired; the
 next connection uses the new answer.
 
 ### DNS for Redis
@@ -349,8 +362,15 @@ itself, such as writing or reading a local file, goes through the node's bounded
 sink host hands a connector as `SinkHost::executor`. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg sink writes and reads its staged
-Arrow IPC files on the filesystem storage workers, so a node that cannot take the job now fails the
-publish or the commit, which the host retries as it retries any other.
+Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
+the publish, which the host retries as it retries any other. A commit charges the bulk memory class
+for every staged byte it reads back before it reads them, or the whole class for a single staged
+file larger than the class, and takes that charge only when the class has room now, because a
+place in the class's queue would take every byte the class frees and hold the node's other bulk
+work behind the commit. A refusal fails the commit, which keeps its staged files and
+acknowledgements while the host retries it. The read itself waits for a place among the filesystem
+workers instead of being refused, because nothing could present again the rows the sink already
+accepted.
 
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
@@ -1526,17 +1546,25 @@ sequenceDiagram
   mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
   nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
-  retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
-  limits.
+  retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
+  and a single file larger than the class alone, charged with the whole class. It charges each
+  group before reading it, returns the charge once the group's rows are in data files, and appends
+  the data files of every group in one catalog commit. It covers the staged files it found when it
+  began, so the retry of a failed append commits files staged since then in a commit of their own
+  instead of acknowledging them unwritten.
+  [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
-  not one per message. A broker that closes the channel names its reason, and Lapin hands it only
-  to what was waiting on the channel at that moment, so the sink reads the reason from its
-  connection's events, once for every channel it loses. The size refusal leaves the connection
-  open, and the sink opens its next channel on it; a message the broker had not confirmed ahead of
-  the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
-  loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
+  not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer
+  within it fails the write with that bound as its typed cause, the write's messages stay
+  unresolved for the host's retry, and the host reopens the sink; without the key the round trip
+  waits as long as the connection lives. A broker that closes the channel names its reason, and
+  Lapin hands it only to what was waiting on the channel at that moment, so the sink reads the
+  reason from its connection's events, once for every channel it loses. The size refusal leaves the
+  connection open, and the sink opens its next channel on it; a message the broker had not
+  confirmed ahead of the refused one may be in its queue, so the attempt then fails for the host's
+  retry. Any other loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
   emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Client source.** Each client ingestor a node executes has one endpoint task that outlives
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
