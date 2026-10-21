@@ -393,7 +393,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   ClickHouse, or an Iceberg object-store client, put `timeout_ms` in the referenced client CONFIG
   when the request needs an explicit bound; the emitter's declared retry policy owns pacing after
   that request fails. A ZeroMQ client's `timeout_ms` bounds each send, which otherwise waits for as
-  long as the peer reads nothing. OTEL clients
+  long as the peer reads nothing. Prefer a bound ZeroMQ PULL ingestor and a connecting ZeroMQ
+  emitter: the driver never reconnects a connecting PULL socket after its peer goes away, and a
+  bound emitter can keep failing after one failed publish; read `Ingestors` → `ZeroMQ` and
+  `Emitters` → `ZeroMQ`. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
   `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
@@ -402,14 +405,15 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   name resolution, connection and TLS included, `connect_timeout_ms` bounds establishing a
   connection, the protocol handshake included, and `idle_timeout_ms` bounds how long a connection
   may carry nothing while its connector waits to read. RabbitMQ, Redis, Syslog emitter, ZeroMQ
-  emitter and WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it; a
-  RabbitMQ client's deadline also covers the AMQP handshake and opening the entity's channel, and
-  its `timeout_ms` bounds the round trip that ends a `NO_ACK` write. A Syslog emitter's client
-  bounds each frame write by `timeout_ms`; a TLS Syslog listener's client bounds each accepted
-  handshake by `connect_timeout_ms`, 30 seconds without it, and a TCP or TLS listener's client may
-  close idle connections with `idle_timeout_ms`. Put each key only on a client whose direction
-  performs the wait it bounds. Read `Ingestors` or `Emitters` → `Client Deadlines`, and
-  `Connector Capabilities` for each entity's waits and what bounds them.
+  emitter and WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a
+  ZeroMQ PULL ingestor reads none of these keys; a RabbitMQ client's deadline also covers the AMQP
+  handshake and opening the entity's channel, and its `timeout_ms` bounds the round trip that ends
+  a `NO_ACK` write. A Syslog emitter's client bounds each frame write by `timeout_ms`; a TLS Syslog
+  listener's client bounds each accepted handshake by `connect_timeout_ms`, 30 seconds without it,
+  and a TCP or TLS listener's client may close idle connections with `idle_timeout_ms`. Put each
+  key only on a client whose direction performs the wait it bounds. Read `Ingestors` or
+  `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
+  bounds them.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
