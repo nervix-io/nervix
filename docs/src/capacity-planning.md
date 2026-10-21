@@ -74,7 +74,8 @@ the work that submitted it reports the refusal as its own failure. The one excep
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
 paced source handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement. Holding one of those source loops pushes back into its transport, so a node whose
+acknowledgement, and an Iceberg commit's read of the staged files its sink already accepted.
+Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
@@ -83,6 +84,10 @@ Transient memory is 275 MiB per node, divided into ceilings that cannot borrow f
 bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
 and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
 once so one blocked channel cannot exhaust the capacity another needs.
+An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
+has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
+single staged file larger than the budget waits until the whole budget is free and is charged all
+of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
@@ -154,8 +159,10 @@ not pay for a window's state, and a window width does not bound a correlator.
   and moved one bounded section at a time, so neither construction nor transfer grows with the size
   of the replicated state.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
-  node. Each node publishes what its pools and budgets are actually holding; see the
-  [interconnection metrics](metrics-and-observability.md) for the series to size against.
+  node, and on a route that feeds an Iceberg emitter, whose commit reads a staged batch above the
+  bulk budget only once the whole budget is free. Each node publishes what its pools and budgets
+  are actually holding; see the [interconnection metrics](metrics-and-observability.md) for the
+  series to size against.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not

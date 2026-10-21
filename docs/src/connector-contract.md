@@ -349,8 +349,15 @@ itself, such as writing or reading a local file, goes through the node's bounded
 sink host hands a connector as `SinkHost::executor`. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg sink writes and reads its staged
-Arrow IPC files on the filesystem storage workers, so a node that cannot take the job now fails the
-publish or the commit, which the host retries as it retries any other.
+Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
+the publish, which the host retries as it retries any other. A commit charges the bulk memory class
+for every staged byte it reads back before it reads them, or the whole class for a single staged
+file larger than the class, and takes that charge only when the class has room now, because a
+place in the class's queue would take every byte the class frees and hold the node's other bulk
+work behind the commit. A refusal fails the commit, which keeps its staged files and
+acknowledgements while the host retries it. The read itself waits for a place among the filesystem
+workers instead of being refused, because nothing could present again the rows the sink already
+accepted.
 
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
@@ -1526,8 +1533,13 @@ sequenceDiagram
   mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
   nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
-  retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
-  limits.
+  retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
+  and a single file larger than the class alone, charged with the whole class. It charges each
+  group before reading it, returns the charge once the group's rows are in data files, and appends
+  the data files of every group in one catalog commit. It covers the staged files it found when it
+  began, so the retry of a failed append commits files staged since then in a commit of their own
+  instead of acknowledging them unwritten.
+  [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
