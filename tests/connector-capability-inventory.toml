@@ -722,6 +722,14 @@ capability = "STALLED PEER connect_timeout_ms"
 entity = "RABBITMQ QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -743,6 +751,7 @@ capability = "STALLED PEER connect_timeout_ms"
 entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
 ]
 
 [[capability]]

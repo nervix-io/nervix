@@ -539,13 +539,20 @@ sink failure and retry path; they do not release a staged record's acknowledgeme
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
 module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
-as a typed field, no address that accepted a connection, a failed or overdue TLS handshake, a Lapin
-runtime that could not be created, or a failed AMQP handshake, each naming the broker host where one
-is involved. The source keeps it beneath its connect and resume contexts, so `DESCRIBE INGESTOR`
-shows the deepest cause, such as the resolver's own lookup error. The sink changes it into a
-configuration failure for an invalid address or CA file and an initialization failure otherwise,
-leading with the connection error's chain, down to a `connect_timeout_ms` it ran out of, which
-`DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+as a typed field, no address that accepted a connection, a socket the node could not hold the
+second handle on that ends an unopened connection, a failed or overdue TLS handshake, a Lapin
+runtime that could not be created, or a failed or overdue AMQP handshake, each naming the broker
+host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its typed
+cause. A step of opening the entity's channel that fails or runs out of the same deadline is
+reported beneath the source's or sink's own context for that step, with the elapsed deadline as its
+typed cause and its text leading the report. The source keeps these beneath its connect and resume
+contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's own lookup error or
+the deadline that ran out. The sink changes them into a configuration failure for an invalid
+address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
+chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
+attaches credentials from the address. A `NO_ACK` round trip that runs out of the client's
+`timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
+its text leading the report.
 
 A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
 broker's own reason, which the sink reads from its connection. A refusal of a message body larger

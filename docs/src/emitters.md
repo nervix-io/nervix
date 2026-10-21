@@ -990,13 +990,15 @@ address attempts, TLS and the protocol's own handshake. Each value is a positive
 milliseconds.
 
 `HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE` and the Iceberg emitter's object-store clients read
-`timeout_ms`; an `HTTP` request emitter's client requires it. `RABBITMQ`, `REDIS` and `SYSLOG`
-clients read `connect_timeout_ms`, and
-allow 30 seconds when it is left out; a `REDIS` command pool also waits no longer than that to check
-out a connection. A `RABBITMQ` client's deadline covers resolving the broker, the address attempts
-and TLS; the AMQP handshake that follows has no deadline. A request or connection that runs out of
-its deadline becomes the emitter's transient status, and the emitter retries on its policy; a
-connection that runs out of `connect_timeout_ms` is reported naming the key and its bound.
+`timeout_ms`; an `HTTP` request emitter's client requires it. A `RABBITMQ` client's `timeout_ms`
+bounds the round trip that ends a `NO_ACK` write. `RABBITMQ`, `REDIS` and `SYSLOG` clients read
+`connect_timeout_ms`, and allow 30 seconds when it is left out; a `REDIS` command pool also waits no
+longer than that to check out a connection. A `RABBITMQ` client's `connect_timeout_ms` covers
+resolving the broker, the address
+attempts, TLS, the AMQP handshake, opening the emitter's channel, selecting publisher confirms under
+`ACK` and checking its queue. A request, connection or round trip that runs out of its deadline
+becomes the emitter's transient status, and the emitter retries on its policy; a deadline that runs
+out is reported naming the key and its bound.
 [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
 bounds each one, including the waits nothing bounds yet.
 
@@ -1172,9 +1174,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and confirm select: unbounded<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: unbounded |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
@@ -1185,7 +1187,10 @@ so once a write's messages are on the channel, the emitter asks the channel for 
 which the broker answers only after it has taken every message written before it, and that answer
 acknowledges them. A `NO_ACK` write therefore waits for one round trip to the broker however many
 messages it carries, and a channel or connection lost before the answer leaves the write's messages
-to the retry.
+to the retry. When the client sets `timeout_ms`, a round trip the broker does not answer within it
+fails the write, reported naming the key and its bound, and leaves the write's messages to the
+retry, which reopens the emitter's connection first. Without `timeout_ms` the round trip waits as
+long as the connection lives.
 
 The broker's `max_message_size`, 16 MiB by default in RabbitMQ 4.x, bounds each message body;
 headers do not count. The broker closes the channel a larger body arrives on, and the emitter
@@ -1196,11 +1201,13 @@ acknowledging it, then keeps publishing on a new channel of the same connection;
 The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
 when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
 on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
-an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection and, for
-`amqps`, the TLS handshake have 30 seconds together; the broker certificate must name the host
-`addr` names. A connection that fails, including a name that does not resolve, leaves the emitter
-unavailable with the failure as its transient error; it confirms nothing, so its input stays
-unacknowledged, and it reopens on its `RETRY POLICY` backoff.
+an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection, for
+`amqps` the TLS handshake, the AMQP handshake, opening the channel, selecting publisher confirms
+under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 seconds when it is
+left out; the broker certificate must name the host `addr` names. A connection that fails or runs
+out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
+the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
+reopens on its `RETRY POLICY` backoff.
 
 ### Redis Pub/Sub
 
