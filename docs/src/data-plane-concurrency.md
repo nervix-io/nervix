@@ -1689,9 +1689,14 @@ line was reused.
 
 **Bounds and handoff.** The live registry owns the live lock, waiting attempt and thread records;
 none of its shard guards cross a tracked acquisition. Order instrumentation adds a run-bounded
-history of at most 16,384 directed instance edges, 1,024 source witnesses per edge, and 64 guard
-leases per thread. Ending a lock does not reclaim the historical edge budget. Refused history or
-count overflow becomes an explicit overload finding. The witness budget retains distinct storage
+history of at most 65,536 directed instance edges, 1,024 source witnesses per edge, and 64 guard
+leases per thread. Ending a lock does not reclaim the historical edge budget, so a lock that lives
+for one request and is taken under the lock of an owner that outlives it spends one edge per
+request: relay admission records under their peer owner leave more than 13,000 such edges in the
+three-node 40-relay materialized restore with a leadership handoff, and more when its relay
+deliveries retry. A process regression keeps 32,768 per-request edges under one owner within the
+history, and the edge-limit regression takes one more per-request lock than it keeps. Refused
+history or count overflow becomes an explicit overload finding. The witness budget retains distinct storage
 worker identities across checkpoint staging. Its process regression retains all 512 worker
 contexts in one historical edge; a separate 1,025-context workload must record order-history
 overload and fail qualification. The independent edge and held-guard limits remain fatal too.
